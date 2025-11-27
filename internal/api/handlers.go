@@ -115,6 +115,14 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 		}, nil
 	}
 
+	// Flush to ensure data is persisted
+	if err := partitionInternal.Wal.Flush(); err != nil {
+		return &types.PublishResponse{
+			Success: false,
+			Error:   fmt.Sprintf("flush WAL: %v", err),
+		}, nil
+	}
+
 	return &types.PublishResponse{
 		Success:     true,
 		Error:       "",

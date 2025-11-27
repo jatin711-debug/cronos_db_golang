@@ -445,8 +445,56 @@ func (s *Segment) ReadEvent(targetOffset int64) (*types.Event, error) {
 // scan scans segment to recover metadata
 func (s *Segment) scan() error {
 	// Scan segment file to find last offset and timestamp
-	// TODO: Implement full scan
-	s.lastOffset = s.nextOffset - 1
+	file := s.segmentFile
+
+	// Seek to start (after header)
+	if _, err := file.Seek(64, io.SeekStart); err != nil {
+		return fmt.Errorf("seek to start: %w", err)
+	}
+
+	s.lastOffset = -1
+	s.lastTS = 0
+
+	// Read through all records
+	for {
+		// Read record length
+		lengthBytes := make([]byte, 4)
+		if _, err := file.Read(lengthBytes); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return fmt.Errorf("read length: %w", err)
+		}
+
+		length := int64(binary.BigEndian.Uint32(lengthBytes))
+		if length <= 0 {
+			break
+		}
+
+		// Read full record
+		record := make([]byte, length)
+		if _, err := io.ReadFull(file, record); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return fmt.Errorf("read record: %w", err)
+		}
+
+		// Parse event to get offset and timestamp
+		event, err := parseEventRecord(record)
+		if err != nil {
+			return fmt.Errorf("parse event: %w", err)
+		}
+
+		s.lastOffset = event.Offset
+		s.lastTS = event.GetScheduleTs()
+	}
+
+	// If we couldn't find any events, start from firstOffset
+	if s.lastOffset < s.firstOffset {
+		s.lastOffset = s.firstOffset - 1
+	}
+
 	return nil
 }
 
