@@ -7,7 +7,7 @@ import (
 )
 
 // generateDeliveryID creates a unique delivery ID
-func generateDeliveryID() string {
+func GenerateDeliveryID() string {
 	var b [16]byte
 	_, _ = rand.Read(b[:])
 	return hex.EncodeToString(b[:])

@@ -177,8 +177,29 @@ func (w *WAL) ReadEvents(startOffset, endOffset int64) ([]*types.Event, error) {
 			continue
 		}
 
-		// TODO: Read events from segment using index
-		// For now, this is a placeholder
+		// Read events from this segment
+		// Start from max(startOffset, segment.firstOffset)
+		readOffset := startOffset
+		if readOffset < segment.GetFirstOffset() {
+			readOffset = segment.GetFirstOffset()
+		}
+
+		// End at min(endOffset, segment.lastOffset)
+		endForSegment := endOffset
+		if endForSegment > segment.GetLastOffset() {
+			endForSegment = segment.GetLastOffset()
+		}
+
+		// Read each event
+		for offset := readOffset; offset <= endForSegment; offset++ {
+			event, err := segment.ReadEvent(offset)
+			if err != nil {
+				// Skip if event not found (might be truncated)
+				continue
+			}
+			event.PartitionId = w.partitionID
+			result = append(result, event)
+		}
 	}
 
 	return result, nil

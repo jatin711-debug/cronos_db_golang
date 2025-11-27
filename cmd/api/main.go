@@ -54,8 +54,11 @@ func main() {
 		partition.ConsumerGroup,
 	)
 
+	// Create consumer group service handler
+	consumerHandler := api.NewConsumerGroupServiceHandler(partition.ConsumerGroup)
+
 	// Register services
-	grpcServer.RegisterServices(eventHandler)
+	grpcServer.RegisterServices(eventHandler, consumerHandler)
 
 	// Start gRPC server
 	log.Printf("Starting gRPC server on %s", cfg.GPRCAddress)

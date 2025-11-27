@@ -4,6 +4,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"cronos_db/internal/consumer"
 	"cronos_db/internal/partition"
@@ -29,6 +30,7 @@ type DedupManager interface {
 type ConsumerManager interface {
 	Subscribe(request *types.SubscribeRequest) (*consumer.Subscription, error)
 	Ack(request *types.AckRequest) error
+	GetCommittedOffset(groupID string, partitionID int32) (int64, error)
 }
 
 // NewEventServiceHandler creates a new event service handler
@@ -70,12 +72,21 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 		}, nil
 	}
 
-	// Get partition for topic
+	// Get internal partition
 	partition, err := h.partitionManager.GetPartitionForTopic(event.Topic)
 	if err != nil {
 		return &types.PublishResponse{
 			Success: false,
 			Error:   fmt.Sprintf("get partition: %v", err),
+		}, nil
+	}
+
+	// Get internal partition object for WAL access
+	partitionInternal, err := h.partitionManager.GetInternalPartition(partition.ID)
+	if err != nil {
+		return &types.PublishResponse{
+			Success: false,
+			Error:   fmt.Sprintf("get internal partition: %v", err),
 		}, nil
 	}
 
@@ -96,13 +107,18 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 		}
 	}
 
-	// TODO: Append to WAL (handled by partition manager)
-	// For now, return success with placeholder values
+	// Append to WAL
+	if err := partitionInternal.Wal.AppendEvent(event); err != nil {
+		return &types.PublishResponse{
+			Success: false,
+			Error:   fmt.Sprintf("append to WAL: %v", err),
+		}, nil
+	}
 
 	return &types.PublishResponse{
 		Success:     true,
 		Error:       "",
-		Offset:      0,     // Would be set by partition manager
+		Offset:      event.Offset,
 		PartitionId: partition.ID,
 		ScheduleTs:  event.GetScheduleTs(),
 	}, nil
@@ -110,18 +126,110 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 
 // Subscribe handles streaming subscription
 func (h *EventServiceHandler) Subscribe(stream grpc.BidiStreamingServer[types.SubscribeRequest, types.Delivery]) error {
-	// Create subscription
+	// Receive subscription request
 	req, err := stream.Recv()
 	if err != nil {
 		return err
 	}
-	_, err = h.consumerManager.Subscribe(req)
+
+	// Get internal partition
+	partitionInternal, err := h.partitionManager.GetInternalPartition(req.GetPartitionId())
 	if err != nil {
-		return err
+		return fmt.Errorf("get partition %d: %w", req.GetPartitionId(), err)
 	}
 
-	// TODO: Start delivery loop
-	// For now, just wait for context cancellation
+	// Get consumer group offset
+	startOffset, err := h.consumerManager.GetCommittedOffset(req.GetConsumerGroup(), req.GetPartitionId())
+	if err != nil {
+		startOffset = -1 // Start from beginning if no offset
+	}
+
+	// Start delivery goroutine
+	go func() {
+		// Get start and end offsets
+		highWatermark := partitionInternal.Wal.GetHighWatermark()
+		currentOffset := startOffset + 1
+		if currentOffset < 0 {
+			currentOffset = 0
+		}
+
+		// Read events from WAL
+		for currentOffset <= highWatermark {
+			select {
+			case <-stream.Context().Done():
+				return
+			default:
+			}
+
+			// Read event from WAL (for now, read in batches)
+			events, err := partitionInternal.Wal.ReadEvents(currentOffset, highWatermark)
+			if err != nil {
+				// Log error and continue
+				continue
+			}
+
+			// Send each event
+			for _, event := range events {
+				// Skip if already delivered
+				if event.Offset < currentOffset {
+					continue
+				}
+
+				currentOffset = event.Offset + 1
+
+				// Create delivery
+				delivery := &types.Delivery{
+					DeliveryId: fmt.Sprintf("%s-%d-%d", event.GetMessageId(), event.Offset, time.Now().UnixNano()),
+					Event:      event,
+				}
+
+				// Send to client
+				if err := stream.Send(delivery); err != nil {
+					// Client disconnected
+					return
+				}
+			}
+
+			// Update high watermark
+			highWatermark = partitionInternal.Wal.GetHighWatermark()
+		}
+
+		// Keep reading new events
+		for {
+			select {
+			case <-stream.Context().Done():
+				return
+			default:
+			}
+
+			// Check for new events
+			newHighWatermark := partitionInternal.Wal.GetHighWatermark()
+			if newHighWatermark >= currentOffset {
+				events, err := partitionInternal.Wal.ReadEvents(currentOffset, newHighWatermark)
+				if err != nil {
+					time.Sleep(100 * time.Millisecond)
+					continue
+				}
+
+				for _, event := range events {
+					delivery := &types.Delivery{
+						DeliveryId: fmt.Sprintf("%s-%d-%d", event.GetMessageId(), event.Offset, time.Now().UnixNano()),
+						Event:      event,
+					}
+
+					if err := stream.Send(delivery); err != nil {
+						return
+					}
+					currentOffset = event.Offset + 1
+				}
+			} else {
+				// No new events, wait a bit
+				time.Sleep(100 * time.Millisecond)
+			}
+		}
+	}()
+
+	// Wait for context cancellation
 	<-stream.Context().Done()
 	return nil
 }

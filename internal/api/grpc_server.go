@@ -63,8 +63,9 @@ func NewGRPCServer(config *Config) *GRPCServer {
 }
 
 // RegisterServices registers all gRPC services
-func (g *GRPCServer) RegisterServices(eventHandler *EventServiceHandler) {
+func (g *GRPCServer) RegisterServices(eventHandler *EventServiceHandler, consumerHandler *ConsumerGroupServiceHandler) {
 	types.RegisterEventServiceServer(g.server, eventHandler)
+	types.RegisterConsumerGroupServiceServer(g.server, consumerHandler)
 }
 
 // Start starts the gRPC server
