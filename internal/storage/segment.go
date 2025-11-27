@@ -1,0 +1,381 @@
+package storage
+
+import (
+	"bufio"
+	"encoding/binary"
+	"fmt"
+	"hash/crc32"
+	"io"
+	"os"
+	"path/filepath"
+	"sync"
+	"time"
+
+	"cronos_db/pkg/types"
+)
+
+// Segment represents a WAL segment file
+type Segment struct {
+	mu              sync.RWMutex
+	segmentFile     *os.File
+	writer          *bufio.Writer
+	reader          io.ReaderAt
+	firstOffset     int64
+	lastOffset      int64
+	firstTS         int64
+	lastTS          int64
+	nextOffset      int64
+	indexEntries    int64
+	nextIndexOffset int64
+	sizeBytes       int64
+	createdTS       int64
+	isActive        bool
+	dataDir         string
+	filename        string
+	indexFilename   string
+}
+
+// NewSegment creates a new segment
+func NewSegment(dataDir string, firstOffset int64, isActive bool) (*Segment, error) {
+	filename := fmt.Sprintf("%020d.log", firstOffset)
+	filePath := filepath.Join(dataDir, "segments", filename)
+
+	// Create segments directory if it doesn't exist
+	segmentsDir := filepath.Join(dataDir, "segments")
+	if err := os.MkdirAll(segmentsDir, 0755); err != nil {
+		return nil, fmt.Errorf("create segments dir: %w", err)
+	}
+
+	// Open or create segment file
+	file, err := os.OpenFile(filePath, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
+	if err != nil {
+		return nil, fmt.Errorf("open segment file: %w", err)
+	}
+
+	segment := &Segment{
+		segmentFile:     file,
+		writer:          bufio.NewWriterSize(file, 1024*1024), // 1MB buffer
+		reader:          file,
+		firstOffset:     firstOffset,
+		nextOffset:      firstOffset,
+		createdTS:       time.Now().UnixMilli(),
+		isActive:        isActive,
+		dataDir:         dataDir,
+		filename:        filename,
+		indexFilename:   fmt.Sprintf("%020d.index", firstOffset),
+		nextIndexOffset: 0,
+		indexEntries:    0,
+	}
+
+	// Write header if new file
+	if firstOffset == 0 {
+		if err := segment.writeHeader(); err != nil {
+			file.Close()
+			return nil, fmt.Errorf("write header: %w", err)
+		}
+	}
+
+	return segment, nil
+}
+
+// OpenSegment opens an existing segment
+func OpenSegment(dataDir string, filename string) (*Segment, error) {
+	filePath := filepath.Join(dataDir, "segments", filename)
+	file, err := os.OpenFile(filePath, os.O_RDWR|os.O_APPEND, 0644)
+	if err != nil {
+		return nil, fmt.Errorf("open segment file: %w", err)
+	}
+
+	// Get file info
+	_, err = file.Stat()
+	if err != nil {
+		file.Close()
+		return nil, fmt.Errorf("stat file: %w", err)
+	}
+
+	// Parse offset from filename
+	var firstOffset int64
+	fmt.Sscanf(filename, "%020d.log", &firstOffset)
+
+	segment := &Segment{
+		segmentFile:   file,
+		writer:        bufio.NewWriterSize(file, 1024*1024),
+		reader:        file,
+		firstOffset:   firstOffset,
+		createdTS:     time.Now().UnixMilli(),
+		dataDir:       dataDir,
+		filename:      filename,
+		indexFilename: fmt.Sprintf("%020d.index", firstOffset),
+	}
+
+	// Scan segment to get metadata
+	if err := segment.scan(); err != nil {
+		file.Close()
+		return nil, fmt.Errorf("scan segment: %w", err)
+	}
+
+	return segment, nil
+}
+
+// writeHeader writes segment file header
+func (s *Segment) writeHeader() error {
+	header := make([]byte, 64)
+
+	// Magic number "CRNOS1" (7 bytes)
+	copy(header[0:7], []byte("CRNOS1"))
+
+	// Version (1 byte)
+	header[7] = 1
+
+	// First offset (8 bytes)
+	binary.BigEndian.PutUint64(header[8:16], uint64(s.firstOffset))
+
+	// Created timestamp (8 bytes)
+	binary.BigEndian.PutUint64(header[24:32], uint64(s.createdTS))
+
+	// Reserved (32 bytes for future use)
+	// ...
+
+	// CRC32 of header (4 bytes)
+	crc := crc32.ChecksumIEEE(header[0:60])
+	binary.BigEndian.PutUint32(header[60:64], crc)
+
+	_, err := s.writer.Write(header)
+	return err
+}
+
+// AppendEvent appends an event to the segment
+func (s *Segment) AppendEvent(event *types.Event, indexInterval int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.isActive {
+		return s.appendEventActive(event, indexInterval)
+	}
+	return fmt.Errorf("cannot append to closed segment")
+}
+
+// appendEventActive appends to active segment
+func (s *Segment) appendEventActive(event *types.Event, indexInterval int64) error {
+	// Get current position
+	pos, err := s.segmentFile.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return fmt.Errorf("seek: %w", err)
+	}
+
+	// Build event record
+	record := s.buildEventRecord(event, pos)
+
+	// Write record
+	if err := s.writeRecord(record); err != nil {
+		return fmt.Errorf("write record: %w", err)
+	}
+
+	// Update metadata
+	s.lastOffset = event.Offset
+	s.lastTS = event.ScheduleTS
+	s.nextOffset++
+	s.sizeBytes = pos + int64(len(record))
+
+	// Write index entry if needed
+	if s.nextOffset-s.firstOffset >= s.nextIndexOffset {
+		if err := s.writeIndexEntry(event); err != nil {
+			return fmt.Errorf("write index: %w", err)
+		}
+		s.nextIndexOffset += indexInterval
+		s.indexEntries++
+	}
+
+	return nil
+}
+
+// buildEventRecord builds binary event record
+func (s *Segment) buildEventRecord(event *types.Event, pos int64) []byte {
+	// Calculate sizes
+	msgIDLen := len(event.MessageID)
+	topicLen := len(event.Topic)
+	payloadLen := len(event.Payload)
+	metaCount := len(event.Meta)
+
+	// Calculate total size
+	size := 4 + 4 + 8 + 8 + 2 + msgIDLen + 2 + topicLen + 4 + payloadLen + 2 + 2*metaCount
+	for k, v := range event.Meta {
+		size += len(k) + len(v)
+	}
+
+	record := make([]byte, size)
+	offset := 0
+
+	// Length (4 bytes)
+	binary.BigEndian.PutUint32(record[offset:offset+4], uint32(size))
+	offset += 4
+
+	// CRC32 (4 bytes) - skip for now, fill later
+	offset += 4
+
+	// Offset (8 bytes)
+	binary.BigEndian.PutUint64(record[offset:offset+8], uint64(event.Offset))
+	offset += 8
+
+	// Schedule timestamp (8 bytes)
+	binary.BigEndian.PutUint64(record[offset:offset+8], uint64(event.ScheduleTS))
+	offset += 8
+
+	// Message ID length (2 bytes)
+	binary.BigEndian.PutUint16(record[offset:offset+2], uint16(msgIDLen))
+	offset += 2
+
+	// Message ID (N bytes)
+	copy(record[offset:offset+msgIDLen], event.MessageID)
+	offset += msgIDLen
+
+	// Topic length (2 bytes)
+	binary.BigEndian.PutUint16(record[offset:offset+2], uint16(topicLen))
+	offset += 2
+
+	// Topic (N bytes)
+	copy(record[offset:offset+topicLen], event.Topic)
+	offset += topicLen
+
+	// Payload length (4 bytes)
+	binary.BigEndian.PutUint32(record[offset:offset+4], uint32(payloadLen))
+	offset += 4
+
+	// Payload (N bytes)
+	copy(record[offset:offset+payloadLen], event.Payload)
+	offset += payloadLen
+
+	// Meta count (2 bytes)
+	binary.BigEndian.PutUint16(record[offset:offset+2], uint16(metaCount))
+	offset += 2
+
+	// Meta entries
+	for k, v := range event.Meta {
+		// Key length (2 bytes)
+		binary.BigEndian.PutUint16(record[offset:offset+2], uint16(len(k)))
+		offset += 2
+
+		// Key (N bytes)
+		copy(record[offset:offset+len(k)], k)
+		offset += len(k)
+
+		// Value length (2 bytes)
+		binary.BigEndian.PutUint16(record[offset:offset+2], uint16(len(v)))
+		offset += 2
+
+		// Value (N bytes)
+		copy(record[offset:offset+len(v)], v)
+		offset += len(v)
+	}
+
+	// Calculate and write CRC32
+	crc := crc32.ChecksumIEEE(record[8:])
+	binary.BigEndian.PutUint32(record[4:8], crc)
+
+	return record
+}
+
+// writeRecord writes record to segment
+func (s *Segment) writeRecord(record []byte) error {
+	if _, err := s.writer.Write(record); err != nil {
+		return err
+	}
+	return nil
+}
+
+// writeIndexEntry writes index entry
+func (s *Segment) writeIndexEntry(event *types.Event) error {
+	// Build index entry: timestamp (8 bytes) + offset (8 bytes) = 16 bytes
+	entry := make([]byte, 16)
+	binary.BigEndian.PutUint64(entry[0:8], uint64(event.ScheduleTS))
+	binary.BigEndian.PutUint64(entry[8:16], uint64(event.Offset))
+
+	// Append to index file
+	indexPath := filepath.Join(s.dataDir, "index", s.indexFilename)
+	indexFile, err := os.OpenFile(indexPath, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
+	if err != nil {
+		return fmt.Errorf("open index file: %w", err)
+	}
+	defer indexFile.Close()
+
+	if _, err := indexFile.Write(entry); err != nil {
+		return fmt.Errorf("write index entry: %w", err)
+	}
+
+	return nil
+}
+
+// ReadEvent reads event at offset
+func (s *Segment) ReadEvent(targetOffset int64) (*types.Event, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if targetOffset < s.firstOffset || targetOffset > s.lastOffset {
+		return nil, types.ErrOffsetOutOfRange
+	}
+
+	// TODO: Implement binary search using index
+	// For now, scan linearly (not efficient)
+	return nil, fmt.Errorf("not implemented: scan using index")
+}
+
+// scan scans segment to recover metadata
+func (s *Segment) scan() error {
+	// Scan segment file to find last offset and timestamp
+	// TODO: Implement full scan
+	s.lastOffset = s.nextOffset - 1
+	return nil
+}
+
+// Flush flushes pending writes
+func (s *Segment) Flush() error {
+	return s.writer.Flush()
+}
+
+// Close closes segment
+func (s *Segment) Close() error {
+	if err := s.writer.Flush(); err != nil {
+		return err
+	}
+	return s.segmentFile.Close()
+}
+
+// IsFull checks if segment is full
+func (s *Segment) IsFull(maxSize int64) bool {
+	return s.sizeBytes >= maxSize
+}
+
+// GetSize returns segment size in bytes
+func (s *Segment) GetSize() int64 {
+	return s.sizeBytes
+}
+
+// GetFilename returns filename
+func (s *Segment) GetFilename() string {
+	return s.filename
+}
+
+// GetFirstOffset returns first offset
+func (s *Segment) GetFirstOffset() int64 {
+	return s.firstOffset
+}
+
+// GetLastOffset returns last offset
+func (s *Segment) GetLastOffset() int64 {
+	return s.lastOffset
+}
+
+// GetFirstTS returns first timestamp
+func (s *Segment) GetFirstTS() int64 {
+	return s.firstTS
+}
+
+// GetLastTS returns last timestamp
+func (s *Segment) GetLastTS() int64 {
+	return s.lastTS
+}
+
+// IsActive returns active status
+func (s *Segment) IsActive() bool {
+	return s.isActive
+}

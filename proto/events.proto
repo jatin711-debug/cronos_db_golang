@@ -1,0 +1,496 @@
+syntax = "proto3";
+
+package cronos_db;
+
+option go_package = "cronos_db/pkg/types;types";
+
+// ============================================================================
+// Core Event Types
+// ============================================================================
+
+message Event {
+  // Unique message identifier for deduplication
+  string message_id = 1;
+
+  // Timestamp when event should be triggered (Unix epoch in milliseconds)
+  int64 schedule_ts = 2;
+
+  // Event payload (arbitrary data)
+  bytes payload = 3;
+
+  // Topic or channel name
+  string topic = 4;
+
+  // Metadata key-value pairs
+  map<string, string> meta = 5;
+
+  // Creation timestamp (set by server)
+  int64 created_ts = 6;
+
+  // Event offset within the partition
+  int64 offset = 7;
+
+  // Partition ID
+  int32 partition_id = 8;
+
+  // Optional checksum for payload integrity
+  uint32 checksum = 9;
+}
+
+// ============================================================================
+// Publish/Subscribe RPCs
+// ============================================================================
+
+message PublishRequest {
+  Event event = 1;
+  // If true, allow duplicate message_id (for testing)
+  bool allow_duplicate = 2;
+}
+
+message PublishResponse {
+  bool success = 1;
+  string error = 2;
+
+  // Persistent offset assigned to the event
+  int64 offset = 3;
+
+  // Partition where event was stored
+  int32 partition_id = 4;
+
+  // Actual schedule timestamp (may be adjusted by server)
+  int64 schedule_ts = 5;
+}
+
+message SubscribeRequest {
+  // Consumer group ID
+  string consumer_group = 1;
+
+  // Topic to subscribe to
+  string topic = 2;
+
+  // Partition ID (optional, if -1 auto-assign)
+  int32 partition_id = 3;
+
+  // Offset to start from (if -1, start from latest)
+  int64 start_offset = 4;
+
+  // Maximum number of events to buffer
+  int32 max_buffer_size = 5;
+
+  // Subscription ID (for tracking)
+  string subscription_id = 6;
+
+  // Whether to replay historical events or only new ones
+  bool replay = 7;
+}
+
+message Delivery {
+  Event event = 1;
+
+  // Delivery ID for tracking
+  string delivery_id = 2;
+
+  // Delivery attempt number
+  int32 attempt = 3;
+
+  // Timeout for ack (milliseconds)
+  int32 ack_timeout_ms = 4;
+}
+
+message AckRequest {
+  // Delivery ID from Delivery message
+  string delivery_id = 2;
+
+  // Whether the event was successfully processed
+  bool success = 3;
+
+  // Optional error message if processing failed
+  string error = 4;
+
+  // Next offset to commit (optional, server can compute)
+  int64 next_offset = 5;
+}
+
+message AckResponse {
+  bool success = 1;
+  string error = 2;
+
+  // Committed offset for this consumer group
+  int64 committed_offset = 3;
+}
+
+// ============================================================================
+// Replay RPCs
+// ============================================================================
+
+message ReplayRequest {
+  // Topic to replay
+  string topic = 1;
+
+  // Partition ID (optional, replay all partitions if not specified)
+  int32 partition_id = 2;
+
+  // Start timestamp (Unix ms, optional if using offset)
+  int64 start_ts = 3;
+
+  // End timestamp (Unix ms, optional)
+  int64 end_ts = 4;
+
+  // Start offset (alternative to start_ts)
+  int64 start_offset = 5;
+
+  // Number of events to replay (optional)
+  int64 count = 6;
+
+  // Consumer group to replay for
+  string consumer_group = 7;
+
+  // Subscription ID for tracking
+  string subscription_id = 8;
+
+  // Replay speed: 0=fast, 1=real-time
+  double speed = 9;
+}
+
+message ReplayEvent {
+  Event event = 1;
+  int64 replay_offset = 2;
+}
+
+// ============================================================================
+// Consumer Group Management
+// ============================================================================
+
+message ConsumerGroupMetadata {
+  string group_id = 1;
+  string topic = 2;
+  repeated int32 partitions = 3;
+  map<int32, int64> committed_offsets = 4;
+  map<string, int64> member_offsets = 5;
+  int64 last_rebalance_ts = 6;
+}
+
+message CreateConsumerGroupRequest {
+  string group_id = 1;
+  string topic = 2;
+  repeated int32 partitions = 3;
+}
+
+message CreateConsumerGroupResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message GetConsumerGroupRequest {
+  string group_id = 1;
+}
+
+message ListConsumerGroupsRequest {
+  string topic = 1; // optional, list all if not specified
+}
+
+message ListConsumerGroupsResponse {
+  repeated ConsumerGroupMetadata groups = 1;
+}
+
+message RebalanceConsumerGroupRequest {
+  string group_id = 1;
+  repeated string member_ids = 2;
+}
+
+message RebalanceConsumerGroupResponse {
+  bool success = 1;
+  string error = 2;
+
+  map<string, int32> partition_assignments = 3;
+}
+
+// ============================================================================
+// Replication RPCs (Internal, leader-follower)
+// ============================================================================
+
+message ReplicationAppendRequest {
+  int32 partition_id = 1;
+
+  // Batch of events to append
+  repeated Event events = 2;
+
+  // Expected next offset (for gap detection)
+  int64 expected_next_offset = 3;
+
+  // Leader term
+  int64 term = 4;
+}
+
+message ReplicationAppendResponse {
+  bool success = 1;
+  string error = 2;
+
+  // Last replicated offset
+  int64 last_offset = 3;
+
+  // Next expected offset
+  int64 next_offset = 4;
+}
+
+message ReplicationSyncRequest {
+  int32 partition_id = 1;
+
+  // Start offset to sync from
+  int64 start_offset = 2;
+
+  // Maximum bytes to transfer
+  int64 max_bytes = 3;
+}
+
+message ReplicationSyncResponse {
+  bool success = 1;
+  string error = 2;
+
+  repeated Event events = 3;
+
+  // Whether more data is available
+  bool has_more = 4;
+}
+
+// ============================================================================
+// Partition Management
+// ============================================================================
+
+message PartitionInfo {
+  int32 partition_id = 1;
+  string topic = 2;
+
+  // Current leader node ID
+  string leader_id = 3;
+
+  // Replica node IDs
+  repeated string replica_ids = 4;
+
+  // Current high watermark (last committed offset)
+  int64 high_watermark = 5;
+
+  // Last offset in WAL
+  int64 last_offset = 6;
+
+  // Segment count
+  int32 segment_count = 7;
+
+  // Disk usage in bytes
+  int64 disk_usage_bytes = 8;
+}
+
+message GetPartitionRequest {
+  int32 partition_id = 1;
+}
+
+message ListPartitionsRequest {
+  string topic = 1; // optional, list all if not specified
+}
+
+message ListPartitionsResponse {
+  repeated PartitionInfo partitions = 1;
+}
+
+// ============================================================================
+// Admin RPCs
+// ============================================================================
+
+message GetWALStatusRequest {
+  int32 partition_id = 1;
+}
+
+message WALStatus {
+  int32 partition_id = 1;
+  repeated string segment_files = 2;
+
+  // Sparse index information
+  int64 first_offset = 3;
+  int64 last_offset = 4;
+  int64 index_entries = 5;
+
+  // Oldest segment timestamp
+  int64 oldest_segment_ts = 6;
+
+  // Newest segment timestamp
+  int64 newest_segment_ts = 7;
+
+  // Disk usage
+  int64 total_size_bytes = 8;
+  int64 available_space_bytes = 9;
+}
+
+message GetSchedulerStatusRequest {
+  int32 partition_id = 1;
+}
+
+message SchedulerStatus {
+  int32 partition_id = 1;
+
+  // Active timing wheel slots
+  int64 active_timers = 2;
+
+  // Events in ready queue
+  int64 ready_events = 3;
+
+  // Scheduling delay (ms)
+  int64 avg_delay_ms = 4;
+  int64 max_delay_ms = 5;
+
+  // Tick configuration
+  int32 tick_ms = 6;
+  int32 wheel_size = 7;
+}
+
+message CompactRequest {
+  int32 partition_id = 1;
+
+  // Compact all segments older than this timestamp
+  int64 before_ts = 2;
+
+  // Whether to force compaction
+  bool force = 3;
+}
+
+message CompactResponse {
+  bool success = 1;
+  string error = 2;
+
+  // Number of segments compacted
+  int32 segments_compacted = 3;
+
+  // Bytes reclaimed
+  int64 bytes_reclaimed = 4;
+}
+
+message RetentionRequest {
+  int32 partition_id = 1;
+
+  // Max age in hours (0 = no limit)
+  int32 max_age_hours = 2;
+
+  // Max size in bytes (0 = no limit)
+  int64 max_size_bytes = 3;
+
+  // Min offset to keep
+  int64 min_offset = 4;
+}
+
+message RetentionResponse {
+  bool success = 1;
+  string error = 2;
+
+  // Number of segments deleted
+  int32 segments_deleted = 3;
+
+  // Bytes freed
+  int64 bytes_freed = 4;
+}
+
+// ============================================================================
+// Raft Metadata RPCs (Internal)
+// ============================================================================
+
+message RaftJoinRequest {
+  string node_id = 1;
+  string address = 2;
+}
+
+message RaftJoinResponse {
+  bool success = 1;
+  string error = 2;
+  int64 term = 3;
+}
+
+message RaftLeaveRequest {
+  string node_id = 1;
+}
+
+message RaftLeaveResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message RaftStatusRequest {
+  // Empty request
+}
+
+message RaftStatusResponse {
+  string node_id = 1;
+  bool is_leader = 2;
+  int64 term = 3;
+  repeated string peers = 4;
+  int64 commit_index = 5;
+  int64 last_applied = 6;
+}
+
+// ============================================================================
+// Service Definitions
+// ============================================================================
+
+service EventService {
+  // Publish an event
+  rpc Publish(PublishRequest) returns (PublishResponse);
+
+  // Subscribe to events (streaming)
+  rpc Subscribe(stream SubscribeRequest) returns (stream Delivery);
+
+  // Acknowledge event processing
+  rpc Ack(stream AckRequest) returns (stream AckResponse);
+
+  // Replay historical events
+  rpc Replay(ReplayRequest) returns (stream ReplayEvent);
+}
+
+service PartitionService {
+  // Get partition information
+  rpc GetPartition(GetPartitionRequest) returns (PartitionInfo);
+
+  // List partitions
+  rpc ListPartitions(ListPartitionsRequest) returns (ListPartitionsResponse);
+
+  // Get WAL status
+  rpc GetWALStatus(GetWALStatusRequest) returns (WALStatus);
+
+  // Get scheduler status
+  rpc GetSchedulerStatus(GetSchedulerStatusRequest) returns (SchedulerStatus);
+
+  // Compact segments
+  rpc Compact(CompactRequest) returns (CompactResponse);
+
+  // Run retention policy
+  rpc RunRetention(RetentionRequest) returns (RetentionResponse);
+}
+
+service ConsumerGroupService {
+  // Create consumer group
+  rpc CreateConsumerGroup(CreateConsumerGroupRequest) returns (CreateConsumerGroupResponse);
+
+  // Get consumer group info
+  rpc GetConsumerGroup(GetConsumerGroupRequest) returns (ConsumerGroupMetadata);
+
+  // List consumer groups
+  rpc ListConsumerGroups(ListConsumerGroupsRequest) returns (ListConsumerGroupsResponse);
+
+  // Rebalance consumer group
+  rpc RebalanceConsumerGroup(RebalanceConsumerGroupRequest) returns (RebalanceConsumerGroupResponse);
+}
+
+service ReplicationService {
+  // Internal: Append batch from leader
+  rpc Append(ReplicationAppendRequest) returns (ReplicationAppendResponse);
+
+  // Internal: Sync from leader
+  rpc Sync(ReplicationSyncRequest) returns (stream ReplicationSyncResponse);
+}
+
+service RaftService {
+  // Internal: Join cluster
+  rpc Join(RaftJoinRequest) returns (RaftJoinResponse);
+
+  // Internal: Leave cluster
+  rpc Leave(RaftLeaveRequest) returns (RaftLeaveResponse);
+
+  // Internal: Get raft status
+  rpc Status(RaftStatusRequest) returns (RaftStatusResponse);
+}
