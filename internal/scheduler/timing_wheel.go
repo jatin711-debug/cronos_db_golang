@@ -214,7 +214,7 @@ func NewTimer(eventID string, event *types.Event) *Timer {
 	return &Timer{
 		EventID:        eventID,
 		Event:          event,
-		ExpirationTick: event.ScheduleTS / 100, // Convert ms to ticks (assuming 100ms tick)
+		ExpirationTick: event.GetScheduleTs() / 100, // Convert ms to ticks (assuming 100ms tick)
 		CreatedTS:      time.Now().UnixMilli(),
 	}
 }

@@ -1,17 +1,21 @@
 package api
 
+	
 import (
 	"context"
 	"fmt"
 
+	"cronos_db/internal/consumer"
+	"cronos_db/internal/partition"
 	"cronos_db/pkg/types"
+	"google.golang.org/grpc"
 )
 
 // EventServiceHandler implements the EventService handler
 type EventServiceHandler struct {
-	UnimplementedEventServiceServer
+	types.UnimplementedEventServiceServer
 
-	partitionManager  types.PartitionManager
+	partitionManager  *partition.PartitionManager
 	dedupManager      DedupManager
 	consumerManager   ConsumerManager
 }
@@ -23,24 +27,13 @@ type DedupManager interface {
 
 // ConsumerManager interface
 type ConsumerManager interface {
-	Subscribe(request *types.SubscribeRequest) (*Subscription, error)
+	Subscribe(request *types.SubscribeRequest) (*consumer.Subscription, error)
 	Ack(request *types.AckRequest) error
-}
-
-// Subscription represents a subscriber
-type Subscription struct {
-	ID             string
-	ConsumerGroup  string
-	Partition      *types.Partition
-	StartOffset    int64
-	Delivery       chan<- *types.Delivery
-	Done           <-chan struct{}
-	quit           chan struct{}
 }
 
 // NewEventServiceHandler creates a new event service handler
 func NewEventServiceHandler(
-	pm types.PartitionManager,
+	pm *partition.PartitionManager,
 	dm DedupManager,
 	cm ConsumerManager,
 ) *EventServiceHandler {
@@ -56,14 +49,14 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 	event := req.Event
 
 	// Validate event
-	if event.MessageID == "" {
+	if event.GetMessageId() == "" {
 		return &types.PublishResponse{
 			Success: false,
 			Error:   "message_id is required",
 		}, nil
 	}
 
-	if event.ScheduleTS <= 0 {
+	if event.GetScheduleTs() <= 0 {
 		return &types.PublishResponse{
 			Success: false,
 			Error:   "schedule_ts is required",
@@ -88,7 +81,7 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 
 	// Check if duplicate (unless explicitly allowed)
 	if !req.AllowDuplicate {
-		isDuplicate, err := h.dedupManager.IsDuplicate(event.MessageID, 0) // offset will be assigned
+		isDuplicate, err := h.dedupManager.IsDuplicate(event.GetMessageId(), 0) // offset will be assigned
 		if err != nil {
 			return &types.PublishResponse{
 				Success: false,
@@ -109,16 +102,20 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 	return &types.PublishResponse{
 		Success:     true,
 		Error:       "",
-		Offset:      0,  // Would be set by partition manager
-		PartitionID: partition.ID,
-		ScheduleTS:  event.ScheduleTS,
+		Offset:      0,     // Would be set by partition manager
+		PartitionId: partition.ID,
+		ScheduleTs:  event.GetScheduleTs(),
 	}, nil
 }
 
 // Subscribe handles streaming subscription
-func (h *EventServiceHandler) Subscribe(req *types.SubscribeRequest, stream types.EventService_SubscribeServer) error {
+func (h *EventServiceHandler) Subscribe(stream grpc.BidiStreamingServer[types.SubscribeRequest, types.Delivery]) error {
 	// Create subscription
-	_, err := h.consumerManager.Subscribe(req)
+	req, err := stream.Recv()
+	if err != nil {
+		return err
+	}
+	_, err = h.consumerManager.Subscribe(req)
 	if err != nil {
 		return err
 	}
@@ -129,27 +126,41 @@ func (h *EventServiceHandler) Subscribe(req *types.SubscribeRequest, stream type
 	return nil
 }
 
-// Ack handles ack requests
-func (h *EventServiceHandler) Ack(req *types.AckRequest) (*types.AckResponse, error) {
-	err := h.consumerManager.Ack(req)
-	if err != nil {
-		return &types.AckResponse{
-			Success: false,
-			Error:   err.Error(),
-		}, nil
-	}
+// Ack handles streaming ack requests
+func (h *EventServiceHandler) Ack(stream types.EventService_AckServer) error {
+	for {
+		req, err := stream.Recv()
+		if err != nil {
+			return err
+		}
 
-	return &types.AckResponse{
-		Success:         true,
-		CommittedOffset: req.NextOffset,
-	}, nil
+		err = h.consumerManager.Ack(req)
+		if err != nil {
+			resp := &types.AckResponse{
+				Success: false,
+				Error:   err.Error(),
+			}
+			if err := stream.Send(resp); err != nil {
+				return err
+			}
+			continue
+		}
+
+		resp := &types.AckResponse{
+			Success:         true,
+			CommittedOffset: req.NextOffset,
+		}
+		if err := stream.Send(resp); err != nil {
+			return err
+		}
+	}
 }
 
 // Replay handles replay requests
 func (h *EventServiceHandler) Replay(req *types.ReplayRequest, stream types.EventService_ReplayServer) error {
 	// Get partition
-	if req.PartitionID >= 0 {
-		_, err := h.partitionManager.GetPartition(req.PartitionID)
+	if req.GetPartitionId() >= 0 {
+		_, err := h.partitionManager.GetPartition(req.GetPartitionId())
 		if err != nil {
 			return fmt.Errorf("get partition: %w", err)
 		}

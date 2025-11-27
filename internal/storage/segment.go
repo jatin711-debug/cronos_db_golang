@@ -173,7 +173,7 @@ func (s *Segment) appendEventActive(event *types.Event, indexInterval int64) err
 
 	// Update metadata
 	s.lastOffset = event.Offset
-	s.lastTS = event.ScheduleTS
+	s.lastTS = event.GetScheduleTs()
 	s.nextOffset++
 	s.sizeBytes = pos + int64(len(record))
 
@@ -192,7 +192,7 @@ func (s *Segment) appendEventActive(event *types.Event, indexInterval int64) err
 // buildEventRecord builds binary event record
 func (s *Segment) buildEventRecord(event *types.Event, pos int64) []byte {
 	// Calculate sizes
-	msgIDLen := len(event.MessageID)
+	msgIDLen := len(event.GetMessageId())
 	topicLen := len(event.Topic)
 	payloadLen := len(event.Payload)
 	metaCount := len(event.Meta)
@@ -218,7 +218,7 @@ func (s *Segment) buildEventRecord(event *types.Event, pos int64) []byte {
 	offset += 8
 
 	// Schedule timestamp (8 bytes)
-	binary.BigEndian.PutUint64(record[offset:offset+8], uint64(event.ScheduleTS))
+	binary.BigEndian.PutUint64(record[offset:offset+8], uint64(event.GetScheduleTs()))
 	offset += 8
 
 	// Message ID length (2 bytes)
@@ -226,7 +226,7 @@ func (s *Segment) buildEventRecord(event *types.Event, pos int64) []byte {
 	offset += 2
 
 	// Message ID (N bytes)
-	copy(record[offset:offset+msgIDLen], event.MessageID)
+	copy(record[offset:offset+msgIDLen], event.GetMessageId())
 	offset += msgIDLen
 
 	// Topic length (2 bytes)
@@ -287,7 +287,7 @@ func (s *Segment) writeRecord(record []byte) error {
 func (s *Segment) writeIndexEntry(event *types.Event) error {
 	// Build index entry: timestamp (8 bytes) + offset (8 bytes) = 16 bytes
 	entry := make([]byte, 16)
-	binary.BigEndian.PutUint64(entry[0:8], uint64(event.ScheduleTS))
+	binary.BigEndian.PutUint64(entry[0:8], uint64(event.GetScheduleTs()))
 	binary.BigEndian.PutUint64(entry[8:16], uint64(event.Offset))
 
 	// Append to index file

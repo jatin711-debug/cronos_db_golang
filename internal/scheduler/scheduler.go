@@ -59,10 +59,10 @@ func (s *Scheduler) Schedule(event *types.Event) error {
 
 	// Check if event is already scheduled
 	// For now, we'll use message_id as timer ID
-	eventID := event.MessageID
+	eventID := event.GetMessageId()
 
 	// If event is already expired, add to ready queue
-	if event.ScheduleTS <= time.Now().UnixMilli() {
+	if event.GetScheduleTs() <= time.Now().UnixMilli() {
 		s.readyQueue = append(s.readyQueue, event)
 		return nil
 	}

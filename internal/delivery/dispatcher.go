@@ -192,7 +192,7 @@ func (d *Dispatcher) findSubscriptions(event *types.Event) []*Subscription {
 	for _, sub := range d.subscriptions {
 		// Check if subscription matches event's partition/topic
 		// This is simplified - real implementation would check consumer group assignments
-		if sub.Partition.ID == event.Partition {
+		if sub.Partition.ID == event.GetPartitionId() {
 			subs = append(subs, sub)
 		}
 	}

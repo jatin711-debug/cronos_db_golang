@@ -48,7 +48,7 @@ func (r *ReplayEngine) ReplayByTimeRange(startTS, endTS int64) ([]*types.Event, 
 	// Filter by timestamp range
 	var filtered []*types.Event
 	for _, event := range events {
-		if event.ScheduleTS >= startTS && event.ScheduleTS <= endTS {
+		if event.GetScheduleTs() >= startTS && event.GetScheduleTs() <= endTS {
 			filtered = append(filtered, event)
 		}
 	}

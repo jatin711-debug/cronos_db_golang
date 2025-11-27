@@ -126,7 +126,7 @@ func (w *WAL) AppendEvent(event *types.Event) error {
 
 	// Set offset
 	event.Offset = w.nextOffset
-	event.Partition = w.partitionID
+	event.PartitionId = w.partitionID
 
 	// Append to active segment
 	if err := w.activeSegment.AppendEvent(event, w.config.IndexInterval); err != nil {

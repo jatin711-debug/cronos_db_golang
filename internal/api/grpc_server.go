@@ -5,6 +5,8 @@ import (
 	"net"
 	"time"
 
+	"cronos_db/pkg/types"
+
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/reflection"
@@ -62,7 +64,7 @@ func NewGRPCServer(config *Config) *GRPCServer {
 
 // RegisterServices registers all gRPC services
 func (g *GRPCServer) RegisterServices(eventHandler *EventServiceHandler) {
-	RegisterEventServiceServer(g.server, eventHandler)
+	types.RegisterEventServiceServer(g.server, eventHandler)
 }
 
 // Start starts the gRPC server

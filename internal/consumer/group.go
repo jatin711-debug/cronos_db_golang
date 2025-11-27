@@ -5,9 +5,19 @@ import (
 	"sync"
 	"time"
 
-	"cronos_db/internal/api"
 	"cronos_db/pkg/types"
 )
+
+// Subscription represents a subscriber
+type Subscription struct {
+	ID             string
+	ConsumerGroup  string
+	Partition      *types.Partition
+	StartOffset    int64
+	Delivery       chan<- *types.Delivery
+	Done           <-chan struct{}
+	quit           chan struct{}
+}
 
 // GroupManager manages consumer groups
 type GroupManager struct {
@@ -243,19 +253,19 @@ func (g *GroupManager) DeleteGroup(groupID string) error {
 }
 
 // Subscribe creates a subscription
-func (g *GroupManager) Subscribe(req *types.SubscribeRequest) (*api.Subscription, error) {
+func (g *GroupManager) Subscribe(req *types.SubscribeRequest) (*Subscription, error) {
 	// Create a subscription (simplified)
-	sub := &api.Subscription{
-		ID:            req.SubscriptionID,
-		ConsumerGroup: req.ConsumerGroup,
+	sub := &Subscription{
+		ID:            req.GetSubscriptionId(),
+		ConsumerGroup: req.GetConsumerGroup(),
 		Partition:     nil, // Will be set by handler
-		StartOffset:   req.StartOffset,
+		StartOffset:   req.GetStartOffset(),
 		Delivery:      nil, // Will be set by handler
 		Done:          nil, // Will be set by handler
 	}
 
 	// Add to group
-	if err := g.JoinGroup(req.ConsumerGroup, req.SubscriptionID, "", req.PartitionID); err != nil {
+	if err := g.JoinGroup(req.GetConsumerGroup(), req.GetSubscriptionId(), "", req.GetPartitionId()); err != nil {
 		return nil, fmt.Errorf("join group: %w", err)
 	}
 
