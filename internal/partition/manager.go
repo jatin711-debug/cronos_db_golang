@@ -10,6 +10,7 @@ import (
 	"cronos_db/internal/storage"
 	"cronos_db/internal/consumer"
 	"cronos_db/internal/dedup"
+	"cronos_db/internal/delivery"
 )
 
 // Partition represents a data partition
@@ -21,6 +22,8 @@ type Partition struct {
 	Scheduler      *scheduler.Scheduler
 	ConsumerGroup  *consumer.GroupManager
 	DedupStore     *dedup.Manager
+	Dispatcher     *delivery.Dispatcher
+	Worker         *delivery.Worker
 	Leader         bool
 	CreatedTS      time.Time
 	UpdatedTS      time.Time
@@ -84,6 +87,13 @@ func (pm *PartitionManager) CreatePartition(partitionID int32, topic string) err
 	}
 	dedupManager := dedup.NewManager(dedupStore)
 
+	// Create dispatcher
+	dispatcherConfig := delivery.DefaultConfig()
+	dispatcher := delivery.NewDispatcher(dispatcherConfig)
+
+	// Create worker
+	worker := delivery.NewWorker(dispatcher, 100)
+
 	// Create partition
 	partition := &Partition{
 		ID:            partitionID,
@@ -93,6 +103,8 @@ func (pm *PartitionManager) CreatePartition(partitionID int32, topic string) err
 		Scheduler:     scheduler,
 		ConsumerGroup: consumerGroup,
 		DedupStore:    dedupManager,
+		Dispatcher:    dispatcher,
+		Worker:        worker,
 		Leader:        false,
 		CreatedTS:     time.Now(),
 		UpdatedTS:     time.Now(),
@@ -196,6 +208,29 @@ func (pm *PartitionManager) StartPartition(partitionID int32) error {
 
 	// Start scheduler
 	partition.Scheduler.Start()
+
+	// Start worker
+	partition.Worker.Start()
+
+	// Start delivery loop (poll scheduler for ready events and dispatch them)
+	go func() {
+		ticker := time.NewTicker(50 * time.Millisecond) // Poll every 50ms
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				// Get ready events from scheduler
+				readyEvents := partition.Scheduler.GetReadyEvents()
+				if readyEvents != nil && len(readyEvents) > 0 {
+					// Dispatch each ready event
+					for _, event := range readyEvents {
+						partition.Dispatcher.Dispatch(event)
+					}
+				}
+			}
+		}
+	}()
 
 	return nil
 }

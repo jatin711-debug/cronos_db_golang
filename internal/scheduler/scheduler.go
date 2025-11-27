@@ -68,7 +68,7 @@ func (s *Scheduler) Schedule(event *types.Event) error {
 	}
 
 	// Create timer and add to timing wheel
-	timer := NewTimer(eventID, event)
+	timer := NewTimer(eventID, event, s.timingWheel.tickMs)
 	return s.timingWheel.AddTimer(timer)
 }
 

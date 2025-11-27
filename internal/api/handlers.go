@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"cronos_db/internal/consumer"
+	"cronos_db/internal/delivery"
 	"cronos_db/internal/partition"
 	"cronos_db/pkg/types"
 	"google.golang.org/grpc"
@@ -31,6 +32,32 @@ type ConsumerManager interface {
 	Subscribe(request *types.SubscribeRequest) (*consumer.Subscription, error)
 	Ack(request *types.AckRequest) error
 	GetCommittedOffset(groupID string, partitionID int32) (int64, error)
+}
+
+// GRPCStream wraps gRPC stream to implement delivery.Stream interface
+type GRPCStream struct {
+	stream grpc.BidiStreamingServer[types.SubscribeRequest, types.Delivery]
+}
+
+// Send sends a delivery message
+func (s *GRPCStream) Send(delivery *delivery.DeliveryMessage) error {
+	// Convert delivery.DeliveryMessage to types.Delivery
+	return s.stream.Send(&types.Delivery{
+		DeliveryId: delivery.DeliveryID,
+		Event:      delivery.Event,
+		Attempt:    delivery.Attempt,
+		AckTimeoutMs: delivery.AckTimeout,
+	})
+}
+
+// Recv receives a control message (not used in current implementation)
+func (s *GRPCStream) Recv() (*delivery.Control, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+
+// Context returns the stream context
+func (s *GRPCStream) Context() context.Context {
+	return s.stream.Context()
 }
 
 // NewEventServiceHandler creates a new event service handler
@@ -123,6 +150,14 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 		}, nil
 	}
 
+	// Schedule the event in timing wheel
+	if err := partitionInternal.Scheduler.Schedule(event); err != nil {
+		return &types.PublishResponse{
+			Success: false,
+			Error:   fmt.Sprintf("schedule event: %v", err),
+		}, nil
+	}
+
 	return &types.PublishResponse{
 		Success:     true,
 		Error:       "",
@@ -140,99 +175,64 @@ func (h *EventServiceHandler) Subscribe(stream grpc.BidiStreamingServer[types.Su
 		return err
 	}
 
+	// Handle partition auto-assignment
+	partitionID := req.GetPartitionId()
+	if partitionID < 0 {
+		// Auto-assign partition based on topic
+		partitionInfo, err := h.partitionManager.GetPartitionForTopic(req.GetTopic())
+		if err != nil {
+			return fmt.Errorf("auto-assign partition for topic %s: %w", req.GetTopic(), err)
+		}
+		partitionID = partitionInfo.ID
+	}
+
 	// Get internal partition
-	partitionInternal, err := h.partitionManager.GetInternalPartition(req.GetPartitionId())
+	partitionInternal, err := h.partitionManager.GetInternalPartition(partitionID)
 	if err != nil {
-		return fmt.Errorf("get partition %d: %w", req.GetPartitionId(), err)
+		return fmt.Errorf("get partition %d: %w", partitionID, err)
 	}
 
 	// Get consumer group offset
-	startOffset, err := h.consumerManager.GetCommittedOffset(req.GetConsumerGroup(), req.GetPartitionId())
+	startOffset, err := h.consumerManager.GetCommittedOffset(req.GetConsumerGroup(), partitionID)
 	if err != nil {
 		startOffset = -1 // Start from beginning if no offset
 	}
 
-	// Start delivery goroutine
+	// Create subscription ID
+	subID := fmt.Sprintf("%s-%d-%s", req.GetConsumerGroup(), partitionID, req.GetSubscriptionId())
+
+	// Create channel for deliveries
+	deliveryChan := make(chan *types.Delivery, 100)
+
+	// Create subscription object for dispatcher
+	subscription := &delivery.Subscription{
+		ID:             subID,
+		ConsumerGroup:  req.GetConsumerGroup(),
+		Partition:      &types.Partition{ID: int32(partitionID)},
+		NextOffset:     startOffset + 1,
+		MaxCredits:     100,
+		CreatedTS:      time.Now().UnixMilli(),
+		Stream:         &GRPCStream{stream: stream},
+	}
+
+	// Register subscription with partition's dispatcher
+	if partitionInternal.Dispatcher != nil {
+		if err := partitionInternal.Dispatcher.Subscribe(subscription); err != nil {
+			return fmt.Errorf("register subscription: %w", err)
+		}
+	}
+
+	// Start delivery goroutine to receive events from worker
 	go func() {
-		// Get start and end offsets
-		highWatermark := partitionInternal.Wal.GetHighWatermark()
-		currentOffset := startOffset + 1
-		if currentOffset < 0 {
-			currentOffset = 0
-		}
-
-		// Read events from WAL
-		for currentOffset <= highWatermark {
-			select {
-			case <-stream.Context().Done():
-				return
-			default:
-			}
-
-			// Read event from WAL (for now, read in batches)
-			events, err := partitionInternal.Wal.ReadEvents(currentOffset, highWatermark)
-			if err != nil {
-				// Log error and continue
-				continue
-			}
-
-			// Send each event
-			for _, event := range events {
-				// Skip if already delivered
-				if event.Offset < currentOffset {
-					continue
-				}
-
-				currentOffset = event.Offset + 1
-
-				// Create delivery
-				delivery := &types.Delivery{
-					DeliveryId: fmt.Sprintf("%s-%d-%d", event.GetMessageId(), event.Offset, time.Now().UnixNano()),
-					Event:      event,
-				}
-
-				// Send to client
-				if err := stream.Send(delivery); err != nil {
-					// Client disconnected
-					return
-				}
-			}
-
-			// Update high watermark
-			highWatermark = partitionInternal.Wal.GetHighWatermark()
-		}
-
-		// Keep reading new events
 		for {
 			select {
 			case <-stream.Context().Done():
 				return
-			default:
-			}
-
-			// Check for new events
-			newHighWatermark := partitionInternal.Wal.GetHighWatermark()
-			if newHighWatermark >= currentOffset {
-				events, err := partitionInternal.Wal.ReadEvents(currentOffset, newHighWatermark)
-				if err != nil {
-					time.Sleep(100 * time.Millisecond)
-					continue
+			case delivery := <-deliveryChan:
+				// Send to subscriber
+				if err := stream.Send(delivery); err != nil {
+					return
 				}
-
-				for _, event := range events {
-					delivery := &types.Delivery{
-						DeliveryId: fmt.Sprintf("%s-%d-%d", event.GetMessageId(), event.Offset, time.Now().UnixNano()),
-						Event:      event,
-					}
-
-					if err := stream.Send(delivery); err != nil {
-						return
-					}
-					currentOffset = event.Offset + 1
-				}
-			} else {
-				// No new events, wait a bit
-				time.Sleep(100 * time.Millisecond)
 			}
 		}
 	}()

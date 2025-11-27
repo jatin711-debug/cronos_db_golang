@@ -73,8 +73,9 @@ func (tw *TimingWheel) AddTimer(timer *Timer) error {
 	} else {
 		// Needs overflow wheel
 		if tw.overflowWheel == nil {
-			// Create overflow wheel
+			// Create overflow wheel with larger ticks
 			tw.overflowWheel = NewTimingWheel(tw.tickMs*tw.wheelSize, tw.wheelSize)
+			tw.overflowWheel.initialize()
 		}
 		return tw.overflowWheel.AddTimer(timer)
 	}
@@ -210,11 +211,11 @@ type SchedulerStats struct {
 }
 
 // NewTimer creates a new timer
-func NewTimer(eventID string, event *types.Event) *Timer {
+func NewTimer(eventID string, event *types.Event, tickMs int32) *Timer {
 	return &Timer{
 		EventID:        eventID,
 		Event:          event,
-		ExpirationTick: event.GetScheduleTs() / 100, // Convert ms to ticks (assuming 100ms tick)
+		ExpirationTick: event.GetScheduleTs() / int64(tickMs), // Convert ms to ticks
 		CreatedTS:      time.Now().UnixMilli(),
 	}
 }

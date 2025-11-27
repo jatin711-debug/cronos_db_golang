@@ -365,8 +365,14 @@ func (s *Segment) writeIndexEntry(event *types.Event) error {
 	binary.BigEndian.PutUint64(entry[0:8], uint64(event.GetScheduleTs()))
 	binary.BigEndian.PutUint64(entry[8:16], uint64(event.Offset))
 
+	// Create index directory if it doesn't exist
+	indexDir := filepath.Join(s.dataDir, "index")
+	if err := os.MkdirAll(indexDir, 0755); err != nil {
+		return fmt.Errorf("create index dir: %w", err)
+	}
+
 	// Append to index file
-	indexPath := filepath.Join(s.dataDir, "index", s.indexFilename)
+	indexPath := filepath.Join(indexDir, s.indexFilename)
 	indexFile, err := os.OpenFile(indexPath, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
 	if err != nil {
 		return fmt.Errorf("open index file: %w", err)
