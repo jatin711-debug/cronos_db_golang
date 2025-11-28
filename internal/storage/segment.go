@@ -55,7 +55,7 @@ func NewSegment(dataDir string, firstOffset int64, isActive bool) (*Segment, err
 	segment := &Segment{
 		segmentFile:     file,
 		writer:          bufio.NewWriterSize(file, 1024*1024), // 1MB buffer
-		reader:          file,
+		reader:          file,  // io.ReaderAt doesn't have buffered option
 		firstOffset:     firstOffset,
 		nextOffset:      firstOffset,
 		createdTS:       time.Now().UnixMilli(),
@@ -528,7 +528,10 @@ func (s *Segment) scan() error {
 
 // Flush flushes pending writes
 func (s *Segment) Flush() error {
-	return s.writer.Flush()
+	if err := s.writer.Flush(); err != nil {
+		return err
+	}
+	return s.segmentFile.Sync()
 }
 
 // Close closes segment
@@ -536,7 +539,15 @@ func (s *Segment) Close() error {
 	if err := s.writer.Flush(); err != nil {
 		return err
 	}
+	if err := s.segmentFile.Sync(); err != nil {
+		return err
+	}
 	return s.segmentFile.Close()
+}
+
+// Sync syncs segment to disk
+func (s *Segment) Sync() error {
+	return s.segmentFile.Sync()
 }
 
 // IsFull checks if segment is full

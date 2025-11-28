@@ -3,6 +3,7 @@ package delivery
 import (
 	"context"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -72,6 +73,7 @@ type ActiveDelivery struct {
 	CreatedTS     int64
 	AckDeadline   time.Time
 	Timer         *time.Timer
+	quit          chan struct{} // Quit channel for timeout goroutine
 }
 
 // Config represents dispatcher configuration
@@ -171,7 +173,8 @@ func (d *Dispatcher) Dispatch(event *types.Event) error {
 
 		// Send to subscriber
 		if err := sub.Stream.Send(delivery); err != nil {
-			// Log error, subscription may be dead
+			log.Printf("Failed to send to subscriber %s: %v", sub.ID, err)
+			// TODO: Clean up dead subscription
 			continue
 		}
 
@@ -209,14 +212,19 @@ func (d *Dispatcher) trackDelivery(delivery *DeliveryMessage, sub *Subscription)
 		CreatedTS:    time.Now().UnixMilli(),
 		AckDeadline:  time.Now().Add(d.config.DefaultAckTimeout),
 		Timer:        time.NewTimer(d.config.DefaultAckTimeout),
+		quit:         make(chan struct{}),
 	}
 
 	d.activeDeliveries[delivery.DeliveryID] = active
 
 	// Wait for ack or timeout
 	go func() {
-		<-active.Timer.C
-		d.handleDeliveryTimeout(delivery.DeliveryID)
+		select {
+		case <-active.Timer.C:
+			d.handleDeliveryTimeout(delivery.DeliveryID)
+		case <-active.quit:
+			return // Clean exit on delivery completion
+		}
 	}()
 }
 
@@ -235,6 +243,9 @@ func (d *Dispatcher) HandleAck(deliveryID string, success bool, nextOffset int64
 	if active.Timer != nil {
 		active.Timer.Stop()
 	}
+
+	// Close quit channel to stop timeout goroutine
+	close(active.quit)
 
 	// Update subscription offset if successful
 	if success {

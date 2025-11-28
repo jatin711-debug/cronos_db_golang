@@ -179,16 +179,10 @@ func (w *WAL) ReadEvents(startOffset, endOffset int64) ([]*types.Event, error) {
 
 		// Read events from this segment
 		// Start from max(startOffset, segment.firstOffset)
-		readOffset := startOffset
-		if readOffset < segment.GetFirstOffset() {
-			readOffset = segment.GetFirstOffset()
-		}
+		readOffset := max(startOffset, segment.GetFirstOffset())
 
 		// End at min(endOffset, segment.lastOffset)
-		endForSegment := endOffset
-		if endForSegment > segment.GetLastOffset() {
-			endForSegment = segment.GetLastOffset()
-		}
+		endForSegment := min(endOffset, segment.GetLastOffset())
 
 		// Read each event
 		for offset := readOffset; offset <= endForSegment; offset++ {
@@ -226,12 +220,21 @@ func (w *WAL) ReadEventsByTime(startTS, endTS int64) ([]*types.Event, error) {
 
 // Flush flushes all pending writes
 func (w *WAL) Flush() error {
-	w.mu.RLock()
-	defer w.mu.RUnlock()
-
+	w.mu.Lock()  // FIXED: Use write lock for safety
+	config := w.config
 	if w.activeSegment != nil {
-		return w.activeSegment.Flush()
+		err := w.activeSegment.Flush()
+		w.mu.Unlock()  // Unlock before potential second sync
+		if err != nil {
+			return err
+		}
+		// Conditionally sync based on FsyncMode
+		if config.FsyncMode == "every_event" {
+			return w.activeSegment.Sync()
+		}
+		return nil
 	}
+	w.mu.Unlock()
 	return nil
 }
 

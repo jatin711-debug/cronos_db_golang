@@ -3,6 +3,7 @@ package dedup
 import (
 	"encoding/binary"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -114,6 +115,7 @@ func (p *PebbleStore) PruneExpired() (int, error) {
 		value := iter.Value()
 		_, expirationTS, err := p.parseValue(value)
 		if err != nil {
+			log.Printf("Failed to parse dedup value: %v", err)
 			continue
 		}
 

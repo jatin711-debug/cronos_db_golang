@@ -1,6 +1,7 @@
 package delivery
 
 import (
+	"log"
 	"sync"
 	"time"
 
@@ -87,7 +88,8 @@ func (w *Worker) processBatch() {
 	// Dispatch events
 	for _, event := range batch {
 		if err := w.dispatcher.Dispatch(event); err != nil {
-			// Log error
+			log.Printf("Failed to dispatch event %s: %v", event.GetMessageId(), err)
+			w.stats.EventsFailed++
 			continue
 		}
 		w.stats.EventsDispatched++
@@ -116,6 +118,7 @@ func (w *Worker) GetStats() *WorkerStats {
 
 	return &WorkerStats{
 		EventsDispatched: w.stats.EventsDispatched,
+		EventsFailed:     w.stats.EventsFailed,
 		QueueLength:      int64(len(w.readyQueue)),
 		LastDispatchTS:   w.stats.LastDispatchTS,
 		Processing:       w.processing,
@@ -125,6 +128,7 @@ func (w *Worker) GetStats() *WorkerStats {
 // WorkerStats represents worker statistics
 type WorkerStats struct {
 	EventsDispatched int64
+	EventsFailed     int64
 	QueueLength      int64
 	LastDispatchTS   int64
 	Processing       bool

@@ -1,6 +1,7 @@
 package consumer
 
 import (
+	"encoding/binary"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -85,11 +86,8 @@ func (s *OffsetStore) buildKey(groupID string, partitionID int32) []byte {
 	key := make([]byte, 4+len(groupID)+4)
 	offset := 0
 
-	// Partition ID (4 bytes)
-	key[offset] = byte(partitionID >> 24)
-	key[offset+1] = byte(partitionID >> 16)
-	key[offset+2] = byte(partitionID >> 8)
-	key[offset+3] = byte(partitionID)
+	// Partition ID (4 bytes) - FIXED to use binary.BigEndian
+	binary.BigEndian.PutUint32(key[offset:], uint32(partitionID))
 	offset += 4
 
 	// Group ID
@@ -105,15 +103,7 @@ func (s *OffsetStore) buildKey(groupID string, partitionID int32) []byte {
 // buildValue builds storage value
 func (s *OffsetStore) buildValue(offset int64) []byte {
 	value := make([]byte, 8)
-	value[0] = byte(offset >> 56)
-	value[1] = byte(offset >> 48)
-	value[2] = byte(offset >> 40)
-	value[3] = byte(offset >> 32)
-	value[4] = byte(offset >> 24)
-	value[5] = byte(offset >> 16)
-	value[6] = byte(offset >> 8)
-	value[7] = byte(offset)
-
+	binary.BigEndian.PutUint64(value, uint64(offset))
 	return value
 }
 
@@ -123,15 +113,8 @@ func (s *OffsetStore) parseValue(value []byte) (int64, error) {
 		return 0, fmt.Errorf("invalid value size")
 	}
 
-	offset := int64(value[0]) << 56
-	offset |= int64(value[1]) << 48
-	offset |= int64(value[2]) << 40
-	offset |= int64(value[3]) << 32
-	offset |= int64(value[4]) << 24
-	offset |= int64(value[5]) << 16
-	offset |= int64(value[6]) << 8
-	offset |= int64(value[7])
-
+	// FIXED to use binary.BigEndian
+	offset := int64(binary.BigEndian.Uint64(value))
 	return offset, nil
 }
 

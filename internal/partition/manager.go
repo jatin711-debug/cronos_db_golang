@@ -2,6 +2,7 @@ package partition
 
 import (
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -27,6 +28,7 @@ type Partition struct {
 	Leader         bool
 	CreatedTS      time.Time
 	UpdatedTS      time.Time
+	deliveryQuit   chan struct{} // Quit channel for delivery goroutine
 }
 
 // PartitionManager manages all partitions
@@ -70,6 +72,12 @@ func (pm *PartitionManager) CreatePartition(partitionID int32, topic string) err
 	if err != nil {
 		return fmt.Errorf("create WAL: %w", err)
 	}
+	// Clean up WAL on any subsequent failure
+	defer func() {
+		if err != nil {
+			wal.Close()
+		}
+	}()
 
 	// Create scheduler
 	scheduler, err := scheduler.NewScheduler(dataDir, partitionID, int32(pm.config.TickMS), int32(pm.config.WheelSize))
@@ -108,6 +116,7 @@ func (pm *PartitionManager) CreatePartition(partitionID int32, topic string) err
 		Leader:        false,
 		CreatedTS:     time.Now(),
 		UpdatedTS:     time.Now(),
+		deliveryQuit:  make(chan struct{}),
 	}
 
 	pm.partitions[partitionID] = partition
@@ -170,19 +179,7 @@ func (pm *PartitionManager) GetPartitionForTopic(topic string) (*types.Partition
 		}
 	}
 
-	// Return any partition if topic not found
-	for _, partition := range pm.partitions {
-		return &types.Partition{
-			ID:            partition.ID,
-			Topic:         partition.Topic,
-			NextOffset:    0,
-			HighWatermark: 0,
-			Active:        true,
-			CreatedTS:     partition.CreatedTS.UnixMilli(),
-			UpdatedTS:     partition.UpdatedTS.UnixMilli(),
-		}, nil
-	}
-
+	// Return error if topic not found - FIXED
 	return nil, types.ErrPartitionNotFound
 }
 
@@ -225,9 +222,13 @@ func (pm *PartitionManager) StartPartition(partitionID int32) error {
 				if readyEvents != nil && len(readyEvents) > 0 {
 					// Dispatch each ready event
 					for _, event := range readyEvents {
-						partition.Dispatcher.Dispatch(event)
+						if err := partition.Dispatcher.Dispatch(event); err != nil {
+							log.Printf("Dispatch failed: %v", err)
+						}
 					}
 				}
+			case <-partition.deliveryQuit:
+				return
 			}
 		}
 	}()
