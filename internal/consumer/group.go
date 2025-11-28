@@ -2,6 +2,7 @@ package consumer
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -274,9 +275,19 @@ func (g *GroupManager) Subscribe(req *types.SubscribeRequest) (*Subscription, er
 
 // Ack acknowledges event processing
 func (g *GroupManager) Ack(req *types.AckRequest) error {
-	// Find the consumer group from the delivery ID or context
-	// For now, we'll just commit the offset
-	return g.CommitOffset("", int64(req.NextOffset), req.NextOffset)
+	// Parse consumer group from delivery ID
+	// Delivery ID format: {consumerGroup}-{partitionId}-{subscriptionId}-{offset}
+	groupID := ""
+	if req.DeliveryId != "" {
+		// Extract group ID from delivery ID
+		parts := strings.Split(req.DeliveryId, "-")
+		if len(parts) >= 1 {
+			groupID = parts[0]
+		}
+	}
+
+	// Commit the offset for this consumer group
+	return g.CommitOffset(groupID, int64(req.NextOffset), req.NextOffset)
 }
 
 

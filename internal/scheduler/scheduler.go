@@ -21,6 +21,7 @@ type Scheduler struct {
 	workerDone      chan struct{}
 	stats           *SchedulerStats
 	lastCheckpointTS int64
+	startTimeMs     int64 // Scheduler start time (Unix ms)
 }
 
 // NewScheduler creates a new scheduler
@@ -30,15 +31,18 @@ func NewScheduler(dataDir string, partitionID int32, tickMs int32, wheelSize int
 		return nil, fmt.Errorf("create scheduler data dir: %w", err)
 	}
 
+	startTime := time.Now().UnixMilli()
+
 	scheduler := &Scheduler{
-		timingWheel:  NewTimingWheel(tickMs, wheelSize),
-		readyQueue:   make([]*types.Event, 0),
-		partitionID:  partitionID,
-		dataDir:      dataDir,
-		active:       false,
-		workerDone:   make(chan struct{}),
-		stats:        &SchedulerStats{},
+		timingWheel:   NewTimingWheel(tickMs, wheelSize, 10, 0), // Limit to 10 overflow levels
+		readyQueue:    make([]*types.Event, 0),
+		partitionID:   partitionID,
+		dataDir:       dataDir,
+		active:        false,
+		workerDone:    make(chan struct{}),
+		stats:         &SchedulerStats{},
 		lastCheckpointTS: time.Now().UnixMilli(),
+		startTimeMs:   startTime,
 	}
 
 	// Initialize timing wheel
@@ -68,7 +72,7 @@ func (s *Scheduler) Schedule(event *types.Event) error {
 	}
 
 	// Create timer and add to timing wheel
-	timer := NewTimer(eventID, event, s.timingWheel.tickMs)
+	timer := NewTimer(eventID, event, s.timingWheel.tickMs, s.startTimeMs)
 	return s.timingWheel.AddTimer(timer)
 }
 

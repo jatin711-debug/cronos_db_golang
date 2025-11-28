@@ -279,6 +279,10 @@ func (s *Segment) buildEventRecord(event *types.Event) []byte {
 func parseEventRecord(record []byte) (*types.Event, error) {
 	offset := 8 // Skip length (4) and CRC32 (4)
 
+	if len(record) < 8 {
+		return nil, fmt.Errorf("record too short")
+	}
+
 	// Offset (8 bytes)
 	eventOffset := int64(binary.BigEndian.Uint64(record[offset : offset+8]))
 	offset += 8
@@ -292,6 +296,9 @@ func parseEventRecord(record []byte) (*types.Event, error) {
 	offset += 2
 
 	// Message ID (N bytes)
+	if offset+msgIDLen > len(record) {
+		return nil, fmt.Errorf("record bounds exceeded for message ID")
+	}
 	messageID := string(record[offset : offset+msgIDLen])
 	offset += msgIDLen
 
@@ -300,6 +307,9 @@ func parseEventRecord(record []byte) (*types.Event, error) {
 	offset += 2
 
 	// Topic (N bytes)
+	if offset+topicLen > len(record) {
+		return nil, fmt.Errorf("record bounds exceeded for topic")
+	}
 	topic := string(record[offset : offset+topicLen])
 	offset += topicLen
 
@@ -308,6 +318,9 @@ func parseEventRecord(record []byte) (*types.Event, error) {
 	offset += 4
 
 	// Payload (N bytes)
+	if offset+payloadLen > len(record) {
+		return nil, fmt.Errorf("record bounds exceeded for payload")
+	}
 	payload := record[offset : offset+payloadLen]
 	offset += payloadLen
 
@@ -323,6 +336,9 @@ func parseEventRecord(record []byte) (*types.Event, error) {
 		offset += 2
 
 		// Key (N bytes)
+		if offset+keyLen > len(record) {
+			return nil, fmt.Errorf("record bounds exceeded for meta key at index %d", i)
+		}
 		key := string(record[offset : offset+keyLen])
 		offset += keyLen
 
@@ -331,6 +347,9 @@ func parseEventRecord(record []byte) (*types.Event, error) {
 		offset += 2
 
 		// Value (N bytes)
+		if offset+valLen > len(record) {
+			return nil, fmt.Errorf("record bounds exceeded for meta value at index %d", i)
+		}
 		value := string(record[offset : offset+valLen])
 		offset += valLen
 

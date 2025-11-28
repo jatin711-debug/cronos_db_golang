@@ -77,6 +77,9 @@ func NewEventServiceHandler(
 func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishRequest) (*types.PublishResponse, error) {
 	event := req.Event
 
+	fmt.Printf("[API] Publish called: message_id=%s, topic=%s, schedule_ts=%d\n",
+		event.GetMessageId(), event.Topic, event.GetScheduleTs())
+
 	// Validate event
 	if event.GetMessageId() == "" {
 		return &types.PublishResponse{
@@ -99,6 +102,8 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 		}, nil
 	}
 
+	fmt.Printf("[API] Validation passed, getting partition...\n")
+
 	// Get internal partition
 	partition, err := h.partitionManager.GetPartitionForTopic(event.Topic)
 	if err != nil {
@@ -108,6 +113,8 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 		}, nil
 	}
 
+	fmt.Printf("[API] Got partition: %d\n", partition.ID)
+
 	// Get internal partition object for WAL access
 	partitionInternal, err := h.partitionManager.GetInternalPartition(partition.ID)
 	if err != nil {
@@ -116,6 +123,8 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 			Error:   fmt.Sprintf("get internal partition: %v", err),
 		}, nil
 	}
+
+	fmt.Printf("[API] Got internal partition\n")
 
 	// Check if duplicate (unless explicitly allowed)
 	if !req.AllowDuplicate {
@@ -135,28 +144,34 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 	}
 
 	// Append to WAL
+	fmt.Printf("[API] Appending to WAL...\n")
 	if err := partitionInternal.Wal.AppendEvent(event); err != nil {
 		return &types.PublishResponse{
 			Success: false,
 			Error:   fmt.Sprintf("append to WAL: %v", err),
 		}, nil
 	}
+	fmt.Printf("[API] Appended to WAL successfully\n")
 
 	// Flush to ensure data is persisted
+	fmt.Printf("[API] Flushing WAL...\n")
 	if err := partitionInternal.Wal.Flush(); err != nil {
 		return &types.PublishResponse{
 			Success: false,
 			Error:   fmt.Sprintf("flush WAL: %v", err),
 		}, nil
 	}
+	fmt.Printf("[API] Flushed WAL successfully\n")
 
 	// Schedule the event in timing wheel
+	fmt.Printf("[API] Scheduling event...\n")
 	if err := partitionInternal.Scheduler.Schedule(event); err != nil {
 		return &types.PublishResponse{
 			Success: false,
 			Error:   fmt.Sprintf("schedule event: %v", err),
 		}, nil
 	}
+	fmt.Printf("[API] Scheduled event successfully\n")
 
 	return &types.PublishResponse{
 		Success:     true,

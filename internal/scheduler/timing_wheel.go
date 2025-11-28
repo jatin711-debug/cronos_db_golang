@@ -20,6 +20,8 @@ type TimingWheel struct {
 	timers          map[string]*Timer // EventID -> Timer
 	expired         chan []*Timer
 	quit            chan struct{}
+	maxLevels       int32 // Maximum number of overflow wheel levels to prevent infinite recursion
+	currentLevel    int32 // Current level in the hierarchy (0 = root)
 }
 
 // Timer represents a scheduled event
@@ -32,15 +34,19 @@ type Timer struct {
 }
 
 // NewTimingWheel creates a new timing wheel
-func NewTimingWheel(tickMs int32, wheelSize int32) *TimingWheel {
+// maxLevels limits the number of overflow wheel levels (0 = no limit, use with caution)
+// currentLevel is the current level in the hierarchy (0 = root)
+func NewTimingWheel(tickMs int32, wheelSize int32, maxLevels int32, currentLevel int32) *TimingWheel {
 	return &TimingWheel{
-		tickMs:    tickMs,
-		wheelSize: wheelSize,
+		tickMs:      tickMs,
+		wheelSize:   wheelSize,
 		currentTick: 0,
-		wheel:     make([]*list.List, wheelSize),
-		timers:    make(map[string]*Timer),
-		expired:   make(chan []*Timer, 100),
-		quit:      make(chan struct{}),
+		wheel:       make([]*list.List, wheelSize),
+		timers:      make(map[string]*Timer),
+		expired:     make(chan []*Timer, 100),
+		quit:        make(chan struct{}),
+		maxLevels:   maxLevels,
+		currentLevel: currentLevel,
 	}
 }
 
@@ -62,7 +68,8 @@ func (tw *TimingWheel) AddTimer(timer *Timer) error {
 	}
 
 	// Calculate which wheel level to place timer
-	delayTicks := (timer.ExpirationTick - tw.currentTick) / int64(tw.tickMs)
+	// timer.ExpirationTick and tw.currentTick are both tick counts (not milliseconds)
+	delayTicks := timer.ExpirationTick - tw.currentTick
 
 	if delayTicks < int64(tw.wheelSize) {
 		// Fits in current wheel
@@ -71,10 +78,15 @@ func (tw *TimingWheel) AddTimer(timer *Timer) error {
 		tw.wheel[slotIndex].PushBack(timer)
 		tw.timers[timer.EventID] = timer
 	} else {
-		// Needs overflow wheel
+		// Needs overflow wheel - prevent infinite recursion
+		if tw.maxLevels > 0 && tw.currentLevel >= tw.maxLevels {
+			return fmt.Errorf("timer %s scheduled too far in the future (exceeds max overflow levels %d)",
+				timer.EventID, tw.maxLevels)
+		}
 		if tw.overflowWheel == nil {
 			// Create overflow wheel with larger ticks
-			tw.overflowWheel = NewTimingWheel(tw.tickMs*tw.wheelSize, tw.wheelSize)
+			nextLevel := tw.currentLevel + 1
+			tw.overflowWheel = NewTimingWheel(tw.tickMs*tw.wheelSize, tw.wheelSize, tw.maxLevels, nextLevel)
 			tw.overflowWheel.initialize()
 		}
 		return tw.overflowWheel.AddTimer(timer)
@@ -211,11 +223,19 @@ type SchedulerStats struct {
 }
 
 // NewTimer creates a new timer
-func NewTimer(eventID string, event *types.Event, tickMs int32) *Timer {
+// startTimeMs is the time when the scheduler started (Unix ms)
+// tickMs is the tick duration for the ROOT wheel
+func NewTimer(eventID string, event *types.Event, tickMs int32, startTimeMs int64) *Timer {
+	// Calculate expiration tick relative to scheduler start
+	// delayMs is how far in the future the event should fire
+	delayMs := event.GetScheduleTs() - startTimeMs
+	// Convert to ticks (relative to root wheel's tick size)
+	expirationTick := delayMs / int64(tickMs)
+
 	return &Timer{
 		EventID:        eventID,
 		Event:          event,
-		ExpirationTick: event.GetScheduleTs() / int64(tickMs), // Convert ms to ticks
+		ExpirationTick: expirationTick,
 		CreatedTS:      time.Now().UnixMilli(),
 	}
 }
