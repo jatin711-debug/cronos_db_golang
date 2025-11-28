@@ -485,21 +485,24 @@ func (s *Segment) scan() error {
 		// Read record length
 		lengthBytes := make([]byte, 4)
 		if _, err := file.Read(lengthBytes); err != nil {
-			if err == io.EOF {
+			if err == io.EOF || err == io.ErrUnexpectedEOF {
+				// End of file - no more records
 				break
 			}
 			return fmt.Errorf("read length: %w", err)
 		}
 
 		length := int64(binary.BigEndian.Uint32(lengthBytes))
-		if length <= 0 {
+		if length <= 0 || length > 10*1024*1024 { // Sanity check: max 10MB record
 			break
 		}
 
 		// Read full record
 		record := make([]byte, length)
 		if _, err := io.ReadFull(file, record); err != nil {
-			if err == io.EOF {
+			if err == io.EOF || err == io.ErrUnexpectedEOF {
+				// Truncated or incomplete file - stop scanning
+				// This is normal after a crash or incomplete write
 				break
 			}
 			return fmt.Errorf("read record: %w", err)
