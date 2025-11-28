@@ -48,11 +48,8 @@ func NewPartitionManager(nodeID string, config *types.Config) *PartitionManager 
 	}
 }
 
-// CreatePartition creates a new partition
-func (pm *PartitionManager) CreatePartition(partitionID int32, topic string) error {
-	pm.mu.Lock()
-	defer pm.mu.Unlock()
-
+// createPartitionLocked creates a new partition (assumes lock is held)
+func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic string) error {
 	// Check if partition already exists
 	if _, exists := pm.partitions[partitionID]; exists {
 		return fmt.Errorf("partition %d already exists", partitionID)
@@ -123,6 +120,14 @@ func (pm *PartitionManager) CreatePartition(partitionID int32, topic string) err
 	return nil
 }
 
+// CreatePartition creates a new partition (public method with lock management)
+func (pm *PartitionManager) CreatePartition(partitionID int32, topic string) error {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	return pm.createPartitionLocked(partitionID, topic)
+}
+
 // GetPartition gets a partition by ID
 func (pm *PartitionManager) GetPartition(partitionID int32) (*types.Partition, error) {
 	partition, err := pm.GetInternalPartition(partitionID)
@@ -156,15 +161,10 @@ func (pm *PartitionManager) GetInternalPartition(partitionID int32) (*Partition,
 
 // GetPartitionForTopic gets partition for a topic using consistent hashing
 func (pm *PartitionManager) GetPartitionForTopic(topic string) (*types.Partition, error) {
-	// TODO: Implement consistent hashing
-	// For now, return first partition
-	pm.mu.RLock()
-	defer pm.mu.RUnlock()
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
 
-	if len(pm.partitions) == 0 {
-		return nil, types.ErrPartitionNotFound
-	}
-
+	// Check if partition already exists for this topic
 	for _, partition := range pm.partitions {
 		if partition.Topic == topic {
 			return &types.Partition{
@@ -179,28 +179,36 @@ func (pm *PartitionManager) GetPartitionForTopic(topic string) (*types.Partition
 		}
 	}
 
-	// Return error if topic not found - FIXED
-	return nil, types.ErrPartitionNotFound
-}
-
-// ListPartitions lists all partitions
-func (pm *PartitionManager) ListPartitions() []*Partition {
-	pm.mu.RLock()
-	defer pm.mu.RUnlock()
-
-	partitions := make([]*Partition, 0, len(pm.partitions))
-	for _, partition := range pm.partitions {
-		partitions = append(partitions, partition)
+	// Auto-create partition for unknown topic
+	partitionID := int32(len(pm.partitions))
+	if err := pm.createPartitionLocked(partitionID, topic); err != nil {
+		return nil, fmt.Errorf("auto-create partition: %w", err)
 	}
 
-	return partitions
+	// Start the newly created partition
+	partition := pm.partitions[partitionID]
+	go func() {
+		if err := pm.startPartitionLocked(partitionID); err != nil {
+			log.Printf("Failed to start auto-created partition %d: %v", partitionID, err)
+		}
+	}()
+
+	return &types.Partition{
+		ID:            partition.ID,
+		Topic:         partition.Topic,
+		NextOffset:    0,
+		HighWatermark: 0,
+		Active:        true,
+		CreatedTS:     partition.CreatedTS.UnixMilli(),
+		UpdatedTS:     partition.UpdatedTS.UnixMilli(),
+	}, nil
 }
 
-// StartPartition starts a partition
-func (pm *PartitionManager) StartPartition(partitionID int32) error {
-	partition, err := pm.GetInternalPartition(partitionID)
-	if err != nil {
-		return err
+// startPartitionLocked starts a partition (assumes lock is held)
+func (pm *PartitionManager) startPartitionLocked(partitionID int32) error {
+	partition, exists := pm.partitions[partitionID]
+	if !exists {
+		return fmt.Errorf("partition %d not found", partitionID)
 	}
 
 	// Start scheduler
@@ -234,6 +242,27 @@ func (pm *PartitionManager) StartPartition(partitionID int32) error {
 	}()
 
 	return nil
+}
+
+// ListPartitions lists all partitions
+func (pm *PartitionManager) ListPartitions() []*Partition {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+
+	partitions := make([]*Partition, 0, len(pm.partitions))
+	for _, partition := range pm.partitions {
+		partitions = append(partitions, partition)
+	}
+
+	return partitions
+}
+
+// StartPartition starts a partition
+func (pm *PartitionManager) StartPartition(partitionID int32) error {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	return pm.startPartitionLocked(partitionID)
 }
 
 // StopPartition stops a partition

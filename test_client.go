@@ -62,7 +62,7 @@ func main() {
 	subscribeReq := &types.SubscribeRequest{
 		ConsumerGroup:  "test-consumer-group",
 		Topic:          topic,
-		PartitionId:    0,
+		PartitionId:    -1, // Auto-assign partition
 		StartOffset:    -1, // Start from latest
 		MaxBufferSize:  100,
 		SubscriptionId: "test-subscription",

@@ -109,6 +109,9 @@ func (d *Dispatcher) Subscribe(sub *Subscription) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
+	log.Printf("[DISPATCHER] Subscribe: Registering subscription %s (partition=%d, maxCredits=%d)",
+		sub.ID, sub.Partition.ID, sub.MaxCredits)
+
 	// Check if subscription already exists
 	if _, exists := d.subscriptions[sub.ID]; exists {
 		return fmt.Errorf("subscription %s already exists", sub.ID)
@@ -121,6 +124,8 @@ func (d *Dispatcher) Subscribe(sub *Subscription) error {
 	sub.Credits = sub.MaxCredits
 
 	d.subscriptions[sub.ID] = sub
+	log.Printf("[DISPATCHER] Subscribe: Successfully registered subscription %s (total subscriptions=%d)",
+		sub.ID, len(d.subscriptions))
 	return nil
 }
 
@@ -153,13 +158,20 @@ func (d *Dispatcher) Dispatch(event *types.Event) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
+	log.Printf("[DISPATCHER] Dispatching event %s (partition=%d, offset=%d)",
+		event.GetMessageId(), event.GetPartitionId(), event.Offset)
+
 	// Find all subscriptions for this event's topic/partition
 	subs := d.findSubscriptions(event)
 
+	log.Printf("[DISPATCHER] Found %d subscriptions for event %s", len(subs), event.GetMessageId())
+
 	// Dispatch to each subscription with credits
 	for _, sub := range subs {
+		log.Printf("[DISPATCHER] Processing subscription %s (credits=%d)", sub.ID, sub.Credits)
 		if sub.Credits <= 0 {
 			// No credits, skip
+			log.Printf("[DISPATCHER] Skipping subscription %s: no credits", sub.ID)
 			continue
 		}
 
@@ -171,12 +183,16 @@ func (d *Dispatcher) Dispatch(event *types.Event) error {
 			AckTimeout:  int32(d.config.DefaultAckTimeout / time.Millisecond),
 		}
 
+		log.Printf("[DISPATCHER] Sending event %s to subscriber %s", event.GetMessageId(), sub.ID)
+
 		// Send to subscriber
 		if err := sub.Stream.Send(delivery); err != nil {
-			log.Printf("Failed to send to subscriber %s: %v", sub.ID, err)
+			log.Printf("[DISPATCHER] Failed to send to subscriber %s: %v", sub.ID, err)
 			// TODO: Clean up dead subscription
 			continue
 		}
+
+		log.Printf("[DISPATCHER] Successfully sent event %s to subscriber %s", event.GetMessageId(), sub.ID)
 
 		// Track active delivery
 		d.trackDelivery(delivery, sub)
@@ -192,11 +208,19 @@ func (d *Dispatcher) Dispatch(event *types.Event) error {
 func (d *Dispatcher) findSubscriptions(event *types.Event) []*Subscription {
 	var subs []*Subscription
 
-	for _, sub := range d.subscriptions {
+	log.Printf("[DISPATCHER] findSubscriptions: eventPartition=%d, totalSubs=%d",
+		event.GetPartitionId(), len(d.subscriptions))
+
+	for subID, sub := range d.subscriptions {
 		// Check if subscription matches event's partition/topic
 		// This is simplified - real implementation would check consumer group assignments
+		log.Printf("[DISPATCHER] Checking subscription %s: subPartition=%d, eventPartition=%d",
+			subID, sub.Partition.ID, event.GetPartitionId())
 		if sub.Partition.ID == event.GetPartitionId() {
+			log.Printf("[DISPATCHER] Subscription %s MATCHES!", subID)
 			subs = append(subs, sub)
+		} else {
+			log.Printf("[DISPATCHER] Subscription %s NO MATCH", subID)
 		}
 	}
 

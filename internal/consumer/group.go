@@ -66,6 +66,36 @@ func (g *GroupManager) CreateGroup(groupID, topic string, partitions []int32) er
 	return nil
 }
 
+// ensureGroup ensures a consumer group exists, creating it if necessary
+func (g *GroupManager) ensureGroup(groupID, topic string, partitionID int32) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	// Check if group exists
+	group, exists := g.groups[groupID]
+	if exists {
+		return nil
+	}
+
+	// Create new group with the single partition
+	group = &types.ConsumerGroup{
+		GroupID:          groupID,
+		Topic:            topic,
+		Partitions:       []int32{partitionID},
+		CommittedOffsets: make(map[int32]int64),
+		MemberOffsets:    make(map[string]int64),
+		Members:          make(map[string]*types.ConsumerMember),
+		CreatedTS:        time.Now().UnixMilli(),
+		UpdatedTS:        time.Now().UnixMilli(),
+	}
+
+	// Initialize offsets to -1 (beginning)
+	group.CommittedOffsets[partitionID] = -1
+
+	g.groups[groupID] = group
+	return nil
+}
+
 // GetGroup returns a consumer group
 func (g *GroupManager) GetGroup(groupID string) (*types.ConsumerGroup, bool) {
 	g.mu.RLock()
@@ -76,13 +106,25 @@ func (g *GroupManager) GetGroup(groupID string) (*types.ConsumerGroup, bool) {
 }
 
 // JoinGroup adds a consumer to a group
-func (g *GroupManager) JoinGroup(groupID, memberID, address string, partitionID int32) error {
+func (g *GroupManager) JoinGroup(groupID, memberID, address, topic string, partitionID int32) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
 	group, exists := g.groups[groupID]
 	if !exists {
-		return fmt.Errorf("group %s not found", groupID)
+		// Auto-create group if it doesn't exist
+		group = &types.ConsumerGroup{
+			GroupID:          groupID,
+			Topic:            topic,
+			Partitions:       []int32{partitionID},
+			CommittedOffsets: make(map[int32]int64),
+			MemberOffsets:    make(map[string]int64),
+			Members:          make(map[string]*types.ConsumerMember),
+			CreatedTS:        time.Now().UnixMilli(),
+			UpdatedTS:        time.Now().UnixMilli(),
+		}
+		group.CommittedOffsets[partitionID] = -1
+		g.groups[groupID] = group
 	}
 
 	// Check if member already exists
@@ -266,7 +308,7 @@ func (g *GroupManager) Subscribe(req *types.SubscribeRequest) (*Subscription, er
 	}
 
 	// Add to group
-	if err := g.JoinGroup(req.GetConsumerGroup(), req.GetSubscriptionId(), "", req.GetPartitionId()); err != nil {
+	if err := g.JoinGroup(req.GetConsumerGroup(), req.GetSubscriptionId(), "", req.GetTopic(), req.GetPartitionId()); err != nil {
 		return nil, fmt.Errorf("join group: %w", err)
 	}
 
@@ -276,11 +318,11 @@ func (g *GroupManager) Subscribe(req *types.SubscribeRequest) (*Subscription, er
 // Ack acknowledges event processing
 func (g *GroupManager) Ack(req *types.AckRequest) error {
 	// Parse consumer group from delivery ID
-	// Delivery ID format: {consumerGroup}-{partitionId}-{subscriptionId}-{offset}
+	// Delivery ID format: {consumerGroup}:{partitionId}:{subscriptionId}:{offset}
 	groupID := ""
 	if req.DeliveryId != "" {
 		// Extract group ID from delivery ID
-		parts := strings.Split(req.DeliveryId, "-")
+		parts := strings.Split(req.DeliveryId, ":")
 		if len(parts) >= 1 {
 			groupID = parts[0]
 		}

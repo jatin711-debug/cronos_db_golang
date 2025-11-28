@@ -3,6 +3,7 @@ package scheduler
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -65,14 +66,21 @@ func (s *Scheduler) Schedule(event *types.Event) error {
 	// For now, we'll use message_id as timer ID
 	eventID := event.GetMessageId()
 
+	log.Printf("[SCHEDULER] Scheduling event %s for partition %d, scheduleTs=%d (now=%d)",
+		eventID, s.partitionID, event.GetScheduleTs(), time.Now().UnixMilli())
+
 	// If event is already expired, add to ready queue
 	if event.GetScheduleTs() <= time.Now().UnixMilli() {
+		log.Printf("[SCHEDULER] Event %s is already expired, adding to ready queue", eventID)
 		s.readyQueue = append(s.readyQueue, event)
 		return nil
 	}
 
 	// Create timer and add to timing wheel
 	timer := NewTimer(eventID, event, s.timingWheel.tickMs, s.startTimeMs)
+	log.Printf("[SCHEDULER] Created timer for event %s, expirationTick=%d",
+		eventID, timer.ExpirationTick)
+
 	return s.timingWheel.AddTimer(timer)
 }
 
@@ -84,6 +92,7 @@ func (s *Scheduler) GetReadyEvents() []*types.Event {
 	// Get expired events from timing wheel
 	select {
 	case expiredTimers := <-s.timingWheel.GetExpiredChannel():
+		log.Printf("[SCHEDULER] GetReadyEvents: received %d expired timers", len(expiredTimers))
 		for _, timer := range expiredTimers {
 			s.readyQueue = append(s.readyQueue, timer.Event)
 		}
@@ -96,6 +105,7 @@ func (s *Scheduler) GetReadyEvents() []*types.Event {
 		return nil
 	}
 
+	log.Printf("[SCHEDULER] GetReadyEvents: returning %d events", len(s.readyQueue))
 	events := s.readyQueue
 	s.readyQueue = make([]*types.Event, 0)
 	return events
@@ -116,6 +126,7 @@ func (s *Scheduler) Start() {
 
 // worker is the scheduler worker loop
 func (s *Scheduler) worker() {
+	log.Printf("[SCHEDULER-WORKER] Started for partition %d", s.partitionID)
 	ticker := time.NewTicker(time.Duration(s.timingWheel.tickMs) * time.Millisecond)
 	defer ticker.Stop()
 
@@ -123,6 +134,7 @@ func (s *Scheduler) worker() {
 		select {
 		case <-ticker.C:
 			s.timingWheel.Tick()
+			log.Printf("[SCHEDULER-WORKER] Tick received, advancing timing wheel, currentTick=%d", s.timingWheel.currentTick)
 			s.checkpoint()
 
 		case <-s.workerDone:

@@ -3,6 +3,7 @@ package scheduler
 import (
 	"container/list"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -71,10 +72,15 @@ func (tw *TimingWheel) AddTimer(timer *Timer) error {
 	// timer.ExpirationTick and tw.currentTick are both tick counts (not milliseconds)
 	delayTicks := timer.ExpirationTick - tw.currentTick
 
+	log.Printf("[TIMING-WHEEL] AddTimer: event=%s, expirationTick=%d, currentTick=%d, delayTicks=%d, level=%d",
+		timer.EventID, timer.ExpirationTick, tw.currentTick, delayTicks, tw.currentLevel)
+
 	if delayTicks < int64(tw.wheelSize) {
 		// Fits in current wheel
 		slotIndex := int32((tw.currentTick + delayTicks) % int64(tw.wheelSize))
 		timer.SlotIndex = slotIndex
+		log.Printf("[TIMING-WHEEL] AddTimer: event %s placed in slot %d (wheelSize=%d)",
+			timer.EventID, slotIndex, tw.wheelSize)
 		tw.wheel[slotIndex].PushBack(timer)
 		tw.timers[timer.EventID] = timer
 	} else {
@@ -83,6 +89,8 @@ func (tw *TimingWheel) AddTimer(timer *Timer) error {
 			return fmt.Errorf("timer %s scheduled too far in the future (exceeds max overflow levels %d)",
 				timer.EventID, tw.maxLevels)
 		}
+		log.Printf("[TIMING-WHEEL] AddTimer: event %s needs overflow wheel (delayTicks=%d > wheelSize=%d)",
+			timer.EventID, delayTicks, tw.wheelSize)
 		if tw.overflowWheel == nil {
 			// Create overflow wheel with larger ticks
 			nextLevel := tw.currentLevel + 1
@@ -144,10 +152,13 @@ func (tw *TimingWheel) Tick() {
 
 	// Send expired timers to channel
 	if len(expiredTimers) > 0 {
+		log.Printf("[TIMING-WHEEL] Tick=%d expired %d events (slot=%d, level=%d)",
+			tw.currentTick, len(expiredTimers), currentSlot, tw.currentLevel)
 		select {
 		case tw.expired <- expiredTimers:
 		default:
 			// Channel full, drop expired timers (should not happen in practice)
+			log.Printf("[TIMING-WHEEL] WARNING: Expired channel full, dropping %d timers", len(expiredTimers))
 		}
 	}
 
@@ -156,6 +167,7 @@ func (tw *TimingWheel) Tick() {
 
 	// Propagate to overflow wheel
 	if tw.overflowWheel != nil && tw.currentTick%int64(tw.wheelSize) == 0 {
+		log.Printf("[TIMING-WHEEL] Propagating tick to overflow wheel (tick=%d)", tw.currentTick)
 		tw.overflowWheel.Tick()
 	}
 }

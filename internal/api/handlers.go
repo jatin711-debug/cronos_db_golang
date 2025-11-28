@@ -214,7 +214,7 @@ func (h *EventServiceHandler) Subscribe(stream grpc.BidiStreamingServer[types.Su
 	}
 
 	// Create subscription ID
-	subID := fmt.Sprintf("%s-%d-%s", req.GetConsumerGroup(), partitionID, req.GetSubscriptionId())
+	subID := fmt.Sprintf("%s:%d:%s", req.GetConsumerGroup(), partitionID, req.GetSubscriptionId())
 
 	// Create channel for deliveries
 	deliveryChan := make(chan *types.Delivery, 100)
@@ -234,6 +234,13 @@ func (h *EventServiceHandler) Subscribe(stream grpc.BidiStreamingServer[types.Su
 	if partitionInternal.Dispatcher != nil {
 		if err := partitionInternal.Dispatcher.Subscribe(subscription); err != nil {
 			return fmt.Errorf("register subscription: %w", err)
+		}
+	}
+
+	// Create consumer group subscription
+	if h.consumerManager != nil {
+		if _, err := h.consumerManager.Subscribe(req); err != nil {
+			return fmt.Errorf("create consumer group: %w", err)
 		}
 	}
 
