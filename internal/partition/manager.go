@@ -5,11 +5,12 @@ import (
 	"sync"
 	"time"
 
-	"cronos_db/pkg/types"
-	"cronos_db/internal/scheduler"
-	"cronos_db/internal/storage"
 	"cronos_db/internal/consumer"
 	"cronos_db/internal/dedup"
+	"cronos_db/internal/delivery"
+	"cronos_db/internal/scheduler"
+	"cronos_db/internal/storage"
+	"cronos_db/pkg/types"
 )
 
 // Partition represents a data partition
@@ -21,9 +22,13 @@ type Partition struct {
 	Scheduler      *scheduler.Scheduler
 	ConsumerGroup  *consumer.GroupManager
 	DedupStore     *dedup.Manager
+	Dispatcher     *delivery.Dispatcher
+	DeliveryWorker *delivery.Worker
 	Leader         bool
 	CreatedTS      time.Time
 	UpdatedTS      time.Time
+	pumpQuit       chan struct{}
+	pumpWg         sync.WaitGroup
 }
 
 // PartitionManager manages all partitions
@@ -74,6 +79,18 @@ func (pm *PartitionManager) CreatePartition(partitionID int32, topic string) err
 		return fmt.Errorf("create scheduler: %w", err)
 	}
 
+	// Create delivery dispatcher
+	deliveryConfig := delivery.DefaultConfig()
+	deliveryConfig.MaxRetries = int32(pm.config.MaxRetries)
+	deliveryConfig.DefaultAckTimeout = pm.config.DefaultAckTimeout
+	deliveryConfig.MaxDeliveryCredits = int32(pm.config.MaxDeliveryCredits)
+	deliveryConfig.RetryBackoff = pm.config.RetryBackoff
+
+	dispatcher := delivery.NewDispatcher(deliveryConfig)
+
+	// Create delivery worker
+	worker := delivery.NewWorker(dispatcher, 100) // Batch size 100
+
 	// Create consumer group manager
 	consumerGroup := consumer.NewGroupManager()
 
@@ -86,16 +103,19 @@ func (pm *PartitionManager) CreatePartition(partitionID int32, topic string) err
 
 	// Create partition
 	partition := &Partition{
-		ID:            partitionID,
-		Topic:         topic,
-		DataDir:       dataDir,
-		Wal:           wal,
-		Scheduler:     scheduler,
-		ConsumerGroup: consumerGroup,
-		DedupStore:    dedupManager,
-		Leader:        false,
-		CreatedTS:     time.Now(),
-		UpdatedTS:     time.Now(),
+		ID:             partitionID,
+		Topic:          topic,
+		DataDir:        dataDir,
+		Wal:            wal,
+		Scheduler:      scheduler,
+		ConsumerGroup:  consumerGroup,
+		DedupStore:     dedupManager,
+		Dispatcher:     dispatcher,
+		DeliveryWorker: worker,
+		Leader:         false,
+		CreatedTS:      time.Now(),
+		UpdatedTS:      time.Now(),
+		pumpQuit:       make(chan struct{}),
 	}
 
 	pm.partitions[partitionID] = partition
@@ -197,6 +217,16 @@ func (pm *PartitionManager) StartPartition(partitionID int32) error {
 	// Start scheduler
 	partition.Scheduler.Start()
 
+	// Start delivery worker
+	partition.DeliveryWorker.Start()
+
+	// Start event pump (Scheduler -> Delivery)
+	partition.pumpWg.Add(1)
+	go func() {
+		defer partition.pumpWg.Done()
+		pm.pumpEvents(partition)
+	}()
+
 	return nil
 }
 
@@ -206,6 +236,13 @@ func (pm *PartitionManager) StopPartition(partitionID int32) error {
 	if err != nil {
 		return err
 	}
+
+	// Stop event pump
+	close(partition.pumpQuit)
+	partition.pumpWg.Wait()
+
+	// Stop delivery worker
+	partition.DeliveryWorker.Stop()
 
 	// Stop scheduler
 	partition.Scheduler.Stop()
@@ -218,13 +255,35 @@ func (pm *PartitionManager) StopPartition(partitionID int32) error {
 	return nil
 }
 
+// pumpEvents pumps events from scheduler to delivery worker
+func (pm *PartitionManager) pumpEvents(partition *Partition) {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-partition.pumpQuit:
+			return
+		case <-ticker.C:
+			// Get ready events from scheduler
+			events := partition.Scheduler.GetReadyEvents()
+			if len(events) > 0 {
+				// Add to delivery worker
+				for _, event := range events {
+					partition.DeliveryWorker.AddReadyEvent(event)
+				}
+			}
+		}
+	}
+}
+
 // GetStats returns partition manager statistics
 func (pm *PartitionManager) GetStats() *PartitionManagerStats {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
 
 	return &PartitionManagerStats{
-		TotalPartitions: int64(len(pm.partitions)),
+		TotalPartitions:  int64(len(pm.partitions)),
 		LeaderPartitions: pm.countLeaderPartitions(),
 		ActivePartitions: int64(len(pm.partitions)), // Simplified
 	}

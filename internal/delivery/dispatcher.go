@@ -162,9 +162,10 @@ func (d *Dispatcher) Dispatch(event *types.Event) error {
 		}
 
 		// Create delivery
+		// Format: PartitionID:SubscriptionID:Offset
 		delivery := &DeliveryMessage{
 			Event:       event,
-			DeliveryID:  fmt.Sprintf("%s-%d", sub.ID, event.Offset),
+			DeliveryID:  fmt.Sprintf("%d:%s:%d", sub.Partition.ID, sub.ID, event.Offset),
 			Attempt:     1,
 			AckTimeout:  int32(d.config.DefaultAckTimeout / time.Millisecond),
 		}

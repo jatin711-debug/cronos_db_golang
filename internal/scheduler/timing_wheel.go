@@ -33,15 +33,24 @@ type Timer struct {
 
 // NewTimingWheel creates a new timing wheel
 func NewTimingWheel(tickMs int32, wheelSize int32) *TimingWheel {
-	return &TimingWheel{
+	if tickMs <= 0 {
+		tickMs = 1
+	}
+	if wheelSize <= 0 {
+		wheelSize = 1
+	}
+
+	tw := &TimingWheel{
 		tickMs:    tickMs,
 		wheelSize: wheelSize,
-		currentTick: 0,
+		currentTick: time.Now().UnixMilli() / int64(tickMs), // Initialize with current time tick
 		wheel:     make([]*list.List, wheelSize),
 		timers:    make(map[string]*Timer),
 		expired:   make(chan []*Timer, 100),
 		quit:      make(chan struct{}),
 	}
+	tw.initialize()
+	return tw
 }
 
 // Initialize wheel slots
@@ -61,12 +70,25 @@ func (tw *TimingWheel) AddTimer(timer *Timer) error {
 		return fmt.Errorf("timer %s already exists", timer.EventID)
 	}
 
-	// Calculate which wheel level to place timer
-	delayTicks := (timer.ExpirationTick - tw.currentTick) / int64(tw.tickMs)
+	// Calculate expiration tick for *this specific wheel level*
+	// timer.Event.ScheduleTs is absolute MS.
+	// tw.tickMs is the tick duration of this wheel level.
+	// This calculation ensures we compare apples to apples.
+	expirationTick := timer.Event.GetScheduleTs() / int64(tw.tickMs)
+
+	// Calculate delay in ticks
+	delayTicks := expirationTick - tw.currentTick
+
+	if delayTicks < 0 {
+		delayTicks = 0
+	}
 
 	if delayTicks < int64(tw.wheelSize) {
 		// Fits in current wheel
 		slotIndex := int32((tw.currentTick + delayTicks) % int64(tw.wheelSize))
+		if slotIndex < 0 {
+			slotIndex = 0
+		}
 		timer.SlotIndex = slotIndex
 		tw.wheel[slotIndex].PushBack(timer)
 		tw.timers[timer.EventID] = timer
@@ -74,7 +96,19 @@ func (tw *TimingWheel) AddTimer(timer *Timer) error {
 		// Needs overflow wheel
 		if tw.overflowWheel == nil {
 			// Create overflow wheel
-			tw.overflowWheel = NewTimingWheel(tw.tickMs*tw.wheelSize, tw.wheelSize)
+			// Overflow wheel creates a new wheel that ticks slower
+			nextTickMs := int64(tw.tickMs) * int64(tw.wheelSize)
+			if nextTickMs > 2147483647 { // MaxInt32
+				nextTickMs = 2147483647
+			}
+
+			tw.overflowWheel = NewTimingWheel(int32(nextTickMs), tw.wheelSize)
+
+			// Initialize overflow wheel current tick based on current tick
+			// It should be roughly currentTick / wheelSize
+			if tw.wheelSize > 0 {
+				tw.overflowWheel.currentTick = tw.currentTick / int64(tw.wheelSize)
+			}
 		}
 		return tw.overflowWheel.AddTimer(timer)
 	}
@@ -210,11 +244,11 @@ type SchedulerStats struct {
 }
 
 // NewTimer creates a new timer
-func NewTimer(eventID string, event *types.Event) *Timer {
+func NewTimer(eventID string, event *types.Event, tickMs int32) *Timer {
 	return &Timer{
 		EventID:        eventID,
 		Event:          event,
-		ExpirationTick: event.GetScheduleTs() / 100, // Convert ms to ticks (assuming 100ms tick)
+		ExpirationTick: event.GetScheduleTs() / int64(tickMs),
 		CreatedTS:      time.Now().UnixMilli(),
 	}
 }

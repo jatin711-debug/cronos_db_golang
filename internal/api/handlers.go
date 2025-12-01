@@ -1,12 +1,12 @@
 package api
 
-	
 import (
 	"context"
 	"fmt"
 	"time"
 
 	"cronos_db/internal/consumer"
+	"cronos_db/internal/delivery"
 	"cronos_db/internal/partition"
 	"cronos_db/pkg/types"
 	"google.golang.org/grpc"
@@ -16,9 +16,9 @@ import (
 type EventServiceHandler struct {
 	types.UnimplementedEventServiceServer
 
-	partitionManager  *partition.PartitionManager
-	dedupManager      DedupManager
-	consumerManager   ConsumerManager
+	partitionManager *partition.PartitionManager
+	dedupManager     DedupManager
+	consumerManager  ConsumerManager
 }
 
 // DedupManager interface
@@ -123,6 +123,14 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 		}, nil
 	}
 
+	// Schedule event
+	if err := partitionInternal.Scheduler.Schedule(event); err != nil {
+		return &types.PublishResponse{
+			Success: false,
+			Error:   fmt.Sprintf("schedule event: %v", err),
+		}, nil
+	}
+
 	return &types.PublishResponse{
 		Success:     true,
 		Error:       "",
@@ -130,6 +138,28 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 		PartitionId: partition.ID,
 		ScheduleTs:  event.GetScheduleTs(),
 	}, nil
+}
+
+// GRPCStreamWrapper wraps gRPC stream to implement delivery.Stream
+type GRPCStreamWrapper struct {
+	stream grpc.BidiStreamingServer[types.SubscribeRequest, types.Delivery]
+}
+
+func (s *GRPCStreamWrapper) Send(delivery *delivery.DeliveryMessage) error {
+	return s.stream.Send(&types.Delivery{
+		DeliveryId: delivery.DeliveryID,
+		Event:      delivery.Event,
+	})
+}
+
+func (s *GRPCStreamWrapper) Recv() (*delivery.Control, error) {
+	// Not implemented for this simplified wrapper as we handle control messages via separate methods or callbacks
+	// Ideally, this should receive messages from the stream
+	return nil, nil
+}
+
+func (s *GRPCStreamWrapper) Context() context.Context {
+	return s.stream.Context()
 }
 
 // Subscribe handles streaming subscription
@@ -152,87 +182,57 @@ func (h *EventServiceHandler) Subscribe(stream grpc.BidiStreamingServer[types.Su
 		startOffset = -1 // Start from beginning if no offset
 	}
 
-	// Start delivery goroutine
+	// Create subscription
+	sub := &delivery.Subscription{
+		ID:            fmt.Sprintf("%s-%s-%d", req.GetConsumerGroup(), req.Topic, time.Now().UnixNano()),
+		ConsumerGroup: req.GetConsumerGroup(),
+		Partition: &types.Partition{
+			ID:    partitionInternal.ID,
+			Topic: partitionInternal.Topic,
+		},
+		NextOffset: startOffset + 1,
+		MaxCredits: 1000, // Default credits
+		Stream:     &GRPCStreamWrapper{stream: stream},
+		CreatedTS:  time.Now().UnixMilli(),
+	}
+
+	// Register with dispatcher
+	if err := partitionInternal.Dispatcher.Subscribe(sub); err != nil {
+		return fmt.Errorf("subscribe: %w", err)
+	}
+	defer partitionInternal.Dispatcher.Unsubscribe(sub.ID)
+
+	// Replay historical events from WAL
+	// Note: We only replay events that are already "due" (schedule_ts <= now).
+	// Future events will be handled by the Scheduler -> Dispatcher flow when they fire.
 	go func() {
-		// Get start and end offsets
 		highWatermark := partitionInternal.Wal.GetHighWatermark()
 		currentOffset := startOffset + 1
 		if currentOffset < 0 {
 			currentOffset = 0
 		}
 
-		// Read events from WAL
-		for currentOffset <= highWatermark {
-			select {
-			case <-stream.Context().Done():
-				return
-			default:
-			}
-
-			// Read event from WAL (for now, read in batches)
+		if currentOffset <= highWatermark {
 			events, err := partitionInternal.Wal.ReadEvents(currentOffset, highWatermark)
 			if err != nil {
-				// Log error and continue
-				continue
+				// Log error (in a real system)
+				return
 			}
 
-			// Send each event
 			for _, event := range events {
-				// Skip if already delivered
-				if event.Offset < currentOffset {
+				// Only replay events that should have already fired
+				if event.GetScheduleTs() > time.Now().UnixMilli() {
 					continue
 				}
 
-				currentOffset = event.Offset + 1
-
-				// Create delivery
+				// Use Dispatcher delivery ID format
 				delivery := &types.Delivery{
-					DeliveryId: fmt.Sprintf("%s-%d-%d", event.GetMessageId(), event.Offset, time.Now().UnixNano()),
+					DeliveryId: fmt.Sprintf("%d:%s:%d", partitionInternal.ID, sub.ID, event.Offset),
 					Event:      event,
 				}
-
-				// Send to client
 				if err := stream.Send(delivery); err != nil {
-					// Client disconnected
 					return
 				}
-			}
-
-			// Update high watermark
-			highWatermark = partitionInternal.Wal.GetHighWatermark()
-		}
-
-		// Keep reading new events
-		for {
-			select {
-			case <-stream.Context().Done():
-				return
-			default:
-			}
-
-			// Check for new events
-			newHighWatermark := partitionInternal.Wal.GetHighWatermark()
-			if newHighWatermark >= currentOffset {
-				events, err := partitionInternal.Wal.ReadEvents(currentOffset, newHighWatermark)
-				if err != nil {
-					time.Sleep(100 * time.Millisecond)
-					continue
-				}
-
-				for _, event := range events {
-					delivery := &types.Delivery{
-						DeliveryId: fmt.Sprintf("%s-%d-%d", event.GetMessageId(), event.Offset, time.Now().UnixNano()),
-						Event:      event,
-					}
-
-					if err := stream.Send(delivery); err != nil {
-						return
-					}
-					currentOffset = event.Offset + 1
-				}
-			} else {
-				// No new events, wait a bit
-				time.Sleep(100 * time.Millisecond)
 			}
 		}
 	}()
@@ -250,6 +250,7 @@ func (h *EventServiceHandler) Ack(stream types.EventService_AckServer) error {
 			return err
 		}
 
+		// Update consumer manager
 		err = h.consumerManager.Ack(req)
 		if err != nil {
 			resp := &types.AckResponse{
@@ -260,6 +261,19 @@ func (h *EventServiceHandler) Ack(stream types.EventService_AckServer) error {
 				return err
 			}
 			continue
+		}
+
+		// Notify Dispatcher about Ack
+		if req.DeliveryId != "" {
+			// Parse PartitionID from DeliveryID (Format: PartitionID:SubscriptionID:Offset)
+			var partitionID int32
+			_, err := fmt.Sscanf(req.DeliveryId, "%d:", &partitionID)
+			if err == nil {
+				partitionInternal, err := h.partitionManager.GetInternalPartition(partitionID)
+				if err == nil {
+					partitionInternal.Dispatcher.HandleAck(req.DeliveryId, true, req.NextOffset)
+				}
+			}
 		}
 
 		resp := &types.AckResponse{
