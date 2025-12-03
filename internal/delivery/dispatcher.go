@@ -12,23 +12,24 @@ import (
 
 // Dispatcher manages event delivery to subscribers
 type Dispatcher struct {
-	mu             sync.RWMutex
-	subscriptions  map[string]*Subscription
+	mu               sync.RWMutex
+	subscriptions    map[string]*Subscription
 	activeDeliveries map[string]*ActiveDelivery
-	config         *Config
-	quit           chan struct{}
+	config           *Config
+	dlq              *DeadLetterQueue
+	quit             chan struct{}
 }
 
 // Subscription represents a subscriber
 type Subscription struct {
-	ID             string
-	ConsumerGroup  string
-	Partition      *types.Partition
-	NextOffset     int64
-	Credits        int32
-	MaxCredits     int32
-	Stream         Stream
-	CreatedTS      int64
+	ID            string
+	ConsumerGroup string
+	Partition     *types.Partition
+	NextOffset    int64
+	Credits       int32
+	MaxCredits    int32
+	Stream        Stream
+	CreatedTS     int64
 }
 
 // Stream represents gRPC stream
@@ -40,10 +41,10 @@ type Stream interface {
 
 // DeliveryMessage represents a delivery to subscriber
 type DeliveryMessage struct {
-	Event       *types.Event
-	DeliveryID  string
-	Attempt     int32
-	AckTimeout  int32
+	Event      *types.Event
+	DeliveryID string
+	Attempt    int32
+	AckTimeout int32
 }
 
 // DeliveryControl represents control message from subscriber
@@ -67,13 +68,13 @@ type CreditMessage struct {
 
 // ActiveDelivery represents an active delivery
 type ActiveDelivery struct {
-	Delivery      *DeliveryMessage
-	Subscription  *Subscription
-	Attempt       int32
-	CreatedTS     int64
-	AckDeadline   time.Time
-	Timer         *time.Timer
-	quit          chan struct{} // Quit channel for timeout goroutine
+	Delivery     *DeliveryMessage
+	Subscription *Subscription
+	Attempt      int32
+	CreatedTS    int64
+	AckDeadline  time.Time
+	Timer        *time.Timer
+	quit         chan struct{} // Quit channel for timeout goroutine
 }
 
 // Config represents dispatcher configuration
@@ -97,11 +98,30 @@ func DefaultConfig() *Config {
 // NewDispatcher creates a new dispatcher
 func NewDispatcher(config *Config) *Dispatcher {
 	return &Dispatcher{
-		subscriptions:      make(map[string]*Subscription),
-		activeDeliveries:  make(map[string]*ActiveDelivery),
-		config:            config,
-		quit:              make(chan struct{}),
+		subscriptions:    make(map[string]*Subscription),
+		activeDeliveries: make(map[string]*ActiveDelivery),
+		config:           config,
+		dlq:              nil, // Set via SetDLQ
+		quit:             make(chan struct{}),
 	}
+}
+
+// NewDispatcherWithDLQ creates a new dispatcher with a dead-letter queue
+func NewDispatcherWithDLQ(config *Config, dlq *DeadLetterQueue) *Dispatcher {
+	return &Dispatcher{
+		subscriptions:    make(map[string]*Subscription),
+		activeDeliveries: make(map[string]*ActiveDelivery),
+		config:           config,
+		dlq:              dlq,
+		quit:             make(chan struct{}),
+	}
+}
+
+// SetDLQ sets the dead-letter queue
+func (d *Dispatcher) SetDLQ(dlq *DeadLetterQueue) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.dlq = dlq
 }
 
 // Subscribe adds a subscription
@@ -177,10 +197,10 @@ func (d *Dispatcher) Dispatch(event *types.Event) error {
 
 		// Create delivery
 		delivery := &DeliveryMessage{
-			Event:       event,
-			DeliveryID:  fmt.Sprintf("%s-%d", sub.ID, event.Offset),
-			Attempt:     1,
-			AckTimeout:  int32(d.config.DefaultAckTimeout / time.Millisecond),
+			Event:      event,
+			DeliveryID: fmt.Sprintf("%s-%d", sub.ID, event.Offset),
+			Attempt:    1,
+			AckTimeout: int32(d.config.DefaultAckTimeout / time.Millisecond),
 		}
 
 		log.Printf("[DISPATCHER] Sending event %s to subscriber %s", event.GetMessageId(), sub.ID)
@@ -241,15 +261,16 @@ func (d *Dispatcher) trackDelivery(delivery *DeliveryMessage, sub *Subscription)
 
 	d.activeDeliveries[delivery.DeliveryID] = active
 
-	// Wait for ack or timeout
-	go func() {
+	// Wait for ack or timeout in separate goroutine
+	go func(deliveryID string, timer *time.Timer, quit chan struct{}) {
 		select {
-		case <-active.Timer.C:
-			d.handleDeliveryTimeout(delivery.DeliveryID)
-		case <-active.quit:
-			return // Clean exit on delivery completion
+		case <-timer.C:
+			d.handleDeliveryTimeout(deliveryID)
+		case <-quit:
+			timer.Stop()
+			return
 		}
-	}()
+	}(delivery.DeliveryID, active.Timer, active.quit)
 }
 
 // HandleAck handles acknowledgment from subscriber
@@ -282,9 +303,13 @@ func (d *Dispatcher) HandleAck(deliveryID string, success bool, nextOffset int64
 	// Remove from active deliveries
 	delete(d.activeDeliveries, deliveryID)
 
-	// Retry if failed and under max retries
-	if !success && active.Attempt < d.config.MaxRetries {
-		return d.retryDelivery(active)
+	// Handle failed delivery
+	if !success {
+		if active.Attempt < d.config.MaxRetries {
+			return d.retryDelivery(active)
+		}
+		// Max retries exceeded - send to DLQ
+		d.sendToDLQ(active, "max retries exceeded")
 	}
 
 	return nil
@@ -300,9 +325,47 @@ func (d *Dispatcher) handleDeliveryTimeout(deliveryID string) {
 		return
 	}
 
+	// Remove from active deliveries
+	delete(d.activeDeliveries, deliveryID)
+
+	// Return credits to subscriber
+	if active.Subscription != nil {
+		active.Subscription.Credits++
+	}
+
 	// Retry if under max retries
 	if active.Attempt < d.config.MaxRetries {
 		d.retryDelivery(active)
+	} else {
+		// Max retries exceeded - send to DLQ
+		d.sendToDLQ(active, "delivery timeout after max retries")
+	}
+}
+
+// sendToDLQ sends a failed delivery to the dead-letter queue
+func (d *Dispatcher) sendToDLQ(active *ActiveDelivery, reason string) {
+	if d.dlq == nil {
+		log.Printf("[DISPATCHER] DLQ not configured, dropping failed delivery %s: %s",
+			active.Delivery.DeliveryID, reason)
+		return
+	}
+
+	subscriberID := ""
+	if active.Subscription != nil {
+		subscriberID = active.Subscription.ID
+	}
+
+	if err := d.dlq.Add(
+		active.Delivery.Event,
+		active.Delivery.DeliveryID,
+		active.Attempt,
+		reason,
+		subscriberID,
+	); err != nil {
+		log.Printf("[DISPATCHER] Failed to add to DLQ: %v", err)
+	} else {
+		log.Printf("[DISPATCHER] Added to DLQ: delivery=%s, reason=%s",
+			active.Delivery.DeliveryID, reason)
 	}
 }
 
@@ -310,10 +373,10 @@ func (d *Dispatcher) handleDeliveryTimeout(deliveryID string) {
 func (d *Dispatcher) retryDelivery(active *ActiveDelivery) error {
 	// Create retry delivery
 	retryDelivery := &DeliveryMessage{
-		Event:       active.Delivery.Event,
-		DeliveryID:  active.Delivery.DeliveryID,
-		Attempt:     active.Attempt + 1,
-		AckTimeout:  active.Delivery.AckTimeout,
+		Event:      active.Delivery.Event,
+		DeliveryID: active.Delivery.DeliveryID,
+		Attempt:    active.Attempt + 1,
+		AckTimeout: active.Delivery.AckTimeout,
 	}
 
 	// Calculate backoff
@@ -341,9 +404,9 @@ func (d *Dispatcher) GetStats() *DispatcherStats {
 
 	return &DispatcherStats{
 		ActiveSubscriptions: int64(len(d.subscriptions)),
-		ActiveDeliveries:   int64(len(d.activeDeliveries)),
-		CreditsInUse:       d.calculateCreditsInUse(),
-		CreditsAvailable:   d.calculateCreditsAvailable(),
+		ActiveDeliveries:    int64(len(d.activeDeliveries)),
+		CreditsInUse:        d.calculateCreditsInUse(),
+		CreditsAvailable:    d.calculateCreditsAvailable(),
 	}
 }
 
@@ -368,7 +431,35 @@ func (d *Dispatcher) calculateCreditsAvailable() int64 {
 // DispatcherStats represents dispatcher statistics
 type DispatcherStats struct {
 	ActiveSubscriptions int64
-	ActiveDeliveries   int64
-	CreditsInUse       int64
-	CreditsAvailable   int64
+	ActiveDeliveries    int64
+	CreditsInUse        int64
+	CreditsAvailable    int64
+}
+
+// Close closes the dispatcher and cleans up all resources
+func (d *Dispatcher) Close() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	// Signal quit
+	close(d.quit)
+
+	// Clean up all active deliveries
+	for deliveryID, active := range d.activeDeliveries {
+		if active.Timer != nil {
+			active.Timer.Stop()
+		}
+		if active.quit != nil {
+			select {
+			case <-active.quit:
+				// Already closed
+			default:
+				close(active.quit)
+			}
+		}
+		delete(d.activeDeliveries, deliveryID)
+	}
+
+	// Clear subscriptions
+	d.subscriptions = make(map[string]*Subscription)
 }

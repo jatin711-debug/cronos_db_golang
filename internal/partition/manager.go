@@ -6,29 +6,29 @@ import (
 	"sync"
 	"time"
 
-	"cronos_db/pkg/types"
-	"cronos_db/internal/scheduler"
-	"cronos_db/internal/storage"
 	"cronos_db/internal/consumer"
 	"cronos_db/internal/dedup"
 	"cronos_db/internal/delivery"
+	"cronos_db/internal/scheduler"
+	"cronos_db/internal/storage"
+	"cronos_db/pkg/types"
 )
 
 // Partition represents a data partition
 type Partition struct {
-	ID             int32
-	Topic          string
-	DataDir        string
-	Wal            *storage.WAL
-	Scheduler      *scheduler.Scheduler
-	ConsumerGroup  *consumer.GroupManager
-	DedupStore     *dedup.Manager
-	Dispatcher     *delivery.Dispatcher
-	Worker         *delivery.Worker
-	Leader         bool
-	CreatedTS      time.Time
-	UpdatedTS      time.Time
-	deliveryQuit   chan struct{} // Quit channel for delivery goroutine
+	ID            int32
+	Topic         string
+	DataDir       string
+	Wal           *storage.WAL
+	Scheduler     *scheduler.Scheduler
+	ConsumerGroup *consumer.GroupManager
+	DedupStore    *dedup.Manager
+	Dispatcher    *delivery.Dispatcher
+	Worker        *delivery.Worker
+	Leader        bool
+	CreatedTS     time.Time
+	UpdatedTS     time.Time
+	deliveryQuit  chan struct{} // Quit channel for delivery goroutine
 }
 
 // PartitionManager manages all partitions
@@ -82,15 +82,21 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 		return fmt.Errorf("create scheduler: %w", err)
 	}
 
-	// Create consumer group manager
-	consumerGroup := consumer.NewGroupManager()
-
 	// Create dedup store
 	dedupStore, err := dedup.NewPebbleStore(dataDir, partitionID, int32(pm.config.DedupTTLHours))
 	if err != nil {
 		return fmt.Errorf("create dedup store: %w", err)
 	}
 	dedupManager := dedup.NewManager(dedupStore)
+
+	// Create offset store for persistent consumer offsets
+	offsetStore, err := consumer.NewOffsetStore(dataDir, partitionID)
+	if err != nil {
+		return fmt.Errorf("create offset store: %w", err)
+	}
+
+	// Create consumer group manager with persistent offset store
+	consumerGroup := consumer.NewGroupManagerWithStore(offsetStore)
 
 	// Create dispatcher
 	dispatcherConfig := delivery.DefaultConfig()
@@ -217,9 +223,15 @@ func (pm *PartitionManager) startPartitionLocked(partitionID int32) error {
 	// Start worker
 	partition.Worker.Start()
 
+	// Get poll interval from config (default 50ms)
+	pollInterval := time.Duration(pm.config.DeliveryPollMS) * time.Millisecond
+	if pollInterval == 0 {
+		pollInterval = 50 * time.Millisecond
+	}
+
 	// Start delivery loop (poll scheduler for ready events and dispatch them)
 	go func() {
-		ticker := time.NewTicker(50 * time.Millisecond) // Poll every 50ms
+		ticker := time.NewTicker(pollInterval)
 		defer ticker.Stop()
 
 		for {
@@ -289,7 +301,7 @@ func (pm *PartitionManager) GetStats() *PartitionManagerStats {
 	defer pm.mu.RUnlock()
 
 	return &PartitionManagerStats{
-		TotalPartitions: int64(len(pm.partitions)),
+		TotalPartitions:  int64(len(pm.partitions)),
 		LeaderPartitions: pm.countLeaderPartitions(),
 		ActivePartitions: int64(len(pm.partitions)), // Simplified
 	}

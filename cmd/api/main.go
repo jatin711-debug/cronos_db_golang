@@ -36,7 +36,7 @@ func main() {
 	}
 
 	// Get partition
-	partition, err := pm.GetInternalPartition(0)
+	part, err := pm.GetInternalPartition(0)
 	if err != nil {
 		log.Fatalf("Failed to get partition: %v", err)
 	}
@@ -50,12 +50,12 @@ func main() {
 	// Create event service handler
 	eventHandler := api.NewEventServiceHandler(
 		pm,
-		partition.DedupStore,
-		partition.ConsumerGroup,
+		part.DedupStore,
+		part.ConsumerGroup,
 	)
 
 	// Create consumer group service handler
-	consumerHandler := api.NewConsumerGroupServiceHandler(partition.ConsumerGroup)
+	consumerHandler := api.NewConsumerGroupServiceHandler(part.ConsumerGroup)
 
 	// Register services
 	grpcServer.RegisterServices(eventHandler, consumerHandler)
@@ -74,12 +74,12 @@ func main() {
 	})
 
 	healthServer := &http.Server{
-		Addr:    ":8080",
+		Addr:    cfg.HTTPAddress,
 		Handler: mux,
 	}
 
 	go func() {
-		log.Printf("Starting health check server on :8080")
+		log.Printf("Starting health check server on %s", cfg.HTTPAddress)
 		if err := healthServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Failed to start health server: %v", err)
 		}
@@ -92,9 +92,14 @@ func main() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	// Print stats periodically
+	// Print stats periodically using config interval
+	statsPrintInterval := cfg.StatsPrintInterval
+	if statsPrintInterval == 0 {
+		statsPrintInterval = 30 * time.Second
+	}
+
 	go func() {
-		ticker := time.NewTicker(30 * time.Second)
+		ticker := time.NewTicker(statsPrintInterval)
 		defer ticker.Stop()
 
 		for {
@@ -116,9 +121,9 @@ func main() {
 	grpcServer.Stop()
 
 	// Shutdown health server
-	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	healthServer.Shutdown(ctx)
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+	healthServer.Shutdown(shutdownCtx)
 
 	// Stop partition
 	if err := pm.StopPartition(0); err != nil {

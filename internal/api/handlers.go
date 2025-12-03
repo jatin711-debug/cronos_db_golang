@@ -1,6 +1,5 @@
 package api
 
-	
 import (
 	"context"
 	"fmt"
@@ -9,7 +8,9 @@ import (
 	"cronos_db/internal/consumer"
 	"cronos_db/internal/delivery"
 	"cronos_db/internal/partition"
+	"cronos_db/internal/replay"
 	"cronos_db/pkg/types"
+
 	"google.golang.org/grpc"
 )
 
@@ -17,9 +18,9 @@ import (
 type EventServiceHandler struct {
 	types.UnimplementedEventServiceServer
 
-	partitionManager  *partition.PartitionManager
-	dedupManager      DedupManager
-	consumerManager   ConsumerManager
+	partitionManager *partition.PartitionManager
+	dedupManager     DedupManager
+	consumerManager  ConsumerManager
 }
 
 // DedupManager interface
@@ -43,9 +44,9 @@ type GRPCStream struct {
 func (s *GRPCStream) Send(delivery *delivery.DeliveryMessage) error {
 	// Convert delivery.DeliveryMessage to types.Delivery
 	return s.stream.Send(&types.Delivery{
-		DeliveryId: delivery.DeliveryID,
-		Event:      delivery.Event,
-		Attempt:    delivery.Attempt,
+		DeliveryId:   delivery.DeliveryID,
+		Event:        delivery.Event,
+		Attempt:      delivery.Attempt,
 		AckTimeoutMs: delivery.AckTimeout,
 	})
 }
@@ -216,18 +217,15 @@ func (h *EventServiceHandler) Subscribe(stream grpc.BidiStreamingServer[types.Su
 	// Create subscription ID
 	subID := fmt.Sprintf("%s:%d:%s", req.GetConsumerGroup(), partitionID, req.GetSubscriptionId())
 
-	// Create channel for deliveries
-	deliveryChan := make(chan *types.Delivery, 100)
-
 	// Create subscription object for dispatcher
 	subscription := &delivery.Subscription{
-		ID:             subID,
-		ConsumerGroup:  req.GetConsumerGroup(),
-		Partition:      &types.Partition{ID: int32(partitionID)},
-		NextOffset:     startOffset + 1,
-		MaxCredits:     100,
-		CreatedTS:      time.Now().UnixMilli(),
-		Stream:         &GRPCStream{stream: stream},
+		ID:            subID,
+		ConsumerGroup: req.GetConsumerGroup(),
+		Partition:     &types.Partition{ID: int32(partitionID)},
+		NextOffset:    startOffset + 1,
+		MaxCredits:    100,
+		CreatedTS:     time.Now().UnixMilli(),
+		Stream:        &GRPCStream{stream: stream},
 	}
 
 	// Register subscription with partition's dispatcher
@@ -235,6 +233,13 @@ func (h *EventServiceHandler) Subscribe(stream grpc.BidiStreamingServer[types.Su
 		if err := partitionInternal.Dispatcher.Subscribe(subscription); err != nil {
 			return fmt.Errorf("register subscription: %w", err)
 		}
+		// Ensure cleanup on disconnect
+		defer func() {
+			if err := partitionInternal.Dispatcher.Unsubscribe(subID); err != nil {
+				// Log but don't fail - subscription may already be cleaned up
+				fmt.Printf("[SUBSCRIBE] Failed to unsubscribe %s: %v\n", subID, err)
+			}
+		}()
 	}
 
 	// Create consumer group subscription
@@ -244,22 +249,7 @@ func (h *EventServiceHandler) Subscribe(stream grpc.BidiStreamingServer[types.Su
 		}
 	}
 
-	// Start delivery goroutine to receive events from worker
-	go func() {
-		for {
-			select {
-			case <-stream.Context().Done():
-				return
-			case delivery := <-deliveryChan:
-				// Send to subscriber
-				if err := stream.Send(delivery); err != nil {
-					return
-				}
-			}
-		}
-	}()
-
-	// Wait for context cancellation
+	// Wait for context cancellation (client disconnect)
 	<-stream.Context().Done()
 	return nil
 }
@@ -297,18 +287,56 @@ func (h *EventServiceHandler) Ack(stream types.EventService_AckServer) error {
 // Replay handles replay requests
 func (h *EventServiceHandler) Replay(req *types.ReplayRequest, stream types.EventService_ReplayServer) error {
 	// Get partition
-	if req.GetPartitionId() >= 0 {
-		_, err := h.partitionManager.GetPartition(req.GetPartitionId())
-		if err != nil {
-			return fmt.Errorf("get partition: %w", err)
-		}
-	} else {
-		// TODO: Replay all partitions
-		return fmt.Errorf("replay all partitions not implemented")
+	partitionID := req.GetPartitionId()
+	if partitionID < 0 {
+		return fmt.Errorf("partition_id is required for replay")
 	}
 
-	// TODO: Scan events in range using partition's WAL
+	partitionInternal, err := h.partitionManager.GetInternalPartition(partitionID)
+	if err != nil {
+		return fmt.Errorf("get partition %d: %w", partitionID, err)
+	}
 
-	// For now, return empty stream
+	// Create replay engine for this partition's WAL
+	replayEngine := replay.NewReplayEngine(partitionInternal.Wal)
+
+	// Create replay request
+	replayReq := &replay.ReplayRequest{
+		Topic:          req.GetTopic(),
+		PartitionID:    partitionID,
+		StartTS:        req.GetStartTs(),
+		EndTS:          req.GetEndTs(),
+		StartOffset:    req.GetStartOffset(),
+		Count:          req.GetCount(),
+		ConsumerGroup:  req.GetConsumerGroup(),
+		SubscriptionID: req.GetSubscriptionId(),
+		Speed:          req.GetSpeed(),
+	}
+
+	// Create channel for replay events
+	eventCh := make(chan *replay.ReplayEvent, 100)
+
+	// Start replay in goroutine
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- replayEngine.ReplayStream(stream.Context(), replayReq, eventCh)
+	}()
+
+	// Stream events to client
+	for event := range eventCh {
+		replayEvent := &types.ReplayEvent{
+			Event:        event.Event,
+			ReplayOffset: event.ReplayOffset,
+		}
+		if err := stream.Send(replayEvent); err != nil {
+			return fmt.Errorf("send replay event: %w", err)
+		}
+	}
+
+	// Check for replay errors
+	if err := <-errCh; err != nil {
+		return fmt.Errorf("replay: %w", err)
+	}
+
 	return nil
 }

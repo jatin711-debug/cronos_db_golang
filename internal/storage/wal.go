@@ -12,14 +12,14 @@ import (
 
 // WAL represents Write-Ahead Log with segmented storage
 type WAL struct {
-	mu              sync.RWMutex
-	dataDir         string
-	partitionID     int32
-	segments        []*Segment
-	activeSegment   *Segment
-	nextOffset      int64
-	highWatermark   int64
-	config          *WALConfig
+	mu            sync.RWMutex
+	dataDir       string
+	partitionID   int32
+	segments      []*Segment
+	activeSegment *Segment
+	nextOffset    int64
+	highWatermark int64
+	config        *WALConfig
 }
 
 // WALConfig represents WAL configuration
@@ -37,12 +37,12 @@ func NewWAL(dataDir string, partitionID int32, config *WALConfig) (*WAL, error) 
 	}
 
 	wal := &WAL{
-		dataDir:     dataDir,
-		partitionID: partitionID,
-		segments:    make([]*Segment, 0),
-		nextOffset:  0,
+		dataDir:       dataDir,
+		partitionID:   partitionID,
+		segments:      make([]*Segment, 0),
+		nextOffset:    0,
 		highWatermark: 0,
-		config:      config,
+		config:        config,
 	}
 
 	// Load existing segments
@@ -220,21 +220,21 @@ func (w *WAL) ReadEventsByTime(startTS, endTS int64) ([]*types.Event, error) {
 
 // Flush flushes all pending writes
 func (w *WAL) Flush() error {
-	w.mu.Lock()  // FIXED: Use write lock for safety
-	config := w.config
-	if w.activeSegment != nil {
-		err := w.activeSegment.Flush()
-		w.mu.Unlock()  // Unlock before potential second sync
-		if err != nil {
-			return err
-		}
-		// Conditionally sync based on FsyncMode
-		if config.FsyncMode == "every_event" {
-			return w.activeSegment.Sync()
-		}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.activeSegment == nil {
 		return nil
 	}
-	w.mu.Unlock()
+
+	if err := w.activeSegment.Flush(); err != nil {
+		return err
+	}
+
+	// Conditionally sync based on FsyncMode
+	if w.config.FsyncMode == "every_event" {
+		return w.activeSegment.Sync()
+	}
 	return nil
 }
 

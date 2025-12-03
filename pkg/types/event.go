@@ -7,6 +7,7 @@ type Config struct {
 	NodeID               string
 	DataDir              string
 	GPRCAddress          string
+	HTTPAddress          string
 	PartitionCount       int
 	ReplicationFactor    int
 	SegmentSizeBytes     int64
@@ -19,11 +20,14 @@ type Config struct {
 	MaxRetries           int
 	RetryBackoff         time.Duration
 	MaxDeliveryCredits   int
+	DeliveryPollMS       int
 	DedupTTLHours        int
 	ReplicationBatchSize int
 	ReplicationTimeout   time.Duration
 	RaftDir              string
 	RaftJoinAddr         string
+	StatsPrintInterval   time.Duration
+	CheckpointInterval   time.Duration
 }
 
 // Partition represents a data partition

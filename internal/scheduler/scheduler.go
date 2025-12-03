@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"cronos_db/pkg/types"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -8,21 +9,20 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
-	"cronos_db/pkg/types"
 )
 
 // Scheduler manages timestamp-triggered event execution
 type Scheduler struct {
-	mu              sync.RWMutex
-	timingWheel     *TimingWheel
-	readyQueue      []*types.Event
-	partitionID     int32
-	dataDir         string
-	active          bool
-	workerDone      chan struct{}
-	stats           *SchedulerStats
+	mu               sync.RWMutex
+	timingWheel      *TimingWheel
+	readyQueue       []*types.Event
+	partitionID      int32
+	dataDir          string
+	active           bool
+	workerDone       chan struct{}
+	stats            *SchedulerStats
 	lastCheckpointTS int64
-	startTimeMs     int64 // Scheduler start time (Unix ms)
+	startTimeMs      int64 // Scheduler start time (Unix ms)
 }
 
 // NewScheduler creates a new scheduler
@@ -35,15 +35,15 @@ func NewScheduler(dataDir string, partitionID int32, tickMs int32, wheelSize int
 	startTime := time.Now().UnixMilli()
 
 	scheduler := &Scheduler{
-		timingWheel:   NewTimingWheel(tickMs, wheelSize, 10, 0), // Limit to 10 overflow levels
-		readyQueue:    make([]*types.Event, 0),
-		partitionID:   partitionID,
-		dataDir:       dataDir,
-		active:        false,
-		workerDone:    make(chan struct{}),
-		stats:         &SchedulerStats{},
+		timingWheel:      NewTimingWheel(tickMs, wheelSize, 10, 0, startTime), // Pass startTime to root wheel
+		readyQueue:       make([]*types.Event, 0),
+		partitionID:      partitionID,
+		dataDir:          dataDir,
+		active:           false,
+		workerDone:       make(chan struct{}),
+		stats:            &SchedulerStats{},
 		lastCheckpointTS: time.Now().UnixMilli(),
-		startTimeMs:   startTime,
+		startTimeMs:      startTime,
 	}
 
 	// Initialize timing wheel
@@ -62,9 +62,9 @@ func (s *Scheduler) Schedule(event *types.Event) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Check if event is already scheduled
-	// For now, we'll use message_id as timer ID
-	eventID := event.GetMessageId()
+	// Use message_id + offset as timer ID to allow duplicates
+	// This ensures each WAL entry gets its own timer
+	eventID := fmt.Sprintf("%s-%d", event.GetMessageId(), event.GetOffset())
 
 	log.Printf("[SCHEDULER] Scheduling event %s for partition %d, scheduleTs=%d (now=%d)",
 		eventID, s.partitionID, event.GetScheduleTs(), time.Now().UnixMilli())
@@ -77,9 +77,9 @@ func (s *Scheduler) Schedule(event *types.Event) error {
 	}
 
 	// Create timer and add to timing wheel
-	timer := NewTimer(eventID, event, s.timingWheel.tickMs, s.startTimeMs)
-	log.Printf("[SCHEDULER] Created timer for event %s, expirationTick=%d",
-		eventID, timer.ExpirationTick)
+	timer := NewTimer(eventID, event)
+	log.Printf("[SCHEDULER] Created timer for event %s, expirationMs=%d",
+		eventID, timer.ExpirationMs)
 
 	return s.timingWheel.AddTimer(timer)
 }
@@ -134,7 +134,6 @@ func (s *Scheduler) worker() {
 		select {
 		case <-ticker.C:
 			s.timingWheel.Tick()
-			log.Printf("[SCHEDULER-WORKER] Tick received, advancing timing wheel, currentTick=%d", s.timingWheel.currentTick)
 			s.checkpoint()
 
 		case <-s.workerDone:
@@ -156,12 +155,12 @@ func (s *Scheduler) checkpoint() {
 
 	// Build checkpoint
 	checkpoint := &SchedulerCheckpoint{
-		PartitionID:   s.partitionID,
-		CurrentTick:   s.timingWheel.currentTick,
-		ActiveTimers:  int64(len(s.timingWheel.timers)),
-		ReadyEvents:   int64(len(s.readyQueue)),
-		NextTickMs:    int64(s.timingWheel.tickMs),
-		WheelSize:     int64(s.timingWheel.wheelSize),
+		PartitionID:      s.partitionID,
+		CurrentTick:      s.timingWheel.currentTick,
+		ActiveTimers:     int64(len(s.timingWheel.timers)),
+		ReadyEvents:      int64(len(s.readyQueue)),
+		NextTickMs:       int64(s.timingWheel.tickMs),
+		WheelSize:        int64(s.timingWheel.wheelSize),
 		LastCheckpointTS: now,
 	}
 
@@ -253,11 +252,11 @@ func (s *Scheduler) GetNextEventTime() time.Time {
 
 // SchedulerCheckpoint represents scheduler checkpoint state
 type SchedulerCheckpoint struct {
-	PartitionID     int32  `json:"partition_id"`
-	CurrentTick     int64  `json:"current_tick"`
-	ActiveTimers    int64  `json:"active_timers"`
-	ReadyEvents     int64  `json:"ready_events"`
-	NextTickMs      int64  `json:"next_tick_ms"`
-	WheelSize       int64  `json:"wheel_size"`
+	PartitionID      int32 `json:"partition_id"`
+	CurrentTick      int64 `json:"current_tick"`
+	ActiveTimers     int64 `json:"active_timers"`
+	ReadyEvents      int64 `json:"ready_events"`
+	NextTickMs       int64 `json:"next_tick_ms"`
+	WheelSize        int64 `json:"wheel_size"`
 	LastCheckpointTS int64 `json:"last_checkpoint_ts"`
 }

@@ -11,27 +11,37 @@ import (
 
 // Subscription represents a subscriber
 type Subscription struct {
-	ID             string
-	ConsumerGroup  string
-	Partition      *types.Partition
-	StartOffset    int64
-	Delivery       chan<- *types.Delivery
-	Done           <-chan struct{}
-	quit           chan struct{}
+	ID            string
+	ConsumerGroup string
+	Partition     *types.Partition
+	StartOffset   int64
+	Delivery      chan<- *types.Delivery
+	Done          <-chan struct{}
+	quit          chan struct{}
 }
 
 // GroupManager manages consumer groups
 type GroupManager struct {
-	mu         sync.RWMutex
-	groups     map[string]*types.ConsumerGroup
-	partitions map[int32]*types.Partition // partition_id -> partition
+	mu          sync.RWMutex
+	groups      map[string]*types.ConsumerGroup
+	partitions  map[int32]*types.Partition // partition_id -> partition
+	offsetStore *OffsetStore               // persistent offset storage
 }
 
-// NewGroupManager creates a new group manager
+// NewGroupManager creates a new group manager (in-memory only, use NewGroupManagerWithStore for persistence)
 func NewGroupManager() *GroupManager {
 	return &GroupManager{
 		groups:     make(map[string]*types.ConsumerGroup),
 		partitions: make(map[int32]*types.Partition),
+	}
+}
+
+// NewGroupManagerWithStore creates a new group manager with persistent offset storage
+func NewGroupManagerWithStore(offsetStore *OffsetStore) *GroupManager {
+	return &GroupManager{
+		groups:      make(map[string]*types.ConsumerGroup),
+		partitions:  make(map[int32]*types.Partition),
+		offsetStore: offsetStore,
 	}
 }
 
@@ -146,12 +156,12 @@ func (g *GroupManager) JoinGroup(groupID, memberID, address, topic string, parti
 
 	// Create member
 	member := &types.ConsumerMember{
-		MemberID:         memberID,
-		Address:          address,
+		MemberID:          memberID,
+		Address:           address,
 		AssignedPartition: partitionID,
-		Active:           true,
-		LastSeenTS:       time.Now().UnixMilli(),
-		ConnectedTS:      time.Now().UnixMilli(),
+		Active:            true,
+		LastSeenTS:        time.Now().UnixMilli(),
+		ConnectedTS:       time.Now().UnixMilli(),
 	}
 
 	group.Members[memberID] = member
@@ -240,13 +250,20 @@ func (g *GroupManager) CommitOffset(groupID string, partitionID int64, offset in
 	}
 
 	// Validate partition
-	if partitionID < 0 || partitionID > int64(len(group.Partitions)) {
+	if partitionID < 0 {
 		return fmt.Errorf("invalid partition %d", partitionID)
 	}
 
-	// Update committed offset
+	// Update in-memory committed offset
 	group.CommittedOffsets[int32(partitionID)] = offset
 	group.UpdatedTS = time.Now().UnixMilli()
+
+	// Persist to offset store if available
+	if g.offsetStore != nil {
+		if err := g.offsetStore.CommitOffset(groupID, int32(partitionID), offset); err != nil {
+			return fmt.Errorf("persist offset: %w", err)
+		}
+	}
 
 	return nil
 }
@@ -256,17 +273,25 @@ func (g *GroupManager) GetCommittedOffset(groupID string, partitionID int32) (in
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 
+	// Try in-memory first
 	group, exists := g.groups[groupID]
-	if !exists {
-		return 0, fmt.Errorf("group %s not found", groupID)
+	if exists {
+		offset, ok := group.CommittedOffsets[partitionID]
+		if ok {
+			return offset, nil
+		}
 	}
 
-	offset, exists := group.CommittedOffsets[partitionID]
-	if !exists {
-		return -1, nil // Beginning of partition
+	// Fall back to persistent store
+	if g.offsetStore != nil {
+		offset, err := g.offsetStore.GetOffset(groupID, partitionID)
+		if err != nil {
+			return -1, err
+		}
+		return offset, nil
 	}
 
-	return offset, nil
+	return -1, nil // Beginning of partition
 }
 
 // ListGroups lists all consumer groups
@@ -332,7 +357,6 @@ func (g *GroupManager) Ack(req *types.AckRequest) error {
 	return g.CommitOffset(groupID, int64(req.NextOffset), req.NextOffset)
 }
 
-
 // GetStats returns group manager statistics
 func (g *GroupManager) GetStats() *GroupManagerStats {
 	g.mu.RLock()
@@ -356,10 +380,10 @@ func (g *GroupManager) GetStats() *GroupManagerStats {
 	}
 
 	return &GroupManagerStats{
-		TotalGroups:    int64(totalGroups),
-		ActiveGroups:   int64(activeGroups),
-		TotalMembers:   int64(totalMembers),
-		ActiveMembers:  int64(totalMembers), // Simplified
+		TotalGroups:   int64(totalGroups),
+		ActiveGroups:  int64(activeGroups),
+		TotalMembers:  int64(totalMembers),
+		ActiveMembers: int64(totalMembers), // Simplified
 	}
 }
 

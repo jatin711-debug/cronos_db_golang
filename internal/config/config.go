@@ -16,6 +16,7 @@ func LoadConfig() (*types.Config, error) {
 	// Set defaults
 	config.DataDir = DefaultDataDir
 	config.GPRCAddress = DefaultGRPCAddress
+	config.HTTPAddress = DefaultHTTPAddress
 	config.PartitionCount = DefaultPartitionCount
 	config.ReplicationFactor = DefaultReplicationFactor
 	config.SegmentSizeBytes = DefaultSegmentSizeBytes
@@ -28,15 +29,19 @@ func LoadConfig() (*types.Config, error) {
 	config.MaxRetries = DefaultMaxRetries
 	config.RetryBackoff = 1 * time.Second
 	config.MaxDeliveryCredits = DefaultMaxDeliveryCredits
+	config.DeliveryPollMS = DefaultDeliveryPollMS
 	config.DedupTTLHours = DefaultDedupTTLHours
 	config.ReplicationBatchSize = DefaultReplicationBatchSize
 	config.ReplicationTimeout = 10 * time.Second
 	config.RaftDir = DefaultRaftDir
+	config.StatsPrintInterval = DefaultStatsPrintInterval
+	config.CheckpointInterval = DefaultCheckpointInterval
 
 	// Node configuration
 	flag.StringVar(&config.NodeID, "node-id", DefaultNodeID, "Unique node ID")
 	flag.StringVar(&config.DataDir, "data-dir", DefaultDataDir, "Data directory")
 	flag.StringVar(&config.GPRCAddress, "grpc-addr", DefaultGRPCAddress, "gRPC address")
+	flag.StringVar(&config.HTTPAddress, "http-addr", DefaultHTTPAddress, "HTTP address for health checks")
 	flag.IntVar(&config.PartitionCount, "partition-count", DefaultPartitionCount, "Number of partitions")
 	flag.IntVar(&config.ReplicationFactor, "replication-factor", DefaultReplicationFactor, "Replication factor")
 
