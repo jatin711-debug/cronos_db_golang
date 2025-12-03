@@ -76,6 +76,19 @@ func (p *PebbleStore) CheckAndStore(messageID string, offset int64) (bool, error
 	return false, nil // Not a duplicate
 }
 
+// StoreOnly stores a message ID without checking if it exists
+// Used by BloomPebbleStore when bloom filter confirms key is new
+func (p *PebbleStore) StoreOnly(messageID string, offset int64) error {
+	key := []byte(messageID)
+	expirationTS := time.Now().UnixMilli() + int64(p.ttlHours)*60*60*1000
+	value := p.buildValue(offset, expirationTS)
+
+	if err := p.db.Set(key, value, pebble.NoSync); err != nil {
+		return fmt.Errorf("set key: %w", err)
+	}
+	return nil
+}
+
 // GetOffset returns stored offset for message ID
 func (p *PebbleStore) GetOffset(messageID string) (int64, bool, error) {
 	key := []byte(messageID)

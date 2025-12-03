@@ -83,8 +83,10 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 		return fmt.Errorf("create scheduler: %w", err)
 	}
 
-	// Create dedup store
-	dedupStore, err := dedup.NewPebbleStore(dataDir, partitionID, int32(pm.config.DedupTTLHours))
+	// Create dedup store with bloom filter for high performance
+	// Expected 1M items per partition with 1% false positive rate
+	// Uses ~10MB memory per partition for bloom filter
+	dedupStore, err := dedup.NewBloomPebbleStore(dataDir, partitionID, int32(pm.config.DedupTTLHours), 1_000_000, 0.01)
 	if err != nil {
 		return fmt.Errorf("create dedup store: %w", err)
 	}
