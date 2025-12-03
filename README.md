@@ -113,16 +113,28 @@ See [MVP_BUILD_GUIDE.md](MVP_BUILD_GUIDE.md) for detailed instructions.
 
 ## Performance
 
+### Current (MVP)
+
 | Metric | Value |
 |--------|-------|
-| Write Throughput | ~100K events/sec/partition |
-| Read Throughput | ~500K events/sec/partition |
-| Publish Latency | 5-10ms p99 |
-| Scheduler Tick | 100ms default (configurable) |
-| Event Capacity | 10M+ scheduled events |
-| Durability | fsync before ack |
+| Write Throughput | ~400 events/sec |
+| Read Throughput | ~400 events/sec |
+| Publish Latency p99 | ~30ms |
+| E2E Latency p99 | ~160ms |
+| Scheduler Tick | 100ms (configurable) |
+| Success Rate | 100% |
 
-> **Note:** Performance metrics are estimates based on similar systems. Run `go run integration_test_suite.go` to verify functionality.
+### Target (With Optimizations)
+
+| Metric | Target | Requires |
+|--------|--------|----------|
+| Write Throughput | 100K events/sec | Batching, async flush |
+| Read Throughput | 500K events/sec | Batched delivery, zero-copy |
+| Publish Latency p99 | 5-10ms | Async ack, connection pooling |
+| Scheduler Tick | 1ms | Config change + CPU budget |
+| Event Capacity | 10M+ | Timer pooling, memory optimization |
+
+> **Note:** Run `go run loadtest.go` to benchmark. Run `go run integration_test_suite.go` to verify functionality.
 
 ## Use Cases
 
@@ -208,12 +220,30 @@ cronos_db/
 - [x] Integration tests (23 tests)
 
 ### Next Phase 🚧
-- [ ] Distributed replication
-- [ ] Raft consensus
+
+**Distributed Features**
+- [ ] Distributed replication (leader-follower)
+- [ ] Raft consensus for metadata
 - [ ] Multi-partition support
-- [ ] Consistent hashing
-- [ ] Metrics & monitoring
-- [ ] Production hardening
+- [ ] Consistent hashing for partition routing
+- [ ] Cluster membership & discovery
+
+**Performance Optimizations**
+- [ ] Write batching (100-1000 events per syscall)
+- [ ] Batched delivery (send 100+ events per gRPC call)
+- [ ] Custom binary protocol for internal replication
+- [ ] Memory-mapped WAL for zero-copy reads
+- [ ] Lock-free dispatcher with sharding
+- [ ] Timer pooling for 10M+ event capacity
+- [ ] 1ms scheduler tick granularity
+
+**Production Hardening**
+- [ ] Metrics & monitoring (Prometheus/OpenTelemetry)
+- [ ] Distributed tracing
+- [ ] Rate limiting & quota management
+- [ ] Graceful shutdown & draining
+- [ ] Backup & restore utilities
+- [ ] Admin CLI & dashboard
 
 ## Technology Stack
 

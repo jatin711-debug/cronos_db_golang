@@ -75,9 +75,9 @@ func parseFlags() *LoadTestConfig {
 	config := &LoadTestConfig{}
 
 	flag.StringVar(&config.ServerAddr, "server", "localhost:9000", "Server address")
-	flag.IntVar(&config.NumPublishers, "publishers", 4, "Number of concurrent publishers")
-	flag.IntVar(&config.NumSubscribers, "subscribers", 2, "Number of concurrent subscribers")
-	flag.IntVar(&config.EventsPerPub, "events", 1000, "Events per publisher")
+	flag.IntVar(&config.NumPublishers, "publishers", 10, "Number of concurrent publishers")
+	flag.IntVar(&config.NumSubscribers, "subscribers", 4, "Number of concurrent subscribers")
+	flag.IntVar(&config.EventsPerPub, "events", 2000, "Events per publisher")
 	flag.IntVar(&config.PayloadSize, "payload-size", 256, "Payload size in bytes")
 	flag.DurationVar(&config.ScheduleDelay, "schedule-delay", 500*time.Millisecond, "Schedule delay from now")
 	flag.StringVar(&config.Topic, "topic", "load-test-topic", "Topic name")
@@ -164,7 +164,7 @@ func runLoadTest(config *LoadTestConfig) *LoadTestMetrics {
 
 	// Wait for all events to be received (with timeout)
 	expectedEvents := int64(config.NumPublishers * config.EventsPerPub)
-	timeout := time.After(30 * time.Second)
+	timeout := time.After(120 * time.Second) // 2 min timeout for larger tests
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 

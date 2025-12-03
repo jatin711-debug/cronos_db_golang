@@ -45,7 +45,7 @@ func NewTimingWheel(tickMs int32, wheelSize int32, maxLevels int32, currentLevel
 		startTimeMs:  startTimeMs,
 		wheel:        make([]*list.List, wheelSize),
 		timers:       make(map[string]*Timer),
-		expired:      make(chan []*Timer, 10000), // Large buffer to prevent drops
+		expired:      make(chan []*Timer, 100000), // 100K buffer for burst loads
 		quit:         make(chan struct{}),
 		maxLevels:    maxLevels,
 		currentLevel: currentLevel,
@@ -177,15 +177,18 @@ func (tw *TimingWheel) tickLocked() {
 	// Clear the slot
 	tw.wheel[currentSlot].Init()
 
-	// Send expired timers to channel
+	// Send expired timers to channel (non-blocking with large buffer)
+	// If buffer is full, we MUST NOT drop - use blocking send
 	if len(expiredTimers) > 0 {
-		log.Printf("[TIMING-WHEEL] Tick=%d expired %d events (slot=%d, level=%d)",
-			tw.currentTick, len(expiredTimers), currentSlot, tw.currentLevel)
 		select {
 		case tw.expired <- expiredTimers:
+			// Sent successfully
 		default:
-			// Channel full, drop expired timers (should not happen in practice)
-			log.Printf("[TIMING-WHEEL] WARNING: Expired channel full, dropping %d timers", len(expiredTimers))
+			// Channel full - send in goroutine to avoid blocking tick
+			// This ensures no events are lost
+			go func(timers []*Timer) {
+				tw.expired <- timers
+			}(expiredTimers)
 		}
 	}
 

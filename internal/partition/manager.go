@@ -227,10 +227,33 @@ func (pm *PartitionManager) startPartitionInternal(partition *Partition) error {
 	// Start worker
 	partition.Worker.Start()
 
-	// Get poll interval from config (default 50ms)
+	// Get poll interval from config (default 10ms for better responsiveness)
 	pollInterval := time.Duration(pm.config.DeliveryPollMS) * time.Millisecond
 	if pollInterval == 0 {
-		pollInterval = 50 * time.Millisecond
+		pollInterval = 10 * time.Millisecond
+	}
+
+	// Create dispatch channel for parallel processing
+	dispatchCh := make(chan *types.Event, 10000)
+
+	// Start multiple dispatch workers (parallel delivery)
+	numWorkers := 4
+	for i := 0; i < numWorkers; i++ {
+		go func() {
+			for {
+				select {
+				case event, ok := <-dispatchCh:
+					if !ok {
+						return
+					}
+					if err := partition.Dispatcher.Dispatch(event); err != nil {
+						log.Printf("Dispatch failed: %v", err)
+					}
+				case <-partition.deliveryQuit:
+					return
+				}
+			}
+		}()
 	}
 
 	// Start delivery loop (poll scheduler for ready events and dispatch them)
@@ -244,14 +267,20 @@ func (pm *PartitionManager) startPartitionInternal(partition *Partition) error {
 				// Get ready events from scheduler
 				readyEvents := partition.Scheduler.GetReadyEvents()
 				if readyEvents != nil && len(readyEvents) > 0 {
-					// Dispatch each ready event
+					// Send to dispatch workers
 					for _, event := range readyEvents {
-						if err := partition.Dispatcher.Dispatch(event); err != nil {
-							log.Printf("Dispatch failed: %v", err)
+						select {
+						case dispatchCh <- event:
+						default:
+							// Channel full - dispatch directly
+							if err := partition.Dispatcher.Dispatch(event); err != nil {
+								log.Printf("Dispatch failed: %v", err)
+							}
 						}
 					}
 				}
 			case <-partition.deliveryQuit:
+				close(dispatchCh)
 				return
 			}
 		}
