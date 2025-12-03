@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"syscall"
 	"time"
 
 	"cronos_db/pkg/types"
@@ -66,8 +65,8 @@ func NewSegment(dataDir string, firstOffset int64, isActive bool) (*Segment, err
 	var mmapData []byte
 	stat, _ := file.Stat()
 	if stat.Size() > 0 {
-		mmapData, _ = syscall.Mmap(int(file.Fd()), 0, int(stat.Size()), syscall.PROT_READ, syscall.MAP_SHARED)
-		// We ignore mmap errors and fall back to file reading (mmapData will be nil or partial if error)
+		mmapData, _ = mmapFile(file, stat.Size())
+		// We ignore mmap errors and fall back to file reading (mmapData will be nil if error)
 	}
 
 	segment := &Segment{
@@ -129,8 +128,8 @@ func OpenSegment(dataDir string, filename string) (*Segment, error) {
 	// Try to mmap the file
 	var mmapData []byte
 	if stat.Size() > 0 {
-		mmapData, _ = syscall.Mmap(int(file.Fd()), 0, int(stat.Size()), syscall.PROT_READ, syscall.MAP_SHARED)
-		// Fallback ignored
+		mmapData, _ = mmapFile(file, stat.Size())
+		// Fallback to file reading if mmap fails or unsupported
 	}
 
 	segment := &Segment{
@@ -208,22 +207,14 @@ func (s *Segment) AppendBatch(events []*types.Event, indexInterval int64) error 
 		return fmt.Errorf("cannot append to closed segment")
 	}
 
-	// Flush writer to get accurate file position
-	if err := s.writer.Flush(); err != nil {
-		return fmt.Errorf("flush before append: %w", err)
-	}
-
-	// Get current file position before writing
-	filePos, err := s.segmentFile.Seek(0, io.SeekCurrent)
-	if err != nil {
-		return fmt.Errorf("seek: %w", err)
-	}
+	// Track position from current size (buffered writes)
+	filePos := s.sizeBytes
 
 	for _, event := range events {
 		// Build event record
 		record := s.buildEventRecord(event)
 
-		// Write record
+		// Write record to buffer
 		if err := s.writeRecord(record); err != nil {
 			return fmt.Errorf("write record: %w", err)
 		}
@@ -257,21 +248,13 @@ func (s *Segment) AppendBatch(events []*types.Event, indexInterval int64) error 
 
 // appendEventActive appends to active segment
 func (s *Segment) appendEventActive(event *types.Event, indexInterval int64) error {
-	// Flush writer to get accurate file position
-	if err := s.writer.Flush(); err != nil {
-		return fmt.Errorf("flush before append: %w", err)
-	}
-
-	// Get current file position before writing
-	filePos, err := s.segmentFile.Seek(0, io.SeekCurrent)
-	if err != nil {
-		return fmt.Errorf("seek: %w", err)
-	}
+	// Get current buffered position (approximation - will be exact after flush)
+	filePos := s.sizeBytes
 
 	// Build event record
 	record := s.buildEventRecord(event)
 
-	// Write record
+	// Write record to buffer (buffered I/O)
 	if err := s.writeRecord(record); err != nil {
 		return fmt.Errorf("write record: %w", err)
 	}
@@ -284,13 +267,6 @@ func (s *Segment) appendEventActive(event *types.Event, indexInterval int64) err
 	}
 	s.nextOffset++
 	s.sizeBytes = filePos + int64(len(record))
-
-	// Remap if needed (extend mmap)
-	// For simplicity, we only remap on close/reopen or periodic maintenance in a real system
-	// Here we just accept that mmapData might be stale until updated or we fall back to file read
-	// if offset > len(mmapData).
-	// Ideally we would munmap and mmap again with new size, but that's expensive on every write.
-	// We'll rely on file reading for very recent writes if they aren't in mmap yet.
 
 	// Write index entry if needed (using sparse indexing)
 	if s.nextOffset-s.firstOffset >= s.nextIndexOffset {
@@ -714,7 +690,7 @@ func (s *Segment) Close() error {
 
 	// Unmap memory
 	if s.mmapData != nil {
-		syscall.Munmap(s.mmapData)
+		munmapFile(s.mmapData)
 		s.mmapData = nil
 	}
 

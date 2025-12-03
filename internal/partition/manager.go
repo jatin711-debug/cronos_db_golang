@@ -2,6 +2,7 @@ package partition
 
 import (
 	"fmt"
+	"hash/fnv"
 	"log"
 	"sync"
 	"time"
@@ -209,6 +210,40 @@ func (pm *PartitionManager) GetPartitionForTopic(topic string) (*types.Partition
 	}, nil
 }
 
+// GetPartitionForKey gets partition for a key using hash-based distribution
+// This provides Kafka-like key-based partitioning for even distribution
+func (pm *PartitionManager) GetPartitionForKey(key string) (*types.Partition, error) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	if len(pm.partitions) == 0 {
+		return nil, fmt.Errorf("no partitions available")
+	}
+
+	// Hash the key to determine partition
+	h := fnv.New32a()
+	h.Write([]byte(key))
+	hash := h.Sum32()
+
+	// Select partition based on hash
+	partitionID := int32(hash % uint32(len(pm.partitions)))
+
+	partition, exists := pm.partitions[partitionID]
+	if !exists {
+		return nil, fmt.Errorf("partition %d not found", partitionID)
+	}
+
+	return &types.Partition{
+		ID:            partition.ID,
+		Topic:         partition.Topic,
+		NextOffset:    0,
+		HighWatermark: 0,
+		Active:        true,
+		CreatedTS:     partition.CreatedTS.UnixMilli(),
+		UpdatedTS:     partition.UpdatedTS.UnixMilli(),
+	}, nil
+}
+
 // startPartitionLocked starts a partition (assumes lock is held)
 func (pm *PartitionManager) startPartitionLocked(partitionID int32) error {
 	partition, exists := pm.partitions[partitionID]
@@ -266,7 +301,7 @@ func (pm *PartitionManager) startPartitionInternal(partition *Partition) error {
 			case <-ticker.C:
 				// Get ready events from scheduler
 				readyEvents := partition.Scheduler.GetReadyEvents()
-				if readyEvents != nil && len(readyEvents) > 0 {
+				if len(readyEvents) > 0 {
 					// Send to dispatch workers
 					for _, event := range readyEvents {
 						select {

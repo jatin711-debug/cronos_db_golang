@@ -72,29 +72,33 @@ func main() {
 		log.Printf("Cluster mode enabled - Gossip: %s, Raft: %s", cfg.ClusterGossipAddr, cfg.ClusterRaftAddr)
 	}
 
-	// Create default partition (in standalone mode or if we're the partition owner)
-	shouldCreatePartition := !cfg.ClusterEnabled
-	if cfg.ClusterEnabled && clusterMgr != nil {
-		// Check if this node should own partition 0
-		ownerNode := clusterMgr.GetPartitionNode(0)
-		shouldCreatePartition = ownerNode != nil && ownerNode.ID == cfg.NodeID
-	}
-
-	if shouldCreatePartition {
-		if err := pm.CreatePartition(0, "default-topic"); err != nil {
-			log.Fatalf("Failed to create partition: %v", err)
+	// Create all partitions locally
+	// Each node creates all partitions so it can handle any routed events
+	// The cluster router determines which node owns each partition for consistency
+	for i := int32(0); i < int32(cfg.PartitionCount); i++ {
+		topic := fmt.Sprintf("partition-%d", i)
+		if err := pm.CreatePartition(i, topic); err != nil {
+			log.Printf("Warning: Failed to create partition %d: %v", i, err)
+			continue
 		}
-
-		// Start partition
-		if err := pm.StartPartition(0); err != nil {
-			log.Fatalf("Failed to start partition: %v", err)
+		if err := pm.StartPartition(i); err != nil {
+			log.Printf("Warning: Failed to start partition %d: %v", i, err)
+		} else {
+			log.Printf("Created and started partition %d", i)
 		}
 	}
 
-	// Get partition (or create a dummy for handlers)
-	part, err := pm.GetInternalPartition(0)
-	if err != nil && !cfg.ClusterEnabled {
-		log.Fatalf("Failed to get partition: %v", err)
+	// Get any available partition for handler setup (dedup and consumer group are shared)
+	var part *partition.Partition
+	for i := int32(0); i < int32(cfg.PartitionCount); i++ {
+		p, err := pm.GetInternalPartition(i)
+		if err == nil && p != nil {
+			part = p
+			break
+		}
+	}
+	if part == nil && !cfg.ClusterEnabled {
+		log.Fatalf("Failed to get any partition")
 	}
 
 	// Create gRPC server
