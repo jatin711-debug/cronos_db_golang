@@ -89,23 +89,25 @@ func (s *Scheduler) GetReadyEvents() []*types.Event {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Get expired events from timing wheel
-	select {
-	case expiredTimers := <-s.timingWheel.GetExpiredChannel():
-		log.Printf("[SCHEDULER] GetReadyEvents: received %d expired timers", len(expiredTimers))
-		for _, timer := range expiredTimers {
-			s.readyQueue = append(s.readyQueue, timer.Event)
+	// Drain ALL expired events from timing wheel channel
+	for {
+		select {
+		case expiredTimers := <-s.timingWheel.GetExpiredChannel():
+			for _, timer := range expiredTimers {
+				s.readyQueue = append(s.readyQueue, timer.Event)
+			}
+		default:
+			// No more pending expired events
+			goto done
 		}
-	default:
-		// No new expired events
 	}
+done:
 
 	// Return ready events
 	if len(s.readyQueue) == 0 {
 		return nil
 	}
 
-	log.Printf("[SCHEDULER] GetReadyEvents: returning %d events", len(s.readyQueue))
 	events := s.readyQueue
 	s.readyQueue = make([]*types.Event, 0)
 	return events

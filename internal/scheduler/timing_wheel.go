@@ -45,7 +45,7 @@ func NewTimingWheel(tickMs int32, wheelSize int32, maxLevels int32, currentLevel
 		startTimeMs:  startTimeMs,
 		wheel:        make([]*list.List, wheelSize),
 		timers:       make(map[string]*Timer),
-		expired:      make(chan []*Timer, 100),
+		expired:      make(chan []*Timer, 10000), // Large buffer to prevent drops
 		quit:         make(chan struct{}),
 		maxLevels:    maxLevels,
 		currentLevel: currentLevel,

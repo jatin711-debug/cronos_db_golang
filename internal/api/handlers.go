@@ -223,7 +223,7 @@ func (h *EventServiceHandler) Subscribe(stream grpc.BidiStreamingServer[types.Su
 		ConsumerGroup: req.GetConsumerGroup(),
 		Partition:     &types.Partition{ID: int32(partitionID)},
 		NextOffset:    startOffset + 1,
-		MaxCredits:    100,
+		MaxCredits:    10000, // High credit limit for throughput
 		CreatedTS:     time.Now().UnixMilli(),
 		Stream:        &GRPCStream{stream: stream},
 	}
@@ -260,6 +260,15 @@ func (h *EventServiceHandler) Ack(stream types.EventService_AckServer) error {
 		req, err := stream.Recv()
 		if err != nil {
 			return err
+		}
+
+		// Extract partition ID from delivery ID (format: "subID-offset")
+		// We need to find the right dispatcher to return credits
+		// For now, notify all dispatchers (they will ignore unknown delivery IDs)
+		for _, p := range h.partitionManager.ListPartitions() {
+			if p.Dispatcher != nil {
+				p.Dispatcher.HandleAck(req.GetDeliveryId(), req.GetSuccess(), req.GetNextOffset())
+			}
 		}
 
 		err = h.consumerManager.Ack(req)

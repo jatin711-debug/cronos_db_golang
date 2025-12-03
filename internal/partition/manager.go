@@ -191,13 +191,12 @@ func (pm *PartitionManager) GetPartitionForTopic(topic string) (*types.Partition
 		return nil, fmt.Errorf("auto-create partition: %w", err)
 	}
 
-	// Start the newly created partition
+	// Start the newly created partition synchronously (before returning)
 	partition := pm.partitions[partitionID]
-	go func() {
-		if err := pm.startPartitionLocked(partitionID); err != nil {
-			log.Printf("Failed to start auto-created partition %d: %v", partitionID, err)
-		}
-	}()
+	if err := pm.startPartitionInternal(partition); err != nil {
+		log.Printf("Failed to start auto-created partition %d: %v", partitionID, err)
+		// Continue anyway - partition is created but may not deliver
+	}
 
 	return &types.Partition{
 		ID:            partition.ID,
@@ -217,6 +216,11 @@ func (pm *PartitionManager) startPartitionLocked(partitionID int32) error {
 		return fmt.Errorf("partition %d not found", partitionID)
 	}
 
+	return pm.startPartitionInternal(partition)
+}
+
+// startPartitionInternal starts a partition's background workers
+func (pm *PartitionManager) startPartitionInternal(partition *Partition) error {
 	// Start scheduler
 	partition.Scheduler.Start()
 

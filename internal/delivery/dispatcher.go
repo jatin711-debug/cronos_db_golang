@@ -178,47 +178,59 @@ func (d *Dispatcher) Dispatch(event *types.Event) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	log.Printf("[DISPATCHER] Dispatching event %s (partition=%d, offset=%d)",
-		event.GetMessageId(), event.GetPartitionId(), event.Offset)
-
 	// Find all subscriptions for this event's topic/partition
 	subs := d.findSubscriptions(event)
 
-	log.Printf("[DISPATCHER] Found %d subscriptions for event %s", len(subs), event.GetMessageId())
+	if len(subs) == 0 {
+		return nil
+	}
 
-	// Dispatch to each subscription with credits
+	// Group subscriptions by consumer group
+	// Only ONE subscriber per consumer group should receive each event
+	consumerGroupSubs := make(map[string][]*Subscription)
 	for _, sub := range subs {
-		log.Printf("[DISPATCHER] Processing subscription %s (credits=%d)", sub.ID, sub.Credits)
-		if sub.Credits <= 0 {
-			// No credits, skip
-			log.Printf("[DISPATCHER] Skipping subscription %s: no credits", sub.ID)
+		consumerGroupSubs[sub.ConsumerGroup] = append(consumerGroupSubs[sub.ConsumerGroup], sub)
+	}
+
+	// For each consumer group, pick ONE subscriber (round-robin based on offset)
+	for groupID, groupSubs := range consumerGroupSubs {
+		// Find a subscriber with credits using round-robin based on event offset
+		var selectedSub *Subscription
+		startIdx := int(event.Offset % int64(len(groupSubs)))
+
+		for i := 0; i < len(groupSubs); i++ {
+			idx := (startIdx + i) % len(groupSubs)
+			if groupSubs[idx].Credits > 0 {
+				selectedSub = groupSubs[idx]
+				break
+			}
+		}
+
+		if selectedSub == nil {
+			log.Printf("[DISPATCHER] No subscriber with credits in group %s for event %s",
+				groupID, event.GetMessageId())
 			continue
 		}
 
 		// Create delivery
 		delivery := &DeliveryMessage{
 			Event:      event,
-			DeliveryID: fmt.Sprintf("%s-%d", sub.ID, event.Offset),
+			DeliveryID: fmt.Sprintf("%s-%d", selectedSub.ID, event.Offset),
 			Attempt:    1,
 			AckTimeout: int32(d.config.DefaultAckTimeout / time.Millisecond),
 		}
 
-		log.Printf("[DISPATCHER] Sending event %s to subscriber %s", event.GetMessageId(), sub.ID)
-
 		// Send to subscriber
-		if err := sub.Stream.Send(delivery); err != nil {
-			log.Printf("[DISPATCHER] Failed to send to subscriber %s: %v", sub.ID, err)
-			// TODO: Clean up dead subscription
+		if err := selectedSub.Stream.Send(delivery); err != nil {
+			log.Printf("[DISPATCHER] Failed to send to subscriber %s: %v", selectedSub.ID, err)
 			continue
 		}
 
-		log.Printf("[DISPATCHER] Successfully sent event %s to subscriber %s", event.GetMessageId(), sub.ID)
-
 		// Track active delivery
-		d.trackDelivery(delivery, sub)
+		d.trackDelivery(delivery, selectedSub)
 
 		// Decrement credits
-		sub.Credits--
+		selectedSub.Credits--
 	}
 
 	return nil
@@ -228,19 +240,10 @@ func (d *Dispatcher) Dispatch(event *types.Event) error {
 func (d *Dispatcher) findSubscriptions(event *types.Event) []*Subscription {
 	var subs []*Subscription
 
-	log.Printf("[DISPATCHER] findSubscriptions: eventPartition=%d, totalSubs=%d",
-		event.GetPartitionId(), len(d.subscriptions))
-
-	for subID, sub := range d.subscriptions {
-		// Check if subscription matches event's partition/topic
-		// This is simplified - real implementation would check consumer group assignments
-		log.Printf("[DISPATCHER] Checking subscription %s: subPartition=%d, eventPartition=%d",
-			subID, sub.Partition.ID, event.GetPartitionId())
+	for _, sub := range d.subscriptions {
+		// Check if subscription matches event's partition
 		if sub.Partition.ID == event.GetPartitionId() {
-			log.Printf("[DISPATCHER] Subscription %s MATCHES!", subID)
 			subs = append(subs, sub)
-		} else {
-			log.Printf("[DISPATCHER] Subscription %s NO MATCH", subID)
 		}
 	}
 
