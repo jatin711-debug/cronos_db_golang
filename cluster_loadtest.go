@@ -42,6 +42,8 @@ type ClusterLoadTestConfig struct {
 	ReportInterval time.Duration
 	TestFailover   bool          // Test node failover scenario
 	FailoverAfter  time.Duration // When to simulate node failure
+	BatchMode      bool          // Use batch publish API
+	BatchSize      int           // Events per batch
 }
 
 // ClusterMetrics holds cluster-wide metrics
@@ -81,6 +83,8 @@ func main() {
 	roundRobin := flag.Bool("round-robin", true, "Distribute events round-robin across nodes")
 	testFailover := flag.Bool("failover", false, "Test failover scenario")
 	failoverAfter := flag.Duration("failover-after", 10*time.Second, "When to simulate failover")
+	batchMode := flag.Bool("batch", false, "Use batch publish API for higher throughput")
+	batchSize := flag.Int("batch-size", 100, "Events per batch when using batch mode")
 
 	flag.Parse()
 
@@ -104,6 +108,8 @@ func main() {
 		ReportInterval: 5 * time.Second,
 		TestFailover:   *testFailover,
 		FailoverAfter:  *failoverAfter,
+		BatchMode:      *batchMode,
+		BatchSize:      *batchSize,
 	}
 
 	fmt.Println("╔═══════════════════════════════════════════════════════════════╗")
@@ -118,6 +124,8 @@ func main() {
 	fmt.Printf("║ Total Events: %-48d ║\n", config.NumPublishers*config.EventsPerPub*len(nodes))
 	fmt.Printf("║ Payload Size: %-48d ║\n", config.PayloadSize)
 	fmt.Printf("║ Round Robin:  %-48v ║\n", config.RoundRobin)
+	fmt.Printf("║ Batch Mode:   %-48v ║\n", config.BatchMode)
+	fmt.Printf("║ Batch Size:   %-48d ║\n", config.BatchSize)
 	fmt.Printf("║ Failover:     %-48v ║\n", config.TestFailover)
 	fmt.Println("╚═══════════════════════════════════════════════════════════════╝")
 	fmt.Println()
@@ -204,7 +212,16 @@ func runClusterLoadTest(config ClusterLoadTestConfig) *ClusterMetrics {
 	// Run publishers for each node
 	var wg sync.WaitGroup
 
-	if config.RoundRobin {
+	if config.BatchMode {
+		// Batch mode: use PublishBatch API
+		for pubIdx := 0; pubIdx < config.NumPublishers*len(config.Nodes); pubIdx++ {
+			wg.Add(1)
+			go func(publisherID int) {
+				defer wg.Done()
+				runBatchPublisher(config, metrics, publisherID, &totalPublished)
+			}(pubIdx)
+		}
+	} else if config.RoundRobin {
 		// Round-robin: each publisher sends to all nodes in rotation
 		for pubIdx := 0; pubIdx < config.NumPublishers*len(config.Nodes); pubIdx++ {
 			wg.Add(1)
@@ -231,6 +248,78 @@ func runClusterLoadTest(config ClusterLoadTestConfig) *ClusterMetrics {
 
 	metrics.EndTime = time.Now()
 	return metrics
+}
+
+// runBatchPublisher sends events in batches for high throughput
+func runBatchPublisher(config ClusterLoadTestConfig, metrics *ClusterMetrics, publisherID int, totalPublished *int64) {
+	payload := make([]byte, config.PayloadSize)
+	rand.Read(payload)
+
+	nodeCount := len(config.Nodes)
+	batchSize := config.BatchSize
+	totalEvents := config.EventsPerPub
+
+	for batchStart := 0; batchStart < totalEvents; batchStart += batchSize {
+		// Select node in round-robin fashion based on batch
+		node := config.Nodes[(publisherID+batchStart/batchSize)%nodeCount]
+
+		// Build batch
+		batchEnd := batchStart + batchSize
+		if batchEnd > totalEvents {
+			batchEnd = totalEvents
+		}
+
+		events := make([]*types.Event, 0, batchEnd-batchStart)
+		scheduleTime := time.Now().Add(config.ScheduleDelay)
+
+		for i := batchStart; i < batchEnd; i++ {
+			eventKey := fmt.Sprintf("pub-%d-event-%d", publisherID, i)
+			event := &types.Event{
+				MessageId:  fmt.Sprintf("batch-%d-%d-%d", publisherID, i, time.Now().UnixNano()),
+				ScheduleTs: scheduleTime.UnixMilli(),
+				Payload:    payload,
+				Topic:      config.Topic,
+				Meta: map[string]string{
+					"publisher":     fmt.Sprintf("%d", publisherID),
+					"sequence":      fmt.Sprintf("%d", i),
+					"partition_key": eventKey,
+				},
+			}
+			events = append(events, event)
+		}
+
+		req := &types.PublishBatchRequest{
+			Events: events,
+		}
+
+		// Publish batch with timing
+		start := time.Now()
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		resp, err := node.client.PublishBatch(ctx, req)
+		cancel()
+		latency := time.Since(start)
+
+		eventsInBatch := int64(len(events))
+
+		metrics.mu.Lock()
+		if err != nil {
+			metrics.NodeErrors[node.ID] += eventsInBatch
+			metrics.TotalErrors += eventsInBatch
+		} else if resp != nil {
+			metrics.NodePublished[node.ID] += int64(resp.PublishedCount)
+			metrics.TotalPublished += int64(resp.PublishedCount)
+			metrics.TotalErrors += int64(resp.ErrorCount)
+			// Record latency per event (amortized)
+			perEventLatency := latency / time.Duration(len(events))
+			for range events {
+				metrics.NodeLatencies[node.ID] = append(metrics.NodeLatencies[node.ID], perEventLatency)
+				metrics.AllLatencies = append(metrics.AllLatencies, perEventLatency)
+			}
+		}
+		metrics.mu.Unlock()
+
+		atomic.AddInt64(totalPublished, eventsInBatch)
+	}
 }
 
 // runRoundRobinPublisher sends events across all nodes in rotation

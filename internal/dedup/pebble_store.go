@@ -27,9 +27,15 @@ func NewPebbleStore(dataDir string, partitionID int32, ttlHours int32) (*PebbleS
 		return nil, fmt.Errorf("create dedup dir: %w", err)
 	}
 
-	// Open PebbleDB
+	// Open PebbleDB with optimized settings for high throughput
 	opts := &pebble.Options{
-		Logger: nil, // Use default logger
+		Logger:                      nil,
+		MemTableSize:                64 * 1024 * 1024,        // 64MB memtable (default 4MB)
+		MemTableStopWritesThreshold: 4,                       // Allow more memtables before stalling
+		L0CompactionThreshold:       4,                       // Trigger L0 compaction earlier
+		L0StopWritesThreshold:       12,                      // Allow more L0 files before stalling
+		MaxConcurrentCompactions:    func() int { return 2 }, // Parallel compaction
+		DisableWAL:                  true,                    // Disable PebbleDB WAL (we have our own)
 	}
 
 	db, err := pebble.Open(dir, opts)
