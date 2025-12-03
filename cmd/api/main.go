@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"cronos_db/internal/api"
+	"cronos_db/internal/cluster"
 	"cronos_db/internal/config"
 	"cronos_db/internal/partition"
 )
@@ -25,19 +26,74 @@ func main() {
 	// Create partition manager
 	pm := partition.NewPartitionManager(cfg.NodeID, cfg)
 
-	// Create default partition
-	if err := pm.CreatePartition(0, "default-topic"); err != nil {
-		log.Fatalf("Failed to create partition: %v", err)
+	// Create cluster manager (if enabled)
+	var clusterMgr *cluster.Manager
+	if cfg.ClusterEnabled {
+		// Use node-specific raft directory
+		raftDir := cfg.RaftDir
+		if raftDir == "./raft" || raftDir == "raft" {
+			// Default raft dir - make it node-specific
+			raftDir = cfg.DataDir + "/raft"
+		}
+
+		clusterConfig := &cluster.Config{
+			NodeID:            cfg.NodeID,
+			DataDir:           cfg.DataDir,
+			GossipAddr:        cfg.ClusterGossipAddr,
+			GRPCAddr:          cfg.ClusterGRPCAddr,
+			RaftAddr:          cfg.ClusterRaftAddr,
+			RaftDir:           raftDir,
+			SeedNodes:         cfg.ClusterSeeds, // Pass seed nodes for join vs bootstrap decision
+			VirtualNodes:      cfg.VirtualNodes,
+			HeartbeatInterval: cfg.HeartbeatInterval,
+			FailureTimeout:    cfg.FailureTimeout,
+			SuspectTimeout:    cfg.SuspectTimeout,
+			PartitionCount:    cfg.PartitionCount,
+			ReplicationFactor: cfg.ReplicationFactor,
+		}
+
+		clusterMgr = cluster.NewManager(clusterConfig)
+		if err := clusterMgr.Start(); err != nil {
+			log.Fatalf("Failed to start cluster manager: %v", err)
+		}
+
+		// Join cluster if seeds provided
+		if len(cfg.ClusterSeeds) > 0 {
+			for _, seed := range cfg.ClusterSeeds {
+				if err := clusterMgr.JoinCluster(seed); err != nil {
+					log.Printf("Warning: Failed to join cluster via %s: %v", seed, err)
+				} else {
+					log.Printf("Joined cluster via seed %s", seed)
+					break
+				}
+			}
+		}
+
+		log.Printf("Cluster mode enabled - Gossip: %s, Raft: %s", cfg.ClusterGossipAddr, cfg.ClusterRaftAddr)
 	}
 
-	// Start partition
-	if err := pm.StartPartition(0); err != nil {
-		log.Fatalf("Failed to start partition: %v", err)
+	// Create default partition (in standalone mode or if we're the partition owner)
+	shouldCreatePartition := !cfg.ClusterEnabled
+	if cfg.ClusterEnabled && clusterMgr != nil {
+		// Check if this node should own partition 0
+		ownerNode := clusterMgr.GetPartitionNode(0)
+		shouldCreatePartition = ownerNode != nil && ownerNode.ID == cfg.NodeID
 	}
 
-	// Get partition
+	if shouldCreatePartition {
+		if err := pm.CreatePartition(0, "default-topic"); err != nil {
+			log.Fatalf("Failed to create partition: %v", err)
+		}
+
+		// Start partition
+		if err := pm.StartPartition(0); err != nil {
+			log.Fatalf("Failed to start partition: %v", err)
+		}
+	}
+
+	// Get partition (or create a dummy for handlers)
 	part, err := pm.GetInternalPartition(0)
-	if err != nil {
+	if err != nil && !cfg.ClusterEnabled {
 		log.Fatalf("Failed to get partition: %v", err)
 	}
 
@@ -48,14 +104,23 @@ func main() {
 	grpcServer := api.NewGRPCServer(grpcConfig)
 
 	// Create event service handler
-	eventHandler := api.NewEventServiceHandler(
-		pm,
-		part.DedupStore,
-		part.ConsumerGroup,
-	)
+	var eventHandler *api.EventServiceHandler
+	if part != nil {
+		eventHandler = api.NewEventServiceHandler(
+			pm,
+			part.DedupStore,
+			part.ConsumerGroup,
+		)
+	} else {
+		// Cluster mode - partition might be on another node
+		eventHandler = api.NewEventServiceHandler(pm, nil, nil)
+	}
 
 	// Create consumer group service handler
-	consumerHandler := api.NewConsumerGroupServiceHandler(part.ConsumerGroup)
+	var consumerHandler *api.ConsumerGroupServiceHandler
+	if part != nil {
+		consumerHandler = api.NewConsumerGroupServiceHandler(part.ConsumerGroup)
+	}
 
 	// Register services
 	grpcServer.RegisterServices(eventHandler, consumerHandler)
@@ -66,11 +131,16 @@ func main() {
 		log.Fatalf("Failed to start gRPC server: %v", err)
 	}
 
-	// Health check endpoint
+	// Health check endpoint with cluster status
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, "OK")
+		if cfg.ClusterEnabled && clusterMgr != nil {
+			fmt.Fprintf(w, "OK - Cluster Mode\n")
+			fmt.Fprintf(w, "Node: %s\n", cfg.NodeID)
+		} else {
+			fmt.Fprintf(w, "OK - Standalone Mode\n")
+		}
 	})
 
 	healthServer := &http.Server{
@@ -107,6 +177,10 @@ func main() {
 			case <-ticker.C:
 				stats := pm.GetStats()
 				log.Printf("Stats: %+v", stats)
+				if cfg.ClusterEnabled && clusterMgr != nil {
+					clusterStats := clusterMgr.GetStats()
+					log.Printf("Cluster Stats: %+v", clusterStats)
+				}
 			case <-ctx.Done():
 				return
 			}
@@ -117,6 +191,13 @@ func main() {
 	<-sigChan
 	log.Println("Shutting down...")
 
+	// Shutdown cluster manager
+	if clusterMgr != nil {
+		if err := clusterMgr.Stop(); err != nil {
+			log.Printf("Failed to stop cluster manager: %v", err)
+		}
+	}
+
 	// Shutdown gRPC server
 	grpcServer.Stop()
 
@@ -126,8 +207,10 @@ func main() {
 	healthServer.Shutdown(shutdownCtx)
 
 	// Stop partition
-	if err := pm.StopPartition(0); err != nil {
-		log.Printf("Failed to stop partition: %v", err)
+	if part != nil {
+		if err := pm.StopPartition(0); err != nil {
+			log.Printf("Failed to stop partition: %v", err)
+		}
 	}
 
 	log.Println("Shutdown complete")

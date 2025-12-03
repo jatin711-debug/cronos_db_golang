@@ -308,100 +308,6 @@ func (s *Segment) buildEventRecord(event *types.Event) []byte {
 	return record
 }
 
-// parseEventRecord parses binary event record
-func parseEventRecord(record []byte) (*types.Event, error) {
-	offset := 8 // Skip length (4) and CRC32 (4)
-
-	if len(record) < 8 {
-		return nil, fmt.Errorf("record too short")
-	}
-
-	// Offset (8 bytes)
-	eventOffset := int64(binary.BigEndian.Uint64(record[offset : offset+8]))
-	offset += 8
-
-	// Schedule timestamp (8 bytes)
-	scheduleTs := int64(binary.BigEndian.Uint64(record[offset : offset+8]))
-	offset += 8
-
-	// Message ID length (2 bytes)
-	msgIDLen := int(binary.BigEndian.Uint16(record[offset : offset+2]))
-	offset += 2
-
-	// Message ID (N bytes)
-	if offset+msgIDLen > len(record) {
-		return nil, fmt.Errorf("record bounds exceeded for message ID")
-	}
-	messageID := string(record[offset : offset+msgIDLen])
-	offset += msgIDLen
-
-	// Topic length (2 bytes)
-	topicLen := int(binary.BigEndian.Uint16(record[offset : offset+2]))
-	offset += 2
-
-	// Topic (N bytes)
-	if offset+topicLen > len(record) {
-		return nil, fmt.Errorf("record bounds exceeded for topic")
-	}
-	topic := string(record[offset : offset+topicLen])
-	offset += topicLen
-
-	// Payload length (4 bytes)
-	payloadLen := int(binary.BigEndian.Uint32(record[offset : offset+4]))
-	offset += 4
-
-	// Payload (N bytes)
-	if offset+payloadLen > len(record) {
-		return nil, fmt.Errorf("record bounds exceeded for payload")
-	}
-	payload := record[offset : offset+payloadLen]
-	offset += payloadLen
-
-	// Meta count (2 bytes)
-	metaCount := int(binary.BigEndian.Uint16(record[offset : offset+2]))
-	offset += 2
-
-	// Meta entries
-	meta := make(map[string]string)
-	for i := 0; i < metaCount; i++ {
-		// Key length (2 bytes)
-		keyLen := int(binary.BigEndian.Uint16(record[offset : offset+2]))
-		offset += 2
-
-		// Key (N bytes)
-		if offset+keyLen > len(record) {
-			return nil, fmt.Errorf("record bounds exceeded for meta key at index %d", i)
-		}
-		key := string(record[offset : offset+keyLen])
-		offset += keyLen
-
-		// Value length (2 bytes)
-		valLen := int(binary.BigEndian.Uint16(record[offset : offset+2]))
-		offset += 2
-
-		// Value (N bytes)
-		if offset+valLen > len(record) {
-			return nil, fmt.Errorf("record bounds exceeded for meta value at index %d", i)
-		}
-		value := string(record[offset : offset+valLen])
-		offset += valLen
-
-		meta[key] = value
-	}
-
-	event := &types.Event{
-		MessageId:   messageID,
-		ScheduleTs:  scheduleTs,
-		Payload:     payload,
-		Topic:       topic,
-		Meta:        meta,
-		Offset:      eventOffset,
-		PartitionId: 0, // Will be set by caller if needed
-	}
-
-	return event, nil
-}
-
 // parseEventRecordWithoutLength parses binary event record that doesn't include length prefix
 // The record starts with CRC32 (4 bytes) followed by event data
 func parseEventRecordWithoutLength(record []byte) (*types.Event, error) {
@@ -501,34 +407,6 @@ func (s *Segment) writeRecord(record []byte) error {
 	if _, err := s.writer.Write(record); err != nil {
 		return err
 	}
-	return nil
-}
-
-// writeIndexEntry writes index entry
-func (s *Segment) writeIndexEntry(event *types.Event) error {
-	// Build index entry: timestamp (8 bytes) + offset (8 bytes) = 16 bytes
-	entry := make([]byte, 16)
-	binary.BigEndian.PutUint64(entry[0:8], uint64(event.GetScheduleTs()))
-	binary.BigEndian.PutUint64(entry[8:16], uint64(event.Offset))
-
-	// Create index directory if it doesn't exist
-	indexDir := filepath.Join(s.dataDir, "index")
-	if err := os.MkdirAll(indexDir, 0755); err != nil {
-		return fmt.Errorf("create index dir: %w", err)
-	}
-
-	// Append to index file
-	indexPath := filepath.Join(indexDir, s.indexFilename)
-	indexFile, err := os.OpenFile(indexPath, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
-	if err != nil {
-		return fmt.Errorf("open index file: %w", err)
-	}
-	defer indexFile.Close()
-
-	if _, err := indexFile.Write(entry); err != nil {
-		return fmt.Errorf("write index entry: %w", err)
-	}
-
 	return nil
 }
 
