@@ -233,9 +233,9 @@ cronos_db/
 - [x] Batched delivery (send 100+ events per gRPC call)
 - [x] Custom binary protocol for internal replication
 - [x] Memory-mapped WAL for zero-copy reads
-- [x] Lock-free dispatcher with sharding
+- [x] Sharded dispatcher for reduced lock contention (32 shards)
 - [x] Timer pooling for 10M+ event capacity
-- [x] 1ms scheduler tick granularity
+- [x] Configurable scheduler tick (1ms-100ms, default 100ms)
 
 **Production Hardening**
 - [ ] Metrics & monitoring (Prometheus/OpenTelemetry)
