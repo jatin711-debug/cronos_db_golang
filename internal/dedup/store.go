@@ -30,9 +30,9 @@ type MemoryStore struct {
 }
 
 type Entry struct {
-	Offset        int64
-	ExpirationTS  int64
-	CreatedTS     int64
+	Offset       int64
+	ExpirationTS int64
+	CreatedTS    int64
 }
 
 // NewMemoryStore creates a new in-memory store
@@ -84,10 +84,16 @@ func (m *MemoryStore) Close() error {
 
 // DedupStats represents deduplication store statistics
 type DedupStats struct {
-	DBSizeBytes        int64
-	ApproximateCount   int64
-	TTLHours           int32
-	LastPruneTS        int64
+	DBSizeBytes      int64
+	ApproximateCount int64
+	TTLHours         int32
+	LastPruneTS      int64
+	// Bloom filter stats
+	BloomHits           uint64 // Fast path: bloom said "not exists"
+	BloomFalsePositives uint64 // Bloom said "maybe exists" but wasn't
+	PebbleHits          uint64 // Actually found in PebbleDB
+	BloomMemoryBytes    uint64 // Bloom filter memory usage
+	BloomCount          uint64 // Items in bloom filter
 }
 
 // Manager manages the dedup store

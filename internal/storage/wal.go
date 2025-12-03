@@ -98,6 +98,39 @@ func (w *WAL) loadSegments() error {
 	return nil
 }
 
+// AppendBatch appends a batch of events to WAL
+func (w *WAL) AppendBatch(events []*types.Event) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if len(events) == 0 {
+		return nil
+	}
+
+	// Set offsets
+	for _, event := range events {
+		event.Offset = w.nextOffset
+		event.PartitionId = w.partitionID
+		w.nextOffset++
+	}
+
+	// Append to active segment
+	if err := w.activeSegment.AppendBatch(events, w.config.IndexInterval); err != nil {
+		return fmt.Errorf("append batch to segment: %w", err)
+	}
+
+	w.highWatermark = events[len(events)-1].Offset
+
+	// Rotate segment if full
+	if w.activeSegment.IsFull(w.config.SegmentSizeBytes) {
+		if err := w.rotateSegment(); err != nil {
+			return fmt.Errorf("rotate segment: %w", err)
+		}
+	}
+
+	return nil
+}
+
 // openActiveSegment opens or creates active segment
 func (w *WAL) openActiveSegment() error {
 	if len(w.segments) > 0 {

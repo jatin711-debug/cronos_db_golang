@@ -13,10 +13,10 @@ import (
 
 // PebbleStore is a PebbleDB-backed dedup store
 type PebbleStore struct {
-	db         *pebble.DB
-	dataDir    string
+	db          *pebble.DB
+	dataDir     string
 	partitionID int32
-	ttlHours   int32
+	ttlHours    int32
 }
 
 // NewPebbleStore creates a new PebbleStore
@@ -27,9 +27,15 @@ func NewPebbleStore(dataDir string, partitionID int32, ttlHours int32) (*PebbleS
 		return nil, fmt.Errorf("create dedup dir: %w", err)
 	}
 
-	// Open PebbleDB
+	// Open PebbleDB with optimized settings for high throughput
 	opts := &pebble.Options{
-		Logger: nil, // Use default logger
+		Logger:                      nil,
+		MemTableSize:                64 * 1024 * 1024,        // 64MB memtable (default 4MB)
+		MemTableStopWritesThreshold: 4,                       // Allow more memtables before stalling
+		L0CompactionThreshold:       4,                       // Trigger L0 compaction earlier
+		L0StopWritesThreshold:       12,                      // Allow more L0 files before stalling
+		MaxConcurrentCompactions:    func() int { return 2 }, // Parallel compaction
+		DisableWAL:                  true,                    // Disable PebbleDB WAL (we have our own)
 	}
 
 	db, err := pebble.Open(dir, opts)
@@ -59,15 +65,28 @@ func (p *PebbleStore) CheckAndStore(messageID string, offset int64) (bool, error
 		return false, fmt.Errorf("check key: %w", err)
 	}
 
-	// Store new entry
+	// Store new entry - use NoSync for performance (WAL provides durability)
 	expirationTS := time.Now().UnixMilli() + int64(p.ttlHours)*60*60*1000
 	value := p.buildValue(offset, expirationTS)
 
-	if err := p.db.Set(key, value, pebble.Sync); err != nil {
+	if err := p.db.Set(key, value, pebble.NoSync); err != nil {
 		return false, fmt.Errorf("set key: %w", err)
 	}
 
 	return false, nil // Not a duplicate
+}
+
+// StoreOnly stores a message ID without checking if it exists
+// Used by BloomPebbleStore when bloom filter confirms key is new
+func (p *PebbleStore) StoreOnly(messageID string, offset int64) error {
+	key := []byte(messageID)
+	expirationTS := time.Now().UnixMilli() + int64(p.ttlHours)*60*60*1000
+	value := p.buildValue(offset, expirationTS)
+
+	if err := p.db.Set(key, value, pebble.NoSync); err != nil {
+		return fmt.Errorf("set key: %w", err)
+	}
+	return nil
 }
 
 // GetOffset returns stored offset for message ID
@@ -120,7 +139,7 @@ func (p *PebbleStore) PruneExpired() (int, error) {
 		}
 
 		if expirationTS < now {
-			if err := p.db.Delete(iter.Key(), pebble.Sync); err != nil {
+			if err := p.db.Delete(iter.Key(), pebble.NoSync); err != nil {
 				return pruned, fmt.Errorf("delete expired key: %w", err)
 			}
 			pruned++

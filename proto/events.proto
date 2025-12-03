@@ -61,6 +61,26 @@ message PublishResponse {
   int64 schedule_ts = 5;
 }
 
+// Batch publish request for high-throughput ingestion
+message PublishBatchRequest {
+  repeated Event events = 1;
+  // If true, allow duplicate message_ids (for testing)
+  bool allow_duplicate = 2;
+}
+
+// Batch publish response
+message PublishBatchResponse {
+  bool success = 1;
+  string error = 2;
+  int32 published_count = 3;
+  int32 duplicate_count = 4;
+  int32 error_count = 5;
+  // First offset in the batch
+  int64 first_offset = 6;
+  // Last offset in the batch  
+  int64 last_offset = 7;
+}
+
 message SubscribeRequest {
   // Consumer group ID
   string consumer_group = 1;
@@ -95,6 +115,9 @@ message Delivery {
 
   // Timeout for ack (milliseconds)
   int32 ack_timeout_ms = 4;
+
+  // Batch of events (for batched delivery optimization)
+  repeated Event batch = 5;
 }
 
 message AckRequest {
@@ -431,6 +454,9 @@ message RaftStatusResponse {
 service EventService {
   // Publish an event
   rpc Publish(PublishRequest) returns (PublishResponse);
+
+  // Publish a batch of events (high-throughput)
+  rpc PublishBatch(PublishBatchRequest) returns (PublishBatchResponse);
 
   // Subscribe to events (streaming)
   rpc Subscribe(stream SubscribeRequest) returns (stream Delivery);
