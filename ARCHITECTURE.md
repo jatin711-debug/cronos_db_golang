@@ -484,12 +484,15 @@ Consumers reconnect to new partition nodes
 
 ### Config Tuning
 
-- **Tick granularity**: 10ms (fast) to 1s (slow) - default 100ms
-- **WAL segment size**: 64MB (fast) to 1GB (slow) - default 512MB
-- **Replication batch size**: 100-10000 events
-- **Dedup TTL**: 1-30 days - default 7 days
-- **DLQ max retries**: 1-10 - default 3
-- **Dispatcher retry delay**: 100ms-10s - default 1s
+- **Tick granularity** (`-tick-ms`): 10-1000ms - default 100ms
+- **Wheel size** (`-wheel-size`): 30-120 slots - default 60
+- **WAL segment size** (`-segment-size`): 64MB-1GB - default 512MB
+- **Fsync mode** (`-fsync-mode`): every_event|batch|periodic - default periodic
+- **Replication batch** (`-replication-batch`): 100-10000 - default 100
+- **Dedup TTL** (`-dedup-ttl`): 24-720 hours - default 168 (7 days)
+- **Ack timeout** (`-ack-timeout`): 5s-60s - default 30s
+- **Max retries** (`-max-retries`): 1-10 - default 5
+- **Retry backoff** (`-retry-backoff`): 100ms-10s - default 1s
 
 ## XI. Security
 

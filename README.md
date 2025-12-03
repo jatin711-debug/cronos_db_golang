@@ -143,22 +143,21 @@ See [MVP_BUILD_GUIDE.md](MVP_BUILD_GUIDE.md) for detailed instructions.
 -grpc-addr=string        # gRPC address (default: ":9000")
 
 # WAL
--wal-max-segment-size=bytes  # Segment size (default: 512MB)
+-segment-size=bytes      # Segment size (default: 512MB)
+-fsync-mode=mode         # Fsync mode: every_event|batch|periodic (default: periodic)
 
 # Scheduler
--scheduler-tick-interval=duration  # Tick interval (default: 100ms)
+-tick-ms=int             # Tick duration in ms (default: 100)
+-wheel-size=int          # Timing wheel size (default: 60)
 
 # Delivery
--dispatcher-max-retries=int    # Max delivery retries (default: 5)
--dispatcher-retry-delay=duration  # Retry delay (default: 1s)
-
-# Dead Letter Queue
--dlq-enabled=bool        # Enable DLQ (default: true)
--dlq-data-dir=string     # DLQ directory (default: "./data/dlq")
--dlq-max-retries=int     # Max retries before DLQ (default: 3)
+-ack-timeout=duration    # Ack timeout (default: 30s)
+-max-retries=int         # Max delivery retries (default: 5)
+-retry-backoff=duration  # Retry backoff (default: 1s)
+-max-credits=int         # Max delivery credits (default: 1000)
 
 # Dedup
--dedup-ttl=hours         # Dedup TTL (default: 168h/7 days)
+-dedup-ttl=int           # Dedup TTL in hours (default: 168/7 days)
 ```
 
 ## Project Structure

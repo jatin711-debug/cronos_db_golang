@@ -266,24 +266,30 @@ go run test_client.go
 -node-id=string          # Unique node identifier (required)
 -data-dir=string         # Data directory (default: "./data")
 -grpc-addr=string        # gRPC address (default: ":9000")
+-http-addr=string        # HTTP address for health checks (default: ":8080")
 
 # WAL Configuration
--wal-max-segment-size=bytes  # Segment size (default: 512MB)
+-segment-size=bytes      # Segment size (default: 512MB)
+-index-interval=int      # Index interval in events (default: 1000)
+-fsync-mode=string       # Fsync mode: every_event|batch|periodic (default: periodic)
+-flush-interval=int      # Flush interval in ms (default: 1000)
 
 # Scheduler Configuration
--scheduler-tick-interval=duration  # Tick interval (default: 100ms)
+-tick-ms=int             # Tick duration in ms (default: 100)
+-wheel-size=int          # Timing wheel size (default: 60)
 
 # Delivery Configuration
--dispatcher-max-retries=int      # Max delivery retries (default: 5)
--dispatcher-retry-delay=duration # Retry delay (default: 1s)
-
-# Dead Letter Queue
--dlq-enabled=bool        # Enable DLQ (default: true)
--dlq-data-dir=string     # DLQ directory (default: "./data/dlq")
--dlq-max-retries=int     # Max retries before DLQ (default: 3)
+-ack-timeout=duration    # Ack timeout (default: 30s)
+-max-retries=int         # Max delivery retries (default: 5)
+-retry-backoff=duration  # Retry backoff (default: 1s)
+-max-credits=int         # Max delivery credits (default: 1000)
 
 # Dedup Configuration
--dedup-ttl=hours         # Dedup TTL in hours (default: 168/7 days)
+-dedup-ttl=int           # Dedup TTL in hours (default: 168/7 days)
+
+# Replication Configuration
+-replication-batch=int   # Replication batch size (default: 100)
+-replication-timeout=duration  # Replication timeout (default: 10s)
 ```
 
 ### Environment Variables
@@ -376,20 +382,26 @@ go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
 
 ```bash
 # Larger segments, less frequent rotation
-./bin/cronos-api -node-id=node1 -wal-max-segment-size=1073741824  # 1GB
+./bin/cronos-api -node-id=node1 -segment-size=1073741824  # 1GB
 
 # Faster scheduler ticks
-./bin/cronos-api -node-id=node1 -scheduler-tick-interval=10ms
+./bin/cronos-api -node-id=node1 -tick-ms=10
+
+# Batch fsync for better throughput
+./bin/cronos-api -node-id=node1 -fsync-mode=batch
 ```
 
 ### For Low Latency
 
 ```bash
 # Lower retry delays
-./bin/cronos-api -node-id=node1 -dispatcher-retry-delay=100ms
+./bin/cronos-api -node-id=node1 -retry-backoff=100ms
 
-# Disable DLQ for simpler flow
-./bin/cronos-api -node-id=node1 -dlq-enabled=false
+# Fsync every event for durability
+./bin/cronos-api -node-id=node1 -fsync-mode=every_event
+
+# Lower ack timeout
+./bin/cronos-api -node-id=node1 -ack-timeout=5s
 ```
 
 ## Next Steps
