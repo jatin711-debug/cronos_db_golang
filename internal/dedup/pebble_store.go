@@ -13,10 +13,10 @@ import (
 
 // PebbleStore is a PebbleDB-backed dedup store
 type PebbleStore struct {
-	db         *pebble.DB
-	dataDir    string
+	db          *pebble.DB
+	dataDir     string
 	partitionID int32
-	ttlHours   int32
+	ttlHours    int32
 }
 
 // NewPebbleStore creates a new PebbleStore
@@ -59,11 +59,11 @@ func (p *PebbleStore) CheckAndStore(messageID string, offset int64) (bool, error
 		return false, fmt.Errorf("check key: %w", err)
 	}
 
-	// Store new entry
+	// Store new entry - use NoSync for performance (WAL provides durability)
 	expirationTS := time.Now().UnixMilli() + int64(p.ttlHours)*60*60*1000
 	value := p.buildValue(offset, expirationTS)
 
-	if err := p.db.Set(key, value, pebble.Sync); err != nil {
+	if err := p.db.Set(key, value, pebble.NoSync); err != nil {
 		return false, fmt.Errorf("set key: %w", err)
 	}
 
@@ -120,7 +120,7 @@ func (p *PebbleStore) PruneExpired() (int, error) {
 		}
 
 		if expirationTS < now {
-			if err := p.db.Delete(iter.Key(), pebble.Sync); err != nil {
+			if err := p.db.Delete(iter.Key(), pebble.NoSync); err != nil {
 				return pruned, fmt.Errorf("delete expired key: %w", err)
 			}
 			pruned++

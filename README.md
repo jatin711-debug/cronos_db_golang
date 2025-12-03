@@ -222,11 +222,11 @@ cronos_db/
 ### Next Phase 🚧
 
 **Distributed Features**
-- [ ] Distributed replication (leader-follower)
-- [ ] Raft consensus for metadata
-- [ ] Multi-partition support
-- [ ] Consistent hashing for partition routing
-- [ ] Cluster membership & discovery
+- [x] Distributed replication (leader-follower)
+- [x] Raft consensus for metadata
+- [x] Multi-partition support
+- [x] Consistent hashing for partition routing
+- [x] Cluster membership & discovery
 
 **Performance Optimizations**
 - [x] Write batching (100-1000 events per syscall)
