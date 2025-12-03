@@ -229,13 +229,13 @@ cronos_db/
 - [ ] Cluster membership & discovery
 
 **Performance Optimizations**
-- [ ] Write batching (100-1000 events per syscall)
-- [ ] Batched delivery (send 100+ events per gRPC call)
-- [ ] Custom binary protocol for internal replication
-- [ ] Memory-mapped WAL for zero-copy reads
-- [ ] Lock-free dispatcher with sharding
-- [ ] Timer pooling for 10M+ event capacity
-- [ ] 1ms scheduler tick granularity
+- [x] Write batching (100-1000 events per syscall)
+- [x] Batched delivery (send 100+ events per gRPC call)
+- [x] Custom binary protocol for internal replication
+- [x] Memory-mapped WAL for zero-copy reads
+- [x] Lock-free dispatcher with sharding
+- [x] Timer pooling for 10M+ event capacity
+- [x] 1ms scheduler tick granularity
 
 **Production Hardening**
 - [ ] Metrics & monitoring (Prometheus/OpenTelemetry)

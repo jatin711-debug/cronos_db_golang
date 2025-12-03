@@ -1,7 +1,6 @@
 package replication
 
 import (
-	"context"
 	"fmt"
 	"log"
 	"sync"
@@ -9,8 +8,7 @@ import (
 
 	"cronos_db/pkg/types"
 
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
+	"net"
 )
 
 // Leader manages replication to followers
@@ -22,7 +20,7 @@ type Leader struct {
 	batchSize     int32
 	flushInterval time.Duration
 	quit          chan struct{}
-	connections   map[string]*grpc.ClientConn
+	transports    map[string]*Transport
 }
 
 // FollowerInfo represents metadata about a follower replica
@@ -47,7 +45,7 @@ func NewLeader(partitionID int32, batchSize int32, flushInterval time.Duration) 
 		batchSize:     batchSize,
 		flushInterval: flushInterval,
 		quit:          make(chan struct{}),
-		connections:   make(map[string]*grpc.ClientConn),
+		transports:    make(map[string]*Transport),
 	}
 }
 
@@ -76,26 +74,73 @@ func (l *Leader) AddFollower(id, address string) error {
 
 // connectFollower establishes connection to follower
 func (l *Leader) connectFollower(id, address string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	conn, err := grpc.DialContext(ctx, address,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithBlock(),
-	)
+	conn, err := net.DialTimeout("tcp", address, 5*time.Second)
 	if err != nil {
 		log.Printf("[LEADER] Failed to connect to follower %s at %s: %v", id, address, err)
 		return
 	}
 
+	transport := NewTransport(conn)
+
+	// Perform handshake
+	handshake := &HandshakeMessage{NodeID: "leader"} // In real system, pass actual ID
+	payload, _ := handshake.Encode()
+	if err := transport.WriteMessage(MsgTypeHandshake, payload); err != nil {
+		log.Printf("[LEADER] Handshake failed to %s: %v", id, err)
+		transport.Close()
+		return
+	}
+
 	l.mu.Lock()
-	l.connections[id] = conn
+	l.transports[id] = transport
 	if follower, exists := l.followers[id]; exists {
 		follower.Connected = true
 	}
 	l.mu.Unlock()
 
-	log.Printf("[LEADER] Connected to follower %s at %s", id, address)
+	log.Printf("[LEADER] Connected to follower %s at %s (binary protocol)", id, address)
+
+	// Start reader loop for acks
+	go l.readLoop(id, transport)
+}
+
+// readLoop reads messages from follower
+func (l *Leader) readLoop(id string, t *Transport) {
+	for {
+		msgType, payload, err := t.ReadMessage()
+		if err != nil {
+			log.Printf("[LEADER] Connection lost to %s: %v", id, err)
+			l.mu.Lock()
+			if f, ok := l.followers[id]; ok {
+				f.Connected = false
+			}
+			delete(l.transports, id)
+			l.mu.Unlock()
+			return
+		}
+
+		if msgType == MsgTypeAppendAck {
+			ack := &AppendAckMessage{}
+			if err := ack.Decode(payload); err == nil {
+				l.handleAck(id, ack)
+			}
+		}
+	}
+}
+
+// handleAck handles acknowledgment
+func (l *Leader) handleAck(id string, ack *AppendAckMessage) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if follower, ok := l.followers[id]; ok {
+		if ack.Success {
+			if ack.Offset > follower.HighWatermark {
+				follower.HighWatermark = ack.Offset
+			}
+			follower.InSync = true
+		}
+	}
 }
 
 // RemoveFollower removes a follower
@@ -108,9 +153,9 @@ func (l *Leader) RemoveFollower(id string) error {
 	}
 
 	// Close connection
-	if conn, exists := l.connections[id]; exists {
-		conn.Close()
-		delete(l.connections, id)
+	if trans, exists := l.transports[id]; exists {
+		trans.Close()
+		delete(l.transports, id)
 	}
 
 	delete(l.followers, id)
@@ -170,21 +215,33 @@ func (l *Leader) flushFollower(follower *FollowerInfo) error {
 		return nil
 	}
 
-	conn, exists := l.connections[follower.ID]
-	if !exists || conn == nil {
+	trans, exists := l.transports[follower.ID]
+	if !exists || trans == nil {
 		return fmt.Errorf("no connection to follower %s", follower.ID)
 	}
 
-	// In production, this would call ReplicationService.Append()
-	// For now, just simulate the replication
-	log.Printf("[LEADER] Replicating %d events to %s", len(follower.Buffer), follower.ID)
+	// Create AppendEntries message
+	msg := &AppendEntriesMessage{
+		Term:   l.epoch,
+		Events: follower.Buffer,
+	}
 
-	// Update follower state
+	payload, err := msg.Encode()
+	if err != nil {
+		return err
+	}
+
+	if err := trans.WriteMessage(MsgTypeAppendEntries, payload); err != nil {
+		return err
+	}
+
+	log.Printf("[LEADER] Replicating %d events to %s (binary)", len(follower.Buffer), follower.ID)
+
+	// Assume success for now, real ack comes async
+	// Update next offset
 	if len(follower.Buffer) > 0 {
 		lastEvent := follower.Buffer[len(follower.Buffer)-1]
 		follower.NextOffset = lastEvent.Offset + 1
-		follower.HighWatermark = lastEvent.Offset
-		follower.InSync = true
 	}
 
 	// Clear buffer
@@ -288,9 +345,9 @@ func (l *Leader) Stop() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	for id, conn := range l.connections {
-		conn.Close()
-		delete(l.connections, id)
+	for id, trans := range l.transports {
+		trans.Close()
+		delete(l.transports, id)
 	}
 }
 

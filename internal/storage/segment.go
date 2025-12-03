@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 
 	"cronos_db/pkg/types"
@@ -20,6 +21,7 @@ type Segment struct {
 	segmentFile     *os.File
 	writer          *bufio.Writer
 	reader          io.ReaderAt
+	mmapData        []byte // Memory mapped data
 	firstOffset     int64
 	lastOffset      int64
 	firstTS         int64
@@ -60,10 +62,19 @@ func NewSegment(dataDir string, firstOffset int64, isActive bool) (*Segment, err
 		return nil, fmt.Errorf("create index: %w", err)
 	}
 
+	// Try to mmap the file for reading
+	var mmapData []byte
+	stat, _ := file.Stat()
+	if stat.Size() > 0 {
+		mmapData, _ = syscall.Mmap(int(file.Fd()), 0, int(stat.Size()), syscall.PROT_READ, syscall.MAP_SHARED)
+		// We ignore mmap errors and fall back to file reading (mmapData will be nil or partial if error)
+	}
+
 	segment := &Segment{
 		segmentFile:     file,
 		writer:          bufio.NewWriterSize(file, 1024*1024), // 1MB buffer
 		reader:          file,                                 // io.ReaderAt doesn't have buffered option
+		mmapData:        mmapData,
 		firstOffset:     firstOffset,
 		nextOffset:      firstOffset,
 		createdTS:       time.Now().UnixMilli(),
@@ -77,7 +88,7 @@ func NewSegment(dataDir string, firstOffset int64, isActive bool) (*Segment, err
 	}
 
 	// Write header if new file
-	stat, _ := file.Stat()
+	stat, _ = file.Stat()
 	if stat.Size() == 0 {
 		if err := segment.writeHeader(); err != nil {
 			file.Close()
@@ -115,10 +126,18 @@ func OpenSegment(dataDir string, filename string) (*Segment, error) {
 		return nil, fmt.Errorf("open index: %w", err)
 	}
 
+	// Try to mmap the file
+	var mmapData []byte
+	if stat.Size() > 0 {
+		mmapData, _ = syscall.Mmap(int(file.Fd()), 0, int(stat.Size()), syscall.PROT_READ, syscall.MAP_SHARED)
+		// Fallback ignored
+	}
+
 	segment := &Segment{
 		segmentFile:   file,
 		writer:        bufio.NewWriterSize(file, 1024*1024),
 		reader:        file,
+		mmapData:      mmapData,
 		firstOffset:   firstOffset,
 		createdTS:     time.Now().UnixMilli(),
 		isActive:      true, // Opened segments are active by default
@@ -180,6 +199,62 @@ func (s *Segment) AppendEvent(event *types.Event, indexInterval int64) error {
 	return fmt.Errorf("cannot append to closed segment")
 }
 
+// AppendBatch appends a batch of events
+func (s *Segment) AppendBatch(events []*types.Event, indexInterval int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if !s.isActive {
+		return fmt.Errorf("cannot append to closed segment")
+	}
+
+	// Flush writer to get accurate file position
+	if err := s.writer.Flush(); err != nil {
+		return fmt.Errorf("flush before append: %w", err)
+	}
+
+	// Get current file position before writing
+	filePos, err := s.segmentFile.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return fmt.Errorf("seek: %w", err)
+	}
+
+	for _, event := range events {
+		// Build event record
+		record := s.buildEventRecord(event)
+
+		// Write record
+		if err := s.writeRecord(record); err != nil {
+			return fmt.Errorf("write record: %w", err)
+		}
+
+		// Update metadata
+		s.lastOffset = event.Offset
+		s.lastTS = event.GetScheduleTs()
+		if s.firstTS == 0 {
+			s.firstTS = event.GetScheduleTs()
+		}
+		s.nextOffset++
+
+		recordLen := int64(len(record))
+		s.sizeBytes = filePos + recordLen
+
+		// Write index entry if needed (using sparse indexing)
+		if s.nextOffset-s.firstOffset >= s.nextIndexOffset {
+			if err := s.index.AddEntry(event.GetScheduleTs(), event.Offset, filePos); err != nil {
+				return fmt.Errorf("write index: %w", err)
+			}
+			s.nextIndexOffset += indexInterval
+			s.indexEntries++
+		}
+
+		// Advance file pos for next event in batch
+		filePos += recordLen
+	}
+
+	return nil
+}
+
 // appendEventActive appends to active segment
 func (s *Segment) appendEventActive(event *types.Event, indexInterval int64) error {
 	// Flush writer to get accurate file position
@@ -209,6 +284,13 @@ func (s *Segment) appendEventActive(event *types.Event, indexInterval int64) err
 	}
 	s.nextOffset++
 	s.sizeBytes = filePos + int64(len(record))
+
+	// Remap if needed (extend mmap)
+	// For simplicity, we only remap on close/reopen or periodic maintenance in a real system
+	// Here we just accept that mmapData might be stale until updated or we fall back to file read
+	// if offset > len(mmapData).
+	// Ideally we would munmap and mmap again with new size, but that's expensive on every write.
+	// We'll rely on file reading for very recent writes if they aren't in mmap yet.
 
 	// Write index entry if needed (using sparse indexing)
 	if s.nextOffset-s.firstOffset >= s.nextIndexOffset {
@@ -427,6 +509,76 @@ func (s *Segment) ReadEvent(targetOffset int64) (*types.Event, error) {
 		}
 	}
 
+	// Try to read from mmap first
+	if s.mmapData != nil && startPos < int64(len(s.mmapData)) {
+		return s.readEventMmap(targetOffset, startPos)
+	}
+
+	return s.readEventFile(targetOffset, startPos)
+}
+
+// readEventMmap reads event from memory mapped data
+func (s *Segment) readEventMmap(targetOffset int64, startPos int64) (*types.Event, error) {
+	pos := int(startPos)
+	data := s.mmapData
+
+	for pos < len(data) {
+		// Read length
+		if pos+4 > len(data) {
+			break
+		}
+		length := int64(binary.BigEndian.Uint32(data[pos : pos+4]))
+		if length <= 4 || length > 10*1024*1024 {
+			break
+		}
+
+		// Check if full record is available
+		if pos+int(length) > len(data) {
+			break
+		}
+
+		// Parse event
+		// Record data starts after length (4 bytes).
+		// recordData includes CRC + data.
+		recordData := data[pos+4 : pos+int(length)]
+
+		// Optimization: Check offset before parsing full event?
+		// Offset is at bytes 8-16 of recordData (after 4 byte CRC + 4 byte Length which is not in recordData)
+		// Wait, recordData here excludes the length prefix.
+		// Structure: [Length 4][CRC 4][Offset 8]...
+		// So in recordData (which is record[4:] from writer POV):
+		// [0-3] is CRC
+		// [4-11] is Offset
+
+		if len(recordData) > 12 {
+			offsetVal := int64(binary.BigEndian.Uint64(recordData[4:12]))
+			if offsetVal > targetOffset {
+				return nil, fmt.Errorf("event not found (passed target)")
+			}
+			if offsetVal < targetOffset {
+				pos += int(length)
+				continue
+			}
+		}
+
+		event, err := parseEventRecordWithoutLength(recordData)
+		if err != nil {
+			return nil, fmt.Errorf("parse event: %w", err)
+		}
+
+		if event.Offset == targetOffset {
+			return event, nil
+		}
+
+		pos += int(length)
+	}
+
+	// If not found in mmap (maybe partial mmap), fall back to file
+	return s.readEventFile(targetOffset, int64(pos))
+}
+
+// readEventFile reads event from file
+func (s *Segment) readEventFile(targetOffset int64, startPos int64) (*types.Event, error) {
 	// Open a separate file handle for reading to avoid conflicts with writer
 	filePath := filepath.Join(s.dataDir, "segments", s.filename)
 	file, err := os.Open(filePath)
@@ -559,6 +711,13 @@ func (s *Segment) Close() error {
 	if err := s.segmentFile.Sync(); err != nil {
 		return err
 	}
+
+	// Unmap memory
+	if s.mmapData != nil {
+		syscall.Munmap(s.mmapData)
+		s.mmapData = nil
+	}
+
 	if s.index != nil {
 		if err := s.index.Close(); err != nil {
 			return err

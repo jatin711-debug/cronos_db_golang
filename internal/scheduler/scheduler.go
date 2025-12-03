@@ -77,7 +77,7 @@ func (s *Scheduler) Schedule(event *types.Event) error {
 	}
 
 	// Create timer and add to timing wheel
-	timer := NewTimer(eventID, event)
+	timer := s.timingWheel.GetTimer(eventID, event)
 	log.Printf("[SCHEDULER] Created timer for event %s, expirationMs=%d",
 		eventID, timer.ExpirationMs)
 
@@ -95,6 +95,8 @@ func (s *Scheduler) GetReadyEvents() []*types.Event {
 		case expiredTimers := <-s.timingWheel.GetExpiredChannel():
 			for _, timer := range expiredTimers {
 				s.readyQueue = append(s.readyQueue, timer.Event)
+				// Return timer to pool
+				s.timingWheel.PutTimer(timer)
 			}
 		default:
 			// No more pending expired events

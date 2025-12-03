@@ -24,6 +24,7 @@ type TimingWheel struct {
 	quit          chan struct{}
 	maxLevels     int32 // Maximum number of overflow wheel levels
 	currentLevel  int32 // Current level in the hierarchy (0 = root)
+	timerPool     *sync.Pool
 }
 
 // Timer represents a scheduled event
@@ -38,7 +39,7 @@ type Timer struct {
 // NewTimingWheel creates a new timing wheel
 // startTimeMs is the absolute start time (only used by root wheel, pass 0 for overflow wheels)
 func NewTimingWheel(tickMs int32, wheelSize int32, maxLevels int32, currentLevel int32, startTimeMs int64) *TimingWheel {
-	return &TimingWheel{
+	tw := &TimingWheel{
 		tickMs:       tickMs,
 		wheelSize:    wheelSize,
 		currentTick:  0,
@@ -49,7 +50,13 @@ func NewTimingWheel(tickMs int32, wheelSize int32, maxLevels int32, currentLevel
 		quit:         make(chan struct{}),
 		maxLevels:    maxLevels,
 		currentLevel: currentLevel,
+		timerPool: &sync.Pool{
+			New: func() interface{} {
+				return &Timer{}
+			},
+		},
 	}
+	return tw
 }
 
 // initialize initializes wheel slots
@@ -117,6 +124,8 @@ func (tw *TimingWheel) addTimerLocked(timer *Timer) error {
 		// Its start time is the same as the root wheel's start time
 		overflowTickMs := tw.tickMs * tw.wheelSize
 		tw.overflowWheel = NewTimingWheel(overflowTickMs, tw.wheelSize, tw.maxLevels, nextLevel, tw.startTimeMs)
+		// Share pool with overflow wheel
+		tw.overflowWheel.timerPool = tw.timerPool
 		tw.overflowWheel.initialize()
 		log.Printf("[TIMING-WHEEL] Created overflow wheel: level=%d, tickMs=%d", nextLevel, overflowTickMs)
 	}
@@ -312,7 +321,7 @@ type SchedulerStats struct {
 	ReadyEvents   int64
 }
 
-// NewTimer creates a new timer
+// NewTimer creates a new timer (deprecated, use GetTimer)
 // eventID is the unique identifier for this timer
 // event is the event to be triggered
 // The timer stores the absolute expiration time from the event's schedule timestamp
@@ -323,4 +332,22 @@ func NewTimer(eventID string, event *types.Event) *Timer {
 		ExpirationMs: event.GetScheduleTs(), // Store absolute expiration time
 		CreatedTS:    time.Now().UnixMilli(),
 	}
+}
+
+// GetTimer gets a timer from the pool or creates a new one
+func (tw *TimingWheel) GetTimer(eventID string, event *types.Event) *Timer {
+	timer := tw.timerPool.Get().(*Timer)
+	timer.EventID = eventID
+	timer.Event = event
+	timer.ExpirationMs = event.GetScheduleTs()
+	timer.CreatedTS = time.Now().UnixMilli()
+	timer.SlotIndex = -1
+	return timer
+}
+
+// PutTimer returns a timer to the pool
+func (tw *TimingWheel) PutTimer(timer *Timer) {
+	timer.Event = nil
+	timer.EventID = ""
+	tw.timerPool.Put(timer)
 }
