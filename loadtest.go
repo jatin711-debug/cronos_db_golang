@@ -61,7 +61,7 @@ func main() {
 	config := parseFlags()
 
 	fmt.Println("╔════════════════════════════════════════════════════════════╗")
-	fmt.Println("║           ChronosDB Load Test                              ║")
+	fmt.Println("║           CronosDB Load Test                              ║")
 	fmt.Println("╚════════════════════════════════════════════════════════════╝")
 	fmt.Println()
 

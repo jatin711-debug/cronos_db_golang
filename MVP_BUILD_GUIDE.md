@@ -1,8 +1,8 @@
-# ChronosDB MVP Build & Deployment Guide
+# CronosDB MVP Build & Deployment Guide
 
 ## Overview
 
-This guide walks you through building and deploying the ChronosDB MVP (Minimum Viable Product). The MVP includes:
+This guide walks you through building and deploying the CronosDB MVP (Minimum Viable Product). The MVP includes:
 
 - ✅ Single-node WAL storage
 - ✅ Sparse index for WAL seeking
@@ -489,7 +489,7 @@ This gracefully:
 
 ## Conclusion
 
-You now have a working ChronosDB MVP! The system provides:
+You now have a working CronosDB MVP! The system provides:
 
 1. **Timestamp-triggered events** - Events scheduled for future execution
 2. **Durable storage** - WAL with fsync for crash recovery

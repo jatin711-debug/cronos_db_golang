@@ -1,10 +1,10 @@
-# ChronosDB: Distributed Timestamp-Triggered Database
+# CronosDB: Distributed Timestamp-Triggered Database
 
 ## I. High-Level Architecture
 
 ### System Overview
 
-ChronosDB is a distributed, timestamp-triggered database with built-in scheduling, pub/sub messaging, and WAL-based persistence. Events are scheduled for future execution and triggered based on their timestamp.
+CronosDB is a distributed, timestamp-triggered database with built-in scheduling, pub/sub messaging, and WAL-based persistence. Events are scheduled for future execution and triggered based on their timestamp.
 
 ### Component Architecture
 
@@ -49,13 +49,27 @@ ChronosDB is a distributed, timestamp-triggered database with built-in schedulin
    ```
    Client → API Gateway → Consistent Hashing → Partition Leader
                                         ↓
-                                    WAL Append
+                                    Bloom Filter Check (fast path)
                                         ↓
-                                    Deduplication Check
+                                    If not in bloom → StoreOnly (skip read)
+                                    If maybe in bloom → PebbleDB Check
                                         ↓
-                                    If schedule_ts ≤ now: → Scheduler Timing Wheel
+                                    WAL Append (buffered, batch)
                                         ↓
-                                    Replication to Followers
+                                    Scheduler Timing Wheel
+                                        ↓
+                                    Ack to Client
+   ```
+
+   **Batch Publish Path** (High Throughput):
+   ```
+   Client → PublishBatch(events[]) → Group by Partition
+                                        ↓
+                                    Batch Bloom/Dedup Check
+                                        ↓
+                                    WAL AppendBatch (single write)
+                                        ↓
+                                    ScheduleBatch (single lock)
                                         ↓
                                     Ack to Client
    ```
@@ -213,9 +227,15 @@ After max retries → Dead Letter Queue (DLQ)
 ```
 
 ### Timer ID Format
-- Timer ID: `message_id-offset` (e.g., "msg-123-42")
-- Allows same message_id to be scheduled multiple times with AllowDuplicate=true
+- Timer ID: `offset` (numeric, e.g., "12345")
+- Uses event offset as unique identifier (cheaper than string concatenation)
 - Each event gets unique timer in the timing wheel
+- Timer pool with sync.Pool for reduced allocations
+
+### Batch Scheduling
+- `ScheduleBatch(events[])` - single lock acquisition for all events
+- Reduces mutex contention under high load
+- Events grouped by partition before scheduling
 
 ## IV. Delivery Model (At-Least-Once)
 
@@ -311,6 +331,34 @@ Events that fail delivery after max retries are sent to a Dead Letter Queue:
 - Resume on crash
 
 ## VI. Deduplication Strategy
+
+### Bloom Filter + PebbleDB (Two-Tier)
+
+```
+┌─────────────────────────────────────────────────────────┐
+│           Bloom Filter (In-Memory)                      │
+├─────────────────────────────────────────────────────────┤
+│  - Lock-free using atomic CAS operations               │
+│  - FNV-1a double hashing                               │
+│  - 10M items @ 1% FPR = ~12MB memory                   │
+│  - Fast path: O(k) bit checks, k ≈ 7 hashes           │
+│                                                         │
+│  If bloom says "NO" → definitely new (skip PebbleDB)   │
+│  If bloom says "MAYBE" → check PebbleDB               │
+└─────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────┐
+│           PebbleDB (Persistent)                         │
+├─────────────────────────────────────────────────────────┤
+│  - LSM tree with 64MB memtable                         │
+│  - Disabled internal WAL (we have our own)             │
+│  - NoSync writes for performance                       │
+│  - TTL: 7 days (automatic expiration)                  │
+│                                                         │
+│  message_id → (offset, expiration_ts)                  │
+└─────────────────────────────────────────────────────────┘
+```
 
 ### message_id Based Deduplication
 ```
@@ -437,12 +485,38 @@ Consumers reconnect to new partition nodes
 
 ## IX. Performance Characteristics
 
-### Throughput
+### Throughput (Benchmarked)
 
-- **Write**: ~100K events/sec per partition (single leader)
-- **Read**: ~500K events/sec per partition (multiple followers)
-- **Latency**: 5-10ms p99 for publish
-- **Scheduling**: 100ms tick default (configurable), supports 10M+ scheduled events
+- **Single Node**: ~100K events/sec (batch mode)
+- **3-Node Cluster**: ~300K events/sec (batch mode with 100 events/batch)
+- **Latency P50**: ~225µs (batch publish)
+- **Latency P99**: ~740µs (batch publish)
+- **Scheduling**: 100ms tick default, hierarchical timing wheels for overflow
+
+### Performance Optimizations
+
+1. **Bloom Filter Fast Path**
+   - Lock-free bloom filter using atomic CAS operations
+   - Skips PebbleDB lookup for new message IDs (~99% of cases)
+   - FNV-1a double hashing, configurable false positive rate
+   
+2. **Batch Operations**
+   - `PublishBatch` API for high-throughput ingestion
+   - Single WAL write per batch
+   - Single lock acquisition for scheduler batch
+   - Reduced gRPC round-trips
+
+3. **PebbleDB Optimizations**
+   - 64MB memtable (vs 4MB default)
+   - Disabled internal WAL (we have our own)
+   - NoSync writes (durability via our WAL)
+   - Parallel compaction
+
+4. **WAL Optimizations**
+   - 1MB buffered writer
+   - Batch append operations
+   - Sparse indexing for fast seeks
+   - Memory-mapped reads where supported
 
 ### Scalability
 
@@ -458,14 +532,49 @@ Consumers reconnect to new partition nodes
 - **WAL**: Always append-only before ack
 - **Dedup**: Persistent with TTL (default 7 days)
 
-### Consistency
+## XII. gRPC API
+
+### Service Definition
+
+```protobuf
+service EventService {
+  // Single event publish
+  rpc Publish(PublishRequest) returns (PublishResponse);
+  
+  // Batch publish for high throughput (100-500 events per call)
+  rpc PublishBatch(PublishBatchRequest) returns (PublishBatchResponse);
+  
+  // Bidirectional streaming subscription
+  rpc Subscribe(stream SubscribeRequest) returns (stream Delivery);
+  
+  // Acknowledgment stream
+  rpc Ack(stream AckRequest) returns (stream AckResponse);
+  
+  // Historical replay
+  rpc Replay(ReplayRequest) returns (stream ReplayEvent);
+}
+```
+
+### Batch Publish (Recommended for High Throughput)
+
+```go
+// PublishBatch - 100-500 events per call optimal
+req := &PublishBatchRequest{
+    Events: events,           // Slice of Event
+    AllowDuplicate: false,    // Enable dedup checking
+}
+resp, err := client.PublishBatch(ctx, req)
+// resp.PublishedCount, resp.DuplicateCount, resp.ErrorCount
+```
+
+## XIII. Consistency
 
 - **Metadata**: Strong (Raft consensus)
 - **WAL**: Eventually consistent (async replication)
 - **Delivery**: At-least-once (not exactly-once)
 - **Ordering**: Per partition, per consumer group (not global)
 
-## X. Operational Considerations
+## XIV. Operational Considerations
 
 ### Monitoring
 
@@ -494,7 +603,7 @@ Consumers reconnect to new partition nodes
 - **Max retries** (`-max-retries`): 1-10 - default 5
 - **Retry backoff** (`-retry-backoff`): 100ms-10s - default 1s
 
-## XI. Security
+## XV. Security
 
 ### Authentication
 - Mutual TLS between nodes
