@@ -6,7 +6,7 @@ BUILD_DIR=bin
 
 # Load test settings (can be overridden: make loadtest-batch BATCH_SIZE=200)
 PUBLISHERS?=30
-EVENTS?=3333
+EVENTS?=10000
 BATCH_SIZE?=100
 
 # Default target

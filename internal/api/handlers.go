@@ -225,7 +225,7 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 		partitionEvents[partition.ID] = append(partitionEvents[partition.ID], event)
 	}
 
-	// Batch write to each partition's WAL
+	// Batch write to each partition's WAL and schedule
 	for partitionID, events := range partitionEvents {
 		partitionInternal, err := h.partitionManager.GetInternalPartition(partitionID)
 		if err != nil {
@@ -239,12 +239,14 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 			continue
 		}
 
-		// Schedule all events
+		// Batch schedule all events (single lock acquisition)
+		if err := partitionInternal.Scheduler.ScheduleBatch(events); err != nil {
+			// Events are in WAL, just log scheduling error
+			continue
+		}
+
+		// Update stats
 		for _, event := range events {
-			if err := partitionInternal.Scheduler.Schedule(event); err != nil {
-				// Event is in WAL, just log scheduling error
-				continue
-			}
 			publishedCount++
 
 			if firstOffset == -1 || event.Offset < firstOffset {
