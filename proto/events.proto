@@ -95,6 +95,9 @@ message Delivery {
 
   // Timeout for ack (milliseconds)
   int32 ack_timeout_ms = 4;
+
+  // Batch of events (for batched delivery optimization)
+  repeated Event batch = 5;
 }
 
 message AckRequest {
