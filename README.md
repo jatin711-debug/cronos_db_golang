@@ -40,8 +40,11 @@ protoc --go_out=. --go-grpc_out=. proto/events.proto
 # 2. Build the server
 go build -o bin/cronos-api ./cmd/api/main.go
 
-# 3. Run the server
-./bin/cronos-api -node-id=node-1 -data-dir=./data
+# 3. Run the server (node-id is required)
+./bin/cronos-api -node-id=node1 -data-dir=./data
+
+# Or run directly with go run
+go run ./cmd/api/main.go -node-id=node1
 
 # 4. Check health
 curl http://localhost:8080/health
@@ -115,9 +118,11 @@ See [MVP_BUILD_GUIDE.md](MVP_BUILD_GUIDE.md) for detailed instructions.
 | Write Throughput | ~100K events/sec/partition |
 | Read Throughput | ~500K events/sec/partition |
 | Publish Latency | 5-10ms p99 |
-| Scheduler Tick | 1ms granularity |
+| Scheduler Tick | 100ms default (configurable) |
 | Event Capacity | 10M+ scheduled events |
 | Durability | fsync before ack |
+
+> **Note:** Performance metrics are estimates based on similar systems. Run `go run integration_test_suite.go` to verify functionality.
 
 ## Use Cases
 
@@ -138,16 +143,19 @@ See [MVP_BUILD_GUIDE.md](MVP_BUILD_GUIDE.md) for detailed instructions.
 -grpc-addr=string        # gRPC address (default: ":9000")
 
 # WAL
--segment-size=bytes      # Segment size (default: 512MB)
--fsync-mode=mode         # every_event|batch|periodic
+-wal-max-segment-size=bytes  # Segment size (default: 512MB)
 
 # Scheduler
--tick-ms=int             # Tick duration (default: 100ms)
--wheel-size=int          # Timing wheel size (default: 60)
+-scheduler-tick-interval=duration  # Tick interval (default: 100ms)
 
 # Delivery
--ack-timeout=duration    # Ack timeout (default: 30s)
--max-retries=int         # Max retries (default: 5)
+-dispatcher-max-retries=int    # Max delivery retries (default: 5)
+-dispatcher-retry-delay=duration  # Retry delay (default: 1s)
+
+# Dead Letter Queue
+-dlq-enabled=bool        # Enable DLQ (default: true)
+-dlq-data-dir=string     # DLQ directory (default: "./data/dlq")
+-dlq-max-retries=int     # Max retries before DLQ (default: 3)
 
 # Dedup
 -dedup-ttl=hours         # Dedup TTL (default: 168h/7 days)
@@ -163,16 +171,20 @@ cronos_db/
 ├── internal/
 │   ├── api/                     # gRPC server & handlers
 │   ├── partition/               # Partition management
-│   ├── storage/                 # WAL & segments
+│   ├── storage/                 # WAL, segments & sparse index
 │   ├── scheduler/               # Timing wheel
-│   ├── delivery/                # Event delivery
+│   ├── delivery/                # Event delivery & DLQ
 │   ├── consumer/                # Consumer groups
 │   ├── dedup/                   # Deduplication
 │   ├── replay/                  # Replay engine
 │   ├── replication/             # Leader-follower
 │   └── config/                  # Configuration
+├── pkg/
+│   ├── types/                   # Shared types & protobuf
+│   └── utils/                   # Utility functions
 ├── proto/
 │   └── events.proto             # Protobuf schema
+├── integration_test_suite.go    # Integration tests (23 tests)
 ├── ARCHITECTURE.md
 ├── PROJECT_STRUCTURE.md
 ├── MVP_BUILD_GUIDE.md
@@ -185,12 +197,16 @@ cronos_db/
 ### MVP ✅ Complete
 - [x] Single-node operation
 - [x] WAL storage with segments
+- [x] Sparse index for WAL seeking
 - [x] Timing wheel scheduler
 - [x] gRPC pub/sub
 - [x] Deduplication
 - [x] Consumer groups
 - [x] Replay engine
 - [x] Delivery worker
+- [x] Dead letter queue
+- [x] Unit tests (scheduler, WAL, dedup)
+- [x] Integration tests (23 tests)
 
 ### Next Phase 🚧
 - [ ] Distributed replication

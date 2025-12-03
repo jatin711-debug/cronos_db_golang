@@ -5,73 +5,70 @@
 ```
 cronos_db/
 ├── cmd/                      # Entry points
-│   ├── api/                  # Main API server
-│   │   └── main.go
-│   └── tools/                # Admin tools
-│       └── benchmark.go
+│   └── api/                  # Main API server
+│       └── main.go
 ├── internal/                 # Private application code
 │   ├── api/                  # gRPC handlers
-│   ├── partition/            # Partition management
-│   ├── storage/              # WAL & storage
-│   ├── scheduler/            # Timing wheel & scheduling
-│   ├── delivery/             # Event delivery worker
+│   │   ├── consumer_handler.go
+│   │   ├── grpc_server.go
+│   │   └── handlers.go
+│   ├── config/               # Configuration management
+│   │   ├── config.go
+│   │   └── defaults.go
 │   ├── consumer/             # Consumer group management
+│   │   ├── group.go
+│   │   └── offset_store.go
 │   ├── dedup/                # Deduplication store
-│   ├── replication/          # Leader-follower replication
+│   │   ├── dedup_test.go     # Unit tests
+│   │   ├── pebble_store.go
+│   │   └── store.go
+│   ├── delivery/             # Event delivery worker
+│   │   ├── dispatcher.go
+│   │   ├── dlq.go            # Dead letter queue
+│   │   └── worker.go
+│   ├── partition/            # Partition management
+│   │   └── manager.go
 │   ├── replay/               # Replay engine
-│   ├── raft/                 # Raft consensus layer
-│   ├── metadata/             # Metadata store
-│   ├── proto/                # Generated protobuf code
-│   └── config/               # Configuration management
+│   │   └── engine.go
+│   ├── replication/          # Leader-follower replication
+│   │   ├── follower.go
+│   │   └── leader.go
+│   ├── scheduler/            # Timing wheel & scheduling
+│   │   ├── scheduler.go
+│   │   ├── scheduler_test.go # Unit tests
+│   │   └── timing_wheel.go
+│   └── storage/              # WAL & storage
+│       ├── index.go          # Sparse index
+│       ├── segment.go
+│       ├── wal.go
+│       └── wal_test.go       # Unit tests
 ├── pkg/                      # Public libraries
-│   ├── types/                # Shared types
-│   ├── utils/                # Utility functions
-│   └── errors/               # Error types
-├── data/                     # Runtime data directory
-│   ├── node-1/               # Node-specific data
-│   │   ├── partitions/       # Partition data
-│   │   │   ├── partition-0/
-│   │   │   │   ├── segments/
-│   │   │   │   │   ├── 0000000000000000000.log
-│   │   │   │   │   ├── 0000000000000100000.log
-│   │   │   │   │   └── ...
-│   │   │   │   ├── index/
-│   │   │   │   │   ├── 0000000000000000000.index
-│   │   │   │   │   └── manifest.json
-│   │   │   │   ├── meta/
-│   │   │   │   │   ├── checkpoint.json
-│   │   │   │   │   └── high_watermark
-│   │   │   │   ├── dedup/
-│   │   │   │   │   └── dedup.db
-│   │   │   │   ├── consumer_offsets/
-│   │   │   │   │   └── consumer_offsets.db
-│   │   │   │   └── timer_state/
-│   │   │   │       └── active_timers.dat
-│   │   │   ├── partition-1/
-│   │   │   └── ...
-│   │   ├── raft/
-│   │   │   ├── logs/
-│   │   │   ├── snapshots/
-│   │   │   └── node.json
-│   │   └── wal_cache/
-│   └── node-N/
+│   ├── types/
+│   │   ├── errors.go
+│   │   ├── event.go
+│   │   ├── events.pb.go
+│   │   ├── events_grpc.pb.go
+│   │   ├── grpc.go
+│   │   └── helpers.go
+│   └── utils/
+│       └── hash.go
 ├── proto/                    # Protobuf definitions
-│   ├── events.proto
-│   └── Makefile              # Proto generation
-├── scripts/                  # Build and deployment scripts
-│   ├── build.sh
-│   ├── deploy.sh
-│   └── run-local.sh
-├── test/                     # Test data
-│   ├── fixtures/
-│   └── integration/
-├── docs/                     # Documentation
-│   ├── api.md
-│   ├── deployment.md
-│   └── troubleshooting.md
+│   └── events.proto
+├── data/                     # Runtime data directory
+│   └── partitions/
+│       └── {partition-id}/
+│           ├── segments/     # WAL segment files
+│           ├── index/        # Sparse index files
+│           ├── dedup_{id}/   # PebbleDB dedup store
+│           └── timer_state.json
+├── integration_test_suite.go # Integration tests (23 tests)
+├── test_client.go            # Simple test client
 ├── go.mod
 ├── go.sum
-├── Makefile
+├── ARCHITECTURE.md
+├── PROJECT_STRUCTURE.md
+├── MVP_BUILD_GUIDE.md
+├── IMPLEMENTATION_SUMMARY.md
 └── README.md
 ```
 
@@ -79,18 +76,17 @@ cronos_db/
 
 ### 1. **cmd/api/main.go**
 Main entry point for the API server
-- Starts gRPC server
+- Parses configuration flags
 - Initializes partition manager
-- Sets up Raft cluster
-- Starts background workers
+- Starts gRPC server
+- Sets up health check endpoint
 
-### 2. **internal/partition/**
+### 2. **internal/api/**
 ```
-internal/partition/
-├── partition.go              # Partition struct & methods
-├── manager.go                # Partition manager
-├── consistent_hash.go        # Partition routing
-└── follower.go               # Follower implementation
+internal/api/
+├── grpc_server.go            # gRPC server setup
+├── handlers.go               # Publish, Subscribe, Ack handlers
+└── consumer_handler.go       # Consumer group handlers
 ```
 
 ### 3. **internal/storage/**
@@ -98,28 +94,23 @@ internal/partition/
 internal/storage/
 ├── wal.go                    # WAL main interface
 ├── segment.go                # Segment file management
-├── index.go                  # Sparse index
-├── manifest.go               # Segment manifest
-├── compaction.go             # Compaction logic
-└── recovery.go               # Crash recovery
+├── index.go                  # Sparse index for fast seeking
+└── wal_test.go               # Unit tests
 ```
 
 ### 4. **internal/scheduler/**
 ```
 internal/scheduler/
-├── timing_wheel.go           # Timing wheel implementation
+├── timing_wheel.go           # Hierarchical timing wheel
 ├── scheduler.go              # Scheduler main logic
-├── timer.go                  # Timer event structure
-├── checkpoint.go             # Timer state persistence
-└── worker.go                 # Scheduler worker loop
+└── scheduler_test.go         # Unit tests
 ```
 
 ### 5. **internal/delivery/**
 ```
 internal/delivery/
-├── dispatcher.go             # Event dispatcher
-├── backpressure.go           # Flow control
-├── ack_manager.go            # Ack tracking & retry
+├── dispatcher.go             # Event dispatcher with retries
+├── dlq.go                    # Dead letter queue
 └── worker.go                 # Delivery worker
 ```
 
@@ -127,9 +118,7 @@ internal/delivery/
 ```
 internal/consumer/
 ├── group.go                  # Consumer group struct
-├── offset_manager.go         # Offset tracking
-├── rebalance.go              # Rebalancing logic
-└── state.go                  # Group state management
+└── offset_store.go           # PebbleDB offset tracking
 ```
 
 ### 7. **internal/dedup/**
@@ -137,79 +126,38 @@ internal/consumer/
 internal/dedup/
 ├── store.go                  # Deduplication store interface
 ├── pebble_store.go           # PebbleDB implementation
-├── memory_store.go           # In-memory (testing)
-└── ttl_manager.go            # TTL pruning
+└── dedup_test.go             # Unit tests
 ```
 
 ### 8. **internal/replication/**
 ```
 internal/replication/
 ├── leader.go                 # Leader replication logic
-├── follower.go               # Follower append logic
-├── batch.go                  # Batch management
-├── stream.go                 # Stream protocol
-└── state.go                  # Replication state
+└── follower.go               # Follower append logic
 ```
 
 ### 9. **internal/replay/**
 ```
 internal/replay/
-├── engine.go                 # Replay engine
-├── time_range.go             # Time-range replay
-├── offset_replay.go          # Offset-based replay
-├── scanner.go                # Segment scanner
-└── checkpoint.go             # Replay checkpoint
+└── engine.go                 # Replay engine (time/offset based)
 ```
 
-### 10. **internal/raft/**
-```
-internal/raft/
-├── node.go                   # Raft node wrapper
-├── metadata.go               # Metadata management
-└── transport.go              # Raft transport
-```
-
-### 11. **internal/api/**
-```
-internal/api/
-├── grpc_server.go            # gRPC server setup
-├── handlers.go               # RPC handlers
-├── middleware.go             # Interceptors
-└── validation.go             # Request validation
-```
-
-### 12. **internal/metadata/**
-```
-internal/metadata/
-├── store.go                  # Metadata store interface
-├── partition_assignments.go  # Partition ownership
-├── consumer_groups.go        # Consumer group metadata
-└── checkpoint.go             # Metadata checkpointing
-```
-
-### 13. **internal/config/**
+### 10. **internal/config/**
 ```
 internal/config/
-├── config.go                 # Config struct
-├── loader.go                 # Config loading
-├── defaults.go               # Default values
-└── flags.go                  # CLI flags
+├── config.go                 # Config struct & flag parsing
+└── defaults.go               # Default constant values
 ```
 
-### 14. **pkg/**
+### 11. **pkg/types/**
 ```
-pkg/
-├── types/
-│   ├── event.go              # Event type definitions
-│   ├── partition.go          # Partition types
-│   └── errors.go             # Error types
-├── utils/
-│   ├── file.go               # File utilities
-│   ├── hash.go               # Hashing utilities
-│   └── time.go               # Time utilities
-└── errors/
-    ├── errors.go             # Error types
-    └── codes.go              # Error codes
+pkg/types/
+├── event.go                  # Event & Config types
+├── errors.go                 # Error types
+├── events.pb.go              # Generated protobuf
+├── events_grpc.pb.go         # Generated gRPC
+├── grpc.go                   # gRPC helpers
+└── helpers.go                # Utility functions
 ```
 
 ## File Formats
@@ -241,101 +189,76 @@ pkg/
 └─ ...
 ```
 
-### Index File: `0000000000000000000.index`
+### Index File: `00000000000000000000.index`
 ```
-[Header]
-├─ Magic: "CRNIDX1"
-├─ Version
-└─ Index version
+[Sparse Index Entries - Binary format]
+Each entry: 16 bytes
+├─ Offset: 8 bytes (int64, little-endian)
+├─ Position: 8 bytes (int64, little-endian)
 
-[Sparse Index Entries]
-├─ Entry 0:
-│   ├─ Timestamp: 8 bytes
-│   └─ Offset: 8 bytes
-├─ Entry 1:
-│   ├─ Timestamp: 1703123456000
-│   └─ Offset: 100000
-└─ ...
+Index is created every N events (configurable via SparseIndexInterval)
+Allows O(log n) seeking to approximate offset, then linear scan
 ```
 
-### Manifest: `manifest.json`
+### Timer State: `timer_state.json`
+```json
+{
+  "last_tick": 1703123456000,
+  "active_timers": 1234
+}
+```
+
+### Manifest: `manifest.json` (Planned)
 ```json
 {
   "partition_id": 0,
   "segments": [
     {
-      "filename": "0000000000000000000.log",
+      "filename": "00000000000000000000.log",
       "first_offset": 0,
       "last_offset": 99999,
-      "first_ts": 1703123456000,
-      "last_ts": 1703123556000,
       "size_bytes": 104857600,
       "is_active": false
-    },
-    {
-      "filename": "0000000000010000000.log",
-      "first_offset": 100000,
-      "last_offset": 199999,
-      "first_ts": 1703123556000,
-      "last_ts": 1703123656000,
-      "size_bytes": 104857600,
-      "is_active": true
     }
   ],
-  "high_watermark": 150000,
-  "last_compaction_ts": 1703120000000,
-  "created_ts": 1703123456000,
-  "updated_ts": 1703123656000
+  "high_watermark": 150000
 }
 ```
 
-### Checkpoint: `checkpoint.json`
+### Checkpoint: `checkpoint.json` (Planned)
 ```json
 {
   "partition_id": 0,
   "last_offset": 199999,
-  "last_segment": "0000000000010000000.log",
   "high_watermark": 150000,
   "scheduler_state": {
     "tick_ms": 100,
-    "wheel_size": 60,
-    "active_timers": 1234,
-    "next_tick_ts": 1703123660000,
-    "watermark_ts": 1703123456000
+    "active_timers": 1234
   },
   "consumer_offsets": {
     "group-1": 150000,
     "group-2": 145000
-  },
-  "dedup_db_stats": {
-    "ttl_hours": 168,
-    "approximate_count": 50000
-  },
-  "created_ts": 1703123456000,
-  "updated_ts": 1703123656000
+  }
 }
 ```
 
-## Build Structure
+## Build & Test Commands
 
-```
+```bash
 # Generate protobuf
-make proto
+protoc --go_out=. --go-grpc_out=. proto/events.proto
 
 # Build
-make build
+go build -o bin/cronos-api ./cmd/api/main.go
 
-# Run tests
-make test
+# Run unit tests
+go test ./internal/... -v
 
-# Run locally
-make run-local
+# Run integration tests
+go run integration_test_suite.go
 
-# Build Docker image
-make docker-build
-
-# Deploy
-make deploy
+# Run server
+go run ./cmd/api/main.go -node-id=node1
 ```
 
 ## Configuration
@@ -343,17 +266,18 @@ make deploy
 ### Data Directory Layout
 ```
 data/
-└── {node-id}/
-    ├── config.yaml          # Node config
-    ├── partitions/          # Partition data
-    │   └── {partition-id}/
-    ├── raft/                # Raft data
-    └── logs/                # Application logs
+├── partitions/
+│   └── {partition-id}/
+│       ├── segments/         # WAL segment files
+│       ├── index/            # Sparse index files
+│       ├── dedup_{id}/       # PebbleDB dedup store
+│       └── timer_state.json  # Scheduler state
+├── dlq/                      # Dead letter queue (if enabled)
+└── offsets/                  # Consumer group offsets
 ```
 
 ### Runtime Files
-- `*.log`: WAL segment files
-- `*.index`: Sparse timestamp→offset index
-- `manifest.json`: Segment manifest
-- `checkpoint.json`: Periodic state snapshot
-- `*.db`: PebbleDB stores (dedup, consumer offsets, metadata)
+- `*.log`: WAL segment files (20-char zero-padded offset)
+- `*.index`: Sparse offset→position index
+- `timer_state.json`: Scheduler tick state
+- PebbleDB directories: `dedup_*`, `offsets_*`

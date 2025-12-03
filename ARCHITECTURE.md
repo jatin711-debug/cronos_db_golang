@@ -157,20 +157,35 @@ Each partition is a logical grouping of data with:
 ┌─────────────────────────────────────────────────────────┐
 │                   Timing Wheel                          │
 ├─────┬─────┬─────┬─────┬─────┬─────┬─────┬─────┬─────────┤
-│ 0ms │1ms  │2ms  │3ms  │...  │N ms │     │     │         │
+│ 0   │ 1   │ 2   │ 3   │...  │ N   │     │     │         │
 ├─────┼─────┼─────┼─────┼─────┼─────┼─────┼─────┼─────────┤
 │ [E1]│     │ [E2]│     │ ... │     │     │     │         │
 │ [E3]│     │     │     │     │     │     │     │         │
 └─────┴─────┴─────┴─────┴─────┴─────┴─────┴─────┴─────────┘
   ↑ Current tick
+
+Overflow Wheel (for events beyond base window)
+┌─────────────────────────────────────────────────────────┐
+│             Hierarchical Overflow                       │
+├─────────────────────────────────────────────────────────┤
+│  Level 0: 0-6 seconds    (60 slots × 100ms tick)       │
+│  Level 1: 6-60 seconds   (overflow wheel)              │
+│  Level 2: 60+ seconds    (overflow wheel)              │
+└─────────────────────────────────────────────────────────┘
 ```
 
 **Components**:
-- **Tick Granularity**: 1ms to 1s (configurable)
-- **Wheel Size**: 60 slots (for 60 second window with 1s ticks)
-- **Overflow Wheel**: For events beyond base window
+- **Tick Granularity**: 100ms default (configurable)
+- **Wheel Size**: 60 slots
+- **Overflow Wheel**: Hierarchical wheels for events beyond base window
 - **Expiration Check**: Move events from wheel to ready queue
 - **Persistence**: Periodic checkpoint of active timers
+
+**Key Design: Absolute Time Tracking**
+- Timers store absolute `ExpirationMs` (Unix timestamp in milliseconds)
+- Each wheel level calculates its own delay from absolute time
+- Prevents timing drift when events cascade through overflow wheels
+- Formula: `delay = (ExpirationMs - now) / tickDuration`
 
 ### Scheduler Workflow
 
@@ -182,7 +197,7 @@ WAL Append (persistent)
 Check schedule_ts:
     ↓
     ├─ If timestamp ≤ active window → Add to timing wheel
-    └─ If timestamp > active window → Queue for future check
+    └─ If timestamp > active window → Add to overflow wheel
     ↓
 Timing Wheel Tick
     ↓
@@ -192,12 +207,30 @@ Delivery Worker → Dispatch to subscribers
     ↓
 Wait for Ack
     ↓
-On timeout → Retry (with backoff)
+On timeout → Retry (with configurable backoff)
     ↓
-After max retries → Dead letter queue
+After max retries → Dead Letter Queue (DLQ)
 ```
 
+### Timer ID Format
+- Timer ID: `message_id-offset` (e.g., "msg-123-42")
+- Allows same message_id to be scheduled multiple times with AllowDuplicate=true
+- Each event gets unique timer in the timing wheel
+
 ## IV. Delivery Model (At-Least-Once)
+
+### Dead Letter Queue (DLQ)
+Events that fail delivery after max retries are sent to a Dead Letter Queue:
+```
+┌─────────────────────────────────────────────────────────┐
+│                 Dead Letter Queue                       │
+├─────────────────────────────────────────────────────────┤
+│  - Failed events stored in PebbleDB                    │
+│  - Captures: event data, error reason, retry count     │
+│  - Configurable: -dlq-enabled, -dlq-max-retries        │
+│  - Events can be replayed or inspected                 │
+└─────────────────────────────────────────────────────────┘
+```
 
 ### gRPC Streaming
 - Bi-directional streaming for Subscribe
@@ -409,7 +442,7 @@ Consumers reconnect to new partition nodes
 - **Write**: ~100K events/sec per partition (single leader)
 - **Read**: ~500K events/sec per partition (multiple followers)
 - **Latency**: 5-10ms p99 for publish
-- **Scheduling**: 1ms tick granularity, supports 10M+ scheduled events
+- **Scheduling**: 100ms tick default (configurable), supports 10M+ scheduled events
 
 ### Scalability
 
@@ -451,11 +484,12 @@ Consumers reconnect to new partition nodes
 
 ### Config Tuning
 
-- **Tick granularity**: 1ms (fast) to 1s (slow)
-- **WAL segment size**: 64MB (fast) to 1GB (slow)
+- **Tick granularity**: 10ms (fast) to 1s (slow) - default 100ms
+- **WAL segment size**: 64MB (fast) to 1GB (slow) - default 512MB
 - **Replication batch size**: 100-10000 events
-- **Dedup TTL**: 1-30 days
-- **fsync strategy**: every_event, batch, periodic
+- **Dedup TTL**: 1-30 days - default 7 days
+- **DLQ max retries**: 1-10 - default 3
+- **Dispatcher retry delay**: 100ms-10s - default 1s
 
 ## XI. Security
 

@@ -51,21 +51,27 @@ cronos_db/
 **Files:**
 - `internal/storage/segment.go` - Individual segment file management
 - `internal/storage/wal.go` - WAL with segment rotation
+- `internal/storage/index.go` - Sparse index for fast seeking
+- `internal/storage/wal_test.go` - Unit tests
 
 **Features:**
-- Append-only segmented logs (512MB default)
-- Sparse timestamp→offset index
+- Append-only segmented logs (512MB default, configurable)
+- Sparse offset→position index for O(log n) seeking
 - CRC32 checksums for integrity
 - Segment rotation on size threshold
-- fsync strategies (every_event, batch, periodic)
+- Thread-safe with RWMutex
+- fsync on each write for durability
 
 #### Scheduler with Timing Wheel ✅
 **Files:**
 - `internal/scheduler/timing_wheel.go` - Hierarchical timing wheel
 - `internal/scheduler/scheduler.go` - Scheduler management
+- `internal/scheduler/scheduler_test.go` - Unit tests
 
 **Features:**
-- Hierarchical timing wheel (configurable tick, wheel size)
+- Hierarchical timing wheel with overflow wheels
+- **Absolute time tracking** (ExpirationMs) prevents timing drift
+- Timer ID format: `message_id-offset` to support duplicates
 - Persistent timer state with checkpoints
 - Support for millions of scheduled events
 - Automatic expiration and dispatch
@@ -74,6 +80,7 @@ cronos_db/
 **Files:**
 - `internal/dedup/pebble_store.go` - PebbleDB-backed dedup
 - `internal/dedup/store.go` - Dedup manager interface
+- `internal/dedup/dedup_test.go` - Unit tests
 
 **Features:**
 - message_id based deduplication
@@ -85,10 +92,12 @@ cronos_db/
 **Files:**
 - `internal/api/grpc_server.go` - gRPC server setup
 - `internal/api/handlers.go` - RPC handlers
+- `internal/api/consumer_handler.go` - Consumer group handlers
 
 **Features:**
 - Bi-directional streaming for Subscribe
 - Protocol Buffer generated code
+- Proper subscription cleanup on disconnect
 - Health check endpoint
 - Graceful shutdown
 
@@ -96,11 +105,14 @@ cronos_db/
 **Files:**
 - `internal/delivery/dispatcher.go` - Event dispatcher
 - `internal/delivery/worker.go` - Delivery worker loop
+- `internal/delivery/dlq.go` - Dead letter queue
 
 **Features:**
 - Flow control with credits
 - At-least-once delivery semantics
-- Retry with exponential backoff
+- Configurable retry with backoff
+- **Dead Letter Queue** for failed events
+- Proper quit channels to prevent goroutine leaks
 - Ack-based offset commits
 
 #### Consumer Group Management ✅
@@ -172,27 +184,40 @@ cronos_db/
 - Consumer offsets: PebbleDB
 - Choice: Battle-tested in CockroachDB, excellent Go support
 
-### 4. **Timing Wheel Pattern**
+### 4. **Timing Wheel with Absolute Time**
 - Hierarchical wheels for scalability
+- **Key Fix:** Timer stores absolute `ExpirationMs` (Unix timestamp in ms)
+- Each wheel level calculates its own delay from absolute time
+- Prevents timing drift when events cascade through overflow wheels
 - O(1) timer insertion and expiration
 - Persistent checkpoints for crash recovery
 
-### 5. **At-Least-Once Delivery**
+### 5. **At-Least-Once Delivery with DLQ**
 - Guarantees: Every event delivered ≥1 times
 - Duplicates handled by dedup store
 - Ack-based offset commits
+- **Dead Letter Queue** captures events that fail after max retries
 - Industry-standard approach
+
+### 6. **Timer ID Format for Duplicate Support**
+- Timer ID: `message_id-offset` (e.g., "msg-123-42")
+- Allows same message_id to be scheduled multiple times with AllowDuplicate=true
+- Each event gets unique timer in the timing wheel
 
 ## MVP Status
 
 ### Completed ✅
 - [x] Single-node WAL storage
-- [x] Scheduler with timing wheel
+- [x] Sparse index for O(log n) WAL seeking
+- [x] Scheduler with timing wheel (absolute time fix)
 - [x] gRPC publish/subscribe
 - [x] Dedup store (PebbleDB)
 - [x] Consumer groups with offset tracking
 - [x] Replay engine (time and offset)
 - [x] Delivery worker with backpressure
+- [x] Dead letter queue
+- [x] Unit tests (scheduler, WAL, dedup)
+- [x] Integration tests (23 tests)
 - [x] Graceful shutdown
 
 ### In Progress 🚧
@@ -215,7 +240,7 @@ cronos_db/
 - **Write**: ~100K events/sec per partition (single leader)
 - **Read**: ~500K events/sec per partition (multiple followers)
 - **Latency**: 5-10ms p99 for publish
-- **Scheduler**: 1ms tick granularity, supports 10M+ events
+- **Scheduler**: 100ms tick default (configurable), supports 10M+ events
 
 ### Scalability
 - **Horizontal**: Add partition nodes, Raft handles routing
@@ -239,12 +264,22 @@ protoc --go_out=. --go-grpc_out=. proto/events.proto
 # 2. Build
 go build -o bin/cronos-api ./cmd/api/main.go
 
-# 3. Run
-./bin/cronos-api -node-id=node-1 -data-dir=./data
+# 3. Run (node-id is required!)
+./bin/cronos-api -node-id=node1 -data-dir=./data
+# Or: go run ./cmd/api/main.go -node-id=node1
 
-# 4. Test
+# 4. Test health
 curl http://localhost:8080/health
 # Should return: OK
+```
+
+### Run Tests
+```bash
+# Unit tests
+go test ./internal/... -v
+
+# Integration tests (23 tests)
+go run integration_test_suite.go
 ```
 
 ### Publish Event
@@ -300,6 +335,9 @@ ChronosDB implements a production-ready, single-node database with all core feat
 ✅ Production-minded design
 ✅ Comprehensive documentation
 ✅ Battle-tested technologies (PebbleDB, gRPC)
+✅ Dead letter queue for failed events
+✅ Sparse indexing for fast WAL seeking
+✅ 23 integration tests + unit tests
 
 ### Next Phase Priorities
 1. Implement Raft consensus layer
@@ -310,5 +348,5 @@ ChronosDB implements a production-ready, single-node database with all core feat
 
 The codebase is ready for distributed expansion and can serve as a solid foundation for a production distributed database system.
 
-**Total Implementation**: ~4,500 lines of Go code across 20+ files
+**Total Implementation**: ~5,500+ lines of Go code across 25+ files
 **Status**: MVP Complete ✅

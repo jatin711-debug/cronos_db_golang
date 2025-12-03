@@ -5,11 +5,14 @@
 This guide walks you through building and deploying the ChronosDB MVP (Minimum Viable Product). The MVP includes:
 
 - ✅ Single-node WAL storage
+- ✅ Sparse index for WAL seeking
 - ✅ Scheduler with timing wheel
 - ✅ gRPC publish/subscribe
 - ✅ Dedup store (PebbleDB)
 - ✅ Consumer groups
 - ✅ Replay engine
+- ✅ Dead letter queue (DLQ)
+- ✅ Unit & integration tests
 - ⏳ Distributed replication (in progress)
 - ⏳ Raft consensus (in progress)
 
@@ -80,8 +83,8 @@ This generates:
 # Build the API server
 go build -o bin/cronos-api ./cmd/api/main.go
 
-# Or use go run for development
-go run ./cmd/api/main.go -node-id=node-1
+# Or use go run for development (node-id is required)
+go run ./cmd/api/main.go -node-id=node1
 ```
 
 ## Step 4: Run the MVP
@@ -89,11 +92,11 @@ go run ./cmd/api/main.go -node-id=node-1
 ### Single Node (Development)
 
 ```bash
-# Start the server
-./bin/cronos-api \
-  -node-id=node-1 \
-  -data-dir=./data \
-  -grpc-addr=:9000
+# Start the server (node-id is required!)
+./bin/cronos-api -node-id=node1 -data-dir=./data -grpc-addr=:9000
+
+# Or run directly
+go run ./cmd/api/main.go -node-id=node1
 
 # Server will start on:
 # - gRPC API: localhost:9000
@@ -109,7 +112,35 @@ curl http://localhost:8080/health
 
 ## Step 5: Test the System
 
-### Using gRPCurl (Recommended)
+### Run Unit Tests
+
+```bash
+# Run all unit tests
+go test ./internal/... -v
+
+# Run specific package tests
+go test ./internal/scheduler -v
+go test ./internal/storage -v
+go test ./internal/dedup -v
+```
+
+### Run Integration Tests
+
+```bash
+# Run the full integration test suite (23 tests)
+go run integration_test_suite.go
+
+# This tests:
+# - Publish operations (9 tests)
+# - Subscribe operations (2 tests)
+# - Consumer groups (3 tests)
+# - Timing/scheduling (3 tests)
+# - Concurrency (2 tests)
+# - Edge cases (3 tests)
+# - End-to-end flow (1 test)
+```
+
+### Using gRPCurl (Manual Testing)
 
 Install grpcurl:
 ```bash
@@ -237,18 +268,19 @@ go run test_client.go
 -grpc-addr=string        # gRPC address (default: ":9000")
 
 # WAL Configuration
--segment-size=bytes      # Segment size (default: 512MB)
--index-interval=int      # Index interval (default: 1000)
--fsync-mode=string       # every_event|batch|periodic (default: "periodic")
+-wal-max-segment-size=bytes  # Segment size (default: 512MB)
 
 # Scheduler Configuration
--tick-ms=int             # Tick duration ms (default: 100)
--wheel-size=int          # Wheel size (default: 60)
+-scheduler-tick-interval=duration  # Tick interval (default: 100ms)
 
 # Delivery Configuration
--ack-timeout=duration    # Ack timeout (default: 30s)
--max-retries=int         # Max retries (default: 5)
--max-credits=int         # Max delivery credits (default: 1000)
+-dispatcher-max-retries=int      # Max delivery retries (default: 5)
+-dispatcher-retry-delay=duration # Retry delay (default: 1s)
+
+# Dead Letter Queue
+-dlq-enabled=bool        # Enable DLQ (default: true)
+-dlq-data-dir=string     # DLQ directory (default: "./data/dlq")
+-dlq-max-retries=int     # Max retries before DLQ (default: 3)
 
 # Dedup Configuration
 -dedup-ttl=hours         # Dedup TTL in hours (default: 168/7 days)
@@ -289,51 +321,53 @@ curl http://localhost:8080/stats
 
 ```
 data/
-└── node-1/
-    ├── partitions/
-    │   └── 0/
-    │       ├── segments/
-    │       │   ├── 0000000000000000000.log
-    │       │   └── 0000000000000100000.log
-    │       ├── index/
-    │       │   └── 0000000000000000000.index
-    │       ├── meta/
-    │       │   └── checkpoint.json
-    │       └── dedup/
-    │           └── dedup.db
-    └── raft/
-        ├── logs/
-        └── snapshots/
+├── partitions/
+│   └── 0/
+│       ├── segments/
+│       │   ├── 00000000000000000000.log
+│       │   └── 00000000000000100000.log
+│       ├── index/
+│       │   └── 00000000000000000000.index
+│       ├── dedup_0/
+│       │   └── (PebbleDB files)
+│       └── timer_state.json
+├── dlq/
+│   └── (Dead letter queue storage)
+└── offsets/
+    └── (Consumer group offsets)
 ```
 
 ## Common Issues
 
 ### Issue: "node-id is required"
 ```bash
-Solution: Always provide -node-id flag
-./bin/cronos-api -node-id=node-1
+# Solution: Always provide -node-id flag
+./bin/cronos-api -node-id=node1
+# Or with go run:
+go run ./cmd/api/main.go -node-id=node1
 ```
 
 ### Issue: Port already in use
 ```bash
-Solution: Change port with -grpc-addr
-./bin/cronos-api -node-id=node-1 -grpc-addr=:9001
+# Solution: Change port with -grpc-addr
+./bin/cronos-api -node-id=node1 -grpc-addr=:9001
 ```
 
 ### Issue: Permission denied on data directory
 ```bash
-Solution: Ensure write permissions
+# Solution: Ensure write permissions
 chmod 755 ./data
 ```
 
 ### Issue: Protobuf generation fails
 ```bash
-Solution: Install protoc
+# Solution: Install protoc
 # Check version
 protoc --version
 
 # Ensure Go plugin installed
 go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
 ```
 
 ## Performance Tuning
@@ -342,33 +376,20 @@ go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
 
 ```bash
 # Larger segments, less frequent rotation
-./bin/cronos-api \
-  -node-id=node-1 \
-  -segment-size=$((1024*1024*1024))  # 1GB
+./bin/cronos-api -node-id=node1 -wal-max-segment-size=1073741824  # 1GB
 
-# Faster scheduler
-./bin/cronos-api \
-  -node-id=node-1 \
-  -tick-ms=10  # 10ms ticks
-
-# Batch writes
-./bin/cronos-api \
-  -node-id=node-1 \
-  -fsync-mode=batch
+# Faster scheduler ticks
+./bin/cronos-api -node-id=node1 -scheduler-tick-interval=10ms
 ```
 
 ### For Low Latency
 
 ```bash
-# Immediate fsync
-./bin/cronos-api \
-  -node-id=node-1 \
-  -fsync-mode=every_event
+# Lower retry delays
+./bin/cronos-api -node-id=node1 -dispatcher-retry-delay=100ms
 
-# Smaller buffer sizes
-./bin/cronos-api \
-  -node-id=node-1 \
-  -max-credits=100  # Lower latency
+# Disable DLQ for simpler flow
+./bin/cronos-api -node-id=node1 -dlq-enabled=false
 ```
 
 ## Next Steps
@@ -383,6 +404,10 @@ Current implementation supports:
 - ✅ Deduplication
 - ✅ Consumer groups
 - ✅ Replay
+- ✅ Dead letter queue
+- ✅ Sparse index for WAL seeking
+- ✅ Unit tests (scheduler, WAL, dedup)
+- ✅ Integration tests (23 tests)
 
 ### Upcoming Features 🚧
 
@@ -456,10 +481,12 @@ You now have a working ChronosDB MVP! The system provides:
 
 1. **Timestamp-triggered events** - Events scheduled for future execution
 2. **Durable storage** - WAL with fsync for crash recovery
-3. **Deduplication** - message_id based idempotency
-4. **Pub/Sub** - gRPC streaming subscriptions
-5. **Consumer groups** - Offset tracking per group
-6. **Replay** - Time or offset-based event replay
+3. **Sparse indexing** - Fast offset-based seeking in WAL
+4. **Deduplication** - message_id based idempotency
+5. **Pub/Sub** - gRPC streaming subscriptions
+6. **Consumer groups** - Offset tracking per group
+7. **Replay** - Time or offset-based event replay
+8. **Dead letter queue** - Failed events captured for inspection
 
 The codebase is modular and production-ready for single-node deployment. The distributed features are designed and partially implemented, ready for the next iteration.
 

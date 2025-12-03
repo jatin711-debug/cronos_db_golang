@@ -813,7 +813,7 @@ func (s *IntegrationTestSuite) TestTimingFarFuture() error {
 
 	for _, futureDelay := range futureTimes {
 		scheduleTs := time.Now().Add(futureDelay).UnixMilli()
-		msgID := fmt.Sprintf("far-future-%d-%d", futureDelay.Minutes(), time.Now().UnixNano())
+		msgID := fmt.Sprintf("far-future-%d-%d", int(futureDelay.Minutes()), time.Now().UnixNano())
 
 		req := &types.PublishRequest{
 			Event: &types.Event{
