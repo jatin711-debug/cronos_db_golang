@@ -18,7 +18,6 @@ import (
 
 // RaftNode manages Raft consensus for cluster metadata
 type RaftNode struct {
-	mu            sync.RWMutex
 	config        *ClusterConfig
 	raft          *raft.Raft
 	fsm           *ClusterFSM
