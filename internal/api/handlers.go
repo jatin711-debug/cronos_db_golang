@@ -173,6 +173,99 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 	}, nil
 }
 
+// PublishBatch handles batch publish requests for high-throughput ingestion
+func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.PublishBatchRequest) (*types.PublishBatchResponse, error) {
+	if len(req.Events) == 0 {
+		return &types.PublishBatchResponse{
+			Success: true,
+		}, nil
+	}
+
+	var publishedCount, duplicateCount, errorCount int32
+	var firstOffset, lastOffset int64 = -1, -1
+
+	// Group events by partition for batch WAL writes
+	partitionEvents := make(map[int32][]*types.Event)
+
+	for _, event := range req.Events {
+		// Basic validation
+		if event.GetMessageId() == "" || event.GetScheduleTs() <= 0 || len(event.Payload) == 0 {
+			errorCount++
+			continue
+		}
+
+		// Get partition
+		partitionKey := event.GetMessageId()
+		if pk, ok := event.Meta["partition_key"]; ok && pk != "" {
+			partitionKey = pk
+		}
+
+		partition, err := h.partitionManager.GetPartitionForKey(partitionKey)
+		if err != nil {
+			partition, err = h.partitionManager.GetPartitionForTopic(event.Topic)
+			if err != nil {
+				errorCount++
+				continue
+			}
+		}
+
+		// Check dedup
+		if !req.AllowDuplicate {
+			isDuplicate, err := h.dedupManager.IsDuplicate(event.GetMessageId(), 0)
+			if err != nil {
+				errorCount++
+				continue
+			}
+			if isDuplicate {
+				duplicateCount++
+				continue
+			}
+		}
+
+		partitionEvents[partition.ID] = append(partitionEvents[partition.ID], event)
+	}
+
+	// Batch write to each partition's WAL
+	for partitionID, events := range partitionEvents {
+		partitionInternal, err := h.partitionManager.GetInternalPartition(partitionID)
+		if err != nil {
+			errorCount += int32(len(events))
+			continue
+		}
+
+		// Batch append to WAL (single syscall for all events)
+		if err := partitionInternal.Wal.AppendBatch(events); err != nil {
+			errorCount += int32(len(events))
+			continue
+		}
+
+		// Schedule all events
+		for _, event := range events {
+			if err := partitionInternal.Scheduler.Schedule(event); err != nil {
+				// Event is in WAL, just log scheduling error
+				continue
+			}
+			publishedCount++
+
+			if firstOffset == -1 || event.Offset < firstOffset {
+				firstOffset = event.Offset
+			}
+			if event.Offset > lastOffset {
+				lastOffset = event.Offset
+			}
+		}
+	}
+
+	return &types.PublishBatchResponse{
+		Success:        errorCount == 0 && duplicateCount == 0,
+		PublishedCount: publishedCount,
+		DuplicateCount: duplicateCount,
+		ErrorCount:     errorCount,
+		FirstOffset:    firstOffset,
+		LastOffset:     lastOffset,
+	}, nil
+}
+
 // Subscribe handles streaming subscription
 func (h *EventServiceHandler) Subscribe(stream grpc.BidiStreamingServer[types.SubscribeRequest, types.Delivery]) error {
 	// Receive subscription request

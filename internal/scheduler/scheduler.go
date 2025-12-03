@@ -63,24 +63,16 @@ func (s *Scheduler) Schedule(event *types.Event) error {
 	defer s.mu.Unlock()
 
 	// Use message_id + offset as timer ID to allow duplicates
-	// This ensures each WAL entry gets its own timer
 	eventID := fmt.Sprintf("%s-%d", event.GetMessageId(), event.GetOffset())
-
-	log.Printf("[SCHEDULER] Scheduling event %s for partition %d, scheduleTs=%d (now=%d)",
-		eventID, s.partitionID, event.GetScheduleTs(), time.Now().UnixMilli())
 
 	// If event is already expired, add to ready queue
 	if event.GetScheduleTs() <= time.Now().UnixMilli() {
-		log.Printf("[SCHEDULER] Event %s is already expired, adding to ready queue", eventID)
 		s.readyQueue = append(s.readyQueue, event)
 		return nil
 	}
 
 	// Create timer and add to timing wheel
 	timer := s.timingWheel.GetTimer(eventID, event)
-	log.Printf("[SCHEDULER] Created timer for event %s, expirationMs=%d",
-		eventID, timer.ExpirationMs)
-
 	return s.timingWheel.AddTimer(timer)
 }
 
