@@ -1,4 +1,4 @@
-# ChronosDB Directory Structure
+# CronosDB Directory Structure
 
 ## Root Layout
 
