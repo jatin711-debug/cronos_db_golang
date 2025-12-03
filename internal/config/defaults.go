@@ -42,4 +42,14 @@ const (
 
 	// Checkpoint configuration
 	DefaultCheckpointInterval = 10 * time.Second
+
+	// Cluster configuration
+	DefaultClusterEnabled    = false
+	DefaultClusterGossipAddr = ":7946"
+	DefaultClusterGRPCAddr   = ":7947"
+	DefaultClusterRaftAddr   = ":7948"
+	DefaultVirtualNodes      = 150
+	DefaultHeartbeatInterval = 1 * time.Second
+	DefaultFailureTimeout    = 5 * time.Second
+	DefaultSuspectTimeout    = 3 * time.Second
 )

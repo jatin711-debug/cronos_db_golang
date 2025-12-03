@@ -28,6 +28,17 @@ type Config struct {
 	RaftJoinAddr         string
 	StatsPrintInterval   time.Duration
 	CheckpointInterval   time.Duration
+
+	// Cluster configuration
+	ClusterEnabled    bool
+	ClusterGossipAddr string   // UDP address for gossip protocol
+	ClusterGRPCAddr   string   // gRPC address for cluster communication
+	ClusterSeeds      []string // Seed nodes for cluster discovery
+	ClusterRaftAddr   string   // Raft bind address
+	VirtualNodes      int      // Virtual nodes per physical node for hashing
+	HeartbeatInterval time.Duration
+	FailureTimeout    time.Duration
+	SuspectTimeout    time.Duration
 }
 
 // Partition represents a data partition

@@ -62,26 +62,49 @@ func (s *Scheduler) Schedule(event *types.Event) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Use message_id + offset as timer ID to allow duplicates
-	// This ensures each WAL entry gets its own timer
-	eventID := fmt.Sprintf("%s-%d", event.GetMessageId(), event.GetOffset())
+	return s.scheduleUnlocked(event)
+}
 
-	log.Printf("[SCHEDULER] Scheduling event %s for partition %d, scheduleTs=%d (now=%d)",
-		eventID, s.partitionID, event.GetScheduleTs(), time.Now().UnixMilli())
-
+// scheduleUnlocked schedules an event (caller must hold lock)
+func (s *Scheduler) scheduleUnlocked(event *types.Event) error {
 	// If event is already expired, add to ready queue
 	if event.GetScheduleTs() <= time.Now().UnixMilli() {
-		log.Printf("[SCHEDULER] Event %s is already expired, adding to ready queue", eventID)
 		s.readyQueue = append(s.readyQueue, event)
 		return nil
 	}
 
 	// Create timer and add to timing wheel
-	timer := NewTimer(eventID, event)
-	log.Printf("[SCHEDULER] Created timer for event %s, expirationMs=%d",
-		eventID, timer.ExpirationMs)
-
+	// Use offset as unique ID (cheaper than fmt.Sprintf)
+	timer := s.timingWheel.GetTimerFast(event.GetOffset(), event)
 	return s.timingWheel.AddTimer(timer)
+}
+
+// ScheduleBatch schedules multiple events efficiently (single lock acquisition)
+func (s *Scheduler) ScheduleBatch(events []*types.Event) error {
+	if len(events) == 0 {
+		return nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now().UnixMilli()
+
+	for _, event := range events {
+		// If event is already expired, add to ready queue
+		if event.GetScheduleTs() <= now {
+			s.readyQueue = append(s.readyQueue, event)
+			continue
+		}
+
+		// Create timer and add to timing wheel
+		timer := s.timingWheel.GetTimerFast(event.GetOffset(), event)
+		if err := s.timingWheel.AddTimer(timer); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // GetReadyEvents returns events ready for execution
@@ -95,6 +118,8 @@ func (s *Scheduler) GetReadyEvents() []*types.Event {
 		case expiredTimers := <-s.timingWheel.GetExpiredChannel():
 			for _, timer := range expiredTimers {
 				s.readyQueue = append(s.readyQueue, timer.Event)
+				// Return timer to pool
+				s.timingWheel.PutTimer(timer)
 			}
 		default:
 			// No more pending expired events

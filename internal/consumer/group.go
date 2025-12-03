@@ -76,36 +76,6 @@ func (g *GroupManager) CreateGroup(groupID, topic string, partitions []int32) er
 	return nil
 }
 
-// ensureGroup ensures a consumer group exists, creating it if necessary
-func (g *GroupManager) ensureGroup(groupID, topic string, partitionID int32) error {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-
-	// Check if group exists
-	group, exists := g.groups[groupID]
-	if exists {
-		return nil
-	}
-
-	// Create new group with the single partition
-	group = &types.ConsumerGroup{
-		GroupID:          groupID,
-		Topic:            topic,
-		Partitions:       []int32{partitionID},
-		CommittedOffsets: make(map[int32]int64),
-		MemberOffsets:    make(map[string]int64),
-		Members:          make(map[string]*types.ConsumerMember),
-		CreatedTS:        time.Now().UnixMilli(),
-		UpdatedTS:        time.Now().UnixMilli(),
-	}
-
-	// Initialize offsets to -1 (beginning)
-	group.CommittedOffsets[partitionID] = -1
-
-	g.groups[groupID] = group
-	return nil
-}
-
 // GetGroup returns a consumer group
 func (g *GroupManager) GetGroup(groupID string) (*types.ConsumerGroup, bool) {
 	g.mu.RLock()

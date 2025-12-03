@@ -3,7 +3,6 @@ package scheduler
 import (
 	"container/list"
 	"fmt"
-	"log"
 	"sync"
 	"time"
 
@@ -24,6 +23,7 @@ type TimingWheel struct {
 	quit          chan struct{}
 	maxLevels     int32 // Maximum number of overflow wheel levels
 	currentLevel  int32 // Current level in the hierarchy (0 = root)
+	timerPool     *sync.Pool
 }
 
 // Timer represents a scheduled event
@@ -38,7 +38,7 @@ type Timer struct {
 // NewTimingWheel creates a new timing wheel
 // startTimeMs is the absolute start time (only used by root wheel, pass 0 for overflow wheels)
 func NewTimingWheel(tickMs int32, wheelSize int32, maxLevels int32, currentLevel int32, startTimeMs int64) *TimingWheel {
-	return &TimingWheel{
+	tw := &TimingWheel{
 		tickMs:       tickMs,
 		wheelSize:    wheelSize,
 		currentTick:  0,
@@ -49,7 +49,13 @@ func NewTimingWheel(tickMs int32, wheelSize int32, maxLevels int32, currentLevel
 		quit:         make(chan struct{}),
 		maxLevels:    maxLevels,
 		currentLevel: currentLevel,
+		timerPool: &sync.Pool{
+			New: func() interface{} {
+				return &Timer{}
+			},
+		},
 	}
+	return tw
 }
 
 // initialize initializes wheel slots
@@ -86,16 +92,11 @@ func (tw *TimingWheel) addTimerLocked(timer *Timer) error {
 	// Convert delay to ticks for this wheel's tick interval
 	delayTicks := delayMs / int64(tw.tickMs)
 
-	log.Printf("[TIMING-WHEEL] AddTimer: event=%s, expirationMs=%d, currentAbsMs=%d, delayMs=%d, delayTicks=%d, level=%d",
-		timer.EventID, timer.ExpirationMs, currentAbsoluteMs, delayMs, delayTicks, tw.currentLevel)
-
 	// Check if timer fits in current wheel
 	if delayTicks < int64(tw.wheelSize) {
 		// Fits in current wheel - place in appropriate slot
 		slotIndex := int32((tw.currentTick + delayTicks) % int64(tw.wheelSize))
 		timer.SlotIndex = slotIndex
-		log.Printf("[TIMING-WHEEL] AddTimer: event %s placed in slot %d (level=%d, wheelSize=%d)",
-			timer.EventID, slotIndex, tw.currentLevel, tw.wheelSize)
 		tw.wheel[slotIndex].PushBack(timer)
 		tw.timers[timer.EventID] = timer
 		return nil
@@ -107,9 +108,6 @@ func (tw *TimingWheel) addTimerLocked(timer *Timer) error {
 			timer.EventID, tw.maxLevels)
 	}
 
-	log.Printf("[TIMING-WHEEL] AddTimer: event %s needs overflow wheel (delayTicks=%d > wheelSize=%d)",
-		timer.EventID, delayTicks, tw.wheelSize)
-
 	// Create overflow wheel if needed
 	if tw.overflowWheel == nil {
 		nextLevel := tw.currentLevel + 1
@@ -117,8 +115,9 @@ func (tw *TimingWheel) addTimerLocked(timer *Timer) error {
 		// Its start time is the same as the root wheel's start time
 		overflowTickMs := tw.tickMs * tw.wheelSize
 		tw.overflowWheel = NewTimingWheel(overflowTickMs, tw.wheelSize, tw.maxLevels, nextLevel, tw.startTimeMs)
+		// Share pool with overflow wheel
+		tw.overflowWheel.timerPool = tw.timerPool
 		tw.overflowWheel.initialize()
-		log.Printf("[TIMING-WHEEL] Created overflow wheel: level=%d, tickMs=%d", nextLevel, overflowTickMs)
 	}
 
 	// Add to overflow wheel (it will calculate its own delay based on its tick interval)
@@ -197,7 +196,6 @@ func (tw *TimingWheel) tickLocked() {
 
 	// When we complete a full rotation, cascade timers from overflow wheel
 	if tw.overflowWheel != nil && tw.currentTick%int64(tw.wheelSize) == 0 {
-		log.Printf("[TIMING-WHEEL] Cascading from overflow wheel (tick=%d, level=%d)", tw.currentTick, tw.currentLevel)
 		tw.cascadeFromOverflow()
 	}
 }
@@ -219,9 +217,6 @@ func (tw *TimingWheel) cascadeFromOverflow() {
 	// Get the slot for the current tick
 	overflowSlot := int32(overflowTick % int64(tw.overflowWheel.wheelSize))
 
-	log.Printf("[TIMING-WHEEL] Cascade: overflow wheel tick=%d, checking slot=%d, level=%d",
-		overflowTick, overflowSlot, tw.overflowWheel.currentLevel)
-
 	// Move all timers from overflow slot to this wheel
 	timersToMove := make([]*Timer, 0)
 	for e := tw.overflowWheel.wheel[overflowSlot].Front(); e != nil; e = e.Next() {
@@ -235,12 +230,8 @@ func (tw *TimingWheel) cascadeFromOverflow() {
 
 	// Re-add timers to this wheel (they will now fit within our range)
 	for _, timer := range timersToMove {
-		log.Printf("[TIMING-WHEEL] Cascading timer %s from level %d to level %d",
-			timer.EventID, tw.currentLevel+1, tw.currentLevel)
 		// Re-insert into this wheel - it should now fit within our range
-		if err := tw.addTimerLocked(timer); err != nil {
-			log.Printf("[TIMING-WHEEL] WARNING: Failed to cascade timer %s: %v", timer.EventID, err)
-		}
+		tw.addTimerLocked(timer)
 	}
 
 	// Recursively cascade if overflow wheel also completed a rotation
@@ -312,7 +303,7 @@ type SchedulerStats struct {
 	ReadyEvents   int64
 }
 
-// NewTimer creates a new timer
+// NewTimer creates a new timer (deprecated, use GetTimer)
 // eventID is the unique identifier for this timer
 // event is the event to be triggered
 // The timer stores the absolute expiration time from the event's schedule timestamp
@@ -323,4 +314,34 @@ func NewTimer(eventID string, event *types.Event) *Timer {
 		ExpirationMs: event.GetScheduleTs(), // Store absolute expiration time
 		CreatedTS:    time.Now().UnixMilli(),
 	}
+}
+
+// GetTimer gets a timer from the pool or creates a new one
+func (tw *TimingWheel) GetTimer(eventID string, event *types.Event) *Timer {
+	timer := tw.timerPool.Get().(*Timer)
+	timer.EventID = eventID
+	timer.Event = event
+	timer.ExpirationMs = event.GetScheduleTs()
+	timer.CreatedTS = time.Now().UnixMilli()
+	timer.SlotIndex = -1
+	return timer
+}
+
+// GetTimerFast gets a timer using offset as ID (avoids string allocation)
+func (tw *TimingWheel) GetTimerFast(offset int64, event *types.Event) *Timer {
+	timer := tw.timerPool.Get().(*Timer)
+	// Use a simple numeric ID format
+	timer.EventID = fmt.Sprintf("%d", offset)
+	timer.Event = event
+	timer.ExpirationMs = event.GetScheduleTs()
+	timer.CreatedTS = time.Now().UnixMilli()
+	timer.SlotIndex = -1
+	return timer
+}
+
+// PutTimer returns a timer to the pool
+func (tw *TimingWheel) PutTimer(timer *Timer) {
+	timer.Event = nil
+	timer.EventID = ""
+	tw.timerPool.Put(timer)
 }

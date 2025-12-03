@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"cronos_db/pkg/types"
@@ -36,6 +37,16 @@ func LoadConfig() (*types.Config, error) {
 	config.RaftDir = DefaultRaftDir
 	config.StatsPrintInterval = DefaultStatsPrintInterval
 	config.CheckpointInterval = DefaultCheckpointInterval
+
+	// Cluster defaults
+	config.ClusterEnabled = DefaultClusterEnabled
+	config.ClusterGossipAddr = DefaultClusterGossipAddr
+	config.ClusterGRPCAddr = DefaultClusterGRPCAddr
+	config.ClusterRaftAddr = DefaultClusterRaftAddr
+	config.VirtualNodes = DefaultVirtualNodes
+	config.HeartbeatInterval = DefaultHeartbeatInterval
+	config.FailureTimeout = DefaultFailureTimeout
+	config.SuspectTimeout = DefaultSuspectTimeout
 
 	// Node configuration
 	flag.StringVar(&config.NodeID, "node-id", DefaultNodeID, "Unique node ID")
@@ -73,7 +84,28 @@ func LoadConfig() (*types.Config, error) {
 	flag.StringVar(&config.RaftDir, "raft-dir", DefaultRaftDir, "Raft data directory")
 	flag.StringVar(&config.RaftJoinAddr, "raft-join", DefaultRaftJoinAddr, "Raft cluster join address")
 
+	// Cluster configuration
+	flag.BoolVar(&config.ClusterEnabled, "cluster", DefaultClusterEnabled, "Enable cluster mode")
+	flag.StringVar(&config.ClusterGossipAddr, "cluster-gossip-addr", DefaultClusterGossipAddr, "Cluster gossip UDP address")
+	flag.StringVar(&config.ClusterGRPCAddr, "cluster-grpc-addr", DefaultClusterGRPCAddr, "Cluster gRPC address")
+	flag.StringVar(&config.ClusterRaftAddr, "cluster-raft-addr", DefaultClusterRaftAddr, "Cluster Raft address")
+	flag.IntVar(&config.VirtualNodes, "virtual-nodes", DefaultVirtualNodes, "Virtual nodes per physical node")
+	flag.DurationVar(&config.HeartbeatInterval, "heartbeat-interval", DefaultHeartbeatInterval, "Cluster heartbeat interval")
+	flag.DurationVar(&config.FailureTimeout, "failure-timeout", DefaultFailureTimeout, "Node failure detection timeout")
+	flag.DurationVar(&config.SuspectTimeout, "suspect-timeout", DefaultSuspectTimeout, "Node suspect timeout")
+
+	var clusterSeeds string
+	flag.StringVar(&clusterSeeds, "cluster-seeds", "", "Comma-separated list of seed node addresses")
+
 	flag.Parse()
+
+	// Parse cluster seeds
+	if clusterSeeds != "" {
+		config.ClusterSeeds = strings.Split(clusterSeeds, ",")
+		for i, seed := range config.ClusterSeeds {
+			config.ClusterSeeds[i] = strings.TrimSpace(seed)
+		}
+	}
 
 	// Environment variable overrides
 	if nodeID := os.Getenv("CRONOS_NODE_ID"); nodeID != "" && config.NodeID == DefaultNodeID {
@@ -84,6 +116,15 @@ func LoadConfig() (*types.Config, error) {
 	}
 	if grpcAddr := os.Getenv("CRONOS_GRPC_ADDR"); grpcAddr != "" && config.GPRCAddress == DefaultGRPCAddress {
 		config.GPRCAddress = grpcAddr
+	}
+	if clusterEnabled := os.Getenv("CRONOS_CLUSTER"); clusterEnabled == "true" {
+		config.ClusterEnabled = true
+	}
+	if seeds := os.Getenv("CRONOS_CLUSTER_SEEDS"); seeds != "" && len(config.ClusterSeeds) == 0 {
+		config.ClusterSeeds = strings.Split(seeds, ",")
+		for i, seed := range config.ClusterSeeds {
+			config.ClusterSeeds[i] = strings.TrimSpace(seed)
+		}
 	}
 
 	// Validate required configuration

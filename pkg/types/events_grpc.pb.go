@@ -19,10 +19,11 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	EventService_Publish_FullMethodName   = "/cronos_db.EventService/Publish"
-	EventService_Subscribe_FullMethodName = "/cronos_db.EventService/Subscribe"
-	EventService_Ack_FullMethodName       = "/cronos_db.EventService/Ack"
-	EventService_Replay_FullMethodName    = "/cronos_db.EventService/Replay"
+	EventService_Publish_FullMethodName      = "/cronos_db.EventService/Publish"
+	EventService_PublishBatch_FullMethodName = "/cronos_db.EventService/PublishBatch"
+	EventService_Subscribe_FullMethodName    = "/cronos_db.EventService/Subscribe"
+	EventService_Ack_FullMethodName          = "/cronos_db.EventService/Ack"
+	EventService_Replay_FullMethodName       = "/cronos_db.EventService/Replay"
 )
 
 // EventServiceClient is the client API for EventService service.
@@ -31,6 +32,8 @@ const (
 type EventServiceClient interface {
 	// Publish an event
 	Publish(ctx context.Context, in *PublishRequest, opts ...grpc.CallOption) (*PublishResponse, error)
+	// Publish a batch of events (high-throughput)
+	PublishBatch(ctx context.Context, in *PublishBatchRequest, opts ...grpc.CallOption) (*PublishBatchResponse, error)
 	// Subscribe to events (streaming)
 	Subscribe(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[SubscribeRequest, Delivery], error)
 	// Acknowledge event processing
@@ -51,6 +54,16 @@ func (c *eventServiceClient) Publish(ctx context.Context, in *PublishRequest, op
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(PublishResponse)
 	err := c.cc.Invoke(ctx, EventService_Publish_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *eventServiceClient) PublishBatch(ctx context.Context, in *PublishBatchRequest, opts ...grpc.CallOption) (*PublishBatchResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PublishBatchResponse)
+	err := c.cc.Invoke(ctx, EventService_PublishBatch_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -108,6 +121,8 @@ type EventService_ReplayClient = grpc.ServerStreamingClient[ReplayEvent]
 type EventServiceServer interface {
 	// Publish an event
 	Publish(context.Context, *PublishRequest) (*PublishResponse, error)
+	// Publish a batch of events (high-throughput)
+	PublishBatch(context.Context, *PublishBatchRequest) (*PublishBatchResponse, error)
 	// Subscribe to events (streaming)
 	Subscribe(grpc.BidiStreamingServer[SubscribeRequest, Delivery]) error
 	// Acknowledge event processing
@@ -126,6 +141,9 @@ type UnimplementedEventServiceServer struct{}
 
 func (UnimplementedEventServiceServer) Publish(context.Context, *PublishRequest) (*PublishResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Publish not implemented")
+}
+func (UnimplementedEventServiceServer) PublishBatch(context.Context, *PublishBatchRequest) (*PublishBatchResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method PublishBatch not implemented")
 }
 func (UnimplementedEventServiceServer) Subscribe(grpc.BidiStreamingServer[SubscribeRequest, Delivery]) error {
 	return status.Errorf(codes.Unimplemented, "method Subscribe not implemented")
@@ -175,6 +193,24 @@ func _EventService_Publish_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
+func _EventService_PublishBatch_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PublishBatchRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(EventServiceServer).PublishBatch(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: EventService_PublishBatch_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(EventServiceServer).PublishBatch(ctx, req.(*PublishBatchRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _EventService_Subscribe_Handler(srv interface{}, stream grpc.ServerStream) error {
 	return srv.(EventServiceServer).Subscribe(&grpc.GenericServerStream[SubscribeRequest, Delivery]{ServerStream: stream})
 }
@@ -210,6 +246,10 @@ var EventService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Publish",
 			Handler:    _EventService_Publish_Handler,
+		},
+		{
+			MethodName: "PublishBatch",
+			Handler:    _EventService_PublishBatch_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

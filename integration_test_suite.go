@@ -1,3 +1,6 @@
+//go:build integration
+// +build integration
+
 package main
 
 import (
@@ -43,7 +46,7 @@ type IntegrationTestSuite struct {
 
 func main() {
 	fmt.Println("╔══════════════════════════════════════════════════════════════╗")
-	fmt.Println("║         ChronosDB Integration Test Suite                     ║")
+	fmt.Println("║         CronosDB Integration Test Suite                     ║")
 	fmt.Println("╚══════════════════════════════════════════════════════════════╝")
 	fmt.Println()
 

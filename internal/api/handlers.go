@@ -78,9 +78,6 @@ func NewEventServiceHandler(
 func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishRequest) (*types.PublishResponse, error) {
 	event := req.Event
 
-	fmt.Printf("[API] Publish called: message_id=%s, topic=%s, schedule_ts=%d\n",
-		event.GetMessageId(), event.Topic, event.GetScheduleTs())
-
 	// Validate event
 	if event.GetMessageId() == "" {
 		return &types.PublishResponse{
@@ -103,18 +100,27 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 		}, nil
 	}
 
-	fmt.Printf("[API] Validation passed, getting partition...\n")
+	// Get partition - use partition_key from meta if available, otherwise use message_id
+	var partition *types.Partition
+	var err error
 
-	// Get internal partition
-	partition, err := h.partitionManager.GetPartitionForTopic(event.Topic)
-	if err != nil {
-		return &types.PublishResponse{
-			Success: false,
-			Error:   fmt.Sprintf("get partition: %v", err),
-		}, nil
+	partitionKey := event.GetMessageId() // Default to message_id for distribution
+	if pk, ok := event.Meta["partition_key"]; ok && pk != "" {
+		partitionKey = pk
 	}
 
-	fmt.Printf("[API] Got partition: %d\n", partition.ID)
+	// Use key-based partitioning for better distribution
+	partition, err = h.partitionManager.GetPartitionForKey(partitionKey)
+	if err != nil {
+		// Fallback to topic-based partitioning
+		partition, err = h.partitionManager.GetPartitionForTopic(event.Topic)
+		if err != nil {
+			return &types.PublishResponse{
+				Success: false,
+				Error:   fmt.Sprintf("get partition: %v", err),
+			}, nil
+		}
+	}
 
 	// Get internal partition object for WAL access
 	partitionInternal, err := h.partitionManager.GetInternalPartition(partition.ID)
@@ -124,8 +130,6 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 			Error:   fmt.Sprintf("get internal partition: %v", err),
 		}, nil
 	}
-
-	fmt.Printf("[API] Got internal partition\n")
 
 	// Check if duplicate (unless explicitly allowed)
 	if !req.AllowDuplicate {
@@ -144,35 +148,21 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 		}
 	}
 
-	// Append to WAL
-	fmt.Printf("[API] Appending to WAL...\n")
+	// Append to WAL (no sync on every write for performance - WAL handles periodic flush)
 	if err := partitionInternal.Wal.AppendEvent(event); err != nil {
 		return &types.PublishResponse{
 			Success: false,
 			Error:   fmt.Sprintf("append to WAL: %v", err),
 		}, nil
 	}
-	fmt.Printf("[API] Appended to WAL successfully\n")
-
-	// Flush to ensure data is persisted
-	fmt.Printf("[API] Flushing WAL...\n")
-	if err := partitionInternal.Wal.Flush(); err != nil {
-		return &types.PublishResponse{
-			Success: false,
-			Error:   fmt.Sprintf("flush WAL: %v", err),
-		}, nil
-	}
-	fmt.Printf("[API] Flushed WAL successfully\n")
 
 	// Schedule the event in timing wheel
-	fmt.Printf("[API] Scheduling event...\n")
 	if err := partitionInternal.Scheduler.Schedule(event); err != nil {
 		return &types.PublishResponse{
 			Success: false,
 			Error:   fmt.Sprintf("schedule event: %v", err),
 		}, nil
 	}
-	fmt.Printf("[API] Scheduled event successfully\n")
 
 	return &types.PublishResponse{
 		Success:     true,
@@ -180,6 +170,101 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 		Offset:      event.Offset,
 		PartitionId: partition.ID,
 		ScheduleTs:  event.GetScheduleTs(),
+	}, nil
+}
+
+// PublishBatch handles batch publish requests for high-throughput ingestion
+func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.PublishBatchRequest) (*types.PublishBatchResponse, error) {
+	if len(req.Events) == 0 {
+		return &types.PublishBatchResponse{
+			Success: true,
+		}, nil
+	}
+
+	var publishedCount, duplicateCount, errorCount int32
+	var firstOffset, lastOffset int64 = -1, -1
+
+	// Group events by partition for batch WAL writes
+	partitionEvents := make(map[int32][]*types.Event)
+
+	for _, event := range req.Events {
+		// Basic validation
+		if event.GetMessageId() == "" || event.GetScheduleTs() <= 0 || len(event.Payload) == 0 {
+			errorCount++
+			continue
+		}
+
+		// Get partition
+		partitionKey := event.GetMessageId()
+		if pk, ok := event.Meta["partition_key"]; ok && pk != "" {
+			partitionKey = pk
+		}
+
+		partition, err := h.partitionManager.GetPartitionForKey(partitionKey)
+		if err != nil {
+			partition, err = h.partitionManager.GetPartitionForTopic(event.Topic)
+			if err != nil {
+				errorCount++
+				continue
+			}
+		}
+
+		// Check dedup
+		if !req.AllowDuplicate {
+			isDuplicate, err := h.dedupManager.IsDuplicate(event.GetMessageId(), 0)
+			if err != nil {
+				errorCount++
+				continue
+			}
+			if isDuplicate {
+				duplicateCount++
+				continue
+			}
+		}
+
+		partitionEvents[partition.ID] = append(partitionEvents[partition.ID], event)
+	}
+
+	// Batch write to each partition's WAL and schedule
+	for partitionID, events := range partitionEvents {
+		partitionInternal, err := h.partitionManager.GetInternalPartition(partitionID)
+		if err != nil {
+			errorCount += int32(len(events))
+			continue
+		}
+
+		// Batch append to WAL (single syscall for all events)
+		if err := partitionInternal.Wal.AppendBatch(events); err != nil {
+			errorCount += int32(len(events))
+			continue
+		}
+
+		// Batch schedule all events (single lock acquisition)
+		if err := partitionInternal.Scheduler.ScheduleBatch(events); err != nil {
+			// Events are in WAL, just log scheduling error
+			continue
+		}
+
+		// Update stats
+		for _, event := range events {
+			publishedCount++
+
+			if firstOffset == -1 || event.Offset < firstOffset {
+				firstOffset = event.Offset
+			}
+			if event.Offset > lastOffset {
+				lastOffset = event.Offset
+			}
+		}
+	}
+
+	return &types.PublishBatchResponse{
+		Success:        errorCount == 0 && duplicateCount == 0,
+		PublishedCount: publishedCount,
+		DuplicateCount: duplicateCount,
+		ErrorCount:     errorCount,
+		FirstOffset:    firstOffset,
+		LastOffset:     lastOffset,
 	}, nil
 }
 
