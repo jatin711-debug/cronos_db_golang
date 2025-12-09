@@ -128,9 +128,29 @@ func LoadConfig() (*types.Config, error) {
 	}
 
 	// Validate required configuration
-	if config.NodeID == "" {
-		return nil, fmt.Errorf("node-id is required")
+	if err := ValidateConfig(&config); err != nil {
+		return nil, err
 	}
 
 	return &config, nil
+}
+
+// ValidateConfig validates the configuration
+func ValidateConfig(c *types.Config) error {
+	if c.NodeID == "" {
+		return fmt.Errorf("node-id is required")
+	}
+	if c.PartitionCount <= 0 {
+		return fmt.Errorf("partition-count must be > 0")
+	}
+	if c.ReplicationFactor <= 0 {
+		return fmt.Errorf("replication-factor must be > 0")
+	}
+	if c.DataDir == "" {
+		return fmt.Errorf("data-dir is required")
+	}
+	if c.GPRCAddress == "" {
+		return fmt.Errorf("grpc-addr is required")
+	}
+	return nil
 }

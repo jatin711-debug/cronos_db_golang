@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -17,10 +17,15 @@ import (
 )
 
 func main() {
+	// Setup structured logging
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	slog.SetDefault(logger)
+
 	// Load configuration
 	cfg, err := config.LoadConfig()
 	if err != nil {
-		log.Fatalf("Failed to load config: %v", err)
+		slog.Error("Failed to load config", "error", err)
+		os.Exit(1)
 	}
 
 	// Create partition manager
@@ -54,22 +59,23 @@ func main() {
 
 		clusterMgr = cluster.NewManager(clusterConfig)
 		if err := clusterMgr.Start(); err != nil {
-			log.Fatalf("Failed to start cluster manager: %v", err)
+			slog.Error("Failed to start cluster manager", "error", err)
+			os.Exit(1)
 		}
 
 		// Join cluster if seeds provided
 		if len(cfg.ClusterSeeds) > 0 {
 			for _, seed := range cfg.ClusterSeeds {
 				if err := clusterMgr.JoinCluster(seed); err != nil {
-					log.Printf("Warning: Failed to join cluster via %s: %v", seed, err)
+					slog.Warn("Failed to join cluster", "seed", seed, "error", err)
 				} else {
-					log.Printf("Joined cluster via seed %s", seed)
+					slog.Info("Joined cluster", "seed", seed)
 					break
 				}
 			}
 		}
 
-		log.Printf("Cluster mode enabled - Gossip: %s, Raft: %s", cfg.ClusterGossipAddr, cfg.ClusterRaftAddr)
+		slog.Info("Cluster mode enabled", "gossip_addr", cfg.ClusterGossipAddr, "raft_addr", cfg.ClusterRaftAddr)
 	}
 
 	// Create all partitions locally
@@ -78,13 +84,13 @@ func main() {
 	for i := int32(0); i < int32(cfg.PartitionCount); i++ {
 		topic := fmt.Sprintf("partition-%d", i)
 		if err := pm.CreatePartition(i, topic); err != nil {
-			log.Printf("Warning: Failed to create partition %d: %v", i, err)
+			slog.Warn("Failed to create partition", "partition_id", i, "error", err)
 			continue
 		}
 		if err := pm.StartPartition(i); err != nil {
-			log.Printf("Warning: Failed to start partition %d: %v", i, err)
+			slog.Warn("Failed to start partition", "partition_id", i, "error", err)
 		} else {
-			log.Printf("Created and started partition %d", i)
+			slog.Info("Created and started partition", "partition_id", i)
 		}
 	}
 
@@ -98,7 +104,8 @@ func main() {
 		}
 	}
 	if part == nil && !cfg.ClusterEnabled {
-		log.Fatalf("Failed to get any partition")
+		slog.Error("Failed to get any partition")
+		os.Exit(1)
 	}
 
 	// Create gRPC server
@@ -130,9 +137,10 @@ func main() {
 	grpcServer.RegisterServices(eventHandler, consumerHandler)
 
 	// Start gRPC server
-	log.Printf("Starting gRPC server on %s", cfg.GPRCAddress)
+	slog.Info("Starting gRPC server", "address", cfg.GPRCAddress)
 	if err := grpcServer.Start(); err != nil {
-		log.Fatalf("Failed to start gRPC server: %v", err)
+		slog.Error("Failed to start gRPC server", "error", err)
+		os.Exit(1)
 	}
 
 	// Health check endpoint with cluster status
@@ -153,9 +161,10 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("Starting health check server on %s", cfg.HTTPAddress)
+		slog.Info("Starting health check server", "address", cfg.HTTPAddress)
 		if err := healthServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Failed to start health server: %v", err)
+			slog.Error("Failed to start health server", "error", err)
+			os.Exit(1)
 		}
 	}()
 
@@ -180,10 +189,10 @@ func main() {
 			select {
 			case <-ticker.C:
 				stats := pm.GetStats()
-				log.Printf("Stats: %+v", stats)
+				slog.Info("Stats", "stats", stats)
 				if cfg.ClusterEnabled && clusterMgr != nil {
 					clusterStats := clusterMgr.GetStats()
-					log.Printf("Cluster Stats: %+v", clusterStats)
+					slog.Info("Cluster Stats", "stats", clusterStats)
 				}
 			case <-ctx.Done():
 				return
@@ -193,12 +202,13 @@ func main() {
 
 	// Wait for shutdown signal
 	<-sigChan
-	log.Println("Shutting down...")
+	slog.Info("Shutting down...")
+	cancel() // Stop background tasks
 
 	// Shutdown cluster manager
 	if clusterMgr != nil {
 		if err := clusterMgr.Stop(); err != nil {
-			log.Printf("Failed to stop cluster manager: %v", err)
+			slog.Error("Failed to stop cluster manager", "error", err)
 		}
 	}
 
@@ -213,9 +223,9 @@ func main() {
 	// Stop partition
 	if part != nil {
 		if err := pm.StopPartition(0); err != nil {
-			log.Printf("Failed to stop partition: %v", err)
+			slog.Error("Failed to stop partition", "error", err)
 		}
 	}
 
-	log.Println("Shutdown complete")
+	slog.Info("Shutdown complete")
 }
