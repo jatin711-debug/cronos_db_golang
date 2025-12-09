@@ -184,6 +184,9 @@ func (s *Segment) writeHeader() error {
 	binary.BigEndian.PutUint32(header[60:64], crc)
 
 	_, err := s.writer.Write(header)
+	if err == nil {
+		s.sizeBytes += 64
+	}
 	return err
 }
 

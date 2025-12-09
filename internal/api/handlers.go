@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"cronos_db/internal/consumer"
@@ -322,7 +323,7 @@ func (h *EventServiceHandler) Subscribe(stream grpc.BidiStreamingServer[types.Su
 		defer func() {
 			if err := partitionInternal.Dispatcher.Unsubscribe(subID); err != nil {
 				// Log but don't fail - subscription may already be cleaned up
-				fmt.Printf("[SUBSCRIBE] Failed to unsubscribe %s: %v\n", subID, err)
+				slog.Warn("Failed to unsubscribe", "subscription_id", subID, "error", err)
 			}
 		}()
 	}
