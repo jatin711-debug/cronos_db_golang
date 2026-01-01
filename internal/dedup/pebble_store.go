@@ -31,10 +31,10 @@ func NewPebbleStore(dataDir string, partitionID int32, ttlHours int32) (*PebbleS
 	opts := &pebble.Options{
 		Logger:                      nil,
 		MemTableSize:                64 * 1024 * 1024,        // 64MB memtable (default 4MB)
-		MemTableStopWritesThreshold: 4,                       // Allow more memtables before stalling
-		L0CompactionThreshold:       4,                       // Trigger L0 compaction earlier
-		L0StopWritesThreshold:       12,                      // Allow more L0 files before stalling
-		MaxConcurrentCompactions:    func() int { return 2 }, // Parallel compaction
+		MemTableStopWritesThreshold: 10,                      // Allow more memtables before stalling (increased from 4)
+		L0CompactionThreshold:       2,                       // Trigger L0 compaction earlier (reduced from 4)
+		L0StopWritesThreshold:       20,                      // Allow more L0 files before stalling (increased from 12)
+		MaxConcurrentCompactions:    func() int { return 3 }, // Increase parallel compaction (increased from 2)
 		DisableWAL:                  true,                    // Disable PebbleDB WAL (we have our own)
 	}
 

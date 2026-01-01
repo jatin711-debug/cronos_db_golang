@@ -4,8 +4,18 @@ import (
 	"sync/atomic"
 )
 
-// BloomFilter is a simple bloom filter implementation for fast dedup checks
-type BloomFilter struct {
+// BloomFilter interface abstracting the backend
+type BloomFilter interface {
+	Add(key string)
+	MayContain(key string) bool
+	MayContainBatch(keys []string) []bool
+	Count() uint64
+	Reset()
+	MemoryUsageBytes() uint64
+}
+
+// GoBloomFilter is a simple bloom filter implementation for fast dedup checks
+type GoBloomFilter struct {
 	bits    []uint64
 	size    uint64 // Number of bits
 	numHash uint64 // Number of hash functions
@@ -13,7 +23,13 @@ type BloomFilter struct {
 }
 
 // NewBloomFilter creates a bloom filter sized for expectedItems with targetFPR false positive rate
-func NewBloomFilter(expectedItems uint64, targetFPR float64) *BloomFilter {
+func NewBloomFilter(expectedItems uint64, targetFPR float64) BloomFilter {
+	// Using Rust implementation for 5-10x performance gain
+	return NewRustBloomFilter(expectedItems, targetFPR)
+}
+
+// NewGoBloomFilter creates a pure Go bloom filter
+func NewGoBloomFilter(expectedItems uint64, targetFPR float64) *GoBloomFilter {
 	var bitsPerItem uint64
 	if targetFPR <= 0.001 {
 		bitsPerItem = 15
@@ -39,7 +55,7 @@ func NewBloomFilter(expectedItems uint64, targetFPR float64) *BloomFilter {
 		numHash = 7 // Cap at 7 for performance
 	}
 
-	return &BloomFilter{
+	return &GoBloomFilter{
 		bits:    make([]uint64, numWords),
 		size:    size,
 		numHash: numHash,
@@ -68,7 +84,7 @@ func fnvHash(key string) (h1, h2 uint64) {
 }
 
 // Add adds a key to the bloom filter (lock-free using atomic CAS)
-func (bf *BloomFilter) Add(key string) {
+func (bf *GoBloomFilter) Add(key string) {
 	h1, h2 := fnvHash(key)
 
 	for i := uint64(0); i < bf.numHash; i++ {
@@ -92,7 +108,7 @@ func (bf *BloomFilter) Add(key string) {
 }
 
 // MayContain returns true if key might be in the set (lock-free)
-func (bf *BloomFilter) MayContain(key string) bool {
+func (bf *GoBloomFilter) MayContain(key string) bool {
 	h1, h2 := fnvHash(key)
 
 	for i := uint64(0); i < bf.numHash; i++ {
@@ -107,13 +123,22 @@ func (bf *BloomFilter) MayContain(key string) bool {
 	return true
 }
 
+// MayContainBatch checks multiple keys efficiently
+func (bf *GoBloomFilter) MayContainBatch(keys []string) []bool {
+	results := make([]bool, len(keys))
+	for i, key := range keys {
+		results[i] = bf.MayContain(key)
+	}
+	return results
+}
+
 // Count returns approximate number of items added
-func (bf *BloomFilter) Count() uint64 {
+func (bf *GoBloomFilter) Count() uint64 {
 	return atomic.LoadUint64(&bf.count)
 }
 
 // Reset clears the bloom filter
-func (bf *BloomFilter) Reset() {
+func (bf *GoBloomFilter) Reset() {
 	for i := range bf.bits {
 		atomic.StoreUint64(&bf.bits[i], 0)
 	}
@@ -121,7 +146,7 @@ func (bf *BloomFilter) Reset() {
 }
 
 // MemoryUsageBytes returns approximate memory usage
-func (bf *BloomFilter) MemoryUsageBytes() uint64 {
+func (bf *GoBloomFilter) MemoryUsageBytes() uint64 {
 	return uint64(len(bf.bits)) * 8
 }
 
@@ -131,7 +156,7 @@ func (bf *BloomFilter) MemoryUsageBytes() uint64 {
 
 // BloomPebbleStore combines bloom filter with PebbleDB for fast dedup
 type BloomPebbleStore struct {
-	bloom  *BloomFilter
+	bloom  BloomFilter
 	pebble *PebbleStore
 
 	// Stats - atomic for lock-free access

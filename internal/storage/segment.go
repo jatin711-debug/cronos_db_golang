@@ -35,6 +35,7 @@ type Segment struct {
 	filename        string
 	indexFilename   string
 	index           *Index // sparse index for fast seeking
+	recordBuf       []byte // Reusable buffer for serialization
 }
 
 // NewSegment creates a new segment
@@ -84,6 +85,7 @@ func NewSegment(dataDir string, firstOffset int64, isActive bool) (*Segment, err
 		nextIndexOffset: 0,
 		indexEntries:    0,
 		index:           index,
+		recordBuf:       make([]byte, 0, 4096), // Pre-allocate 4KB
 	}
 
 	// Write header if new file
@@ -145,6 +147,7 @@ func OpenSegment(dataDir string, filename string) (*Segment, error) {
 		filename:      filename,
 		indexFilename: fmt.Sprintf("%020d.index", firstOffset),
 		index:         index,
+		recordBuf:     make([]byte, 0, 4096),
 	}
 
 	// Scan segment to get metadata
@@ -297,7 +300,14 @@ func (s *Segment) buildEventRecord(event *types.Event) []byte {
 		size += 2 + len(k) + 2 + len(v) // keylen + key + valuelen + value
 	}
 
-	record := make([]byte, size)
+	// Reuse buffer if possible
+	if cap(s.recordBuf) < size {
+		// Grow buffer efficiently
+		s.recordBuf = make([]byte, size*2)
+	}
+
+	// Slice to required size
+	record := s.recordBuf[:size]
 	offset := 0
 
 	// Length (4 bytes)

@@ -1,0 +1,43 @@
+    Checking cronos_dedup v0.1.0 (D:\personal-projects\cronos_db\internal\dedup\rust)
+warning: unused import: `c_void`
+ --> src\lib.rs:1:20
+  |
+1 | use libc::{size_t, c_void};
+  |                    ^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+error[E0277]: `*const u8` cannot be shared between threads safely
+   --> src\lib.rs:139:53
+    |
+139 |           results.par_iter_mut().enumerate().for_each(|(i, res)| {
+    |                                              -------- ^---------
+    |                                              |        |
+    |  ____________________________________________|________within this `{closure@src\lib.rs:139:53: 139:63}`
+    | |                                            |
+    | |                                            required by a bound introduced by this call
+140 | |             let key = slice::from_raw_parts(keys_ptrs[i], lens[i]);
+141 | |             *res = bf.contains(key);
+142 | |         });
+    | |_________^ `*const u8` cannot be shared between threads safely
+    |
+    = help: within `{closure@src\lib.rs:139:53: 139:63}`, the trait `Sync` is not implemented for `*const u8`
+    = note: required because it appears within the type `[*const u8]`
+    = note: required because it appears within the type `&[*const u8]`
+note: required because it's used within this closure
+   --> src\lib.rs:139:53
+    |
+139 |         results.par_iter_mut().enumerate().for_each(|(i, res)| {
+    |                                                     ^^^^^^^^^^
+note: required by a bound in `rayon::iter::ParallelIterator::for_each`
+   --> C:\Users\User\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\rayon-1.11.0\src\iter\mod.rs:375:30
+    |
+373 |     fn for_each<OP>(self, op: OP)
+    |        -------- required by a bound in this associated function
+374 |     where
+375 |         OP: Fn(Self::Item) + Sync + Send,
+    |                              ^^^^ required by this bound in `ParallelIterator::for_each`
+
+For more information about this error, try `rustc --explain E0277`.
+warning: `cronos_dedup` (lib) generated 1 warning
+error: could not compile `cronos_dedup` (lib) due to 1 previous error; 1 warning emitted
