@@ -1,8 +1,8 @@
 package scheduler
 
 import (
-	"container/list"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
@@ -16,7 +16,7 @@ type TimingWheel struct {
 	wheelSize     int32
 	currentTick   int64
 	startTimeMs   int64        // Absolute start time of the root wheel (Unix ms)
-	wheel         []*list.List // Array of time slots
+	wheel         []*Timer     // Array of time slots (linked list heads)
 	overflowWheel *TimingWheel // Higher level wheel
 	timers        map[string]*Timer
 	expired       chan []*Timer
@@ -33,6 +33,10 @@ type Timer struct {
 	ExpirationMs int64 // Absolute expiration time in milliseconds (Unix timestamp)
 	SlotIndex    int32
 	CreatedTS    int64
+
+	// Intrusive list pointers
+	prev *Timer
+	next *Timer
 }
 
 // NewTimingWheel creates a new timing wheel
@@ -43,7 +47,7 @@ func NewTimingWheel(tickMs int32, wheelSize int32, maxLevels int32, currentLevel
 		wheelSize:    wheelSize,
 		currentTick:  0,
 		startTimeMs:  startTimeMs,
-		wheel:        make([]*list.List, wheelSize),
+		wheel:        make([]*Timer, wheelSize), // Slice of list heads
 		timers:       make(map[string]*Timer),
 		expired:      make(chan []*Timer, 100000), // 100K buffer for burst loads
 		quit:         make(chan struct{}),
@@ -55,14 +59,13 @@ func NewTimingWheel(tickMs int32, wheelSize int32, maxLevels int32, currentLevel
 			},
 		},
 	}
+	// No initialization loop needed for nil headers
 	return tw
 }
 
-// initialize initializes wheel slots
+// initialize initializes wheel slots (legacy, now empty as slice is zero-inited)
 func (tw *TimingWheel) initialize() {
-	for i := int32(0); i < tw.wheelSize; i++ {
-		tw.wheel[i] = list.New()
-	}
+	// No-op for intrusive list slice
 }
 
 // AddTimer adds a timer to the wheel
@@ -97,7 +100,10 @@ func (tw *TimingWheel) addTimerLocked(timer *Timer) error {
 		// Fits in current wheel - place in appropriate slot
 		slotIndex := int32((tw.currentTick + delayTicks) % int64(tw.wheelSize))
 		timer.SlotIndex = slotIndex
-		tw.wheel[slotIndex].PushBack(timer)
+
+		// Insert into intrusive list
+		tw.insertTimer(slotIndex, timer)
+
 		tw.timers[timer.EventID] = timer
 		return nil
 	}
@@ -124,6 +130,40 @@ func (tw *TimingWheel) addTimerLocked(timer *Timer) error {
 	return tw.overflowWheel.addTimerLocked(timer)
 }
 
+// insertTimer inserts a timer into the slot's list (at tail for FIFOish behavior, or head for speed - head is O(1))
+// We'll insert at head for O(1) simplicity.
+func (tw *TimingWheel) insertTimer(slot int32, timer *Timer) {
+	head := tw.wheel[slot]
+
+	timer.next = head
+	timer.prev = nil
+
+	if head != nil {
+		head.prev = timer
+	}
+
+	tw.wheel[slot] = timer
+}
+
+// removeTimerFromList removes a timer from the linked list
+func (tw *TimingWheel) removeTimerFromList(timer *Timer) {
+	if timer.prev != nil {
+		timer.prev.next = timer.next
+	} else {
+		// Logic to update head if we are removing the first element
+		// But we need to know WHICH slot. Timer stores SlotIndex.
+		// If timer.prev is nil, it MUST be the head of tw.wheel[timer.SlotIndex]
+		tw.wheel[timer.SlotIndex] = timer.next
+	}
+
+	if timer.next != nil {
+		timer.next.prev = timer.prev
+	}
+
+	timer.next = nil
+	timer.prev = nil
+}
+
 // RemoveTimer removes a timer
 func (tw *TimingWheel) RemoveTimer(eventID string) error {
 	tw.mu.Lock()
@@ -131,25 +171,23 @@ func (tw *TimingWheel) RemoveTimer(eventID string) error {
 
 	timer, exists := tw.timers[eventID]
 	if !exists {
+		// Check overflow wheel
+		if tw.overflowWheel != nil {
+			return tw.overflowWheel.RemoveTimer(eventID)
+		}
 		return fmt.Errorf("timer %s not found", eventID)
 	}
 
-	// Remove from wheel
-	for e := tw.wheel[timer.SlotIndex].Front(); e != nil; e = e.Next() {
-		t := e.Value.(*Timer)
-		if t.EventID == eventID {
-			tw.wheel[timer.SlotIndex].Remove(e)
-			delete(tw.timers, eventID)
-			return nil
-		}
-	}
+	// Remove from intrusive list
+	tw.removeTimerFromList(timer)
 
-	// Check overflow wheel
-	if tw.overflowWheel != nil {
-		return tw.overflowWheel.RemoveTimer(eventID)
-	}
+	delete(tw.timers, eventID)
 
-	return fmt.Errorf("timer %s not found in wheel", eventID)
+	// Return to pool? No, caller/expire logic handles putTimer usually, but here we are cancelling.
+	// So we should put it back.
+	tw.PutTimer(timer)
+
+	return nil
 }
 
 // Tick advances the timing wheel by one tick
@@ -167,14 +205,24 @@ func (tw *TimingWheel) tickLocked() {
 
 	// Get all timers in current slot
 	expiredTimers := make([]*Timer, 0)
-	for e := tw.wheel[currentSlot].Front(); e != nil; e = e.Next() {
-		timer := e.Value.(*Timer)
-		expiredTimers = append(expiredTimers, timer)
-		delete(tw.timers, timer.EventID)
+
+	// Iterate intrusive list
+	curr := tw.wheel[currentSlot]
+	for curr != nil {
+		next := curr.next // Save next before modifying
+
+		expiredTimers = append(expiredTimers, curr)
+		delete(tw.timers, curr.EventID)
+
+		// Clear links
+		curr.next = nil
+		curr.prev = nil
+
+		curr = next
 	}
 
-	// Clear the slot
-	tw.wheel[currentSlot].Init()
+	// Clear the slot head
+	tw.wheel[currentSlot] = nil
 
 	// Send expired timers to channel (non-blocking with large buffer)
 	// If buffer is full, we MUST NOT drop - use blocking send
@@ -219,14 +267,22 @@ func (tw *TimingWheel) cascadeFromOverflow() {
 
 	// Move all timers from overflow slot to this wheel
 	timersToMove := make([]*Timer, 0)
-	for e := tw.overflowWheel.wheel[overflowSlot].Front(); e != nil; e = e.Next() {
-		timer := e.Value.(*Timer)
-		timersToMove = append(timersToMove, timer)
-		delete(tw.overflowWheel.timers, timer.EventID)
+
+	curr := tw.overflowWheel.wheel[overflowSlot]
+	for curr != nil {
+		next := curr.next
+
+		timersToMove = append(timersToMove, curr)
+		delete(tw.overflowWheel.timers, curr.EventID)
+
+		curr.prev = nil
+		curr.next = nil
+
+		curr = next
 	}
 
 	// Clear the overflow slot
-	tw.overflowWheel.wheel[overflowSlot].Init()
+	tw.overflowWheel.wheel[overflowSlot] = nil
 
 	// Re-add timers to this wheel (they will now fit within our range)
 	for _, timer := range timersToMove {
@@ -304,9 +360,6 @@ type SchedulerStats struct {
 }
 
 // NewTimer creates a new timer (deprecated, use GetTimer)
-// eventID is the unique identifier for this timer
-// event is the event to be triggered
-// The timer stores the absolute expiration time from the event's schedule timestamp
 func NewTimer(eventID string, event *types.Event) *Timer {
 	return &Timer{
 		EventID:      eventID,
@@ -324,18 +377,24 @@ func (tw *TimingWheel) GetTimer(eventID string, event *types.Event) *Timer {
 	timer.ExpirationMs = event.GetScheduleTs()
 	timer.CreatedTS = time.Now().UnixMilli()
 	timer.SlotIndex = -1
+	timer.next = nil
+	timer.prev = nil
 	return timer
 }
 
 // GetTimerFast gets a timer using offset as ID (avoids string allocation)
 func (tw *TimingWheel) GetTimerFast(offset int64, event *types.Event) *Timer {
 	timer := tw.timerPool.Get().(*Timer)
-	// Use a simple numeric ID format
-	timer.EventID = fmt.Sprintf("%d", offset)
+	// Optimization: FormatInt is slightly faster than Sprintf, but still allocates.
+	// Ideally we would change EventID to be an interface{} or int64, but that requires
+	// larger refactoring of map keys.
+	timer.EventID = strconv.FormatInt(offset, 10)
 	timer.Event = event
 	timer.ExpirationMs = event.GetScheduleTs()
 	timer.CreatedTS = time.Now().UnixMilli()
 	timer.SlotIndex = -1
+	timer.next = nil
+	timer.prev = nil
 	return timer
 }
 
@@ -343,5 +402,7 @@ func (tw *TimingWheel) GetTimerFast(offset int64, event *types.Event) *Timer {
 func (tw *TimingWheel) PutTimer(timer *Timer) {
 	timer.Event = nil
 	timer.EventID = ""
+	timer.next = nil
+	timer.prev = nil
 	tw.timerPool.Put(timer)
 }
