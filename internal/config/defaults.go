@@ -28,7 +28,8 @@ const (
 	DefaultDeliveryPollMS     = 50
 
 	// Dedup configuration
-	DefaultDedupTTLHours = 168 // 7 days
+	DefaultDedupTTLHours = 168         // 7 days
+	DefaultBloomCapacity = 100_000_000 // 100M items (increased from 10M)
 
 	// Replication configuration
 	DefaultReplicationBatchSize = 100
