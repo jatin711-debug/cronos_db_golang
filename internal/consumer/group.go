@@ -170,12 +170,38 @@ func (g *GroupManager) LeaveGroup(groupID, memberID string) error {
 	go func() {
 		time.Sleep(30 * time.Second) // 30 second grace period
 		g.mu.Lock()
-		delete(group.Members, memberID)
-		delete(group.MemberOffsets, memberID)
+		if group, exists := g.groups[groupID]; exists {
+			delete(group.Members, memberID)
+			delete(group.MemberOffsets, memberID)
+		}
 		g.mu.Unlock()
 	}()
 
 	return nil
+}
+
+// TriggerRebalance manually triggers a rebalance and returns assignments
+func (g *GroupManager) TriggerRebalance(groupID string) (map[string]int32, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	group, exists := g.groups[groupID]
+	if !exists {
+		return nil, fmt.Errorf("group %s not found", groupID)
+	}
+
+	if err := g.rebalanceGroup(group); err != nil {
+		return nil, err
+	}
+
+	assignments := make(map[string]int32)
+	for memberID, member := range group.Members {
+		if member.Active {
+			assignments[memberID] = member.AssignedPartition
+		}
+	}
+
+	return assignments, nil
 }
 
 // rebalanceGroup rebalances partition assignments

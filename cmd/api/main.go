@@ -14,6 +14,8 @@ import (
 	"cronos_db/internal/cluster"
 	"cronos_db/internal/config"
 	"cronos_db/internal/partition"
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 func main() {
@@ -154,6 +156,8 @@ func main() {
 			fmt.Fprintf(w, "OK - Standalone Mode\n")
 		}
 	})
+	
+	mux.Handle("/metrics", promhttp.Handler())
 
 	healthServer := &http.Server{
 		Addr:    cfg.HTTPAddress,
@@ -220,11 +224,10 @@ func main() {
 	defer shutdownCancel()
 	healthServer.Shutdown(shutdownCtx)
 
-	// Stop partition
-	if part != nil {
-		if err := pm.StopPartition(0); err != nil {
-			slog.Error("Failed to stop partition", "error", err)
-		}
+	// Stop all partitions gracefully
+	slog.Info("Stopping all partitions...")
+	if err := pm.StopAllPartitions(); err != nil {
+		slog.Error("Failed to cleanly stop all partitions", "error", err)
 	}
 
 	slog.Info("Shutdown complete")

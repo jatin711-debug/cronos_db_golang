@@ -323,7 +323,74 @@ func (pm *PartitionManager) startPartitionInternal(partition *Partition) error {
 		}
 	}()
 
+	// Start compaction loop (runs every 10 minutes)
+	compactionInterval := 10 * time.Minute
+	go func() {
+		ticker := time.NewTicker(compactionInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				partition.runCompaction()
+			case <-partition.deliveryQuit:
+				return
+			}
+		}
+	}()
+
 	return nil
+}
+
+// runCompaction calculates the minimum consumed offset across all consumer groups
+// and safely removes obsolete WAL segments.
+func (p *Partition) runCompaction() {
+	groups := p.ConsumerGroup.ListGroups()
+	
+	hasActiveConsumers := false
+	minConsumedOffset := p.Wal.GetHighWatermark()
+
+	for _, group := range groups {
+		hasPartition := false
+		for _, partID := range group.Partitions {
+			if partID == p.ID {
+				hasPartition = true
+				break
+			}
+		}
+		
+		if !hasPartition {
+			continue
+		}
+		
+		hasActiveConsumers = true
+		
+		offset, ok := group.CommittedOffsets[p.ID]
+		if ok {
+			if offset == -1 {
+				// Consumer hasn't consumed anything, can't discard data
+				minConsumedOffset = 0
+			} else if offset < minConsumedOffset {
+				minConsumedOffset = offset
+			}
+		} else {
+			// Partition is assigned but no offset committed yet
+			minConsumedOffset = 0
+		}
+	}
+
+	if !hasActiveConsumers {
+		return // No active consumers to bound the min offset
+	}
+
+	if minConsumedOffset > 0 {
+		deleted, err := p.Wal.CompactByOffset(minConsumedOffset)
+		if err != nil {
+			log.Printf("[Partition %d] WAL compaction error: %v", p.ID, err)
+		} else if deleted > 0 {
+			log.Printf("[Partition %d] Compacted %d WAL segments up to offset %d", p.ID, deleted, minConsumedOffset)
+		}
+	}
 }
 
 // ListPartitions lists all partitions
@@ -355,13 +422,63 @@ func (pm *PartitionManager) StopPartition(partitionID int32) error {
 	}
 
 	// Stop scheduler
-	partition.Scheduler.Stop()
-
-	// Close WAL
-	if err := partition.Wal.Close(); err != nil {
-		return fmt.Errorf("close WAL: %w", err)
+	if partition.Scheduler != nil {
+		partition.Scheduler.Stop()
 	}
 
+	// Stop delivery worker
+	if partition.Worker != nil {
+		partition.Worker.Stop()
+	}
+
+	// Signal delivery goroutines to stop
+	select {
+	case <-partition.deliveryQuit:
+		// already closed
+	default:
+		close(partition.deliveryQuit)
+	}
+
+	// Close WAL
+	if partition.Wal != nil {
+		// Flush before close to ensure durability
+		partition.Wal.Flush()
+		if err := partition.Wal.Close(); err != nil {
+			return fmt.Errorf("close WAL: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// StopAllPartitions stops all active partitions concurrently and gracefully
+func (pm *PartitionManager) StopAllPartitions() error {
+	partitions := pm.ListPartitions()
+	
+	var wg sync.WaitGroup
+	errCh := make(chan error, len(partitions))
+
+	for _, p := range partitions {
+		wg.Add(1)
+		go func(partitionID int32) {
+			defer wg.Done()
+			if err := pm.StopPartition(partitionID); err != nil {
+				errCh <- fmt.Errorf("partition %d: %w", partitionID, err)
+			}
+		}(p.ID)
+	}
+
+	wg.Wait()
+	close(errCh)
+
+	var errs []error
+	for err := range errCh {
+		errs = append(errs, err)
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("failed to stop %d partitions: %v", len(errs), errs[0])
+	}
 	return nil
 }
 

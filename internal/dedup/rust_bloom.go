@@ -15,6 +15,8 @@ void bloom_free(void* ptr);
 void bloom_add(void* ptr, const unsigned char* key, size_t len);
 bool bloom_check(void* ptr, const unsigned char* key, size_t len);
 void bloom_check_batch(void* ptr, const unsigned char** keys, const size_t* keys_lens, size_t num_keys, bool* results);
+unsigned long long bloom_count(void* ptr);
+unsigned long long bloom_memory_usage(void* ptr);
 */
 import "C"
 import (
@@ -86,8 +88,7 @@ func (bf *RustBloomFilter) MayContainBatch(keys []string) []bool {
 }
 
 func (bf *RustBloomFilter) Count() uint64 {
-	// Not implemented in Rust side yet, return 0 or track in Go
-	return 0
+	return uint64(C.bloom_count(bf.ptr))
 }
 
 func (bf *RustBloomFilter) Reset() {
@@ -96,5 +97,5 @@ func (bf *RustBloomFilter) Reset() {
 }
 
 func (bf *RustBloomFilter) MemoryUsageBytes() uint64 {
-	return 0 // TODO
+	return uint64(C.bloom_memory_usage(bf.ptr))
 }

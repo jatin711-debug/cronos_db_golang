@@ -211,19 +211,15 @@ func (w *WAL) ReadEvents(startOffset, endOffset int64) ([]*types.Event, error) {
 		}
 
 		// Read events from this segment
-		// Start from max(startOffset, segment.firstOffset)
 		readOffset := max(startOffset, segment.GetFirstOffset())
-
-		// End at min(endOffset, segment.lastOffset)
 		endForSegment := min(endOffset, segment.GetLastOffset())
 
-		// Read each event
-		for offset := readOffset; offset <= endForSegment; offset++ {
-			event, err := segment.ReadEvent(offset)
-			if err != nil {
-				// Skip if event not found (might be truncated)
-				continue
-			}
+		events, err := segment.ReadEventsByOffsetRange(readOffset, endForSegment)
+		if err != nil {
+			return nil, fmt.Errorf("read offset range from segment %s: %w", segment.GetFilename(), err)
+		}
+		
+		for _, event := range events {
 			event.PartitionId = w.partitionID
 			result = append(result, event)
 		}
@@ -245,7 +241,15 @@ func (w *WAL) ReadEventsByTime(startTS, endTS int64) ([]*types.Event, error) {
 			continue
 		}
 
-		// TODO: Read events using index
+		events, err := segment.ReadEventsByTime(startTS, endTS)
+		if err != nil {
+			return nil, fmt.Errorf("read from segment %s: %w", segment.GetFilename(), err)
+		}
+		
+		for _, event := range events {
+			event.PartitionId = w.partitionID
+			result = append(result, event)
+		}
 	}
 
 	return result, nil
@@ -293,6 +297,78 @@ func (w *WAL) GetSegments() []*Segment {
 	segments := make([]*Segment, len(w.segments))
 	copy(segments, w.segments)
 	return segments
+}
+
+// CompactByOffset removes all segments whose last offset is less than upToOffset.
+// Returns the number of segments deleted.
+func (w *WAL) CompactByOffset(upToOffset int64) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if len(w.segments) <= 1 {
+		return 0, nil // Never delete the active/only segment
+	}
+
+	keepIndex := 0
+	deletedCount := 0
+
+	for i, segment := range w.segments {
+		// Only consider non-active segments for deletion
+		if segment == w.activeSegment || i == len(w.segments)-1 {
+			w.segments[keepIndex] = segment
+			keepIndex++
+			continue
+		}
+
+		if segment.GetLastOffset() < upToOffset && segment.GetLastOffset() > 0 {
+			if err := segment.Delete(); err != nil {
+				return deletedCount, fmt.Errorf("failed to delete segment %s: %w", segment.GetFilename(), err)
+			}
+			deletedCount++
+		} else {
+			w.segments[keepIndex] = segment
+			keepIndex++
+		}
+	}
+
+	w.segments = w.segments[:keepIndex]
+	return deletedCount, nil
+}
+
+// CompactByTimestamp removes all segments whose last timestamp is less than upToTS.
+// Returns the number of segments deleted.
+func (w *WAL) CompactByTimestamp(upToTS int64) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if len(w.segments) <= 1 {
+		return 0, nil // Never delete the active/only segment
+	}
+
+	keepIndex := 0
+	deletedCount := 0
+
+	for i, segment := range w.segments {
+		// Only consider non-active segments for deletion
+		if segment == w.activeSegment || i == len(w.segments)-1 {
+			w.segments[keepIndex] = segment
+			keepIndex++
+			continue
+		}
+
+		if segment.GetLastTS() < upToTS && segment.GetLastTS() > 0 {
+			if err := segment.Delete(); err != nil {
+				return deletedCount, fmt.Errorf("failed to delete segment %s: %w", segment.GetFilename(), err)
+			}
+			deletedCount++
+		} else {
+			w.segments[keepIndex] = segment
+			keepIndex++
+		}
+	}
+
+	w.segments = w.segments[:keepIndex]
+	return deletedCount, nil
 }
 
 // GetActiveSegment returns active segment
