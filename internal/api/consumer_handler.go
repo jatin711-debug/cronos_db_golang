@@ -103,7 +103,7 @@ func (h *ConsumerGroupServiceHandler) RebalanceConsumerGroup(
 	}
 
 	return &types.RebalanceConsumerGroupResponse{
-		Success:             true,
+		Success:              true,
 		PartitionAssignments: assignments,
 	}, nil
 }
