@@ -2,8 +2,11 @@ package replication
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"net"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -165,6 +168,119 @@ func (f *Follower) handleMessage(t *Transport, msgType uint8, payload []byte) er
 	return nil
 }
 
+// SyncFilesFromLeader actively pulls raw disk segment files from the leader
+func (f *Follower) SyncFilesFromLeader() error {
+	f.mu.Lock()
+	if f.catchupMode {
+		f.mu.Unlock()
+		return fmt.Errorf("already catching up")
+	}
+	f.catchupMode = true
+	leaderAddr := f.leaderAddr
+	partitionID := f.partitionID
+	walDataDir := f.wal.GetDataDir()
+	f.mu.Unlock()
+
+	defer func() {
+		f.mu.Lock()
+		f.catchupMode = false
+		f.mu.Unlock()
+	}()
+
+	log.Printf("[FOLLOWER] Connecting to leader %s for bulk file sync...", leaderAddr)
+	conn, err := net.DialTimeout("tcp", leaderAddr, 5*time.Second)
+	if err != nil {
+		return fmt.Errorf("dial leader: %w", err)
+	}
+	defer conn.Close()
+
+	transport := NewTransport(conn)
+
+	// Send Handshake
+	hs := &HandshakeMessage{NodeID: f.nodeID}
+	pl, _ := hs.Encode()
+	if err := transport.WriteMessage(MsgTypeHandshake, pl); err != nil {
+		return err
+	}
+
+	// Request bulk file stream
+	req := &FileTransferRequestMessage{PartitionId: partitionID}
+	pl, _ = req.Encode()
+	if err := transport.WriteMessage(MsgTypeFileTransferRequest, pl); err != nil {
+		return fmt.Errorf("request file transfer: %w", err)
+	}
+
+	segmentsDir := filepath.Join(walDataDir, "segments")
+	var currentFile *os.File
+	var currentFilePath string
+
+	for {
+		msgType, payload, err := transport.ReadMessage()
+		if err != nil {
+			if err == io.EOF {
+				return fmt.Errorf("leader disconnected during bulk sync")
+			}
+			return fmt.Errorf("read message: %w", err)
+		}
+
+		switch msgType {
+		case MsgTypeFileTransferStart:
+			msg := &FileTransferStartMessage{}
+			if err := msg.Decode(payload); err != nil {
+				return err
+			}
+			currentFilePath = filepath.Join(segmentsDir, msg.Filename)
+			
+			// Open new file for writing
+			log.Printf("[FOLLOWER] Receiving segment file: %s (%d bytes)", msg.Filename, msg.FileSize)
+			if currentFile != nil {
+				currentFile.Close()
+			}
+			currentFile, err = os.OpenFile(currentFilePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+			if err != nil {
+				return fmt.Errorf("create segment file %s: %w", msg.Filename, err)
+			}
+
+		case MsgTypeFileTransferData:
+			msg := &FileTransferDataMessage{}
+			if err := msg.Decode(payload); err != nil {
+				return err
+			}
+			if currentFile == nil {
+				return fmt.Errorf("received data without FileTransferStart")
+			}
+			if _, err := currentFile.Write(msg.Data); err != nil {
+				return fmt.Errorf("write segment data: %w", err)
+			}
+
+		case MsgTypeFileTransferEnd:
+			msg := &FileTransferEndMessage{}
+			if err := msg.Decode(payload); err != nil {
+				return err
+			}
+			if currentFile != nil {
+				currentFile.Close()
+				currentFile = nil
+			}
+			if !msg.Success {
+				return fmt.Errorf("leader reported failure during bulk transfer")
+			}
+			
+			log.Printf("[FOLLOWER] Bulk file sync completed successfully")
+			
+			// Reload WAL to pick up new segments
+			f.mu.Lock()
+			f.wal.ReloadSegments()
+			f.nextOffset = f.wal.GetNextOffset()
+			f.mu.Unlock()
+			
+			return nil
+		default:
+			log.Printf("[FOLLOWER] Ignored unexpected msg type %d during bulk sync", msgType)
+		}
+	}
+}
+
 // AppendEvents appends replicated events to WAL (Logic moved to handleMessage)
 func (f *Follower) AppendEvents(events []*types.Event, leaderEpoch int64) error {
 	f.mu.Lock()
@@ -210,7 +326,7 @@ func (f *Follower) PromoteToLeader() (*Leader, error) {
 	}
 
 	// Create new leader
-	leader := NewLeader(f.partitionID, 100, 100*time.Millisecond)
+	leader := NewLeader(f.partitionID, 100, 100*time.Millisecond, f.wal)
 	leader.SetEpoch(f.epoch + 1)
 
 	log.Printf("[FOLLOWER] Promoted to leader for partition %d (new epoch: %d)", f.partitionID, f.epoch+1)

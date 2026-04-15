@@ -119,6 +119,7 @@ func (m *HandshakeMessage) Decode(data []byte) error {
 
 // AppendEntriesMessage
 type AppendEntriesMessage struct {
+	PartitionId  int32
 	Term         int64
 	PrevLogIndex int64
 	PrevLogTerm  int64
@@ -134,7 +135,7 @@ func (m *AppendEntriesMessage) Encode() ([]byte, error) {
 
 	// Create a wrapper proto
 	req := &types.ReplicationAppendRequest{
-		PartitionId:        0, // TODO
+		PartitionId:        m.PartitionId,
 		Events:             m.Events,
 		ExpectedNextOffset: m.PrevLogIndex + 1, // Approximation
 		Term:               m.Term,
@@ -147,6 +148,7 @@ func (m *AppendEntriesMessage) Decode(data []byte) error {
 	if err := proto.Unmarshal(data, req); err != nil {
 		return err
 	}
+	m.PartitionId = req.PartitionId
 	m.Term = req.Term
 	m.Events = req.Events
 	m.PrevLogIndex = req.ExpectedNextOffset - 1 // Approximation

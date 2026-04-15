@@ -625,6 +625,153 @@ func (s *Segment) readEventFile(targetOffset int64, startPos int64) (*types.Even
 	return nil, fmt.Errorf("event not found at offset %d", targetOffset)
 }
 
+// ReadEventsByTime reads events in the given timestamp range [startTS, endTS]
+func (s *Segment) ReadEventsByTime(startTS, endTS int64) ([]*types.Event, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var result []*types.Event
+
+	if s.lastTS > 0 && s.firstTS > endTS {
+		return result, nil // Segment is completely after the range
+	}
+	if s.lastTS > 0 && s.lastTS < startTS {
+		return result, nil // Segment is completely before the range
+	}
+
+	// Find starting position using index
+	startPos := int64(64) // Default to after header
+	if s.index != nil {
+		if pos, found := s.index.FindByTimestamp(startTS); found {
+			startPos = pos
+		}
+	}
+
+	filePath := filepath.Join(s.dataDir, "segments", s.filename)
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("open for read: %w", err)
+	}
+	defer file.Close()
+
+	if _, err := file.Seek(startPos, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("seek: %w", err)
+	}
+
+	for {
+		// Read record length
+		lengthBytes := make([]byte, 4)
+		if _, err := io.ReadFull(file, lengthBytes); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return nil, fmt.Errorf("read length: %w", err)
+		}
+
+		length := int64(binary.BigEndian.Uint32(lengthBytes))
+		if length <= 0 || length > 10*1024*1024 {
+			break
+		}
+
+		// Read full record
+		record := make([]byte, length-4)
+		if _, err := io.ReadFull(file, record); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return nil, fmt.Errorf("read record: %w", err)
+		}
+
+		event, err := parseEventRecordWithoutLength(record)
+		if err != nil {
+			return nil, fmt.Errorf("parse event: %w", err)
+		}
+
+		// Check timestamp
+		if event.GetScheduleTs() >= startTS && event.GetScheduleTs() <= endTS {
+			result = append(result, event)
+		}
+
+		// Stop early if we passed the endTS (assuming timestamps are roughly ordered)
+		// Wait, timestamps are just event creation/schedule. But WAL strictly ordered by offset.
+		// Schedule timestamp might not be perfectly ordered, so it's safer to read to the end of the segment 
+		// but typically events are added mostly in order with drift.
+		// For now, let's stop if event.Offset == s.lastOffset
+		if event.Offset == s.lastOffset {
+			break
+		}
+	}
+
+	return result, nil
+}
+
+// ReadEventsByOffsetRange reads events in the given offset range [startOffset, endOffset]
+func (s *Segment) ReadEventsByOffsetRange(startOffset, endOffset int64) ([]*types.Event, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var result []*types.Event
+
+	// Find starting position using index
+	startPos := int64(64) // Default to after header
+	if s.index != nil {
+		if pos, found := s.index.FindByOffset(startOffset); found {
+			startPos = pos
+		}
+	}
+
+	filePath := filepath.Join(s.dataDir, "segments", s.filename)
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("open for read: %w", err)
+	}
+	defer file.Close()
+
+	if _, err := file.Seek(startPos, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("seek: %w", err)
+	}
+
+	for {
+		// Read record length
+		lengthBytes := make([]byte, 4)
+		if _, err := io.ReadFull(file, lengthBytes); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return nil, fmt.Errorf("read length: %w", err)
+		}
+
+		length := int64(binary.BigEndian.Uint32(lengthBytes))
+		if length <= 0 || length > 10*1024*1024 {
+			break
+		}
+
+		// Read full record
+		record := make([]byte, length-4)
+		if _, err := io.ReadFull(file, record); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return nil, fmt.Errorf("read record: %w", err)
+		}
+
+		event, err := parseEventRecordWithoutLength(record)
+		if err != nil {
+			return nil, fmt.Errorf("parse event: %w", err)
+		}
+
+		if event.Offset >= startOffset && event.Offset <= endOffset {
+			result = append(result, event)
+		}
+
+		if event.Offset >= endOffset {
+			break
+		}
+	}
+
+	return result, nil
+}
+
 // scan scans segment to recover metadata
 func (s *Segment) scan() error {
 	// Scan segment file to find last offset and timestamp
@@ -713,6 +860,40 @@ func (s *Segment) Close() error {
 		}
 	}
 	return s.segmentFile.Close()
+}
+
+// Delete permanently removes the segment and its index files from disk
+func (s *Segment) Delete() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Close files first if they are open
+	if s.segmentFile != nil {
+		_ = s.segmentFile.Close()
+	}
+	
+	if s.mmapData != nil {
+		munmapFile(s.mmapData)
+		s.mmapData = nil
+	}
+
+	if s.index != nil {
+		_ = s.index.Close()
+	}
+
+	// Delete segment file
+	filePath := filepath.Join(s.dataDir, "segments", s.filename)
+	if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("delete segment file: %w", err)
+	}
+
+	// Delete index file
+	indexFilePath := filepath.Join(s.dataDir, "index", s.indexFilename)
+	if err := os.Remove(indexFilePath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("delete index file: %w", err)
+	}
+
+	return nil
 }
 
 // Sync syncs segment to disk

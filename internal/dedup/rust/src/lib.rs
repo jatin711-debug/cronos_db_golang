@@ -13,6 +13,7 @@ pub struct BloomFilter {
     bits: Vec<AtomicU64>,
     size_bits: u64,
     num_hashes: u64,
+    num_items: AtomicU64,
 }
 
 impl BloomFilter {
@@ -35,6 +36,7 @@ impl BloomFilter {
             bits,
             size_bits,
             num_hashes,
+            num_items: AtomicU64::new(0),
         }
     }
 
@@ -55,6 +57,8 @@ impl BloomFilter {
     fn add(&self, key: &[u8]) {
         let (h1, h2) = Self::get_hash_values(key);
         
+        let mut added = false;
+        
         for i in 0..self.num_hashes {
             let idx = (h1.wrapping_add(i.wrapping_mul(h2))) % self.size_bits;
             let word_idx = (idx / 64) as usize;
@@ -65,7 +69,15 @@ impl BloomFilter {
             // Relaxed ordering might be okay for bloom filters, but using Relaxed/Release consistency
             // Standard idiom is ORing. 
             // We use fetch_or which is atomic.
-            atom.fetch_or(bit_mask, Ordering::Relaxed);
+            let prev = atom.fetch_or(bit_mask, Ordering::Relaxed);
+            
+            if (prev & bit_mask) == 0 {
+                added = true;
+            }
+        }
+        
+        if added {
+            self.num_items.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -112,6 +124,19 @@ pub unsafe extern "C" fn bloom_check(ptr: *mut BloomFilter, key_ptr: *const u8, 
     let bf = &*ptr;
     let key = slice::from_raw_parts(key_ptr, key_len);
     bf.contains(key)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn bloom_count(ptr: *mut BloomFilter) -> u64 {
+    let bf = &*ptr;
+    bf.num_items.load(Ordering::Relaxed)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn bloom_memory_usage(ptr: *mut BloomFilter) -> u64 {
+    let bf = &*ptr;
+    // Vec size * 8 bytes per u64
+    (bf.bits.len() as u64) * 8
 }
 
 // Wrapper for raw pointer to make it Sync/Send for Rayon

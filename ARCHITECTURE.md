@@ -38,8 +38,8 @@ CronosDB is a distributed, timestamp-triggered database with built-in scheduling
        │            │               │            │               │
        ▼            ▼               ▼            ▼               ▼
 ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐
-│   WAL    │ │Scheduler │ │Delivery  │ │Dedup    │ │Consumer  │
-│  Storage │ │   Worker │ │  Worker  │ │  Store  │ │  Groups  │
+│   WAL    │ │Scheduler │ │Delivery  │ │Dedup     │ │Consumer  │
+│  Storage │ │   Worker │ │  Worker  │ │  Store   │ │  Groups  │
 └──────────┘ └──────────┘ └──────────┘ └──────────┘ └──────────┘
 ```
 

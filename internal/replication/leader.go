@@ -222,8 +222,9 @@ func (l *Leader) flushFollower(follower *FollowerInfo) error {
 
 	// Create AppendEntries message
 	msg := &AppendEntriesMessage{
-		Term:   l.epoch,
-		Events: follower.Buffer,
+		PartitionId: l.partitionID,
+		Term:        l.epoch,
+		Events:      follower.Buffer,
 	}
 
 	payload, err := msg.Encode()

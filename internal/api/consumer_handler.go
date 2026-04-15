@@ -93,19 +93,17 @@ func (h *ConsumerGroupServiceHandler) RebalanceConsumerGroup(
 	ctx context.Context,
 	req *types.RebalanceConsumerGroupRequest,
 ) (*types.RebalanceConsumerGroupResponse, error) {
-	// Get the group
-	_, exists := h.consumerManager.GetGroup(req.GetGroupId())
-	if !exists {
+	// Call internal rebalance
+	assignments, err := h.consumerManager.TriggerRebalance(req.GetGroupId())
+	if err != nil {
 		return &types.RebalanceConsumerGroupResponse{
 			Success: false,
-			Error:   "group not found",
+			Error:   err.Error(),
 		}, nil
 	}
 
-	// Call internal rebalance (note: rebalanceGroup is lowercase/unexported in consumer package)
-	// For now, return success as rebalancing is a TODO
 	return &types.RebalanceConsumerGroupResponse{
 		Success:             true,
-		PartitionAssignments: map[string]int32{},
+		PartitionAssignments: assignments,
 	}, nil
 }
