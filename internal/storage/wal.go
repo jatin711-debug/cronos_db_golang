@@ -404,6 +404,38 @@ func (w *WAL) GetLastOffset() int64 {
 	return w.segments[len(w.segments)-1].GetLastOffset()
 }
 
+// GetDataDir returns the WAL data directory
+func (w *WAL) GetDataDir() string {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.dataDir
+}
+
+// ReloadSegments reloads segments from disk (used after bulk file sync)
+func (w *WAL) ReloadSegments() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	// Close existing segments
+	for _, seg := range w.segments {
+		seg.Close()
+	}
+	w.segments = make([]*Segment, 0)
+	w.activeSegment = nil
+
+	// Reload from disk
+	if err := w.loadSegments(); err != nil {
+		return fmt.Errorf("reload segments: %w", err)
+	}
+
+	// Open or create active segment
+	if err := w.openActiveSegment(); err != nil {
+		return fmt.Errorf("reload open active segment: %w", err)
+	}
+
+	return nil
+}
+
 // Compact compacts old segments
 func (w *WAL) Compact(beforeOffset int64, consumerOffsets map[int64]bool) error {
 	w.mu.Lock()

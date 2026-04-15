@@ -18,12 +18,16 @@ const (
 
 // Message types
 const (
-	MsgTypeHandshake      = 1
-	MsgTypeHandshakeAck   = 2
-	MsgTypeAppendEntries  = 3
-	MsgTypeAppendAck      = 4
-	MsgTypeHeartbeat      = 5
-	MsgTypeHeartbeatAck   = 6
+	MsgTypeHandshake             = 1
+	MsgTypeHandshakeAck          = 2
+	MsgTypeAppendEntries         = 3
+	MsgTypeAppendAck             = 4
+	MsgTypeHeartbeat             = 5
+	MsgTypeHeartbeatAck          = 6
+	MsgTypeFileTransferRequest   = 7
+	MsgTypeFileTransferStart     = 8
+	MsgTypeFileTransferData      = 9
+	MsgTypeFileTransferEnd       = 10
 )
 
 // Transport manages binary protocol connections
@@ -177,5 +181,86 @@ func (m *AppendAckMessage) Decode(data []byte) error {
 	}
 	m.Success = resp.Success
 	m.Offset = resp.LastOffset
+	return nil
+}
+
+// FileTransferRequestMessage requests bulk segment file transfer
+type FileTransferRequestMessage struct {
+	PartitionId int32
+}
+
+func (m *FileTransferRequestMessage) Encode() ([]byte, error) {
+	resp := &types.ReplicationSyncRequest{
+		PartitionId: m.PartitionId,
+	}
+	return proto.Marshal(resp)
+}
+
+func (m *FileTransferRequestMessage) Decode(data []byte) error {
+	req := &types.ReplicationSyncRequest{}
+	if err := proto.Unmarshal(data, req); err != nil {
+		return err
+	}
+	m.PartitionId = req.PartitionId
+	return nil
+}
+
+// FileTransferStartMessage indicates start of file transfer
+type FileTransferStartMessage struct {
+	Filename string
+	FileSize int64
+}
+
+func (m *FileTransferStartMessage) Encode() ([]byte, error) {
+	buf := make([]byte, 8+len(m.Filename))
+	binary.BigEndian.PutUint64(buf[0:8], uint64(len(m.Filename)))
+	copy(buf[8:], m.Filename)
+	return buf, nil
+}
+
+func (m *FileTransferStartMessage) Decode(data []byte) error {
+	if len(data) < 8 {
+		return fmt.Errorf("FileTransferStartMessage: data too short")
+	}
+	nameLen := int(binary.BigEndian.Uint64(data[0:8]))
+	if len(data) < 8+nameLen {
+		return fmt.Errorf("FileTransferStartMessage: data too short for filename")
+	}
+	m.Filename = string(data[8 : 8+nameLen])
+	m.FileSize = int64(binary.BigEndian.Uint64(data[8+nameLen:]))
+	return nil
+}
+
+// FileTransferDataMessage contains segment file data chunk
+type FileTransferDataMessage struct {
+	Data []byte
+}
+
+func (m *FileTransferDataMessage) Encode() ([]byte, error) {
+	return m.Data, nil
+}
+
+func (m *FileTransferDataMessage) Decode(data []byte) error {
+	m.Data = data
+	return nil
+}
+
+// FileTransferEndMessage indicates end of file transfer
+type FileTransferEndMessage struct {
+	Success bool
+}
+
+func (m *FileTransferEndMessage) Encode() ([]byte, error) {
+	if m.Success {
+		return []byte{1}, nil
+	}
+	return []byte{0}, nil
+}
+
+func (m *FileTransferEndMessage) Decode(data []byte) error {
+	if len(data) < 1 {
+		return fmt.Errorf("FileTransferEndMessage: data too short")
+	}
+	m.Success = data[0] != 0
 	return nil
 }
