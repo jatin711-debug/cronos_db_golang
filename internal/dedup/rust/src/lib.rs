@@ -1,13 +1,16 @@
-use libc::{size_t, c_void};
+use libc::size_t;
 use std::slice;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::hash::Hasher;
 use rayon::prelude::*;
 use twox_hash::XxHash64;
 
-// Blocked Bloom Filter for better cache locality could be better, 
-// but sticking to standard global bitset for simplicity and match with Go logic initially.
-// We use AtomicU64 for concurrent lock-free sets, similar to the Go implementation.
+// Wrapper for raw pointer to make it Sync/Send for Rayon
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+struct SyncPtr(*const u8);
+unsafe impl Sync for SyncPtr {}
+unsafe impl Send for SyncPtr {}
 
 pub struct BloomFilter {
     bits: Vec<AtomicU64>,
@@ -138,13 +141,6 @@ pub unsafe extern "C" fn bloom_memory_usage(ptr: *mut BloomFilter) -> u64 {
     // Vec size * 8 bytes per u64
     (bf.bits.len() as u64) * 8
 }
-
-// Wrapper for raw pointer to make it Sync/Send for Rayon
-#[repr(transparent)]
-#[derive(Clone, Copy)]
-struct SyncPtr(*const u8);
-unsafe impl Sync for SyncPtr {}
-unsafe impl Send for SyncPtr {}
 
 // Batch check implementation - Parallelized with Rayon
 #[no_mangle]
