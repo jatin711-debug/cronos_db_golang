@@ -56,7 +56,7 @@ func NewGRPCServer(config *Config) *GRPCServer {
 		}),
 		grpc.ChainUnaryInterceptor(
 			MetricsInterceptor(),
-			RateLimitInterceptor(100.0, 200.0), // 100 req/s, burst of 200 per IP
+			RateLimitInterceptor(100000.0, 500000.0), // 100K req/s, burst of 500K per IP for load testing
 		),
 	)
 

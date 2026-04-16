@@ -208,6 +208,7 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 
 	var publishedCount, duplicateCount, errorCount int32
 	var firstOffset, lastOffset int64 = -1, -1
+	var lastError string
 
 	// Group events by partition for batch WAL writes
 	partitionEvents := make(map[int32][]*types.Event)
@@ -216,6 +217,10 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 		// Basic validation
 		if event.GetMessageId() == "" || event.GetScheduleTs() <= 0 || len(event.Payload) == 0 {
 			errorCount++
+			if lastError == "" {
+				lastError = fmt.Sprintf("validation failed: msgId=%q, scheduleTs=%d, payloadLen=%d",
+					event.GetMessageId(), event.GetScheduleTs(), len(event.Payload))
+			}
 			continue
 		}
 
@@ -230,6 +235,9 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 			partition, err = h.partitionManager.GetPartitionForTopic(event.Topic)
 			if err != nil {
 				errorCount++
+				if lastError == "" {
+					lastError = fmt.Sprintf("partition lookup failed: %v", err)
+				}
 				continue
 			}
 		}
@@ -239,6 +247,9 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 			isDuplicate, err := h.dedupManager.IsDuplicate(event.GetMessageId(), 0)
 			if err != nil {
 				errorCount++
+				if lastError == "" {
+					lastError = fmt.Sprintf("dedup check failed for %s: %v", event.GetMessageId(), err)
+				}
 				continue
 			}
 			if isDuplicate {
@@ -255,19 +266,25 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 		partitionInternal, err := h.partitionManager.GetInternalPartition(partitionID)
 		if err != nil {
 			errorCount += int32(len(events))
+			if lastError == "" {
+				lastError = fmt.Sprintf("get internal partition %d: %v", partitionID, err)
+			}
 			continue
 		}
 
 		// Batch append to WAL (single syscall for all events)
 		if err := partitionInternal.Wal.AppendBatch(events); err != nil {
 			errorCount += int32(len(events))
+			if lastError == "" {
+				lastError = fmt.Sprintf("WAL append for partition %d: %v", partitionID, err)
+			}
 			continue
 		}
 
 		// Batch schedule all events (single lock acquisition)
 		if err := partitionInternal.Scheduler.ScheduleBatch(events); err != nil {
 			// Events are in WAL, just log scheduling error
-			continue
+			slog.Warn("batch schedule partially failed", "partition", partitionID, "count", len(events), "error", err)
 		}
 
 		// Update stats
@@ -281,6 +298,14 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 				lastOffset = event.Offset
 			}
 		}
+	}
+
+	// Log errors periodically to help debug
+	if errorCount > 0 && errorCount%1000 == 0 {
+		slog.Warn("batch publish errors",
+			"errorCount", errorCount,
+			"duplicateCount", duplicateCount,
+			"lastError", lastError)
 	}
 
 	return &types.PublishBatchResponse{
