@@ -1,0 +1,49 @@
+name: Bug Report
+description: Create a report to help us improve CronosDB
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to fill out this bug report!
+  - type: input
+    id: version
+    attributes:
+      label: CronosDB Version
+      description: What version of CronosDB are you using? (e.g., commit hash or version tag)
+      placeholder: "e.g. main / commit abc1234"
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe the bug
+      description: A clear and concise description of what the bug is.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce
+      description: Please provide clear steps to reproduce the issue.
+      placeholder: |
+        1. Start the server with ...
+        2. Run client with ...
+        3. See error ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: A clear and concise description of what you expected to happen.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / Output
+      description: Include any relevant logs or shell output.
+      render: shell
+    validations:
+      required: false
