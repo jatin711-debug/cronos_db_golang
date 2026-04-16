@@ -1,0 +1,40 @@
+# =============================================================================
+# CronosDB .dockerignore - Exclude unnecessary files from build context
+# =============================================================================
+
+# Build artifacts
+bin/
+data/
+*.exe
+*.dll
+*.so
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+
+# Documentation (not needed for build)
+*.md
+LICENSE
+
+# Test files
+*_test.go
+**/*_test.go
+
+# Rust build artifacts (we rebuild in Docker)
+internal/dedup/rust/target/
+
+# Local config
+.env
+.env.local
+
+# OS files
+.DS_Store
+Thumbs.db
+.claude
