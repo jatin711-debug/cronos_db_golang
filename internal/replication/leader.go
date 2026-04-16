@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"cronos_db/internal/storage"
 	"cronos_db/pkg/types"
 
 	"net"
@@ -21,6 +22,7 @@ type Leader struct {
 	flushInterval time.Duration
 	quit          chan struct{}
 	transports    map[string]*Transport
+	wal           *storage.WAL
 }
 
 // FollowerInfo represents metadata about a follower replica
@@ -37,7 +39,7 @@ type FollowerInfo struct {
 }
 
 // NewLeader creates a new leader
-func NewLeader(partitionID int32, batchSize int32, flushInterval time.Duration) *Leader {
+func NewLeader(partitionID int32, batchSize int32, flushInterval time.Duration, wal *storage.WAL) *Leader {
 	return &Leader{
 		partitionID:   partitionID,
 		epoch:         1,
@@ -46,6 +48,7 @@ func NewLeader(partitionID int32, batchSize int32, flushInterval time.Duration) 
 		flushInterval: flushInterval,
 		quit:          make(chan struct{}),
 		transports:    make(map[string]*Transport),
+		wal:           wal,
 	}
 }
 
@@ -222,8 +225,9 @@ func (l *Leader) flushFollower(follower *FollowerInfo) error {
 
 	// Create AppendEntries message
 	msg := &AppendEntriesMessage{
-		Term:   l.epoch,
-		Events: follower.Buffer,
+		PartitionId: l.partitionID,
+		Term:        l.epoch,
+		Events:      follower.Buffer,
 	}
 
 	payload, err := msg.Encode()

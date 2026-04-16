@@ -11,7 +11,18 @@ cronos_db/
 │   ├── api/                  # gRPC handlers
 │   │   ├── consumer_handler.go
 │   │   ├── grpc_server.go
-│   │   └── handlers.go
+│   │   ├── handlers.go
+│   │   ├── metrics.go        # Prometheus metrics
+│   │   └── ratelimit.go      # Rate limiting
+│   ├── cluster/              # Cluster management
+│   │   ├── hashring.go       # Consistent hashing
+│   │   ├── hashring_test.go
+│   │   ├── manager.go        # Cluster manager
+│   │   ├── membership.go     # Node membership
+│   │   ├── raft.go          # Raft consensus
+│   │   ├── router.go        # Request routing
+│   │   ├── router_test.go
+│   │   └── service.go       # Cluster service
 │   ├── config/               # Configuration management
 │   │   ├── config.go
 │   │   └── defaults.go
@@ -19,11 +30,14 @@ cronos_db/
 │   │   ├── group.go
 │   │   └── offset_store.go
 │   ├── dedup/                # Deduplication store
+│   │   ├── bloom_store.go    # Bloom filter + PebbleDB
 │   │   ├── dedup_test.go     # Unit tests
 │   │   ├── pebble_store.go
+│   │   ├── rust_bloom.go     # Rust FFI bindings
+│   │   ├── rust_integration_test.go
 │   │   └── store.go
 │   ├── delivery/             # Event delivery worker
-│   │   ├── dispatcher.go
+│   │   ├── dispatcher.go     # Sharded dispatcher
 │   │   ├── dlq.go            # Dead letter queue
 │   │   └── worker.go
 │   ├── partition/            # Partition management
@@ -32,13 +46,16 @@ cronos_db/
 │   │   └── engine.go
 │   ├── replication/          # Leader-follower replication
 │   │   ├── follower.go
-│   │   └── leader.go
+│   │   ├── leader.go
+│   │   └── protocol.go
 │   ├── scheduler/            # Timing wheel & scheduling
 │   │   ├── scheduler.go
 │   │   ├── scheduler_test.go # Unit tests
 │   │   └── timing_wheel.go
 │   └── storage/              # WAL & storage
 │       ├── index.go          # Sparse index
+│       ├── mmap_unix.go      # Unix mmap (Linux/macOS)
+│       ├── mmap_windows.go   # Windows mmap
 │       ├── segment.go
 │       ├── wal.go
 │       └── wal_test.go       # Unit tests
@@ -54,17 +71,11 @@ cronos_db/
 │       └── hash.go
 ├── proto/                    # Protobuf definitions
 │   └── events.proto
-├── data/                     # Runtime data directory
-│   └── partitions/
-│       └── {partition-id}/
-│           ├── segments/     # WAL segment files
-│           ├── index/        # Sparse index files
-│           ├── dedup_{id}/   # PebbleDB dedup store
-│           └── timer_state.json
+├── cluster_loadtest.go       # Cluster load test tool
 ├── integration_test_suite.go # Integration tests (23 tests)
-├── test_client.go            # Simple test client
 ├── go.mod
 ├── go.sum
+├── Makefile
 ├── ARCHITECTURE.md
 ├── PROJECT_STRUCTURE.md
 ├── MVP_BUILD_GUIDE.md
@@ -124,8 +135,11 @@ internal/consumer/
 ### 7. **internal/dedup/**
 ```
 internal/dedup/
-├── store.go                  # Deduplication store interface
+├── store.go                  # Dedup manager interface
+├── bloom_store.go            # Bloom filter + PebbleDB store
 ├── pebble_store.go           # PebbleDB implementation
+├── rust_bloom.go             # Rust FFI bindings
+├── rust_integration_test.go   # Rust integration tests
 └── dedup_test.go             # Unit tests
 ```
 
@@ -251,11 +265,17 @@ protoc --go_out=. --go-grpc_out=. proto/events.proto
 # Build
 go build -o bin/cronos-api ./cmd/api/main.go
 
+# Build cluster load test
+go build -tags clustertest -o bin/cluster_loadtest.exe cluster_loadtest.go
+
 # Run unit tests
 go test ./internal/... -v
 
 # Run integration tests
 go run integration_test_suite.go
+
+# Run cluster load test
+go run -tags clustertest cluster_loadtest.go -publishers=30 -events=10000 -batch -batch-size=100
 
 # Run server
 go run ./cmd/api/main.go -node-id=node1

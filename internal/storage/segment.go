@@ -35,6 +35,7 @@ type Segment struct {
 	filename        string
 	indexFilename   string
 	index           *Index // sparse index for fast seeking
+	recordBuf       []byte // Reusable buffer for serialization
 }
 
 // NewSegment creates a new segment
@@ -84,6 +85,7 @@ func NewSegment(dataDir string, firstOffset int64, isActive bool) (*Segment, err
 		nextIndexOffset: 0,
 		indexEntries:    0,
 		index:           index,
+		recordBuf:       make([]byte, 0, 4096), // Pre-allocate 4KB
 	}
 
 	// Write header if new file
@@ -145,6 +147,7 @@ func OpenSegment(dataDir string, filename string) (*Segment, error) {
 		filename:      filename,
 		indexFilename: fmt.Sprintf("%020d.index", firstOffset),
 		index:         index,
+		recordBuf:     make([]byte, 0, 4096),
 	}
 
 	// Scan segment to get metadata
@@ -184,6 +187,9 @@ func (s *Segment) writeHeader() error {
 	binary.BigEndian.PutUint32(header[60:64], crc)
 
 	_, err := s.writer.Write(header)
+	if err == nil {
+		s.sizeBytes += 64
+	}
 	return err
 }
 
@@ -212,7 +218,10 @@ func (s *Segment) AppendBatch(events []*types.Event, indexInterval int64) error 
 
 	for _, event := range events {
 		// Build event record
-		record := s.buildEventRecord(event)
+		record, err := s.buildEventRecord(event)
+		if err != nil {
+			return fmt.Errorf("build event record: %w", err)
+		}
 
 		// Write record to buffer
 		if err := s.writeRecord(record); err != nil {
@@ -252,7 +261,10 @@ func (s *Segment) appendEventActive(event *types.Event, indexInterval int64) err
 	filePos := s.sizeBytes
 
 	// Build event record
-	record := s.buildEventRecord(event)
+	record, err := s.buildEventRecord(event)
+	if err != nil {
+		return fmt.Errorf("build event record: %w", err)
+	}
 
 	// Write record to buffer (buffered I/O)
 	if err := s.writeRecord(record); err != nil {
@@ -281,20 +293,32 @@ func (s *Segment) appendEventActive(event *types.Event, indexInterval int64) err
 }
 
 // buildEventRecord builds binary event record
-func (s *Segment) buildEventRecord(event *types.Event) []byte {
+func (s *Segment) buildEventRecord(event *types.Event) ([]byte, error) {
 	// Calculate sizes
 	msgIDLen := len(event.GetMessageId())
 	topicLen := len(event.Topic)
 	payloadLen := len(event.Payload)
 	metaCount := len(event.Meta)
 
-	// Calculate total size
+	// Calculate total size with overflow checking
 	size := 4 + 4 + 8 + 8 + 2 + msgIDLen + 2 + topicLen + 4 + payloadLen + 2
 	for k, v := range event.Meta {
-		size += 2 + len(k) + 2 + len(v) // keylen + key + valuelen + value
+		metaEntrySize := 2 + len(k) + 2 + len(v)
+		// Check for integer overflow
+		if size > (1<<63 - 1) - metaEntrySize {
+			return nil, fmt.Errorf("event record too large: overflow in size calculation")
+		}
+		size += metaEntrySize
 	}
 
-	record := make([]byte, size)
+	// Reuse buffer if possible
+	if cap(s.recordBuf) < size {
+		// Grow buffer efficiently
+		s.recordBuf = make([]byte, size*2)
+	}
+
+	// Slice to required size
+	record := s.recordBuf[:size]
 	offset := 0
 
 	// Length (4 bytes)
@@ -363,17 +387,24 @@ func (s *Segment) buildEventRecord(event *types.Event) []byte {
 	crc := crc32.ChecksumIEEE(record[8:])
 	binary.BigEndian.PutUint32(record[4:8], crc)
 
-	return record
+	return record, nil
 }
 
 // parseEventRecordWithoutLength parses binary event record that doesn't include length prefix
 // The record starts with CRC32 (4 bytes) followed by event data
 func parseEventRecordWithoutLength(record []byte) (*types.Event, error) {
-	offset := 4 // Skip CRC32 (4 bytes), length was already read separately
-
 	if len(record) < 4 {
 		return nil, fmt.Errorf("record too short")
 	}
+
+	// Validate CRC32 checksum
+	storedCRC := binary.BigEndian.Uint32(record[0:4])
+	computedCRC := crc32.ChecksumIEEE(record[4:])
+	if storedCRC != computedCRC {
+		return nil, fmt.Errorf("CRC32 mismatch: stored=0x%08x computed=0x%08x (data corruption detected)", storedCRC, computedCRC)
+	}
+
+	offset := 4 // Skip CRC32 (4 bytes), length was already read separately
 
 	// Offset (8 bytes)
 	eventOffset := int64(binary.BigEndian.Uint64(record[offset : offset+8]))
@@ -612,6 +643,153 @@ func (s *Segment) readEventFile(targetOffset int64, startPos int64) (*types.Even
 	return nil, fmt.Errorf("event not found at offset %d", targetOffset)
 }
 
+// ReadEventsByTime reads events in the given timestamp range [startTS, endTS]
+func (s *Segment) ReadEventsByTime(startTS, endTS int64) ([]*types.Event, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var result []*types.Event
+
+	if s.lastTS > 0 && s.firstTS > endTS {
+		return result, nil // Segment is completely after the range
+	}
+	if s.lastTS > 0 && s.lastTS < startTS {
+		return result, nil // Segment is completely before the range
+	}
+
+	// Find starting position using index
+	startPos := int64(64) // Default to after header
+	if s.index != nil {
+		if pos, found := s.index.FindByTimestamp(startTS); found {
+			startPos = pos
+		}
+	}
+
+	filePath := filepath.Join(s.dataDir, "segments", s.filename)
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("open for read: %w", err)
+	}
+	defer file.Close()
+
+	if _, err := file.Seek(startPos, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("seek: %w", err)
+	}
+
+	for {
+		// Read record length
+		lengthBytes := make([]byte, 4)
+		if _, err := io.ReadFull(file, lengthBytes); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return nil, fmt.Errorf("read length: %w", err)
+		}
+
+		length := int64(binary.BigEndian.Uint32(lengthBytes))
+		if length <= 0 || length > 10*1024*1024 {
+			break
+		}
+
+		// Read full record
+		record := make([]byte, length-4)
+		if _, err := io.ReadFull(file, record); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return nil, fmt.Errorf("read record: %w", err)
+		}
+
+		event, err := parseEventRecordWithoutLength(record)
+		if err != nil {
+			return nil, fmt.Errorf("parse event: %w", err)
+		}
+
+		// Check timestamp
+		if event.GetScheduleTs() >= startTS && event.GetScheduleTs() <= endTS {
+			result = append(result, event)
+		}
+
+		// Stop early if we passed the endTS (assuming timestamps are roughly ordered)
+		// Wait, timestamps are just event creation/schedule. But WAL strictly ordered by offset.
+		// Schedule timestamp might not be perfectly ordered, so it's safer to read to the end of the segment 
+		// but typically events are added mostly in order with drift.
+		// For now, let's stop if event.Offset == s.lastOffset
+		if event.Offset == s.lastOffset {
+			break
+		}
+	}
+
+	return result, nil
+}
+
+// ReadEventsByOffsetRange reads events in the given offset range [startOffset, endOffset]
+func (s *Segment) ReadEventsByOffsetRange(startOffset, endOffset int64) ([]*types.Event, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var result []*types.Event
+
+	// Find starting position using index
+	startPos := int64(64) // Default to after header
+	if s.index != nil {
+		if pos, found := s.index.FindByOffset(startOffset); found {
+			startPos = pos
+		}
+	}
+
+	filePath := filepath.Join(s.dataDir, "segments", s.filename)
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("open for read: %w", err)
+	}
+	defer file.Close()
+
+	if _, err := file.Seek(startPos, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("seek: %w", err)
+	}
+
+	for {
+		// Read record length
+		lengthBytes := make([]byte, 4)
+		if _, err := io.ReadFull(file, lengthBytes); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return nil, fmt.Errorf("read length: %w", err)
+		}
+
+		length := int64(binary.BigEndian.Uint32(lengthBytes))
+		if length <= 0 || length > 10*1024*1024 {
+			break
+		}
+
+		// Read full record
+		record := make([]byte, length-4)
+		if _, err := io.ReadFull(file, record); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return nil, fmt.Errorf("read record: %w", err)
+		}
+
+		event, err := parseEventRecordWithoutLength(record)
+		if err != nil {
+			return nil, fmt.Errorf("parse event: %w", err)
+		}
+
+		if event.Offset >= startOffset && event.Offset <= endOffset {
+			result = append(result, event)
+		}
+
+		if event.Offset >= endOffset {
+			break
+		}
+	}
+
+	return result, nil
+}
+
 // scan scans segment to recover metadata
 func (s *Segment) scan() error {
 	// Scan segment file to find last offset and timestamp
@@ -700,6 +878,40 @@ func (s *Segment) Close() error {
 		}
 	}
 	return s.segmentFile.Close()
+}
+
+// Delete permanently removes the segment and its index files from disk
+func (s *Segment) Delete() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Close files first if they are open
+	if s.segmentFile != nil {
+		_ = s.segmentFile.Close()
+	}
+	
+	if s.mmapData != nil {
+		munmapFile(s.mmapData)
+		s.mmapData = nil
+	}
+
+	if s.index != nil {
+		_ = s.index.Close()
+	}
+
+	// Delete segment file
+	filePath := filepath.Join(s.dataDir, "segments", s.filename)
+	if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("delete segment file: %w", err)
+	}
+
+	// Delete index file
+	indexFilePath := filepath.Join(s.dataDir, "index", s.indexFilename)
+	if err := os.Remove(indexFilePath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("delete index file: %w", err)
+	}
+
+	return nil
 }
 
 // Sync syncs segment to disk

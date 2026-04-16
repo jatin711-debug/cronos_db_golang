@@ -54,6 +54,10 @@ func NewGRPCServer(config *Config) *GRPCServer {
 			Time:    config.KeepaliveMinTime,
 			Timeout: config.KeepaliveTimeout,
 		}),
+		grpc.ChainUnaryInterceptor(
+			MetricsInterceptor(),
+			RateLimitInterceptor(100000.0, 500000.0), // 100K req/s, burst of 500K per IP for load testing
+		),
 	)
 
 	return &GRPCServer{

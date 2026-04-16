@@ -1,4 +1,4 @@
-.PHONY: build clean proto node1 node2 node3 cluster loadtest loadtest-batch help
+.PHONY: build clean proto node1 node2 node3 cluster loadtest loadtest-batch help docker docker-build docker-single docker-cluster
 
 # Build settings
 BINARY=cronos-api
@@ -114,3 +114,25 @@ health:
 	@curl -s http://127.0.0.1:8080/health && echo " - Node 1 OK" || echo " - Node 1 FAIL"
 	@curl -s http://127.0.0.1:8081/health && echo " - Node 2 OK" || echo " - Node 2 FAIL"
 	@curl -s http://127.0.0.1:8082/health && echo " - Node 3 OK" || echo " - Node 3 FAIL"
+
+# Docker commands
+docker:
+	docker build -t cronos-db:latest --no-cache .
+
+docker-build:
+	docker build -t cronos-db:latest --no-cache . && echo "Image built successfully"
+
+docker-single:
+	docker-compose up -d cronos-single
+
+docker-cluster:
+	docker-compose up -d cronos-node1 cronos-node2 cronos-node3
+
+docker-logs:
+	docker-compose logs -f
+
+docker-down:
+	docker-compose down
+
+docker-clean:
+	docker-compose down -v

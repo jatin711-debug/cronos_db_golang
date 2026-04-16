@@ -1,0 +1,148 @@
+# =============================================================================
+# CronosDB Docker Compose - Development & Production
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # Single Node (for development/testing)
+  # ---------------------------------------------------------------------------
+  cronos-single:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cronos-single
+    image: cronos-db:latest
+    ports:
+      - "9000:9000"   # gRPC
+      - "8080:8080"   # HTTP health
+    volumes:
+      - cronos-data:/data
+    environment:
+      - CRONOS_NODE_ID=single-node
+      - CRONOS_DATA_DIR=/data
+      - CRONOS_GRPC_ADDR=0.0.0.0:9000
+      - CRONOS_HTTP_ADDR=0.0.0.0:8080
+      - CRONOS_CLUSTER=false
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+
+  # ---------------------------------------------------------------------------
+  # Cluster Node 1 (Leader)
+  # ---------------------------------------------------------------------------
+  cronos-node1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cronos-node1
+    image: cronos-db:latest
+    ports:
+      - "9000:9000"   # gRPC
+      - "8080:8080"   # HTTP health
+      - "7946:7946"   # Cluster gossip
+      - "7947:7947"   # Cluster gRPC
+      - "7948:7948"   # Raft
+    volumes:
+      - node1-data:/data
+    environment:
+      - CRONOS_NODE_ID=node1
+      - CRONOS_DATA_DIR=/data
+      - CRONOS_GRPC_ADDR=0.0.0.0:9000
+      - CRONOS_HTTP_ADDR=0.0.0.0:8080
+      - CRONOS_CLUSTER=true
+      - CRONOS_CLUSTER_SEEDS=
+      - CRONOS_PARTITION_COUNT=8
+      - CRONOS_TICK_MS=100
+      - CRONOS_WHEEL_SIZE=60
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+    depends_on:
+      - cronos-node2
+      - cronos-node3
+
+  # ---------------------------------------------------------------------------
+  # Cluster Node 2 (Follower)
+  # ---------------------------------------------------------------------------
+  cronos-node2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cronos-node2
+    image: cronos-db:latest
+    ports:
+      - "9001:9000"   # gRPC (host port 9001 -> container 9000)
+      - "8081:8080"   # HTTP health
+      - "7956:7946"   # Cluster gossip
+      - "7957:7947"   # Cluster gRPC
+      - "7958:7948"   # Raft
+    volumes:
+      - node2-data:/data
+    environment:
+      - CRONOS_NODE_ID=node2
+      - CRONOS_DATA_DIR=/data
+      - CRONOS_GRPC_ADDR=0.0.0.0:9000
+      - CRONOS_HTTP_ADDR=0.0.0.0:8080
+      - CRONOS_CLUSTER=true
+      - CRONOS_CLUSTER_SEEDS=cronos-node1:7946
+      - CRONOS_PARTITION_COUNT=8
+      - CRONOS_TICK_MS=100
+      - CRONOS_WHEEL_SIZE=60
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+
+  # ---------------------------------------------------------------------------
+  # Cluster Node 3 (Follower)
+  # ---------------------------------------------------------------------------
+  cronos-node3:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cronos-node3
+    image: cronos-db:latest
+    ports:
+      - "9002:9000"   # gRPC
+      - "8082:8080"   # HTTP health
+      - "7966:7946"   # Cluster gossip
+      - "7967:7947"   # Cluster gRPC
+      - "7968:7948"   # Raft
+    volumes:
+      - node3-data:/data
+    environment:
+      - CRONOS_NODE_ID=node3
+      - CRONOS_DATA_DIR=/data
+      - CRONOS_GRPC_ADDR=0.0.0.0:9000
+      - CRONOS_HTTP_ADDR=0.0.0.0:8080
+      - CRONOS_CLUSTER=true
+      - CRONOS_CLUSTER_SEEDS=cronos-node1:7946
+      - CRONOS_PARTITION_COUNT=8
+      - CRONOS_TICK_MS=100
+      - CRONOS_WHEEL_SIZE=60
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+
+# =============================================================================
+# Volumes - Named volumes for persistent data
+# =============================================================================
+volumes:
+  # Single node volume
+  cronos-data:
+    driver: local
+
+  # Cluster node volumes (each node has its own data)
+  node1-data:
+    driver: local
+  node2-data:
+    driver: local
+  node3-data:
+    driver: local
