@@ -142,6 +142,15 @@ pub unsafe extern "C" fn bloom_memory_usage(ptr: *mut BloomFilter) -> u64 {
     (bf.bits.len() as u64) * 8
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn bloom_reset(ptr: *mut BloomFilter) {
+    let bf = &*ptr;
+    for atom in bf.bits.iter() {
+        atom.store(0, Ordering::Relaxed);
+    }
+    bf.num_items.store(0, Ordering::Relaxed);
+}
+
 // Batch check implementation - Parallelized with Rayon
 #[no_mangle]
 pub unsafe extern "C" fn bloom_check_batch(

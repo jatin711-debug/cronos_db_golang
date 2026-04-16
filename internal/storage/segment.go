@@ -382,11 +382,18 @@ func (s *Segment) buildEventRecord(event *types.Event) []byte {
 // parseEventRecordWithoutLength parses binary event record that doesn't include length prefix
 // The record starts with CRC32 (4 bytes) followed by event data
 func parseEventRecordWithoutLength(record []byte) (*types.Event, error) {
-	offset := 4 // Skip CRC32 (4 bytes), length was already read separately
-
 	if len(record) < 4 {
 		return nil, fmt.Errorf("record too short")
 	}
+
+	// Validate CRC32 checksum
+	storedCRC := binary.BigEndian.Uint32(record[0:4])
+	computedCRC := crc32.ChecksumIEEE(record[4:])
+	if storedCRC != computedCRC {
+		return nil, fmt.Errorf("CRC32 mismatch: stored=0x%08x computed=0x%08x (data corruption detected)", storedCRC, computedCRC)
+	}
+
+	offset := 4 // Skip CRC32 (4 bytes), length was already read separately
 
 	// Offset (8 bytes)
 	eventOffset := int64(binary.BigEndian.Uint64(record[offset : offset+8]))
