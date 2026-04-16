@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,11 +14,14 @@ import (
 // Dispatcher manages event delivery to subscribers
 // Optimized with sharding for reduced lock contention
 type Dispatcher struct {
-	shards    []*DispatcherShard
-	shardCount int
-	config    *Config
-	dlq       *DeadLetterQueue
-	quit      chan struct{}
+	shards       []*DispatcherShard
+	shardCount   int
+	config       *Config
+	dlq          *DeadLetterQueue
+	quit         chan struct{}
+	// Partition-to-subscribers index for O(1) lookup instead of scanning all shards
+	partitionsMu sync.RWMutex
+	partitionSubs map[int32][]*Subscription
 }
 
 // DispatcherShard represents a shard of the dispatcher
@@ -116,11 +120,12 @@ func NewDispatcher(config *Config) *Dispatcher {
 	}
 
 	return &Dispatcher{
-		shards:     shards,
-		shardCount: shardCount,
-		config:     config,
-		dlq:        nil,
-		quit:       make(chan struct{}),
+		shards:        shards,
+		shardCount:    shardCount,
+		config:        config,
+		dlq:           nil,
+		quit:          make(chan struct{}),
+		partitionSubs: make(map[int32][]*Subscription),
 	}
 }
 
@@ -171,6 +176,12 @@ func (d *Dispatcher) Subscribe(sub *Subscription) error {
 	sub.Credits = sub.MaxCredits
 
 	shard.subscriptions[sub.ID] = sub
+
+	// Also add to partition index for O(1) lookup during dispatch
+	d.partitionsMu.Lock()
+	d.partitionSubs[sub.Partition.ID] = append(d.partitionSubs[sub.Partition.ID], sub)
+	d.partitionsMu.Unlock()
+
 	log.Printf("[DISPATCHER] Subscribe: Successfully registered subscription %s", sub.ID)
 	return nil
 }
@@ -181,10 +192,13 @@ func (d *Dispatcher) Unsubscribe(subscriptionID string) error {
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 
-	_, exists := shard.subscriptions[subscriptionID]
+	sub, exists := shard.subscriptions[subscriptionID]
 	if !exists {
 		return fmt.Errorf("subscription %s not found", subscriptionID)
 	}
+
+	// Get partition ID before deleting
+	partitionID := sub.Partition.ID
 
 	// Cancel active deliveries
 	for deliveryID, active := range shard.activeDeliveries {
@@ -197,31 +211,33 @@ func (d *Dispatcher) Unsubscribe(subscriptionID string) error {
 	}
 
 	delete(shard.subscriptions, subscriptionID)
+
+	// Remove from partition index
+	d.partitionsMu.Lock()
+	if subs := d.partitionSubs[partitionID]; subs != nil {
+		newSubs := make([]*Subscription, 0, len(subs))
+		for _, s := range subs {
+			if s.ID != subscriptionID {
+				newSubs = append(newSubs, s)
+			}
+		}
+		if len(newSubs) == 0 {
+			delete(d.partitionSubs, partitionID)
+		} else {
+			d.partitionSubs[partitionID] = newSubs
+		}
+	}
+	d.partitionsMu.Unlock()
+
 	return nil
 }
 
 // Dispatch dispatches an event to subscribers
 func (d *Dispatcher) Dispatch(event *types.Event) error {
-	// Iterate all shards to find subscriptions for this partition
-	// Optimization: Partition to Shard mapping?
-	// For now, we iterate, which is slightly less efficient but safer for "find all subscriptions"
-	// However, usually one Dispatcher per partition in the architecture?
-	// If Dispatcher is shared, we must lock shards.
-
-	// Better: We are dispatching ONE event. We need to find matching subscriptions.
-	// Subscriptions are scattered across shards.
-
-	var allSubs []*Subscription
-
-	for _, shard := range d.shards {
-		shard.mu.RLock()
-		for _, sub := range shard.subscriptions {
-			if sub.Partition.ID == event.GetPartitionId() {
-				allSubs = append(allSubs, sub)
-			}
-		}
-		shard.mu.RUnlock()
-	}
+	// Use partition index for O(1) lookup instead of scanning all shards
+	d.partitionsMu.RLock()
+	allSubs := d.partitionSubs[event.GetPartitionId()]
+	d.partitionsMu.RUnlock()
 
 	if len(allSubs) == 0 {
 		return nil
@@ -299,16 +315,10 @@ func (d *Dispatcher) DispatchBatch(events []*types.Event) error {
 	// Assumption: Batch belongs to same partition usually.
 	partitionID := events[0].GetPartitionId()
 
-	var allSubs []*Subscription
-	for _, shard := range d.shards {
-		shard.mu.RLock()
-		for _, sub := range shard.subscriptions {
-			if sub.Partition.ID == partitionID {
-				allSubs = append(allSubs, sub)
-			}
-		}
-		shard.mu.RUnlock()
-	}
+	// Use partition index for O(1) lookup instead of scanning all shards
+	d.partitionsMu.RLock()
+	allSubs := d.partitionSubs[partitionID]
+	d.partitionsMu.RUnlock()
 
 	if len(allSubs) == 0 {
 		return nil
@@ -423,19 +433,17 @@ func (d *Dispatcher) trackDelivery(delivery *DeliveryMessage, sub *Subscription)
 // HandleAck handles acknowledgment from subscriber
 func (d *Dispatcher) HandleAck(deliveryID string, success bool, nextOffset int64) error {
 	// We don't know the shard from deliveryID easily unless we parse it or store a map.
-	// deliveryID format: "subID-offset". We can extract subID.
+	// deliveryID format: "subID-offset" or "subID-batch-offset-count"
+	// We extract subID by finding the first '-'
 	var subID string
-	// Find the last index of "-"
-	for i := len(deliveryID) - 1; i >= 0; i-- {
-		if deliveryID[i] == '-' {
-			subID = deliveryID[:i]
-			break
-		}
+	// Find the first index of "-" to split subID from rest
+	if idx := strings.IndexByte(deliveryID, '-'); idx != -1 {
+		subID = deliveryID[:idx]
+	} else {
+		return fmt.Errorf("invalid delivery ID format")
 	}
 
 	if subID == "" {
-		// Fallback: search all shards (expensive) or just fail
-		// Let's assume standard format
 		return fmt.Errorf("invalid delivery ID format")
 	}
 

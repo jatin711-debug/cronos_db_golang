@@ -118,9 +118,11 @@ func (tw *TimingWheel) addTimerLocked(timer *Timer) error {
 	if tw.overflowWheel == nil {
 		nextLevel := tw.currentLevel + 1
 		// Overflow wheel has larger tick interval: tickMs * wheelSize
-		// Its start time is the same as the root wheel's start time
+		// Its start time should be the absolute time at current tick position
+		// This ensures proper cascade timing when timers move back from overflow
 		overflowTickMs := tw.tickMs * tw.wheelSize
-		tw.overflowWheel = NewTimingWheel(overflowTickMs, tw.wheelSize, tw.maxLevels, nextLevel, tw.startTimeMs)
+		overflowStartTime := tw.startTimeMs + tw.currentTick*int64(tw.tickMs)
+		tw.overflowWheel = NewTimingWheel(overflowTickMs, tw.wheelSize, tw.maxLevels, nextLevel, overflowStartTime)
 		// Share pool with overflow wheel
 		tw.overflowWheel.timerPool = tw.timerPool
 		tw.overflowWheel.initialize()

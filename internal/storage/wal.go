@@ -2,6 +2,7 @@ package storage
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -309,29 +310,29 @@ func (w *WAL) CompactByOffset(upToOffset int64) (int, error) {
 		return 0, nil // Never delete the active/only segment
 	}
 
-	keepIndex := 0
+	// Build a new slice with only segments to keep - avoids in-place deletion bugs
+	kept := make([]*Segment, 0, len(w.segments))
 	deletedCount := 0
 
-	for i, segment := range w.segments {
-		// Only consider non-active segments for deletion
-		if segment == w.activeSegment || i == len(w.segments)-1 {
-			w.segments[keepIndex] = segment
-			keepIndex++
+	for _, segment := range w.segments {
+		// Never delete the active segment
+		if segment == w.activeSegment {
+			kept = append(kept, segment)
 			continue
 		}
 
+		// Check if segment should be deleted (all offsets before upToOffset)
 		if segment.GetLastOffset() < upToOffset && segment.GetLastOffset() > 0 {
 			if err := segment.Delete(); err != nil {
 				return deletedCount, fmt.Errorf("failed to delete segment %s: %w", segment.GetFilename(), err)
 			}
 			deletedCount++
 		} else {
-			w.segments[keepIndex] = segment
-			keepIndex++
+			kept = append(kept, segment)
 		}
 	}
 
-	w.segments = w.segments[:keepIndex]
+	w.segments = kept
 	return deletedCount, nil
 }
 
@@ -345,29 +346,29 @@ func (w *WAL) CompactByTimestamp(upToTS int64) (int, error) {
 		return 0, nil // Never delete the active/only segment
 	}
 
-	keepIndex := 0
+	// Build a new slice with only segments to keep - avoids in-place deletion bugs
+	kept := make([]*Segment, 0, len(w.segments))
 	deletedCount := 0
 
-	for i, segment := range w.segments {
-		// Only consider non-active segments for deletion
-		if segment == w.activeSegment || i == len(w.segments)-1 {
-			w.segments[keepIndex] = segment
-			keepIndex++
+	for _, segment := range w.segments {
+		// Never delete the active segment
+		if segment == w.activeSegment {
+			kept = append(kept, segment)
 			continue
 		}
 
+		// Check if segment should be deleted (all timestamps before upToTS)
 		if segment.GetLastTS() < upToTS && segment.GetLastTS() > 0 {
 			if err := segment.Delete(); err != nil {
 				return deletedCount, fmt.Errorf("failed to delete segment %s: %w", segment.GetFilename(), err)
 			}
 			deletedCount++
 		} else {
-			w.segments[keepIndex] = segment
-			keepIndex++
+			kept = append(kept, segment)
 		}
 	}
 
-	w.segments = w.segments[:keepIndex]
+	w.segments = kept
 	return deletedCount, nil
 }
 
@@ -436,13 +437,68 @@ func (w *WAL) ReloadSegments() error {
 	return nil
 }
 
-// Compact compacts old segments
+// Compact compacts old segments based on consumer offsets.
+// It removes segments whose last offset is less than the minimum
+// offset that any consumer has processed.
 func (w *WAL) Compact(beforeOffset int64, consumerOffsets map[int64]bool) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	// Keep all segments with offset >= min_offset
-	// where min_offset is min(all consumer offsets)
-	// TODO: Implement full compaction logic
+	if len(consumerOffsets) == 0 {
+		return nil
+	}
+
+	// Find minimum offset across all consumers
+	minOffset := int64(^uint64(0) >> 1) // Max int64
+	for offset := range consumerOffsets {
+		if offset < minOffset {
+			minOffset = offset
+		}
+	}
+
+	// Nothing to compact if no progress or all are at beginning
+	if minOffset == 0 || minOffset >= w.highWatermark {
+		return nil
+	}
+
+	// Use CompactByOffset which handles segment deletion properly
+	deleted, err := w.compactByOffsetUnsafe(minOffset)
+	if err != nil {
+		return err
+	}
+
+	if deleted > 0 {
+		log.Printf("WAL compaction deleted %d segments, minConsumerOffset=%d", deleted, minOffset)
+	}
+
 	return nil
+}
+
+// compactByOffsetUnsafe compacts without acquiring lock (caller must hold lock)
+func (w *WAL) compactByOffsetUnsafe(upToOffset int64) (int, error) {
+	if len(w.segments) <= 1 {
+		return 0, nil
+	}
+
+	kept := make([]*Segment, 0, len(w.segments))
+	deletedCount := 0
+
+	for _, segment := range w.segments {
+		if segment == w.activeSegment {
+			kept = append(kept, segment)
+			continue
+		}
+
+		if segment.GetLastOffset() < upToOffset && segment.GetLastOffset() > 0 {
+			if err := segment.Delete(); err != nil {
+				return deletedCount, fmt.Errorf("failed to delete segment %s: %w", segment.GetFilename(), err)
+			}
+			deletedCount++
+		} else {
+			kept = append(kept, segment)
+		}
+	}
+
+	w.segments = kept
+	return deletedCount, nil
 }

@@ -482,7 +482,16 @@ func (pm *PartitionManager) StopPartition(partitionID int32) error {
 		return err
 	}
 
-	// Stop scheduler
+	// Signal delivery goroutines to stop FIRST to avoid circular lock deadlock
+	// Delivery goroutines read from deliveryQuit channel - closing it allows them to exit
+	select {
+	case <-partition.deliveryQuit:
+		// already closed
+	default:
+		close(partition.deliveryQuit)
+	}
+
+	// Stop scheduler (safe now since delivery goroutines will exit)
 	if partition.Scheduler != nil {
 		partition.Scheduler.Stop()
 	}
@@ -490,14 +499,6 @@ func (pm *PartitionManager) StopPartition(partitionID int32) error {
 	// Stop delivery worker
 	if partition.Worker != nil {
 		partition.Worker.Stop()
-	}
-
-	// Signal delivery goroutines to stop
-	select {
-	case <-partition.deliveryQuit:
-		// already closed
-	default:
-		close(partition.deliveryQuit)
 	}
 
 	// Close WAL

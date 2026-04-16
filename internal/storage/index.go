@@ -11,9 +11,10 @@ import (
 )
 
 const (
-	indexEntrySize = 24 // timestamp(8) + offset(8) + filePosition(8)
-	indexMagic     = "CRNIDX1"
-	indexVersion   = 1
+	indexEntrySize     = 24   // timestamp(8) + offset(8) + filePosition(8)
+	indexMagic         = "CRNIDX1"
+	indexVersion       = 1
+	indexSyncInterval  = 100 // Sync every N entries for performance
 )
 
 // IndexEntry represents a sparse index entry
@@ -132,7 +133,12 @@ func (idx *Index) AddEntry(timestamp, offset, filePosition int64) error {
 		return fmt.Errorf("write entry: %w", err)
 	}
 
-	return idx.file.Sync()
+	// Batch sync: sync every N entries instead of every entry for performance
+	// This reduces I/O overhead significantly while maintaining reasonable durability
+	if len(idx.entries)%indexSyncInterval == 0 {
+		return idx.file.Sync()
+	}
+	return nil
 }
 
 // FindByOffset finds the closest index entry at or before the target offset
@@ -197,12 +203,25 @@ func (idx *Index) Count() int {
 	return len(idx.entries)
 }
 
+// Flush syncs any pending writes to disk
+func (idx *Index) Flush() error {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+
+	if idx.file != nil {
+		return idx.file.Sync()
+	}
+	return nil
+}
+
 // Close closes the index file
 func (idx *Index) Close() error {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 
 	if idx.file != nil {
+		// Sync before close to ensure all data is persisted
+		idx.file.Sync()
 		return idx.file.Close()
 	}
 	return nil

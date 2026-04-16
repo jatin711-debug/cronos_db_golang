@@ -161,20 +161,26 @@ pub unsafe extern "C" fn bloom_check_batch(
     results_out: *mut bool,
 ) {
     let bf = &*ptr;
-    let safe_keys = slice::from_raw_parts(keys_array as *const SyncPtr, num_keys);
-    let lens = slice::from_raw_parts(keys_lens, num_keys);
-    let results = slice::from_raw_parts_mut(results_out, num_keys);
 
     // If batch size is small, serial is faster. If large, use parallel.
     if num_keys < 100 {
+        let safe_keys = slice::from_raw_parts(keys_array as *const SyncPtr, num_keys);
+        let lens = slice::from_raw_parts(keys_lens, num_keys);
+        let results = slice::from_raw_parts_mut(results_out, num_keys);
+
         for i in 0..num_keys {
             let key = slice::from_raw_parts(safe_keys[i].0, lens[i]);
             results[i] = bf.contains(key);
         }
     } else {
-        // Parallel iterator
-        results.par_iter_mut().enumerate().for_each(|(i, res)| {
-            let key = unsafe { slice::from_raw_parts(safe_keys[i].0, lens[i]) };
+        // Parallel: re-create slices inside the branch to ensure proper lifetime
+        // Use zip to pair results with keys and lens without capturing enumerate's index
+        let safe_keys = slice::from_raw_parts(keys_array as *const SyncPtr, num_keys);
+        let lens = slice::from_raw_parts(keys_lens, num_keys);
+        let results = slice::from_raw_parts_mut(results_out, num_keys);
+
+        results.par_iter_mut().zip(safe_keys.par_iter()).zip(lens.par_iter()).for_each(|((res, key_ptr), &len)| {
+            let key = slice::from_raw_parts(key_ptr.0, len);
             *res = bf.contains(key);
         });
     }

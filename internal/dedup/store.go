@@ -1,7 +1,6 @@
 package dedup
 
 import (
-	"fmt"
 	"sync"
 	"time"
 )
@@ -32,6 +31,7 @@ type DedupStore interface {
 type MemoryStore struct {
 	mu      sync.RWMutex
 	entries map[string]Entry
+	ttlHours int32 // TTL in hours for entries
 }
 
 type Entry struct {
@@ -40,10 +40,19 @@ type Entry struct {
 	CreatedTS    int64
 }
 
-// NewMemoryStore creates a new in-memory store
+// NewMemoryStore creates a new in-memory store with optional TTL
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		entries: make(map[string]Entry),
+		entries:  make(map[string]Entry),
+		ttlHours: 24, // Default 24 hour TTL
+	}
+}
+
+// NewMemoryStoreWithTTL creates a new in-memory store with specified TTL in hours
+func NewMemoryStoreWithTTL(ttlHours int32) *MemoryStore {
+	return &MemoryStore{
+		entries:  make(map[string]Entry),
+		ttlHours: ttlHours,
 	}
 }
 
@@ -56,10 +65,14 @@ func (m *MemoryStore) CheckAndStore(messageID string, offset int64) (bool, error
 		return true, nil
 	}
 
+	now := time.Now()
+	ttlMs := int64(m.ttlHours) * 60 * 60 * 1000
+
 	// Store the entry so future lookups detect duplicates
 	m.entries[messageID] = Entry{
-		Offset:    offset,
-		CreatedTS: time.Now().UnixMilli(),
+		Offset:       offset,
+		CreatedTS:     now.UnixMilli(),
+		ExpirationTS: now.Add(time.Duration(ttlMs) * time.Millisecond).UnixMilli(),
 	}
 	return false, nil
 }
@@ -87,7 +100,20 @@ func (m *MemoryStore) Exists(messageID string) (bool, error) {
 
 // PruneExpired removes expired entries
 func (m *MemoryStore) PruneExpired() (int, error) {
-	return 0, fmt.Errorf("not implemented for memory store")
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	now := time.Now().UnixMilli()
+	deleted := 0
+
+	for id, entry := range m.entries {
+		if entry.ExpirationTS > 0 && entry.ExpirationTS < now {
+			delete(m.entries, id)
+			deleted++
+		}
+	}
+
+	return deleted, nil
 }
 
 // GetStats returns store statistics
