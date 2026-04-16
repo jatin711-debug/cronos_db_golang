@@ -1,6 +1,7 @@
 package dedup
 
 import (
+	"sync"
 	"sync/atomic"
 )
 
@@ -16,10 +17,12 @@ type BloomFilter interface {
 
 // GoBloomFilter is a simple bloom filter implementation for fast dedup checks
 type GoBloomFilter struct {
-	bits    []uint64
-	size    uint64 // Number of bits
-	numHash uint64 // Number of hash functions
-	count   uint64 // Approximate number of items (atomic)
+	bits       []uint64
+	size       uint64         // Number of bits
+	numHash    uint64         // Number of hash functions
+	count      uint64         // Approximate number of items (atomic)
+	resetMu    sync.Mutex     // Protects reset operations
+	generation uint64         // Generation counter for detecting resets
 }
 
 // NewBloomFilter creates a bloom filter sized for expectedItems with targetFPR false positive rate
@@ -159,14 +162,18 @@ type BloomPebbleStore struct {
 	bloom  BloomFilter
 	pebble *PebbleStore
 
+	// Mutex to protect bloom filter reset from concurrent Add operations
+	bloomMu sync.Mutex
+
 	// Stats - atomic for lock-free access
 	bloomHits     uint64 // Bloom filter said "definitely not exists"
 	bloomFalsePos uint64 // Bloom said "maybe exists" but PebbleDB said "no"
 	pebbleHits    uint64 // Actually found in PebbleDB
 
 	// Configuration for bloom filter maintenance
-	bloomCapacity       uint64 // Max items before considering reset
-	falsePositiveThresh float64 // FPR threshold (e.g., 0.05 = 5%) to trigger reset
+	bloomCapacity        uint64        // Max items before considering reset
+	falsePositiveThresh  float64       // FPR threshold (e.g., 0.05 = 5%) to trigger reset
+	resetInProgress      atomic.Bool   // True when a reset is in progress
 }
 
 // NewBloomPebbleStore creates a new bloom filter + PebbleDB store
@@ -193,33 +200,49 @@ func NewBloomPebbleStore(dataDir string, partitionID int32, ttlHours int32, expe
 // CheckAndStore checks if message ID exists using bloom filter first
 func (s *BloomPebbleStore) CheckAndStore(messageID string, offset int64) (bool, error) {
 	// Fast path: bloom filter says "definitely not exists"
-	if !s.bloom.MayContain(messageID) {
-		// Add to bloom filter immediately
-		s.bloom.Add(messageID)
-		atomic.AddUint64(&s.bloomHits, 1)
+	// Use lock-free check with reset detection
+	for {
+		if !s.bloom.MayContain(messageID) {
+			// Check if reset is in progress
+			if s.resetInProgress.Load() {
+				continue // Retry after reset completes
+			}
 
-		// Store in PebbleDB directly (skip check since bloom said it's new)
-		if err := s.pebble.StoreOnly(messageID, offset); err != nil {
+			// Add to bloom filter with lock to prevent race with reset
+			s.bloomMu.Lock()
+			// Double-check after acquiring lock
+			if !s.bloom.MayContain(messageID) {
+				s.bloom.Add(messageID)
+				s.bloomMu.Unlock()
+				atomic.AddUint64(&s.bloomHits, 1)
+
+				// Store in PebbleDB directly (skip check since bloom said it's new)
+				if err := s.pebble.StoreOnly(messageID, offset); err != nil {
+					return false, err
+				}
+				return false, nil
+			}
+			s.bloomMu.Unlock()
+		}
+
+		// Slow path: bloom filter says "maybe exists", must check PebbleDB
+		exists, err := s.pebble.CheckAndStore(messageID, offset)
+		if err != nil {
 			return false, err
 		}
-		return false, nil
-	}
 
-	// Slow path: bloom filter says "maybe exists", must check PebbleDB
-	exists, err := s.pebble.CheckAndStore(messageID, offset)
-	if err != nil {
-		return false, err
-	}
+		if exists {
+			atomic.AddUint64(&s.pebbleHits, 1)
+		} else {
+			atomic.AddUint64(&s.bloomFalsePos, 1)
+			// Add to bloom filter since it's new - with lock to prevent reset race
+			s.bloomMu.Lock()
+			s.bloom.Add(messageID)
+			s.bloomMu.Unlock()
+		}
 
-	if exists {
-		atomic.AddUint64(&s.pebbleHits, 1)
-	} else {
-		atomic.AddUint64(&s.bloomFalsePos, 1)
-		// Add to bloom filter since it's new
-		s.bloom.Add(messageID)
+		return exists, nil
 	}
-
-	return exists, nil
 }
 
 // GetOffset returns stored offset for message ID
@@ -260,6 +283,7 @@ func (s *BloomPebbleStore) PruneExpired() (int, error) {
 }
 
 // checkAndResetBloom checks false positive rate and resets bloom if needed
+// Must be called with bloomMu held to prevent race with Add operations
 func (s *BloomPebbleStore) checkAndResetBloom() {
 	totalLookups := atomic.LoadUint64(&s.bloomHits) + atomic.LoadUint64(&s.bloomFalsePos)
 	if totalLookups < 1000 {
@@ -272,7 +296,11 @@ func (s *BloomPebbleStore) checkAndResetBloom() {
 
 	if actualFPR > s.falsePositiveThresh {
 		// FPR too high, reset bloom filter
-		// Note: This loses all bloom filter state, but we rebuild it through normal operation
+		// Mark reset as in progress to block concurrent Adds
+		s.resetInProgress.Store(true)
+		defer s.resetInProgress.Store(false)
+
+		// Now safe to reset - Add() will spin retry
 		s.bloom.Reset()
 		atomic.StoreUint64(&s.bloomHits, 0)
 		atomic.StoreUint64(&s.bloomFalsePos, 0)
@@ -283,6 +311,8 @@ func (s *BloomPebbleStore) checkAndResetBloom() {
 // CheckAndResetBloom forces a bloom filter health check and reset if needed
 // Call this during low-traffic periods for maintenance
 func (s *BloomPebbleStore) CheckAndResetBloom() {
+	s.bloomMu.Lock()
+	defer s.bloomMu.Unlock()
 	s.checkAndResetBloom()
 }
 
@@ -308,6 +338,11 @@ func (s *BloomPebbleStore) Close() error {
 }
 
 // ResetBloom resets the bloom filter (use during maintenance)
+// Uses lock to prevent race with concurrent Add operations
 func (s *BloomPebbleStore) ResetBloom() {
+	s.bloomMu.Lock()
+	defer s.bloomMu.Unlock()
+	s.resetInProgress.Store(true)
 	s.bloom.Reset()
+	s.resetInProgress.Store(false)
 }

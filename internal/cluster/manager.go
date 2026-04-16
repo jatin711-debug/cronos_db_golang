@@ -11,11 +11,12 @@ import (
 
 // Manager is the main cluster manager that coordinates all distributed components
 type Manager struct {
-	mu         sync.RWMutex
-	config     *ClusterConfig
-	membership *Membership
-	router     *Router
-	raft       *RaftNode
+	mu                sync.RWMutex
+	config            *ClusterConfig
+	membership        *Membership
+	router            *Router
+	raft              *RaftNode
+	partitionAccessor PartitionAccessor
 
 	started bool
 	stopCh  chan struct{}
@@ -146,7 +147,7 @@ func (m *Manager) Start() error {
 	}
 
 	// Create router
-	m.router = NewRouter(m.membership, m.config.NumPartitions, m.config.ReplicationFactor)
+	m.router = NewRouter(m.membership, m.config.NumPartitions, m.config.ReplicationFactor, m.partitionAccessor)
 
 	// Start background tasks
 	go m.leaderTasks()
@@ -327,19 +328,64 @@ func (m *Manager) syncClusterState() {
 	// For now, just log
 }
 
-// JoinCluster joins an existing cluster
-func (m *Manager) JoinCluster(leaderAddr string) error {
+// SetPartitionAccessor sets the partition accessor for state transfer operations
+func (m *Manager) SetPartitionAccessor(accessor PartitionAccessor) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.partitionAccessor = accessor
+	// If router already exists, update it
+	if m.router != nil {
+		// Router is created in Start(), so this should be called before Start()
+	}
+}
 
+// JoinCluster joins an existing cluster via the given leader address
+// It contacts the leader to be added to the Raft cluster and initiates
+// state transfer to sync partition data
+func (m *Manager) JoinCluster(leaderAddr string) error {
+	m.mu.Lock()
 	if m.raft == nil {
+		m.mu.Unlock()
 		return fmt.Errorf("raft not initialized")
 	}
+	if m.partitionAccessor == nil {
+		m.mu.Unlock()
+		return fmt.Errorf("partition accessor not set - call SetPartitionAccessor first")
+	}
+	partitionAccessor := m.partitionAccessor
+	localPartitions := m.router.GetLocalPartitions()
+	m.mu.Unlock()
 
-	// Request leader to add us
-	// In production, this would be a gRPC call to the leader
 	log.Printf("[CLUSTER] Requesting to join cluster via %s", leaderAddr)
 
+	// In a real implementation, this would use gRPC to contact the leader
+	// and request to be added to the cluster. The leader would then:
+	// 1. Add this node to Raft
+	// 2. Initiate partition reassignment
+	// 3. Start state transfer
+
+	// For now, we trigger local partition sync for any partitions this node should own
+	// This simulates what would happen after Raft adds this node
+	leader, err := m.router.GetPartitionLeader(0) // Get any leader to sync from
+	if err != nil || leader == nil {
+		log.Printf("[CLUSTER] No leader found for initial sync: %v", err)
+		return nil
+	}
+
+	// Sync all partitions this node should own
+	for _, partitionID := range localPartitions {
+		log.Printf("[CLUSTER] Syncing partition %d from leader %s", partitionID, leader.Address)
+		if err := partitionAccessor.GetOrCreatePartition(partitionID); err != nil {
+			log.Printf("[CLUSTER] Failed to create partition %d: %v", partitionID, err)
+			continue
+		}
+		if err := partitionAccessor.SyncPartitionFromLeader(partitionID, leader.Address); err != nil {
+			log.Printf("[CLUSTER] Failed to sync partition %d: %v", partitionID, err)
+			continue
+		}
+	}
+
+	log.Printf("[CLUSTER] Join cluster complete, synced %d partitions", len(localPartitions))
 	return nil
 }
 

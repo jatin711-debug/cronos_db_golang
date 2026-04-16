@@ -1,15 +1,18 @@
 package partition
 
 import (
+	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"log"
+	"os"
 	"sync"
 	"time"
 
 	"cronos_db/internal/consumer"
 	"cronos_db/internal/dedup"
 	"cronos_db/internal/delivery"
+	"cronos_db/internal/replication"
 	"cronos_db/internal/scheduler"
 	"cronos_db/internal/storage"
 	"cronos_db/pkg/types"
@@ -28,6 +31,7 @@ type Partition struct {
 	DedupStore    *dedup.Manager
 	Dispatcher    *delivery.Dispatcher
 	Worker        *delivery.Worker
+	Follower      *replication.Follower // For receiving replicated data
 	Leader        bool
 	CreatedTS     time.Time
 	UpdatedTS     time.Time
@@ -371,14 +375,29 @@ func (pm *PartitionManager) startPartitionInternal(partition *Partition) error {
 
 // replayWALTimers reads all events from the WAL and re-schedules any whose
 // schedule_ts is still in the future. This recovers timers lost during a crash.
+// Uses incremental checkpointing to avoid O(N) replay on each boot.
 func (pm *PartitionManager) replayWALTimers(partition *Partition) {
 	lastOffset := partition.Wal.GetLastOffset()
 	if lastOffset < 0 {
 		return // Empty WAL, nothing to replay
 	}
 
+	// Read incremental checkpoint to avoid replaying entire WAL
+	checkpoint := pm.readTimerCheckpoint(partition)
+	startOffset := int64(0)
+	if checkpoint != nil && checkpoint.LastScheduledOffset >= 0 {
+		startOffset = checkpoint.LastScheduledOffset + 1
+		log.Printf("[Partition %d] Using timer checkpoint: resuming from offset %d", partition.ID, startOffset)
+	}
+
+	// If we're already at the end, nothing to replay
+	if startOffset > lastOffset {
+		log.Printf("[Partition %d] Timer replay complete: already up to date at offset %d", partition.ID, lastOffset)
+		return
+	}
+
 	now := time.Now().UnixMilli()
-	events, err := partition.Wal.ReadEvents(0, lastOffset)
+	events, err := partition.Wal.ReadEvents(startOffset, lastOffset)
 	if err != nil {
 		log2.Warn("WAL replay failed", "partition", partition.ID, "error", err)
 		return
@@ -386,6 +405,8 @@ func (pm *PartitionManager) replayWALTimers(partition *Partition) {
 
 	scheduledCount := 0
 	expiredCount := 0
+	lastScheduled := startOffset - 1
+
 	for _, event := range events {
 		if event.GetScheduleTs() > now {
 			// Future event — re-schedule it
@@ -397,10 +418,54 @@ func (pm *PartitionManager) replayWALTimers(partition *Partition) {
 		} else {
 			expiredCount++
 		}
+		lastScheduled = event.Offset
 	}
 
-	log.Printf("[Partition %d] WAL replay complete: %d future events re-scheduled, %d already expired",
-		partition.ID, scheduledCount, expiredCount)
+	// Update checkpoint incrementally
+	pm.writeTimerCheckpoint(partition, lastScheduled)
+
+	log.Printf("[Partition %d] WAL replay complete: %d future events re-scheduled, %d already expired (offsets %d-%d)",
+		partition.ID, scheduledCount, expiredCount, startOffset, lastScheduled)
+}
+
+// TimerCheckpoint stores the incremental replay progress
+type TimerCheckpoint struct {
+	LastScheduledOffset int64 `json:"last_scheduled_offset"`
+	LastCheckpointTime int64 `json:"last_checkpoint_time"`
+}
+
+// readTimerCheckpoint reads the timer replay checkpoint
+func (pm *PartitionManager) readTimerCheckpoint(partition *Partition) *TimerCheckpoint {
+	cpPath := fmt.Sprintf("%s/timer_replay_checkpoint.json", partition.DataDir)
+	data, err := os.ReadFile(cpPath)
+	if err != nil {
+		return nil
+	}
+	var cp TimerCheckpoint
+	if err := json.Unmarshal(data, &cp); err != nil {
+		return nil
+	}
+	return &cp
+}
+
+// writeTimerCheckpoint writes the timer replay checkpoint
+func (pm *PartitionManager) writeTimerCheckpoint(partition *Partition, lastOffset int64) {
+	cp := TimerCheckpoint{
+		LastScheduledOffset: lastOffset,
+		LastCheckpointTime:  time.Now().UnixMilli(),
+	}
+	data, err := json.Marshal(cp)
+	if err != nil {
+		log2.Warn("Failed to marshal timer checkpoint", "error", err)
+		return
+	}
+	cpPath := fmt.Sprintf("%s/timer_replay_checkpoint.json", partition.DataDir)
+	tmpPath := cpPath + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+		log2.Warn("Failed to write timer checkpoint", "error", err)
+		return
+	}
+	os.Rename(tmpPath, cpPath)
 }
 
 // runCompaction calculates the minimum consumed offset across all consumer groups
@@ -572,4 +637,51 @@ type PartitionManagerStats struct {
 	TotalPartitions  int64
 	LeaderPartitions int64
 	ActivePartitions int64
+}
+
+// GetOrCreatePartition gets an existing partition or creates a new one for sync
+func (pm *PartitionManager) GetOrCreatePartition(partitionID int32) error {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	if _, exists := pm.partitions[partitionID]; exists {
+		return nil
+	}
+
+	// Auto-create partition for sync (topic will be set later)
+	return pm.createPartitionLocked(partitionID, fmt.Sprintf("partition-%d", partitionID))
+}
+
+// SyncPartitionFromLeader syncs a partition from its leader via bulk transfer
+func (pm *PartitionManager) SyncPartitionFromLeader(partitionID int32, leaderAddr string) error {
+	pm.mu.RLock()
+	partition, exists := pm.partitions[partitionID]
+	pm.mu.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("partition %d not found", partitionID)
+	}
+
+	// Get or create follower
+	pm.mu.Lock()
+	if partition.Follower == nil {
+		partition.Follower = replication.NewFollower(partitionID, partition.Wal, pm.nodeID)
+	}
+	pm.mu.Unlock()
+
+	// Set leader info
+	partition.Follower.SetLeader(fmt.Sprintf("leader-%d", partitionID), leaderAddr, 0)
+
+	// Perform bulk file sync
+	if err := partition.Follower.SyncFilesFromLeader(); err != nil {
+		return fmt.Errorf("bulk sync from leader %s: %w", leaderAddr, err)
+	}
+
+	log.Printf("[PARTITION] Partition %d synced from leader %s", partitionID, leaderAddr)
+	return nil
+}
+
+// NewPartitionManagerWithAccessor creates a new partition manager that implements PartitionAccessor
+func NewPartitionManagerWithAccessor(nodeID string, config *types.Config) *PartitionManager {
+	return NewPartitionManager(nodeID, config)
 }

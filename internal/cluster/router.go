@@ -6,26 +6,36 @@ import (
 	"sync"
 )
 
+// PartitionAccessor interface for triggering partition sync operations
+type PartitionAccessor interface {
+	// SyncPartitionFromLeader syncs a partition from its leader
+	SyncPartitionFromLeader(partitionID int32, leaderAddr string) error
+	// GetOrCreatePartition gets or creates a local partition
+	GetOrCreatePartition(partitionID int32) error
+}
+
 // Router handles routing requests to the correct node/partition
 type Router struct {
-	mu            sync.RWMutex
-	hashRing      *HashRing
-	membership    *Membership
-	numPartitions int
-	localNodeID   string
+	mu                sync.RWMutex
+	hashRing          *HashRing
+	membership        *Membership
+	numPartitions     int
+	localNodeID       string
+	partitionAccessor PartitionAccessor
 
 	// Partition assignments cache
 	assignments map[int32]*PartitionInfo
 }
 
 // NewRouter creates a new partition router
-func NewRouter(membership *Membership, numPartitions, replicationFactor int) *Router {
+func NewRouter(membership *Membership, numPartitions, replicationFactor int, accessor PartitionAccessor) *Router {
 	r := &Router{
-		hashRing:      NewHashRing(150, replicationFactor),
-		membership:    membership,
-		numPartitions: numPartitions,
-		localNodeID:   membership.GetLocalNode().ID,
-		assignments:   make(map[int32]*PartitionInfo),
+		hashRing:          NewHashRing(150, replicationFactor),
+		membership:        membership,
+		numPartitions:     numPartitions,
+		localNodeID:       membership.GetLocalNode().ID,
+		partitionAccessor: accessor,
+		assignments:       make(map[int32]*PartitionInfo),
 	}
 
 	// Initialize partition assignments
@@ -161,6 +171,12 @@ func (r *Router) executeRebalance(moves []PartitionMove) {
 
 		// Check if we are the destination node receiving the partition
 		if move.ToNode == r.localNodeID {
+			// Check if we have a partition accessor
+			if r.partitionAccessor == nil {
+				log.Printf("[ROUTER] No partition accessor available, cannot sync partition %d", move.PartitionID)
+				continue
+			}
+
 			// Find the current leader to sync from
 			leader, err := r.GetPartitionLeader(move.PartitionID)
 			if err != nil {
@@ -168,21 +184,27 @@ func (r *Router) executeRebalance(moves []PartitionMove) {
 				continue
 			}
 
-			// In a real system, we'd grab the local WAL instance.
-			// Here we are placing a placeholder for where the PartitionManager
-			// handles the Follower creation and triggering of the sync.
+			if leader == nil || leader.Address == "" {
+				log.Printf("[ROUTER] No leader address for partition %d", move.PartitionID)
+				continue
+			}
+
 			log.Printf("[ROUTER] Node %s initiating bulk file sync from %s for partition %d", r.localNodeID, leader.Address, move.PartitionID)
-			
-			// Pseudocode for the interaction with PartitionManager:
-			// pm := GetPartitionManager()
-			// partition := pm.GetOrCreatePartition(move.PartitionID)
-			// follower := partition.GetFollower()
-			// if err := follower.SyncFilesFromLeader(); err != nil {
-			//     log.Printf("Sync failed: %v", err)
-			// } else {
-			//     log.Printf("Sync complete, ready to serve requests or become leader")
-			//     r.updatePartitionState(move.PartitionID, PartitionStateReady)
-			// }
+
+			// Get or create the partition first
+			if err := r.partitionAccessor.GetOrCreatePartition(move.PartitionID); err != nil {
+				log.Printf("[ROUTER] Failed to get/create partition %d: %v", move.PartitionID, err)
+				continue
+			}
+
+			// Sync partition data from leader
+			if err := r.partitionAccessor.SyncPartitionFromLeader(move.PartitionID, leader.Address); err != nil {
+				log.Printf("[ROUTER] Sync failed for partition %d: %v", move.PartitionID, err)
+				// Don't fail hard - allow retry
+				continue
+			}
+
+			log.Printf("[ROUTER] Sync complete for partition %d, ready to serve requests", move.PartitionID)
 		}
 	}
 }
