@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
+	"strings"
 	"time"
 
 	"cronos_db/internal/consumer"
@@ -13,6 +15,8 @@ import (
 	"cronos_db/pkg/types"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // EventServiceHandler implements the EventService handler
@@ -22,6 +26,7 @@ type EventServiceHandler struct {
 	partitionManager *partition.PartitionManager
 	dedupManager     DedupManager
 	consumerManager  ConsumerManager
+	clusterRouter    ClusterRouter // nil in standalone mode
 }
 
 // DedupManager interface
@@ -34,6 +39,13 @@ type ConsumerManager interface {
 	Subscribe(request *types.SubscribeRequest) (*consumer.Subscription, error)
 	Ack(request *types.AckRequest) error
 	GetCommittedOffset(groupID string, partitionID int32) (int64, error)
+}
+
+// ClusterRouter provides cluster-aware partition routing.
+// When non-nil, the handler checks partition locality before processing.
+type ClusterRouter interface {
+	IsLocalPartition(partitionID int32) bool
+	IsPartitionLeader(partitionID int32) bool
 }
 
 // GRPCStream wraps gRPC stream to implement delivery.Stream interface
@@ -73,6 +85,12 @@ func NewEventServiceHandler(
 		dedupManager:     dm,
 		consumerManager:  cm,
 	}
+}
+
+// SetClusterRouter sets the cluster router for partition-aware request routing.
+// When set, Publish/Subscribe will reject requests for non-local partitions.
+func (h *EventServiceHandler) SetClusterRouter(router ClusterRouter) {
+	h.clusterRouter = router
 }
 
 // Publish handles publish requests
@@ -130,6 +148,12 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 			Success: false,
 			Error:   fmt.Sprintf("get internal partition: %v", err),
 		}, nil
+	}
+
+	// Cluster mode: check if this partition is local to this node
+	if h.clusterRouter != nil && !h.clusterRouter.IsLocalPartition(partition.ID) {
+		return nil, status.Errorf(codes.Unavailable,
+			"partition %d is not owned by this node; retry against the partition leader", partition.ID)
 	}
 
 	// Check if duplicate (unless explicitly allowed)
@@ -348,12 +372,30 @@ func (h *EventServiceHandler) Ack(stream types.EventService_AckServer) error {
 			return err
 		}
 
-		// Extract partition ID from delivery ID (format: "subID-offset")
-		// We need to find the right dispatcher to return credits
-		// For now, notify all dispatchers (they will ignore unknown delivery IDs)
-		for _, p := range h.partitionManager.ListPartitions() {
-			if p.Dispatcher != nil {
-				p.Dispatcher.HandleAck(req.GetDeliveryId(), req.GetSuccess(), req.GetNextOffset())
+		// Parse partition ID from delivery ID to route to the correct dispatcher.
+		// Delivery ID format: "consumerGroup:partitionID:memberID-offset"
+		// or batch format: "consumerGroup:partitionID:memberID-batch-offset-count"
+		var targetPartitionID int32 = -1
+		deliveryID := req.GetDeliveryId()
+		parts := strings.Split(deliveryID, ":")
+		if len(parts) >= 2 {
+			if pid, err := strconv.ParseInt(parts[1], 10, 32); err == nil {
+				targetPartitionID = int32(pid)
+			}
+		}
+
+		if targetPartitionID >= 0 {
+			// Fast path: route directly to the target partition's dispatcher
+			p, err := h.partitionManager.GetInternalPartition(targetPartitionID)
+			if err == nil && p.Dispatcher != nil {
+				p.Dispatcher.HandleAck(deliveryID, req.GetSuccess(), req.GetNextOffset())
+			}
+		} else {
+			// Fallback: broadcast to all partitions (legacy delivery ID format)
+			for _, p := range h.partitionManager.ListPartitions() {
+				if p.Dispatcher != nil {
+					p.Dispatcher.HandleAck(deliveryID, req.GetSuccess(), req.GetNextOffset())
+				}
 			}
 		}
 

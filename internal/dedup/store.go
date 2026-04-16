@@ -1,6 +1,10 @@
 package dedup
 
-import "fmt"
+import (
+	"fmt"
+	"sync"
+	"time"
+)
 
 // DedupStore interface for message deduplication
 type DedupStore interface {
@@ -26,6 +30,7 @@ type DedupStore interface {
 
 // MemoryStore is an in-memory dedup store for testing
 type MemoryStore struct {
+	mu      sync.RWMutex
 	entries map[string]Entry
 }
 
@@ -42,16 +47,28 @@ func NewMemoryStore() *MemoryStore {
 	}
 }
 
-// CheckAndStore checks if message ID exists
+// CheckAndStore checks if message ID exists, and stores it if not
 func (m *MemoryStore) CheckAndStore(messageID string, offset int64) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	if _, exists := m.entries[messageID]; exists {
 		return true, nil
+	}
+
+	// Store the entry so future lookups detect duplicates
+	m.entries[messageID] = Entry{
+		Offset:    offset,
+		CreatedTS: time.Now().UnixMilli(),
 	}
 	return false, nil
 }
 
 // GetOffset returns stored offset
 func (m *MemoryStore) GetOffset(messageID string) (int64, bool, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
 	entry, exists := m.entries[messageID]
 	if !exists {
 		return 0, false, nil
@@ -61,6 +78,9 @@ func (m *MemoryStore) GetOffset(messageID string) (int64, bool, error) {
 
 // Exists checks if message ID exists
 func (m *MemoryStore) Exists(messageID string) (bool, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
 	_, exists := m.entries[messageID]
 	return exists, nil
 }
@@ -72,6 +92,9 @@ func (m *MemoryStore) PruneExpired() (int, error) {
 
 // GetStats returns store statistics
 func (m *MemoryStore) GetStats() (*DedupStats, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
 	return &DedupStats{
 		ApproximateCount: int64(len(m.entries)),
 	}, nil
@@ -112,4 +135,9 @@ func NewManager(store DedupStore) *Manager {
 func (m *Manager) IsDuplicate(messageID string, offset int64) (bool, error) {
 	exists, err := m.store.CheckAndStore(messageID, offset)
 	return exists, err
+}
+
+// PruneExpired removes expired dedup entries from the underlying store
+func (m *Manager) PruneExpired() (int, error) {
+	return m.store.PruneExpired()
 }

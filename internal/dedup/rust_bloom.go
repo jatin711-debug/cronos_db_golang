@@ -17,6 +17,7 @@ bool bloom_check(void* ptr, const unsigned char* key, size_t len);
 void bloom_check_batch(void* ptr, const unsigned char** keys, const size_t* keys_lens, size_t num_keys, bool* results);
 unsigned long long bloom_count(void* ptr);
 unsigned long long bloom_memory_usage(void* ptr);
+void bloom_reset(void* ptr);
 */
 import "C"
 import (
@@ -92,8 +93,7 @@ func (bf *RustBloomFilter) Count() uint64 {
 }
 
 func (bf *RustBloomFilter) Reset() {
-	// Not implemented in Rust side yet
-	// Re-create?
+	C.bloom_reset(bf.ptr)
 }
 
 func (bf *RustBloomFilter) MemoryUsageBytes() uint64 {

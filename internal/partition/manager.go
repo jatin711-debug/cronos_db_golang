@@ -13,6 +13,8 @@ import (
 	"cronos_db/internal/scheduler"
 	"cronos_db/internal/storage"
 	"cronos_db/pkg/types"
+
+	log2 "log/slog"
 )
 
 // Partition represents a data partition
@@ -258,6 +260,9 @@ func (pm *PartitionManager) startPartitionLocked(partitionID int32) error {
 
 // startPartitionInternal starts a partition's background workers
 func (pm *PartitionManager) startPartitionInternal(partition *Partition) error {
+	// Replay WAL to recover scheduled timers that haven't fired yet
+	pm.replayWALTimers(partition)
+
 	// Start scheduler
 	partition.Scheduler.Start()
 
@@ -339,7 +344,63 @@ func (pm *PartitionManager) startPartitionInternal(partition *Partition) error {
 		}
 	}()
 
+	// Start dedup pruning loop (runs every hour)
+	go func() {
+		ticker := time.NewTicker(1 * time.Hour)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				if partition.DedupStore != nil {
+					pruned, err := partition.DedupStore.PruneExpired()
+					if err != nil {
+						log.Printf("[Partition %d] Dedup prune error: %v", partition.ID, err)
+					} else if pruned > 0 {
+						log.Printf("[Partition %d] Pruned %d expired dedup entries", partition.ID, pruned)
+					}
+				}
+			case <-partition.deliveryQuit:
+				return
+			}
+		}
+	}()
+
 	return nil
+}
+
+// replayWALTimers reads all events from the WAL and re-schedules any whose
+// schedule_ts is still in the future. This recovers timers lost during a crash.
+func (pm *PartitionManager) replayWALTimers(partition *Partition) {
+	lastOffset := partition.Wal.GetLastOffset()
+	if lastOffset < 0 {
+		return // Empty WAL, nothing to replay
+	}
+
+	now := time.Now().UnixMilli()
+	events, err := partition.Wal.ReadEvents(0, lastOffset)
+	if err != nil {
+		log2.Warn("WAL replay failed", "partition", partition.ID, "error", err)
+		return
+	}
+
+	scheduledCount := 0
+	expiredCount := 0
+	for _, event := range events {
+		if event.GetScheduleTs() > now {
+			// Future event — re-schedule it
+			if err := partition.Scheduler.Schedule(event); err != nil {
+				// Timer may already exist if recovery runs twice; skip silently
+				continue
+			}
+			scheduledCount++
+		} else {
+			expiredCount++
+		}
+	}
+
+	log.Printf("[Partition %d] WAL replay complete: %d future events re-scheduled, %d already expired",
+		partition.ID, scheduledCount, expiredCount)
 }
 
 // runCompaction calculates the minimum consumed offset across all consumer groups

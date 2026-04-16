@@ -129,6 +129,11 @@ func main() {
 		eventHandler = api.NewEventServiceHandler(pm, nil, nil)
 	}
 
+	// Wire cluster router for partition-aware request routing
+	if clusterMgr != nil {
+		eventHandler.SetClusterRouter(clusterMgr)
+	}
+
 	// Create consumer group service handler
 	var consumerHandler *api.ConsumerGroupServiceHandler
 	if part != nil {
