@@ -220,26 +220,39 @@ cronos_db/
 - [x] Integration tests (23 tests)
 - [x] Graceful shutdown
 
-### In Progress 🚧
-- [ ] Distributed replication (leader-follower)
-- [ ] Raft consensus for metadata
-- [ ] Multi-partition support
-- [ ] Consistent hashing
+### Distributed Features ✅
+- [x] Multi-node clustering (3+ nodes)
+- [x] Leader-follower replication (async)
+- [x] Raft consensus for metadata
+- [x] Multi-partition support (8 partitions default)
+- [x] Consistent hashing (256-ring, virtual nodes)
+- [x] Cluster membership & discovery
+
+### Performance ✅ Optimized
+- [x] Batch publish API (100-500 events/call)
+- [x] Lock-free bloom filter deduplication (Rust-backed)
+- [x] Batch WAL writes (single syscall per batch)
+- [x] Batch scheduling (single lock per batch)
+- [x] PebbleDB tuning (64MB memtable, NoSync)
+- [x] Timer pooling with sync.Pool
+- [x] Sharded dispatcher for reduced lock contention
+- [x] **425K+ events/sec achieved** 🚀
 
 ### Future Features 📋
 - [ ] Compaction and retention policies
 - [ ] Authentication and authorization
-- [ ] Metrics and monitoring
+- [ ] Distributed tracing (OpenTelemetry)
 - [ ] TLS encryption
+- [ ] Admin CLI & dashboard
 - [ ] Exactly-once delivery (with transactions)
 - [ ] Kafka protocol compatibility
 
 ## Performance Characteristics
 
 ### Throughput
-- **Write**: ~100K events/sec per partition (single leader)
+- **Write**: ~425K events/sec per cluster (batch mode)
 - **Read**: ~500K events/sec per partition (multiple followers)
-- **Latency**: 5-10ms p99 for publish
+- **Latency**: 244µs P50, 1.1ms P99 for batch publish
 - **Scheduler**: 100ms tick default (configurable), supports 10M+ events
 
 ### Scalability

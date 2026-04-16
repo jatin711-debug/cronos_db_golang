@@ -146,11 +146,11 @@ See [MVP_BUILD_GUIDE.md](MVP_BUILD_GUIDE.md) for detailed instructions.
 
 | Metric | Value | Notes |
 |--------|-------|-------|
-| **Cluster Throughput** | **303,351 events/sec** | Batch mode, 100 events/batch |
-| **Per-Node Throughput** | **101,117 events/sec** | 3 nodes, round-robin |
-| **Publish Latency P50** | **225µs** | Batch publish |
-| **Publish Latency P95** | **607µs** | Batch publish |
-| **Publish Latency P99** | **739µs** | Batch publish |
+| **Cluster Throughput** | **425,341 events/sec** | Batch mode, 500 events/batch, 150 publishers |
+| **Per-Node Throughput** | **141,780 events/sec** | 3 nodes, distributed round-robin |
+| **Publish Latency P50** | **244µs** | Batch publish |
+| **Publish Latency P95** | **872µs** | Batch publish |
+| **Publish Latency P99** | **1.1ms** | Batch publish |
 | **Success Rate** | **100%** | Zero errors |
 | **Scheduler Tick** | 100ms | Configurable (1-1000ms) |
 
@@ -270,14 +270,12 @@ cronos_db/
 - [x] Batch scheduling (single lock per batch)
 - [x] PebbleDB tuning (64MB memtable, NoSync)
 - [x] Timer pooling with sync.Pool
-- [x] **300K+ events/sec achieved** 🚀
+- [x] **425K+ events/sec achieved** 🚀
 
 ### Production Hardening 🚧
-- [ ] Metrics & monitoring (Prometheus/OpenTelemetry)
-- [ ] Distributed tracing
-- [ ] Rate limiting & quota management
+- [x] Metrics & monitoring (Prometheus)
+- [ ] Distributed tracing (OpenTelemetry)
 - [ ] Graceful shutdown & draining
-- [ ] Backup & restore utilities
 - [ ] Admin CLI & dashboard
 
 ## Technology Stack

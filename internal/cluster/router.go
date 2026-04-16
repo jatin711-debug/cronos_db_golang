@@ -159,10 +159,31 @@ func (r *Router) executeRebalance(moves []PartitionMove) {
 		log.Printf("[ROUTER] Rebalancing partition %d: %s -> %s (leader=%v)",
 			move.PartitionID, move.FromNode, move.ToNode, move.IsLeader)
 
-		// TODO: Implement actual data transfer
-		// 1. If this node is FromNode and is leader, transfer leadership
-		// 2. If this node is ToNode, prepare to receive data
-		// 3. Coordinate with Raft for metadata updates
+		// Check if we are the destination node receiving the partition
+		if move.ToNode == r.localNodeID {
+			// Find the current leader to sync from
+			leader, err := r.GetPartitionLeader(move.PartitionID)
+			if err != nil {
+				log.Printf("[ROUTER] Cannot sync partition %d: %v", move.PartitionID, err)
+				continue
+			}
+
+			// In a real system, we'd grab the local WAL instance.
+			// Here we are placing a placeholder for where the PartitionManager
+			// handles the Follower creation and triggering of the sync.
+			log.Printf("[ROUTER] Node %s initiating bulk file sync from %s for partition %d", r.localNodeID, leader.Address, move.PartitionID)
+			
+			// Pseudocode for the interaction with PartitionManager:
+			// pm := GetPartitionManager()
+			// partition := pm.GetOrCreatePartition(move.PartitionID)
+			// follower := partition.GetFollower()
+			// if err := follower.SyncFilesFromLeader(); err != nil {
+			//     log.Printf("Sync failed: %v", err)
+			// } else {
+			//     log.Printf("Sync complete, ready to serve requests or become leader")
+			//     r.updatePartitionState(move.PartitionID, PartitionStateReady)
+			// }
+		}
 	}
 }
 

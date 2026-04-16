@@ -32,6 +32,7 @@ func LoadConfig() (*types.Config, error) {
 	config.MaxDeliveryCredits = DefaultMaxDeliveryCredits
 	config.DeliveryPollMS = DefaultDeliveryPollMS
 	config.DedupTTLHours = DefaultDedupTTLHours
+	config.BloomCapacity = DefaultBloomCapacity
 	config.ReplicationBatchSize = DefaultReplicationBatchSize
 	config.ReplicationTimeout = 10 * time.Second
 	config.RaftDir = DefaultRaftDir
@@ -75,6 +76,7 @@ func LoadConfig() (*types.Config, error) {
 
 	// Dedup configuration
 	flag.IntVar(&config.DedupTTLHours, "dedup-ttl", DefaultDedupTTLHours, "Deduplication TTL in hours (7 days)")
+	flag.Uint64Var(&config.BloomCapacity, "bloom-capacity", DefaultBloomCapacity, "Bloom filter capacity per partition")
 
 	// Replication configuration
 	flag.IntVar(&config.ReplicationBatchSize, "replication-batch", DefaultReplicationBatchSize, "Replication batch size")
@@ -128,9 +130,29 @@ func LoadConfig() (*types.Config, error) {
 	}
 
 	// Validate required configuration
-	if config.NodeID == "" {
-		return nil, fmt.Errorf("node-id is required")
+	if err := ValidateConfig(&config); err != nil {
+		return nil, err
 	}
 
 	return &config, nil
+}
+
+// ValidateConfig validates the configuration
+func ValidateConfig(c *types.Config) error {
+	if c.NodeID == "" {
+		return fmt.Errorf("node-id is required")
+	}
+	if c.PartitionCount <= 0 {
+		return fmt.Errorf("partition-count must be > 0")
+	}
+	if c.ReplicationFactor <= 0 {
+		return fmt.Errorf("replication-factor must be > 0")
+	}
+	if c.DataDir == "" {
+		return fmt.Errorf("data-dir is required")
+	}
+	if c.GPRCAddress == "" {
+		return fmt.Errorf("grpc-addr is required")
+	}
+	return nil
 }

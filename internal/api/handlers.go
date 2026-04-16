@@ -3,6 +3,9 @@ package api
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"strconv"
+	"strings"
 	"time"
 
 	"cronos_db/internal/consumer"
@@ -12,6 +15,8 @@ import (
 	"cronos_db/pkg/types"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // EventServiceHandler implements the EventService handler
@@ -21,6 +26,7 @@ type EventServiceHandler struct {
 	partitionManager *partition.PartitionManager
 	dedupManager     DedupManager
 	consumerManager  ConsumerManager
+	clusterRouter    ClusterRouter // nil in standalone mode
 }
 
 // DedupManager interface
@@ -33,6 +39,13 @@ type ConsumerManager interface {
 	Subscribe(request *types.SubscribeRequest) (*consumer.Subscription, error)
 	Ack(request *types.AckRequest) error
 	GetCommittedOffset(groupID string, partitionID int32) (int64, error)
+}
+
+// ClusterRouter provides cluster-aware partition routing.
+// When non-nil, the handler checks partition locality before processing.
+type ClusterRouter interface {
+	IsLocalPartition(partitionID int32) bool
+	IsPartitionLeader(partitionID int32) bool
 }
 
 // GRPCStream wraps gRPC stream to implement delivery.Stream interface
@@ -72,6 +85,12 @@ func NewEventServiceHandler(
 		dedupManager:     dm,
 		consumerManager:  cm,
 	}
+}
+
+// SetClusterRouter sets the cluster router for partition-aware request routing.
+// When set, Publish/Subscribe will reject requests for non-local partitions.
+func (h *EventServiceHandler) SetClusterRouter(router ClusterRouter) {
+	h.clusterRouter = router
 }
 
 // Publish handles publish requests
@@ -131,6 +150,12 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 		}, nil
 	}
 
+	// Cluster mode: check if this partition is local to this node
+	if h.clusterRouter != nil && !h.clusterRouter.IsLocalPartition(partition.ID) {
+		return nil, status.Errorf(codes.Unavailable,
+			"partition %d is not owned by this node; retry against the partition leader", partition.ID)
+	}
+
 	// Check if duplicate (unless explicitly allowed)
 	if !req.AllowDuplicate {
 		isDuplicate, err := h.dedupManager.IsDuplicate(event.GetMessageId(), 0) // offset will be assigned
@@ -183,6 +208,7 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 
 	var publishedCount, duplicateCount, errorCount int32
 	var firstOffset, lastOffset int64 = -1, -1
+	var lastError string
 
 	// Group events by partition for batch WAL writes
 	partitionEvents := make(map[int32][]*types.Event)
@@ -191,6 +217,10 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 		// Basic validation
 		if event.GetMessageId() == "" || event.GetScheduleTs() <= 0 || len(event.Payload) == 0 {
 			errorCount++
+			if lastError == "" {
+				lastError = fmt.Sprintf("validation failed: msgId=%q, scheduleTs=%d, payloadLen=%d",
+					event.GetMessageId(), event.GetScheduleTs(), len(event.Payload))
+			}
 			continue
 		}
 
@@ -205,6 +235,9 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 			partition, err = h.partitionManager.GetPartitionForTopic(event.Topic)
 			if err != nil {
 				errorCount++
+				if lastError == "" {
+					lastError = fmt.Sprintf("partition lookup failed: %v", err)
+				}
 				continue
 			}
 		}
@@ -214,6 +247,9 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 			isDuplicate, err := h.dedupManager.IsDuplicate(event.GetMessageId(), 0)
 			if err != nil {
 				errorCount++
+				if lastError == "" {
+					lastError = fmt.Sprintf("dedup check failed for %s: %v", event.GetMessageId(), err)
+				}
 				continue
 			}
 			if isDuplicate {
@@ -230,19 +266,25 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 		partitionInternal, err := h.partitionManager.GetInternalPartition(partitionID)
 		if err != nil {
 			errorCount += int32(len(events))
+			if lastError == "" {
+				lastError = fmt.Sprintf("get internal partition %d: %v", partitionID, err)
+			}
 			continue
 		}
 
 		// Batch append to WAL (single syscall for all events)
 		if err := partitionInternal.Wal.AppendBatch(events); err != nil {
 			errorCount += int32(len(events))
+			if lastError == "" {
+				lastError = fmt.Sprintf("WAL append for partition %d: %v", partitionID, err)
+			}
 			continue
 		}
 
 		// Batch schedule all events (single lock acquisition)
 		if err := partitionInternal.Scheduler.ScheduleBatch(events); err != nil {
 			// Events are in WAL, just log scheduling error
-			continue
+			slog.Warn("batch schedule partially failed", "partition", partitionID, "count", len(events), "error", err)
 		}
 
 		// Update stats
@@ -256,6 +298,14 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 				lastOffset = event.Offset
 			}
 		}
+	}
+
+	// Log errors periodically to help debug
+	if errorCount > 0 && errorCount%1000 == 0 {
+		slog.Warn("batch publish errors",
+			"errorCount", errorCount,
+			"duplicateCount", duplicateCount,
+			"lastError", lastError)
 	}
 
 	return &types.PublishBatchResponse{
@@ -322,7 +372,7 @@ func (h *EventServiceHandler) Subscribe(stream grpc.BidiStreamingServer[types.Su
 		defer func() {
 			if err := partitionInternal.Dispatcher.Unsubscribe(subID); err != nil {
 				// Log but don't fail - subscription may already be cleaned up
-				fmt.Printf("[SUBSCRIBE] Failed to unsubscribe %s: %v\n", subID, err)
+				slog.Warn("Failed to unsubscribe", "subscription_id", subID, "error", err)
 			}
 		}()
 	}
@@ -347,12 +397,30 @@ func (h *EventServiceHandler) Ack(stream types.EventService_AckServer) error {
 			return err
 		}
 
-		// Extract partition ID from delivery ID (format: "subID-offset")
-		// We need to find the right dispatcher to return credits
-		// For now, notify all dispatchers (they will ignore unknown delivery IDs)
-		for _, p := range h.partitionManager.ListPartitions() {
-			if p.Dispatcher != nil {
-				p.Dispatcher.HandleAck(req.GetDeliveryId(), req.GetSuccess(), req.GetNextOffset())
+		// Parse partition ID from delivery ID to route to the correct dispatcher.
+		// Delivery ID format: "consumerGroup:partitionID:memberID-offset"
+		// or batch format: "consumerGroup:partitionID:memberID-batch-offset-count"
+		var targetPartitionID int32 = -1
+		deliveryID := req.GetDeliveryId()
+		parts := strings.Split(deliveryID, ":")
+		if len(parts) >= 2 {
+			if pid, err := strconv.ParseInt(parts[1], 10, 32); err == nil {
+				targetPartitionID = int32(pid)
+			}
+		}
+
+		if targetPartitionID >= 0 {
+			// Fast path: route directly to the target partition's dispatcher
+			p, err := h.partitionManager.GetInternalPartition(targetPartitionID)
+			if err == nil && p.Dispatcher != nil {
+				p.Dispatcher.HandleAck(deliveryID, req.GetSuccess(), req.GetNextOffset())
+			}
+		} else {
+			// Fallback: broadcast to all partitions (legacy delivery ID format)
+			for _, p := range h.partitionManager.ListPartitions() {
+				if p.Dispatcher != nil {
+					p.Dispatcher.HandleAck(deliveryID, req.GetSuccess(), req.GetNextOffset())
+				}
 			}
 		}
 

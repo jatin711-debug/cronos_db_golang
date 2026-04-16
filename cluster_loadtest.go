@@ -305,10 +305,17 @@ func runBatchPublisher(config ClusterLoadTestConfig, metrics *ClusterMetrics, pu
 		if err != nil {
 			metrics.NodeErrors[node.ID] += eventsInBatch
 			metrics.TotalErrors += eventsInBatch
+			// Log first gRPC error for debugging
+			log.Printf("gRPC ERROR %s: %v (errors so far: %d)", node.ID, err, metrics.NodeErrors[node.ID])
 		} else if resp != nil {
 			metrics.NodePublished[node.ID] += int64(resp.PublishedCount)
 			metrics.TotalPublished += int64(resp.PublishedCount)
 			metrics.TotalErrors += int64(resp.ErrorCount)
+			// Log first handler-level error
+			if resp.ErrorCount > 0 {
+				log.Printf("Handler ERROR %s: resp.ErrorCount=%d (dup=%d, published=%d)",
+					node.ID, resp.ErrorCount, resp.DuplicateCount, resp.PublishedCount)
+			}
 			// Record latency per event (amortized)
 			perEventLatency := latency / time.Duration(len(events))
 			for range events {

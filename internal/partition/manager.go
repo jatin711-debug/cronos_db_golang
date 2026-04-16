@@ -13,6 +13,8 @@ import (
 	"cronos_db/internal/scheduler"
 	"cronos_db/internal/storage"
 	"cronos_db/pkg/types"
+
+	log2 "log/slog"
 )
 
 // Partition represents a data partition
@@ -84,9 +86,9 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 	}
 
 	// Create dedup store with bloom filter for high performance
-	// Expected 1M items per partition with 1% false positive rate
-	// Uses ~10MB memory per partition for bloom filter
-	dedupStore, err := dedup.NewBloomPebbleStore(dataDir, partitionID, int32(pm.config.DedupTTLHours), 1_000_000, 0.01)
+	// Expected items per partition with 1% false positive rate
+	// Uses ~10MB memory per partition for bloom filter (at 10M items)
+	dedupStore, err := dedup.NewBloomPebbleStore(dataDir, partitionID, int32(pm.config.DedupTTLHours), pm.config.BloomCapacity, 0.01)
 	if err != nil {
 		return fmt.Errorf("create dedup store: %w", err)
 	}
@@ -258,6 +260,9 @@ func (pm *PartitionManager) startPartitionLocked(partitionID int32) error {
 
 // startPartitionInternal starts a partition's background workers
 func (pm *PartitionManager) startPartitionInternal(partition *Partition) error {
+	// Replay WAL to recover scheduled timers that haven't fired yet
+	pm.replayWALTimers(partition)
+
 	// Start scheduler
 	partition.Scheduler.Start()
 
@@ -323,7 +328,130 @@ func (pm *PartitionManager) startPartitionInternal(partition *Partition) error {
 		}
 	}()
 
+	// Start compaction loop (runs every 10 minutes)
+	compactionInterval := 10 * time.Minute
+	go func() {
+		ticker := time.NewTicker(compactionInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				partition.runCompaction()
+			case <-partition.deliveryQuit:
+				return
+			}
+		}
+	}()
+
+	// Start dedup pruning loop (runs every hour)
+	go func() {
+		ticker := time.NewTicker(1 * time.Hour)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				if partition.DedupStore != nil {
+					pruned, err := partition.DedupStore.PruneExpired()
+					if err != nil {
+						log.Printf("[Partition %d] Dedup prune error: %v", partition.ID, err)
+					} else if pruned > 0 {
+						log.Printf("[Partition %d] Pruned %d expired dedup entries", partition.ID, pruned)
+					}
+				}
+			case <-partition.deliveryQuit:
+				return
+			}
+		}
+	}()
+
 	return nil
+}
+
+// replayWALTimers reads all events from the WAL and re-schedules any whose
+// schedule_ts is still in the future. This recovers timers lost during a crash.
+func (pm *PartitionManager) replayWALTimers(partition *Partition) {
+	lastOffset := partition.Wal.GetLastOffset()
+	if lastOffset < 0 {
+		return // Empty WAL, nothing to replay
+	}
+
+	now := time.Now().UnixMilli()
+	events, err := partition.Wal.ReadEvents(0, lastOffset)
+	if err != nil {
+		log2.Warn("WAL replay failed", "partition", partition.ID, "error", err)
+		return
+	}
+
+	scheduledCount := 0
+	expiredCount := 0
+	for _, event := range events {
+		if event.GetScheduleTs() > now {
+			// Future event — re-schedule it
+			if err := partition.Scheduler.Schedule(event); err != nil {
+				// Timer may already exist if recovery runs twice; skip silently
+				continue
+			}
+			scheduledCount++
+		} else {
+			expiredCount++
+		}
+	}
+
+	log.Printf("[Partition %d] WAL replay complete: %d future events re-scheduled, %d already expired",
+		partition.ID, scheduledCount, expiredCount)
+}
+
+// runCompaction calculates the minimum consumed offset across all consumer groups
+// and safely removes obsolete WAL segments.
+func (p *Partition) runCompaction() {
+	groups := p.ConsumerGroup.ListGroups()
+	
+	hasActiveConsumers := false
+	minConsumedOffset := p.Wal.GetHighWatermark()
+
+	for _, group := range groups {
+		hasPartition := false
+		for _, partID := range group.Partitions {
+			if partID == p.ID {
+				hasPartition = true
+				break
+			}
+		}
+		
+		if !hasPartition {
+			continue
+		}
+		
+		hasActiveConsumers = true
+		
+		offset, ok := group.CommittedOffsets[p.ID]
+		if ok {
+			if offset == -1 {
+				// Consumer hasn't consumed anything, can't discard data
+				minConsumedOffset = 0
+			} else if offset < minConsumedOffset {
+				minConsumedOffset = offset
+			}
+		} else {
+			// Partition is assigned but no offset committed yet
+			minConsumedOffset = 0
+		}
+	}
+
+	if !hasActiveConsumers {
+		return // No active consumers to bound the min offset
+	}
+
+	if minConsumedOffset > 0 {
+		deleted, err := p.Wal.CompactByOffset(minConsumedOffset)
+		if err != nil {
+			log.Printf("[Partition %d] WAL compaction error: %v", p.ID, err)
+		} else if deleted > 0 {
+			log.Printf("[Partition %d] Compacted %d WAL segments up to offset %d", p.ID, deleted, minConsumedOffset)
+		}
+	}
 }
 
 // ListPartitions lists all partitions
@@ -354,14 +482,65 @@ func (pm *PartitionManager) StopPartition(partitionID int32) error {
 		return err
 	}
 
-	// Stop scheduler
-	partition.Scheduler.Stop()
-
-	// Close WAL
-	if err := partition.Wal.Close(); err != nil {
-		return fmt.Errorf("close WAL: %w", err)
+	// Signal delivery goroutines to stop FIRST to avoid circular lock deadlock
+	// Delivery goroutines read from deliveryQuit channel - closing it allows them to exit
+	select {
+	case <-partition.deliveryQuit:
+		// already closed
+	default:
+		close(partition.deliveryQuit)
 	}
 
+	// Stop scheduler (safe now since delivery goroutines will exit)
+	if partition.Scheduler != nil {
+		partition.Scheduler.Stop()
+	}
+
+	// Stop delivery worker
+	if partition.Worker != nil {
+		partition.Worker.Stop()
+	}
+
+	// Close WAL
+	if partition.Wal != nil {
+		// Flush before close to ensure durability
+		partition.Wal.Flush()
+		if err := partition.Wal.Close(); err != nil {
+			return fmt.Errorf("close WAL: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// StopAllPartitions stops all active partitions concurrently and gracefully
+func (pm *PartitionManager) StopAllPartitions() error {
+	partitions := pm.ListPartitions()
+	
+	var wg sync.WaitGroup
+	errCh := make(chan error, len(partitions))
+
+	for _, p := range partitions {
+		wg.Add(1)
+		go func(partitionID int32) {
+			defer wg.Done()
+			if err := pm.StopPartition(partitionID); err != nil {
+				errCh <- fmt.Errorf("partition %d: %w", partitionID, err)
+			}
+		}(p.ID)
+	}
+
+	wg.Wait()
+	close(errCh)
+
+	var errs []error
+	for err := range errCh {
+		errs = append(errs, err)
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("failed to stop %d partitions: %v", len(errs), errs[0])
+	}
 	return nil
 }
 

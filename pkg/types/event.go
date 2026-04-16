@@ -22,6 +22,7 @@ type Config struct {
 	MaxDeliveryCredits   int
 	DeliveryPollMS       int
 	DedupTTLHours        int
+	BloomCapacity        uint64
 	ReplicationBatchSize int
 	ReplicationTimeout   time.Duration
 	RaftDir              string
