@@ -218,7 +218,10 @@ func (s *Segment) AppendBatch(events []*types.Event, indexInterval int64) error 
 
 	for _, event := range events {
 		// Build event record
-		record := s.buildEventRecord(event)
+		record, err := s.buildEventRecord(event)
+		if err != nil {
+			return fmt.Errorf("build event record: %w", err)
+		}
 
 		// Write record to buffer
 		if err := s.writeRecord(record); err != nil {
@@ -258,7 +261,10 @@ func (s *Segment) appendEventActive(event *types.Event, indexInterval int64) err
 	filePos := s.sizeBytes
 
 	// Build event record
-	record := s.buildEventRecord(event)
+	record, err := s.buildEventRecord(event)
+	if err != nil {
+		return fmt.Errorf("build event record: %w", err)
+	}
 
 	// Write record to buffer (buffered I/O)
 	if err := s.writeRecord(record); err != nil {
@@ -287,17 +293,22 @@ func (s *Segment) appendEventActive(event *types.Event, indexInterval int64) err
 }
 
 // buildEventRecord builds binary event record
-func (s *Segment) buildEventRecord(event *types.Event) []byte {
+func (s *Segment) buildEventRecord(event *types.Event) ([]byte, error) {
 	// Calculate sizes
 	msgIDLen := len(event.GetMessageId())
 	topicLen := len(event.Topic)
 	payloadLen := len(event.Payload)
 	metaCount := len(event.Meta)
 
-	// Calculate total size
+	// Calculate total size with overflow checking
 	size := 4 + 4 + 8 + 8 + 2 + msgIDLen + 2 + topicLen + 4 + payloadLen + 2
 	for k, v := range event.Meta {
-		size += 2 + len(k) + 2 + len(v) // keylen + key + valuelen + value
+		metaEntrySize := 2 + len(k) + 2 + len(v)
+		// Check for integer overflow
+		if size > (1<<63 - 1) - metaEntrySize {
+			return nil, fmt.Errorf("event record too large: overflow in size calculation")
+		}
+		size += metaEntrySize
 	}
 
 	// Reuse buffer if possible
@@ -376,7 +387,7 @@ func (s *Segment) buildEventRecord(event *types.Event) []byte {
 	crc := crc32.ChecksumIEEE(record[8:])
 	binary.BigEndian.PutUint32(record[4:8], crc)
 
-	return record
+	return record, nil
 }
 
 // parseEventRecordWithoutLength parses binary event record that doesn't include length prefix

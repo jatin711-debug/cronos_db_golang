@@ -163,6 +163,10 @@ type BloomPebbleStore struct {
 	bloomHits     uint64 // Bloom filter said "definitely not exists"
 	bloomFalsePos uint64 // Bloom said "maybe exists" but PebbleDB said "no"
 	pebbleHits    uint64 // Actually found in PebbleDB
+
+	// Configuration for bloom filter maintenance
+	bloomCapacity       uint64 // Max items before considering reset
+	falsePositiveThresh float64 // FPR threshold (e.g., 0.05 = 5%) to trigger reset
 }
 
 // NewBloomPebbleStore creates a new bloom filter + PebbleDB store
@@ -179,8 +183,10 @@ func NewBloomPebbleStore(dataDir string, partitionID int32, ttlHours int32, expe
 	bloom := NewBloomFilter(expectedItems, falsePositiveRate)
 
 	return &BloomPebbleStore{
-		bloom:  bloom,
-		pebble: pebble,
+		bloom:              bloom,
+		pebble:             pebble,
+		bloomCapacity:      expectedItems,
+		falsePositiveThresh: 0.05, // 5% FPR threshold triggers reset
 	}, nil
 }
 
@@ -238,11 +244,46 @@ func (s *BloomPebbleStore) Exists(messageID string) (bool, error) {
 	return s.pebble.Exists(messageID)
 }
 
-// PruneExpired removes expired entries
-// Note: Bloom filter cannot be pruned, so it may have false positives for expired keys
-// This is acceptable as it only causes extra PebbleDB lookups
+// PruneExpired removes expired entries and checks bloom filter health
+// If false positive rate is too high, resets the bloom filter
 func (s *BloomPebbleStore) PruneExpired() (int, error) {
-	return s.pebble.PruneExpired()
+	// Prune expired entries from PebbleDB
+	count, err := s.pebble.PruneExpired()
+	if err != nil {
+		return count, err
+	}
+
+	// Check bloom filter health and reset if FPR is too high
+	s.checkAndResetBloom()
+
+	return count, nil
+}
+
+// checkAndResetBloom checks false positive rate and resets bloom if needed
+func (s *BloomPebbleStore) checkAndResetBloom() {
+	totalLookups := atomic.LoadUint64(&s.bloomHits) + atomic.LoadUint64(&s.bloomFalsePos)
+	if totalLookups < 1000 {
+		// Not enough data to judge FPR yet
+		return
+	}
+
+	falsePos := atomic.LoadUint64(&s.bloomFalsePos)
+	actualFPR := float64(falsePos) / float64(totalLookups)
+
+	if actualFPR > s.falsePositiveThresh {
+		// FPR too high, reset bloom filter
+		// Note: This loses all bloom filter state, but we rebuild it through normal operation
+		s.bloom.Reset()
+		atomic.StoreUint64(&s.bloomHits, 0)
+		atomic.StoreUint64(&s.bloomFalsePos, 0)
+		atomic.StoreUint64(&s.pebbleHits, 0)
+	}
+}
+
+// CheckAndResetBloom forces a bloom filter health check and reset if needed
+// Call this during low-traffic periods for maintenance
+func (s *BloomPebbleStore) CheckAndResetBloom() {
+	s.checkAndResetBloom()
 }
 
 // GetStats returns store statistics
