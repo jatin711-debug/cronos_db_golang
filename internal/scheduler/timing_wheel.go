@@ -251,6 +251,7 @@ func (tw *TimingWheel) tickLocked() {
 }
 
 // cascadeFromOverflow ticks the overflow wheel and brings expired timers back to this wheel
+// Optimized to use bucket-based insertion instead of O(N) individual adds
 func (tw *TimingWheel) cascadeFromOverflow() {
 	if tw.overflowWheel == nil {
 		return
@@ -267,16 +268,29 @@ func (tw *TimingWheel) cascadeFromOverflow() {
 	// Get the slot for the current tick
 	overflowSlot := int32(overflowTick % int64(tw.overflowWheel.wheelSize))
 
-	// Move all timers from overflow slot to this wheel
-	timersToMove := make([]*Timer, 0)
+	// Get current absolute time for this wheel
+	currentAbsoluteMs := tw.startTimeMs + tw.currentTick*int64(tw.tickMs)
+
+	// Collect all timers to move and organize them by target slot
+	// Using bucket-based approach for O(N) instead of O(N*logN) or O(N^2)
+	timersBySlot := make(map[int32][]*Timer) // slot -> timers
 
 	curr := tw.overflowWheel.wheel[overflowSlot]
 	for curr != nil {
 		next := curr.next
 
-		timersToMove = append(timersToMove, curr)
-		delete(tw.overflowWheel.timers, curr.EventID)
+		// Calculate which slot this timer should go into in this wheel
+		delayMs := curr.ExpirationMs - currentAbsoluteMs
+		if delayMs < 0 {
+			delayMs = 0
+		}
+		delayTicks := delayMs / int64(tw.tickMs)
+		targetSlot := int32((tw.currentTick + delayTicks) % int64(tw.wheelSize))
 
+		curr.SlotIndex = targetSlot
+		timersBySlot[targetSlot] = append(timersBySlot[targetSlot], curr)
+
+		delete(tw.overflowWheel.timers, curr.EventID)
 		curr.prev = nil
 		curr.next = nil
 
@@ -286,10 +300,30 @@ func (tw *TimingWheel) cascadeFromOverflow() {
 	// Clear the overflow slot
 	tw.overflowWheel.wheel[overflowSlot] = nil
 
-	// Re-add timers to this wheel (they will now fit within our range)
-	for _, timer := range timersToMove {
-		// Re-insert into this wheel - it should now fit within our range
-		tw.addTimerLocked(timer)
+	// Batch insert all timers into their target slots - O(N) total
+	for slot, timers := range timersBySlot {
+		// Prepend all timers for this slot to the existing head (if any)
+		if len(timers) > 0 {
+			head := tw.wheel[slot]
+			// Reverse order so they end up in correct relative order (FIFO)
+			for i := len(timers)/2 - 1; i >= 0; i-- {
+				j := len(timers) - 1 - i
+				timers[i], timers[j] = timers[j], timers[i]
+			}
+			// Connect first timer to head
+			timers[0].next = head
+			if head != nil {
+				head.prev = timers[0]
+			}
+			// Set last timer as head
+			lastTimer := timers[len(timers)-1]
+			tw.wheel[slot] = lastTimer
+
+			// Add all timers to the timers map
+			for _, t := range timers {
+				tw.timers[t.EventID] = t
+			}
+		}
 	}
 
 	// Recursively cascade if overflow wheel also completed a rotation

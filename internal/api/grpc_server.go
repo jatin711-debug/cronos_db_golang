@@ -5,6 +5,7 @@ import (
 	"net"
 	"time"
 
+	"cronos_db/internal/tracing"
 	"cronos_db/pkg/types"
 
 	"google.golang.org/grpc"
@@ -55,6 +56,7 @@ func NewGRPCServer(config *Config) *GRPCServer {
 			Timeout: config.KeepaliveTimeout,
 		}),
 		grpc.ChainUnaryInterceptor(
+			tracing.GRPCServerInterceptor(),
 			MetricsInterceptor(),
 			RateLimitInterceptor(100000.0, 500000.0), // 100K req/s, burst of 500K per IP for load testing
 		),

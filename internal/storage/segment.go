@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -790,7 +791,8 @@ func (s *Segment) ReadEventsByOffsetRange(startOffset, endOffset int64) ([]*type
 	return result, nil
 }
 
-// scan scans segment to recover metadata
+// scan scans segment to recover metadata and handles tail corruption
+// by truncating any half-written or corrupt frames at the end of the file.
 func (s *Segment) scan() error {
 	// Scan segment file to find last offset and timestamp
 	file := s.segmentFile
@@ -803,13 +805,23 @@ func (s *Segment) scan() error {
 	s.lastOffset = -1
 	s.lastTS = 0
 
+	var lastGoodPos int64 = 64 // Track position of last valid record end
+	var recordStartPos int64 = 64
+
 	// Read through all records
 	for {
+		recordStartPos = lastGoodPos
+
 		// Read record length
 		lengthBytes := make([]byte, 4)
 		if _, err := file.Read(lengthBytes); err != nil {
-			if err == io.EOF || err == io.ErrUnexpectedEOF {
-				// End of file - no more records
+			if err == io.EOF {
+				// Clean end of file
+				break
+			}
+			if err == io.ErrUnexpectedEOF {
+				// Truncated file - corrupt tail detected
+				log.Printf("[SEGMENT] Truncated tail detected at position %d, truncating file", lastGoodPos)
 				break
 			}
 			return fmt.Errorf("read length: %w", err)
@@ -817,6 +829,7 @@ func (s *Segment) scan() error {
 
 		length := int64(binary.BigEndian.Uint32(lengthBytes))
 		if length <= 4 || length > 10*1024*1024 { // Sanity check: must be > 4 bytes, max 10MB record
+			log.Printf("[SEGMENT] Invalid record length %d at position %d, treating as corrupt tail", length, lastGoodPos)
 			break
 		}
 
@@ -824,8 +837,8 @@ func (s *Segment) scan() error {
 		recordData := make([]byte, length-4)
 		if _, err := io.ReadFull(file, recordData); err != nil {
 			if err == io.EOF || err == io.ErrUnexpectedEOF {
-				// Truncated or incomplete file - stop scanning
-				// This is normal after a crash or incomplete write
+				// Truncated or incomplete file - corrupt tail detected
+				log.Printf("[SEGMENT] Incomplete record at position %d (expected %d bytes), truncating", lastGoodPos, length)
 				break
 			}
 			return fmt.Errorf("read record: %w", err)
@@ -834,11 +847,27 @@ func (s *Segment) scan() error {
 		// Parse event to get offset and timestamp (record doesn't include length prefix)
 		event, err := parseEventRecordWithoutLength(recordData)
 		if err != nil {
-			return fmt.Errorf("parse event: %w", err)
+			// CRC mismatch or parse error - corrupt frame detected
+			log.Printf("[SEGMENT] Corrupt frame at position %d: %v, truncating file", lastGoodPos, err)
+			break
 		}
 
+		// Valid record - update last good position
 		s.lastOffset = event.Offset
 		s.lastTS = event.GetScheduleTs()
+		lastGoodPos = recordStartPos + 4 + int64(len(recordData)) // After length + recordData
+
+		// Update segment size to reflect truncated state
+		s.sizeBytes = lastGoodPos
+	}
+
+	// If we found corrupt data at the tail, truncate the file
+	if lastGoodPos < s.sizeBytes {
+		if err := s.truncateToPosition(lastGoodPos); err != nil {
+			log.Printf("[SEGMENT] Warning: failed to truncate corrupt tail: %v", err)
+		} else {
+			log.Printf("[SEGMENT] Truncated %d bytes of corrupt tail", s.sizeBytes-lastGoodPos)
+		}
 	}
 
 	// If we couldn't find any events, start from firstOffset
@@ -846,6 +875,31 @@ func (s *Segment) scan() error {
 		s.lastOffset = s.firstOffset - 1
 	}
 
+	return nil
+}
+
+// truncateToPosition truncates the segment file to the given position
+func (s *Segment) truncateToPosition(pos int64) error {
+	if pos >= s.sizeBytes {
+		return nil // Nothing to truncate
+	}
+
+	// Sync before truncating to ensure data integrity
+	if err := s.segmentFile.Sync(); err != nil {
+		return fmt.Errorf("sync before truncate: %w", err)
+	}
+
+	// Truncate the file
+	if err := s.segmentFile.Truncate(pos); err != nil {
+		return fmt.Errorf("truncate to %d: %w", pos, err)
+	}
+
+	// Sync again to ensure truncation is persisted
+	if err := s.segmentFile.Sync(); err != nil {
+		return fmt.Errorf("sync after truncate: %w", err)
+	}
+
+	s.sizeBytes = pos
 	return nil
 }
 
