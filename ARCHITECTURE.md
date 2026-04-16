@@ -232,10 +232,15 @@ After max retries → Dead Letter Queue (DLQ)
 - Each event gets unique timer in the timing wheel
 - Timer pool with sync.Pool for reduced allocations
 
-### Batch Scheduling
+**Batch Scheduling**:
 - `ScheduleBatch(events[])` - single lock acquisition for all events
 - Reduces mutex contention under high load
 - Events grouped by partition before scheduling
+
+**Timer Pool Optimization**:
+- Uses `sync.Pool` to reduce timer allocations
+- `GetTimerFast(offset, event)` avoids string formatting overhead
+- Timers recycled after expiration
 
 ## IV. Delivery Model (At-Least-Once)
 
@@ -488,9 +493,9 @@ Consumers reconnect to new partition nodes
 ### Throughput (Benchmarked)
 
 - **Single Node**: ~100K events/sec (batch mode)
-- **3-Node Cluster**: ~300K events/sec (batch mode with 100 events/batch)
-- **Latency P50**: ~225µs (batch publish)
-- **Latency P99**: ~740µs (batch publish)
+- **3-Node Cluster**: ~425K events/sec (batch mode with 500 events/batch)
+- **Latency P50**: ~244µs (batch publish)
+- **Latency P99**: ~1.1ms (batch publish)
 - **Scheduling**: 100ms tick default, hierarchical timing wheels for overflow
 
 ### Performance Optimizations
