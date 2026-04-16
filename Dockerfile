@@ -56,16 +56,19 @@ ENV CGO_LDFLAGS="-L/build/go-app -lcronos_dedup"
 RUN go build -ldflags="-linkmode=external" -o /cronos-api ./cmd/api/main.go
 
 # -----------------------------------------------------------------------------
-# Stage 3: Final runtime image (Alpine for small size)
-# -----------------------------------------------------------------------------
-FROM alpine:3.19
+# Stage 3: Final runtime image (Debian for glibc compatibility)
+# =============================================================================
+FROM debian:bookworm-slim
 
 # Install runtime dependencies
-RUN apk add --no-cache ca-certificates tzdata
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    tzdata \
+    && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user for security
-RUN addgroup -g 1000 cronos && \
-    adduser -u 1000 -G cronos -s /bin/sh -D cronos
+RUN groupadd -g 1000 cronos && \
+    useradd -u 1000 -g cronos -s /bin/sh -m cronos
 
 WORKDIR /app
 
@@ -74,6 +77,9 @@ COPY --from=go-builder /cronos-api /app/cronos-api
 
 # Copy Rust library (must be in same directory as binary or in library path)
 COPY --from=rust-builder /build/libcronos_dedup.so /app/cronos_dedup.so
+
+# Also copy to system library path
+COPY --from=rust-builder /build/libcronos_dedup.so /usr/lib/x86_64-linux-gnu/libcronos_dedup.so
 
 # Create data directory structure
 RUN mkdir -p /data/partitions && chown -R cronos:cronos /data
@@ -84,6 +90,7 @@ ENV CRONOS_NODE_ID=cronos-node-1
 ENV CRONOS_GRPC_ADDR=0.0.0.0:9000
 ENV CRONOS_HTTP_ADDR=0.0.0.0:8080
 ENV CRONOS_CLUSTER=false
+ENV LD_LIBRARY_PATH=/app
 
 # Expose ports
 # gRPC: 9000, HTTP: 8080, Cluster gossip: 7946, Cluster gRPC: 7947, Raft: 7948
@@ -97,7 +104,7 @@ USER cronos
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD wget -q --spider http://localhost:8080/health || exit 1
+    CMD curl -f http://localhost:8080/health || exit 1
 
 # Entry point
 ENTRYPOINT ["/app/cronos-api"]
