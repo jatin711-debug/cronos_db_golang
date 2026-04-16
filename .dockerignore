@@ -14,27 +14,58 @@ data/
 .idea/
 *.swp
 *.swo
+*.iml
 
 # Git
 .git/
 .gitignore
+.gitattributes
 
 # Documentation (not needed for build)
 *.md
 LICENSE
+*.txt
 
 # Test files
 *_test.go
 **/*_test.go
+**/*.test
 
 # Rust build artifacts (we rebuild in Docker)
 internal/dedup/rust/target/
+Cargo.lock
 
 # Local config
 .env
 .env.local
+.env.*.local
 
 # OS files
 .DS_Store
 Thumbs.db
 .claude
+
+# Node/npm (if applicable)
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+.circleci/
+
+# Docker
+Dockerfile.dev
+docker-compose.*.yml
+
+# Coverage and profiling
+*.prof
+*.cover
+*.coverprofile
+.coverage
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
