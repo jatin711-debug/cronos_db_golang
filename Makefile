@@ -117,10 +117,10 @@ health:
 
 # Docker commands
 docker:
-	docker build -t cronos-db:latest .
+	docker build -t cronos-db:latest --no-cache .
 
 docker-build:
-	docker build -t cronos-db:latest . && echo "Image built successfully"
+	docker build -t cronos-db:latest --no-cache . && echo "Image built successfully"
 
 docker-single:
 	docker-compose up -d cronos-single
