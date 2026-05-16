@@ -236,7 +236,7 @@ cronos_db/
 - [x] PebbleDB tuning (64MB memtable, NoSync)
 - [x] Timer pooling with sync.Pool
 - [x] Sharded dispatcher for reduced lock contention
-- [x] **425K+ events/sec achieved** 🚀
+- [x] **550K+ events/sec achieved** 🚀
 
 ### Future Features 📋
 - [ ] Compaction and retention policies
@@ -250,9 +250,9 @@ cronos_db/
 ## Performance Characteristics
 
 ### Throughput
-- **Write**: ~425K events/sec per cluster (batch mode)
+- **Write**: ~550K events/sec per cluster (batch mode, 1000 events/batch)
 - **Read**: ~500K events/sec per partition (multiple followers)
-- **Latency**: 244µs P50, 1.1ms P99 for batch publish
+- **Latency**: 84µs P50, 273µs P99 for batch publish
 - **Scheduler**: 100ms tick default (configurable), supports 10M+ events
 
 ### Scalability

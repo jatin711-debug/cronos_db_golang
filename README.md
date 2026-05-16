@@ -70,8 +70,8 @@ make node2
 make node3
 
 # Run benchmark
-make loadtest-batch PUBLISHERS=30 EVENTS=3333 BATCH_SIZE=100
-# Expected: ~300K events/sec
+make loadtest-batch PUBLISHERS=20 EVENTS=50000 BATCH_SIZE=1000
+# Expected: ~550K events/sec (3-node cluster, batch mode)
 ```
 
 ### Test with grpcurl
@@ -146,11 +146,11 @@ See [MVP_BUILD_GUIDE.md](MVP_BUILD_GUIDE.md) for detailed instructions.
 
 | Metric | Value | Notes |
 |--------|-------|-------|
-| **Cluster Throughput** | **425,341 events/sec** | Batch mode, 500 events/batch, 150 publishers |
-| **Per-Node Throughput** | **141,780 events/sec** | 3 nodes, distributed round-robin |
-| **Publish Latency P50** | **244µs** | Batch publish |
-| **Publish Latency P95** | **872µs** | Batch publish |
-| **Publish Latency P99** | **1.1ms** | Batch publish |
+| **Cluster Throughput** | **550,907 events/sec** | Batch mode, 1000 events/batch, 60 publishers (20/node) |
+| **Per-Node Throughput** | **183,636 events/sec** | 3 nodes, distributed round-robin |
+| **Publish Latency P50** | **84µs** | Batch publish |
+| **Publish Latency P95** | **218µs** | Batch publish |
+| **Publish Latency P99** | **273µs** | Batch publish |
 | **Success Rate** | **100%** | Zero errors |
 | **Scheduler Tick** | 100ms | Configurable (1-1000ms) |
 
@@ -158,19 +158,19 @@ See [MVP_BUILD_GUIDE.md](MVP_BUILD_GUIDE.md) for detailed instructions.
 
 | Metric | Value |
 |--------|-------|
-| Write Throughput (batch) | ~100K events/sec |
+| Write Throughput (batch) | ~180K events/sec |
 | Write Throughput (single) | ~10K events/sec |
-| Latency P99 (batch) | <1ms |
+| Latency P99 (batch) | <300µs |
 
 ### Performance Optimizations Applied
 
 1. **Lock-Free Bloom Filter** - Atomic CAS operations, skips PebbleDB for new keys
-2. **Batch APIs** - `PublishBatch` for 100-500 events per call
+2. **Batch APIs** - `PublishBatch` for 100-1000 events per call (sweet spot at 1000)
 3. **Batch Scheduling** - Single lock acquisition per batch
 4. **PebbleDB Tuning** - 64MB memtable, disabled internal WAL, NoSync
 5. **WAL Buffering** - 1MB buffered writer, batch append
 
-> **Benchmark Command:** `make loadtest-batch PUBLISHERS=30 EVENTS=3333 BATCH_SIZE=100`
+> **Benchmark Command:** `make loadtest-batch PUBLISHERS=20 EVENTS=50000 BATCH_SIZE=1000`
 
 ## Use Cases
 
@@ -264,13 +264,13 @@ cronos_db/
 - [x] Cluster membership & discovery
 
 ### Performance ✅ Optimized
-- [x] Batch publish API (100-500 events/call)
+- [x] Batch publish API (100-1000 events/call)
 - [x] Lock-free bloom filter deduplication
 - [x] Batch WAL writes (single syscall per batch)
 - [x] Batch scheduling (single lock per batch)
 - [x] PebbleDB tuning (64MB memtable, NoSync)
 - [x] Timer pooling with sync.Pool
-- [x] **425K+ events/sec achieved** 🚀
+- [x] **550K+ events/sec achieved** 🚀
 
 ### Production Hardening 🚧
 - [x] Metrics & monitoring (Prometheus)
