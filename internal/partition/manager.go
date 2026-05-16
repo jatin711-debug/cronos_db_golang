@@ -239,15 +239,31 @@ func (pm *PartitionManager) GetPartitionForKey(key string) (*types.Partition, er
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
-	if len(pm.partitions) == 0 {
-		return nil, fmt.Errorf("no partitions available")
-	}
-
 	partitionID := utils.HashToPartitionID(key, pm.config.PartitionCount)
 
-	partition, exists := pm.partitions[partitionID]
-	if !exists {
-		return nil, fmt.Errorf("partition %d not found", partitionID)
+	// Check if the computed partition already exists locally
+	if partition, exists := pm.partitions[partitionID]; exists {
+		return &types.Partition{
+			ID:            partition.ID,
+			Topic:         partition.Topic,
+			NextOffset:    0,
+			HighWatermark: 0,
+			Active:        true,
+			CreatedTS:     partition.CreatedTS.UnixMilli(),
+			UpdatedTS:     partition.UpdatedTS.UnixMilli(),
+		}, nil
+	}
+
+	// Auto-create the partition with the CORRECT hash-derived ID
+	if err := pm.createPartitionLocked(partitionID, key); err != nil {
+		return nil, fmt.Errorf("auto-create partition: %w", err)
+	}
+
+	// Start the newly created partition synchronously (before returning)
+	partition := pm.partitions[partitionID]
+	if err := pm.startPartitionInternal(partition); err != nil {
+		log.Printf("Failed to start auto-created partition %d: %v", partitionID, err)
+		// Continue anyway - partition is created but may not deliver
 	}
 
 	return &types.Partition{
