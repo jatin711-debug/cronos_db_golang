@@ -8,7 +8,7 @@ import (
 func TestPebbleStore_CheckAndStore(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	store, err := NewPebbleStore(tmpDir, 0, 1) // 1 hour TTL
+	store, err := NewPebbleStore(tmpDir, 0, 1, nil) // 1 hour TTL
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)
 	}
@@ -36,7 +36,7 @@ func TestPebbleStore_CheckAndStore(t *testing.T) {
 func TestPebbleStore_Exists(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	store, err := NewPebbleStore(tmpDir, 0, 1)
+	store, err := NewPebbleStore(tmpDir, 0, 1, nil)
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestPebbleStore_Exists(t *testing.T) {
 func TestPebbleStore_GetOffset(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	store, err := NewPebbleStore(tmpDir, 0, 1)
+	store, err := NewPebbleStore(tmpDir, 0, 1, nil)
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)
 	}
@@ -97,13 +97,13 @@ func TestPebbleStore_GetOffset(t *testing.T) {
 func TestPebbleStore_MultiplePartitions(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	store1, err := NewPebbleStore(tmpDir, 0, 1)
+	store1, err := NewPebbleStore(tmpDir, 0, 1, nil)
 	if err != nil {
 		t.Fatalf("Failed to create store 1: %v", err)
 	}
 	defer store1.Close()
 
-	store2, err := NewPebbleStore(tmpDir, 1, 1)
+	store2, err := NewPebbleStore(tmpDir, 1, 1, nil)
 	if err != nil {
 		t.Fatalf("Failed to create store 2: %v", err)
 	}
@@ -128,7 +128,7 @@ func TestPebbleStore_MultiplePartitions(t *testing.T) {
 func TestPebbleStore_GetStats(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	store, err := NewPebbleStore(tmpDir, 0, 1)
+	store, err := NewPebbleStore(tmpDir, 0, 1, nil)
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)
 	}
@@ -154,7 +154,7 @@ func TestPebbleStore_CloseAndReopen(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// Create store and add entry
-	store1, err := NewPebbleStore(tmpDir, 0, 1)
+	store1, err := NewPebbleStore(tmpDir, 0, 1, nil)
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)
 	}
@@ -167,7 +167,7 @@ func TestPebbleStore_CloseAndReopen(t *testing.T) {
 	store1.Close()
 
 	// Reopen and verify persistence
-	store2, err := NewPebbleStore(tmpDir, 0, 1)
+	store2, err := NewPebbleStore(tmpDir, 0, 1, nil)
 	if err != nil {
 		t.Fatalf("Failed to reopen store: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestPebbleStore_CloseAndReopen(t *testing.T) {
 func TestPebbleStore_ConcurrentAccess(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	store, err := NewPebbleStore(tmpDir, 0, 1)
+	store, err := NewPebbleStore(tmpDir, 0, 1, nil)
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)
 	}
@@ -217,7 +217,7 @@ func TestPebbleStore_PruneExpired(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// Create store with 0 hour TTL (immediate expiration)
-	store, err := NewPebbleStore(tmpDir, 0, 0) // 0 hour TTL means entries expire immediately
+	store, err := NewPebbleStore(tmpDir, 0, 0, nil) // 0 hour TTL means entries expire immediately
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)
 	}

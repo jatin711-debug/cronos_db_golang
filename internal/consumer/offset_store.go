@@ -19,7 +19,7 @@ type OffsetStore struct {
 }
 
 // NewOffsetStore creates a new offset store
-func NewOffsetStore(dataDir string, partitionID int32) (*OffsetStore, error) {
+func NewOffsetStore(dataDir string, partitionID int32, cache *pebble.Cache) (*OffsetStore, error) {
 	// Create data directory
 	dir := filepath.Join(dataDir, "consumer_offsets")
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -29,6 +29,9 @@ func NewOffsetStore(dataDir string, partitionID int32) (*OffsetStore, error) {
 	// Open PebbleDB
 	opts := &pebble.Options{
 		Logger: nil, // Use default logger
+	}
+	if cache != nil {
+		opts.Cache = cache
 	}
 
 	db, err := pebble.Open(dir, opts)

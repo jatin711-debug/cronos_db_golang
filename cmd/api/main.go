@@ -15,6 +15,7 @@ import (
 	"cronos_db/internal/config"
 	"cronos_db/internal/partition"
 
+	"github.com/cockroachdb/pebble"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -30,8 +31,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Create partition manager
-	pm := partition.NewPartitionManager(cfg.NodeID, cfg)
+	// Create shared PebbleDB block cache sized to ~25% of available RAM.
+	// This prevents memory fragmentation when running many partitions.
+	sharedCache := pebble.NewCache(256 << 20) // 256MB default; scales with partition count
+	defer sharedCache.Unref()
+
+	// Create partition manager with shared cache
+	pm := partition.NewPartitionManagerWithCache(cfg.NodeID, cfg, sharedCache)
 
 	// Create cluster manager (if enabled)
 	var clusterMgr *cluster.Manager
@@ -80,10 +86,15 @@ func main() {
 		slog.Info("Cluster mode enabled", "gossip_addr", cfg.ClusterGossipAddr, "raft_addr", cfg.ClusterRaftAddr)
 	}
 
-	// Create all partitions locally
-	// Each node creates all partitions so it can handle any routed events
-	// The cluster router determines which node owns each partition for consistency
-	for i := int32(0); i < int32(cfg.PartitionCount); i++ {
+	// Create partitions.
+	// In standalone mode: create all partitions locally.
+	// In cluster mode: create only partition 0 for shared dedup/consumer group state;
+	// remaining partitions are lazy-created on first write via GetPartitionForKey/Topic.
+	partitionsToCreate := cfg.PartitionCount
+	if cfg.ClusterEnabled {
+		partitionsToCreate = 1
+	}
+	for i := int32(0); i < int32(partitionsToCreate); i++ {
 		topic := fmt.Sprintf("partition-%d", i)
 		if err := pm.CreatePartition(i, topic); err != nil {
 			slog.Warn("Failed to create partition", "partition_id", i, "error", err)
@@ -214,25 +225,33 @@ func main() {
 	slog.Info("Shutting down...")
 	cancel() // Stop background tasks
 
-	// Shutdown cluster manager
+	// 1. Graceful gRPC shutdown: stop accepting new requests but finish in-flight RPCs
+	grpcShutdownCtx, grpcShutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer grpcShutdownCancel()
+	go func() {
+		<-grpcShutdownCtx.Done()
+		grpcServer.Stop() // Force stop if graceful takes too long
+	}()
+	grpcServer.GracefulStop()
+
+	// 2. Shutdown health server
+	healthShutdownCtx, healthShutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer healthShutdownCancel()
+	if err := healthServer.Shutdown(healthShutdownCtx); err != nil {
+		slog.Error("Health server shutdown error", "error", err)
+	}
+
+	// 3. Stop all partitions gracefully (drains in-flight deliveries, flushes WAL)
+	slog.Info("Stopping all partitions...")
+	if err := pm.StopAllPartitions(); err != nil {
+		slog.Error("Failed to cleanly stop all partitions", "error", err)
+	}
+
+	// 4. Shutdown cluster manager
 	if clusterMgr != nil {
 		if err := clusterMgr.Stop(); err != nil {
 			slog.Error("Failed to stop cluster manager", "error", err)
 		}
-	}
-
-	// Shutdown gRPC server
-	grpcServer.Stop()
-
-	// Shutdown health server
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer shutdownCancel()
-	healthServer.Shutdown(shutdownCtx)
-
-	// Stop all partitions gracefully
-	slog.Info("Stopping all partitions...")
-	if err := pm.StopAllPartitions(); err != nil {
-		slog.Error("Failed to cleanly stop all partitions", "error", err)
 	}
 
 	slog.Info("Shutdown complete")

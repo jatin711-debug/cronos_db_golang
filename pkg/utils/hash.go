@@ -2,6 +2,8 @@ package utils
 
 import (
 	"crypto/sha1"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"hash"
 	"hash/crc32"
@@ -142,4 +144,19 @@ func (c *ConsistentHash) GetN(key string, n int) []string {
 	}
 
 	return result
+}
+
+// HashToPartitionID computes a stable partition ID from an input string using
+// SHA-256 (same algorithm as the cluster router). This guarantees that every
+// node derives the same partition ID for a given topic or key, which is
+// essential for correct request routing in a multi-node cluster.
+func HashToPartitionID(input string, numPartitions int) int32 {
+	if numPartitions <= 0 {
+		return 0
+	}
+	hasher := sha256.New()
+	hasher.Write([]byte(input))
+	sum := hasher.Sum(nil)
+	hash := binary.BigEndian.Uint64(sum[:8])
+	return int32(hash % uint64(numPartitions))
 }

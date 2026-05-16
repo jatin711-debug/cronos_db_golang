@@ -9,6 +9,26 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+)
+
+var (
+	schedulerReadyEvents = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "cronos_scheduler_ready_events",
+			Help: "Number of events in the scheduler ready queue waiting for dispatch",
+		},
+		[]string{"partition"},
+	)
+	schedulerActiveTimers = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "cronos_scheduler_active_timers",
+			Help: "Number of active timers in the timing wheel",
+		},
+		[]string{"partition"},
+	)
 )
 
 // Scheduler manages timestamp-triggered event execution
@@ -157,11 +177,21 @@ func (s *Scheduler) worker() {
 	ticker := time.NewTicker(time.Duration(s.timingWheel.tickMs) * time.Millisecond)
 	defer ticker.Stop()
 
+	partitionLabel := fmt.Sprintf("%d", s.partitionID)
+
 	for s.active {
 		select {
 		case <-ticker.C:
 			s.timingWheel.Tick()
 			s.checkpoint()
+
+			// Emit metrics
+			s.mu.RLock()
+			readyCount := int64(len(s.readyQueue))
+			twStats := s.timingWheel.GetStats()
+			s.mu.RUnlock()
+			schedulerReadyEvents.WithLabelValues(partitionLabel).Set(float64(readyCount))
+			schedulerActiveTimers.WithLabelValues(partitionLabel).Set(float64(twStats.ActiveTimers))
 
 		case <-s.workerDone:
 			return

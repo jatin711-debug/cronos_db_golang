@@ -26,6 +26,40 @@ var (
 		},
 		[]string{"method"},
 	)
+
+	// Critical path latency histograms (production observability)
+	walAppendLatency = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "cronos_wal_append_latency_seconds",
+			Help:    "Latency of WAL append operations",
+			Buckets: []float64{0.0001, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.025, 0.05, 0.1},
+		},
+		[]string{"partition"},
+	)
+	dedupCheckLatency = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "cronos_dedup_check_latency_seconds",
+			Help:    "Latency of deduplication check operations",
+			Buckets: []float64{0.00001, 0.00005, 0.0001, 0.0005, 0.001, 0.005, 0.01},
+		},
+		[]string{"partition", "path"}, // path = "bloom_fast" or "pebble_slow"
+	)
+	dispatchLatency = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "cronos_dispatch_latency_seconds",
+			Help:    "Latency of event dispatch operations",
+			Buckets: []float64{0.0001, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.025},
+		},
+		[]string{"partition"},
+	)
+	segmentRotationLatency = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "cronos_segment_rotation_latency_seconds",
+			Help:    "Latency of WAL segment rotation",
+			Buckets: []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5},
+		},
+		[]string{"partition"},
+	)
 )
 
 // MetricsInterceptor creates a gRPC unary interceptor for prometheus metrics
@@ -220,4 +254,24 @@ func SetClusterMetrics(totalNodes, aliveNodes, totalPartitions, leaderPartitions
 	clusterNodesAlive.Set(float64(aliveNodes))
 	clusterPartitionsTotal.Set(float64(totalPartitions))
 	clusterPartitionsLeader.Set(float64(leaderPartitions))
+}
+
+// ObserveWALAppend records WAL append latency
+func ObserveWALAppend(partitionID string, d time.Duration) {
+	walAppendLatency.WithLabelValues(partitionID).Observe(d.Seconds())
+}
+
+// ObserveDedupCheck records dedup check latency
+func ObserveDedupCheck(partitionID string, path string, d time.Duration) {
+	dedupCheckLatency.WithLabelValues(partitionID, path).Observe(d.Seconds())
+}
+
+// ObserveDispatch records dispatch latency
+func ObserveDispatch(partitionID string, d time.Duration) {
+	dispatchLatency.WithLabelValues(partitionID).Observe(d.Seconds())
+}
+
+// ObserveSegmentRotation records segment rotation latency
+func ObserveSegmentRotation(partitionID string, d time.Duration) {
+	segmentRotationLatency.WithLabelValues(partitionID).Observe(d.Seconds())
 }

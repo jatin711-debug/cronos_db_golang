@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+
+	"cronos_db/pkg/utils"
 )
 
 // HashRing implements consistent hashing with virtual nodes
@@ -151,14 +153,12 @@ func (h *HashRing) GetPartitionNodes(partitionID int32) []string {
 
 // GetTopicPartition returns the partition ID for a topic
 func (h *HashRing) GetTopicPartition(topic string, numPartitions int) int32 {
-	hash := h.hash(topic)
-	return int32(hash % uint64(numPartitions))
+	return utils.HashToPartitionID(topic, numPartitions)
 }
 
 // GetKeyPartition returns the partition ID for a key
 func (h *HashRing) GetKeyPartition(key string, numPartitions int) int32 {
-	hash := h.hash(key)
-	return int32(hash % uint64(numPartitions))
+	return utils.HashToPartitionID(key, numPartitions)
 }
 
 // search finds the index of the first node with hash >= target

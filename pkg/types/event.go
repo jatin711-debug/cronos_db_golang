@@ -8,6 +8,8 @@ type Config struct {
 	DataDir              string
 	GPRCAddress          string
 	HTTPAddress          string
+	
+	
 	PartitionCount       int
 	ReplicationFactor    int
 	SegmentSizeBytes     int64

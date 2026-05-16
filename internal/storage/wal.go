@@ -7,20 +7,27 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"cronos_db/pkg/types"
 )
 
 // WAL represents Write-Ahead Log with segmented storage
 type WAL struct {
-	mu            sync.RWMutex
-	dataDir       string
-	partitionID   int32
-	segments      []*Segment
-	activeSegment *Segment
-	nextOffset    int64
-	highWatermark int64
-	config        *WALConfig
+	mu               sync.RWMutex
+	dataDir          string
+	partitionID      int32
+	segments         []*Segment
+	activeSegment    *Segment
+	nextSegment      *Segment      // Pre-created next segment for fast rotation
+	nextSegMu        sync.Mutex    // Protects nextSegment
+	preCreateTriggered atomic.Bool // Atomic flag to avoid duplicate pre-creation goroutines
+	nextOffset       int64
+	highWatermark    int64
+	config           *WALConfig
+	quit             chan struct{}
+	wg               sync.WaitGroup
 }
 
 // WALConfig represents WAL configuration
@@ -44,6 +51,7 @@ func NewWAL(dataDir string, partitionID int32, config *WALConfig) (*WAL, error) 
 		nextOffset:    0,
 		highWatermark: 0,
 		config:        config,
+		quit:          make(chan struct{}),
 	}
 
 	// Load existing segments
@@ -54,6 +62,12 @@ func NewWAL(dataDir string, partitionID int32, config *WALConfig) (*WAL, error) 
 	// Open or create active segment
 	if err := wal.openActiveSegment(); err != nil {
 		return nil, fmt.Errorf("open active segment: %w", err)
+	}
+
+	// Start periodic background flush if configured
+	if config.FlushIntervalMS > 0 {
+		wal.wg.Add(1)
+		go wal.periodicFlushLoop()
 	}
 
 	return wal, nil
@@ -122,14 +136,56 @@ func (w *WAL) AppendBatch(events []*types.Event) error {
 
 	w.highWatermark = events[len(events)-1].Offset
 
+	// Sync inline for every_event and batch modes
+	if w.config.FsyncMode == "every_event" || w.config.FsyncMode == "batch" {
+		if err := w.activeSegment.FlushBuffer(); err != nil {
+			return fmt.Errorf("flush batch: %w", err)
+		}
+		if err := w.activeSegment.Sync(); err != nil {
+			return fmt.Errorf("sync batch: %w", err)
+		}
+	}
+
 	// Rotate segment if full
 	if w.activeSegment.IsFull(w.config.SegmentSizeBytes) {
 		if err := w.rotateSegment(); err != nil {
 			return fmt.Errorf("rotate segment: %w", err)
 		}
+	} else {
+		// Trigger background pre-creation at 90% capacity
+		threshold := int64(float64(w.config.SegmentSizeBytes) * 0.9)
+		if w.activeSegment.GetSize() >= threshold && w.preCreateTriggered.CompareAndSwap(false, true) {
+			go w.maybePreCreateNextSegment()
+		}
 	}
 
 	return nil
+}
+
+// maybePreCreateNextSegment creates the next segment in the background
+// so that rotation can swap it in with minimal lock hold time.
+func (w *WAL) maybePreCreateNextSegment() {
+	w.nextSegMu.Lock()
+	if w.nextSegment != nil {
+		w.nextSegMu.Unlock()
+		return
+	}
+	w.nextSegMu.Unlock()
+
+	seg, err := NewSegment(w.dataDir, w.nextOffset, true)
+	if err != nil {
+		log.Printf("[WAL-%d] failed to pre-create next segment: %v", w.partitionID, err)
+		w.preCreateTriggered.Store(false)
+		return
+	}
+
+	w.nextSegMu.Lock()
+	if w.nextSegment == nil {
+		w.nextSegment = seg
+	} else {
+		_ = seg.Close() // Another goroutine won the race
+	}
+	w.nextSegMu.Unlock()
 }
 
 // openActiveSegment opens or creates active segment
@@ -170,30 +226,60 @@ func (w *WAL) AppendEvent(event *types.Event) error {
 	w.nextOffset++
 	w.highWatermark = event.Offset
 
+	// Sync inline for every_event mode
+	if w.config.FsyncMode == "every_event" {
+		if err := w.activeSegment.FlushBuffer(); err != nil {
+			return fmt.Errorf("flush event: %w", err)
+		}
+		if err := w.activeSegment.Sync(); err != nil {
+			return fmt.Errorf("sync event: %w", err)
+		}
+	}
+
 	// Rotate segment if full
 	if w.activeSegment.IsFull(w.config.SegmentSizeBytes) {
 		if err := w.rotateSegment(); err != nil {
 			return fmt.Errorf("rotate segment: %w", err)
+		}
+	} else {
+		// Trigger background pre-creation at 90% capacity
+		threshold := int64(float64(w.config.SegmentSizeBytes) * 0.9)
+		if w.activeSegment.GetSize() >= threshold && w.preCreateTriggered.CompareAndSwap(false, true) {
+			go w.maybePreCreateNextSegment()
 		}
 	}
 
 	return nil
 }
 
-// rotateSegment rotates to new active segment
+// rotateSegment swaps to the pre-created next segment if available,
+// otherwise falls back to synchronous creation.
 func (w *WAL) rotateSegment() error {
 	// Close current active segment
 	if err := w.activeSegment.Close(); err != nil {
 		return fmt.Errorf("close active segment: %w", err)
 	}
 
-	// Create new active segment
+	// Try to use pre-created segment
+	w.nextSegMu.Lock()
+	if w.nextSegment != nil {
+		w.segments = append(w.segments, w.nextSegment)
+		w.activeSegment = w.nextSegment
+		w.nextSegment = nil
+		w.nextSegMu.Unlock()
+		w.preCreateTriggered.Store(false)
+		return nil
+	}
+	w.nextSegMu.Unlock()
+
+	// Fallback: create synchronously
 	newSegment, err := NewSegment(w.dataDir, w.nextOffset, true)
 	if err != nil {
 		return fmt.Errorf("create new active segment: %w", err)
 	}
 	w.segments = append(w.segments, newSegment)
 	w.activeSegment = newSegment
+	w.preCreateTriggered.Store(false)
 
 	return nil
 }
@@ -256,32 +342,77 @@ func (w *WAL) ReadEventsByTime(startTS, endTS int64) ([]*types.Event, error) {
 	return result, nil
 }
 
-// Flush flushes all pending writes
-func (w *WAL) Flush() error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
+// periodicFlushLoop runs in the background to flush and optionally sync
+// the active segment at regular intervals. This eliminates syscall spikes
+// from inline syncing and provides predictable latency.
+func (w *WAL) periodicFlushLoop() {
+	defer w.wg.Done()
+	ticker := time.NewTicker(time.Duration(w.config.FlushIntervalMS) * time.Millisecond)
+	defer ticker.Stop()
 
-	if w.activeSegment == nil {
+	for {
+		select {
+		case <-ticker.C:
+			w.mu.RLock()
+			seg := w.activeSegment
+			mode := w.config.FsyncMode
+			w.mu.RUnlock()
+
+			if seg == nil {
+				continue
+			}
+
+			if err := seg.FlushBuffer(); err != nil {
+				log.Printf("[WAL-%d] background flush error: %v", w.partitionID, err)
+				continue
+			}
+
+			// For periodic and batch modes, sync in the background loop.
+			// every_event mode already syncs inline after each append.
+			if mode == "periodic" || mode == "batch" {
+				if err := seg.Sync(); err != nil {
+					log.Printf("[WAL-%d] background sync error: %v", w.partitionID, err)
+				}
+			}
+
+		case <-w.quit:
+			return
+		}
+	}
+}
+
+// Flush flushes all pending writes to disk.
+// This performs both buffer flush and fsync regardless of mode,
+// and is intended for explicit durability checkpoints (e.g. shutdown).
+func (w *WAL) Flush() error {
+	w.mu.RLock()
+	seg := w.activeSegment
+	w.mu.RUnlock()
+
+	if seg == nil {
 		return nil
 	}
 
-	if err := w.activeSegment.Flush(); err != nil {
+	if err := seg.FlushBuffer(); err != nil {
 		return err
 	}
-
-	// Conditionally sync based on FsyncMode
-	if w.config.FsyncMode == "every_event" {
-		return w.activeSegment.Sync()
-	}
-	return nil
+	return seg.Sync()
 }
 
-// Close closes WAL
+// Close stops the background flush loop, flushes and syncs the active segment,
+// and closes all underlying files.
 func (w *WAL) Close() error {
+	// Signal background loop to stop
+	close(w.quit)
+	w.wg.Wait()
+
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
 	if w.activeSegment != nil {
+		// Final flush + sync before close
+		_ = w.activeSegment.FlushBuffer()
+		_ = w.activeSegment.Sync()
 		if err := w.activeSegment.Close(); err != nil {
 			return err
 		}

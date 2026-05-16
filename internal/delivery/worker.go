@@ -33,9 +33,16 @@ func NewWorker(dispatcher *Dispatcher, batchSize int32) *Worker {
 // AddReadyEvent adds a ready event to the queue
 func (w *Worker) AddReadyEvent(event *types.Event) {
 	w.mu.Lock()
-	defer w.mu.Unlock()
-
 	w.readyQueue = append(w.readyQueue, event)
+	w.mu.Unlock()
+}
+
+// AddReadyEvents adds multiple ready events in a single lock acquisition.
+// Use this when draining the scheduler to reduce lock contention.
+func (w *Worker) AddReadyEvents(events []*types.Event) {
+	w.mu.Lock()
+	w.readyQueue = append(w.readyQueue, events...)
+	w.mu.Unlock()
 }
 
 // Start starts the worker
@@ -70,9 +77,8 @@ func (w *Worker) loop() {
 // processBatch processes a batch of ready events
 func (w *Worker) processBatch() {
 	w.mu.Lock()
-	defer w.mu.Unlock()
-
 	if len(w.readyQueue) == 0 {
+		w.mu.Unlock()
 		return
 	}
 
@@ -82,20 +88,22 @@ func (w *Worker) processBatch() {
 		batch = batch[:w.batchSize]
 		w.readyQueue = w.readyQueue[w.batchSize:]
 	} else {
-		w.readyQueue = make([]*types.Event, 0)
+		w.readyQueue = w.readyQueue[:0] // Reuse backing array
+	}
+	w.mu.Unlock()
+
+	// Dispatch as a batch for higher throughput.
+	// Lock is released so AddReadyEvent/AddReadyEvents can proceed concurrently.
+	if err := w.dispatcher.DispatchBatch(batch); err != nil {
+		log.Printf("Failed to dispatch batch: %v", err)
+		w.stats.EventsFailed += int64(len(batch))
+	} else {
+		w.stats.EventsDispatched += int64(len(batch))
 	}
 
-	// Dispatch events
-	for _, event := range batch {
-		if err := w.dispatcher.Dispatch(event); err != nil {
-			log.Printf("Failed to dispatch event %s: %v", event.GetMessageId(), err)
-			w.stats.EventsFailed++
-			continue
-		}
-		w.stats.EventsDispatched++
-	}
-
+	w.mu.Lock()
 	w.stats.LastDispatchTS = time.Now().UnixMilli()
+	w.mu.Unlock()
 }
 
 // Stop stops the worker

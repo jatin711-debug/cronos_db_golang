@@ -32,6 +32,7 @@ type Segment struct {
 	sizeBytes       int64
 	createdTS       int64
 	isActive        bool
+	closed          bool // Set to true after Close()
 	dataDir         string
 	filename        string
 	indexFilename   string
@@ -903,8 +904,37 @@ func (s *Segment) truncateToPosition(pos int64) error {
 	return nil
 }
 
-// Flush flushes pending writes
+// FlushBuffer flushes the buffered writer without syncing to disk.
+// Use this for frequent, low-cost flush operations.
+// Safe to call on a closed segment — returns nil without action.
+func (s *Segment) FlushBuffer() error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.closed {
+		return nil
+	}
+	return s.writer.Flush()
+}
+
+// Sync persists the segment file to disk (fdatasync).
+// Safe to call on a closed segment — returns nil without action.
+func (s *Segment) Sync() error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.closed {
+		return nil
+	}
+	return s.segmentFile.Sync()
+}
+
+// Flush flushes pending writes and syncs to disk.
+// This is expensive; prefer FlushBuffer for routine flushing.
 func (s *Segment) Flush() error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.closed {
+		return nil
+	}
 	if err := s.writer.Flush(); err != nil {
 		return err
 	}
@@ -913,6 +943,14 @@ func (s *Segment) Flush() error {
 
 // Close closes segment
 func (s *Segment) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closed {
+		return nil
+	}
+	s.closed = true
+
 	if err := s.writer.Flush(); err != nil {
 		return err
 	}
@@ -966,11 +1004,6 @@ func (s *Segment) Delete() error {
 	}
 
 	return nil
-}
-
-// Sync syncs segment to disk
-func (s *Segment) Sync() error {
-	return s.segmentFile.Sync()
 }
 
 // IsFull checks if segment is full

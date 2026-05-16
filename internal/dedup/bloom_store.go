@@ -3,6 +3,8 @@ package dedup
 import (
 	"sync"
 	"sync/atomic"
+
+	"github.com/cockroachdb/pebble"
 )
 
 // BloomFilter interface abstracting the backend
@@ -179,9 +181,13 @@ type BloomPebbleStore struct {
 // NewBloomPebbleStore creates a new bloom filter + PebbleDB store
 // expectedItems: expected number of unique message IDs (e.g., 10_000_000 for 10M)
 // falsePositiveRate: acceptable false positive rate (e.g., 0.01 for 1%)
-func NewBloomPebbleStore(dataDir string, partitionID int32, ttlHours int32, expectedItems uint64, falsePositiveRate float64) (*BloomPebbleStore, error) {
+func NewBloomPebbleStore(dataDir string, partitionID int32, ttlHours int32, expectedItems uint64, falsePositiveRate float64, cache interface{}) (*BloomPebbleStore, error) {
 	// Create underlying PebbleDB store
-	pebble, err := NewPebbleStore(dataDir, partitionID, ttlHours)
+	var pebbleCache *pebble.Cache
+	if cache != nil {
+		pebbleCache = cache.(*pebble.Cache)
+	}
+	pebble, err := NewPebbleStore(dataDir, partitionID, ttlHours, pebbleCache)
 	if err != nil {
 		return nil, err
 	}

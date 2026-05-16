@@ -61,6 +61,7 @@ func (s *GRPCStream) Send(delivery *delivery.DeliveryMessage) error {
 		Event:        delivery.Event,
 		Attempt:      delivery.Attempt,
 		AckTimeoutMs: delivery.AckTimeout,
+		Batch:        delivery.Batch,
 	})
 }
 
@@ -352,13 +353,22 @@ func (h *EventServiceHandler) Subscribe(stream grpc.BidiStreamingServer[types.Su
 	// Create subscription ID
 	subID := fmt.Sprintf("%s:%d:%s", req.GetConsumerGroup(), partitionID, req.GetSubscriptionId())
 
+	// Determine credit limit from request or use default
+	maxCredits := req.GetMaxBufferSize()
+	if maxCredits <= 0 {
+		maxCredits = 10000 // Default high credit limit for throughput
+	}
+	if maxCredits > 50000 {
+		maxCredits = 50000 // Hard cap to prevent memory abuse
+	}
+
 	// Create subscription object for dispatcher
 	subscription := &delivery.Subscription{
 		ID:            subID,
 		ConsumerGroup: req.GetConsumerGroup(),
 		Partition:     &types.Partition{ID: int32(partitionID)},
 		NextOffset:    startOffset + 1,
-		MaxCredits:    10000, // High credit limit for throughput
+		MaxCredits:    maxCredits,
 		CreatedTS:     time.Now().UnixMilli(),
 		Stream:        &GRPCStream{stream: stream},
 	}

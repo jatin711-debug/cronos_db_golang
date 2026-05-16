@@ -3,7 +3,6 @@ package partition
 import (
 	"encoding/json"
 	"fmt"
-	"hash/fnv"
 	"log"
 	"os"
 	"sync"
@@ -16,7 +15,9 @@ import (
 	"cronos_db/internal/scheduler"
 	"cronos_db/internal/storage"
 	"cronos_db/pkg/types"
+	"cronos_db/pkg/utils"
 
+	"github.com/cockroachdb/pebble"
 	log2 "log/slog"
 )
 
@@ -40,10 +41,11 @@ type Partition struct {
 
 // PartitionManager manages all partitions
 type PartitionManager struct {
-	mu         sync.RWMutex
-	partitions map[int32]*Partition
-	nodeID     string
-	config     *types.Config
+	mu          sync.RWMutex
+	partitions  map[int32]*Partition
+	nodeID      string
+	config      *types.Config
+	pebbleCache *pebble.Cache
 }
 
 // NewPartitionManager creates a new partition manager
@@ -53,6 +55,13 @@ func NewPartitionManager(nodeID string, config *types.Config) *PartitionManager 
 		nodeID:     nodeID,
 		config:     config,
 	}
+}
+
+// NewPartitionManagerWithCache creates a new partition manager with a shared PebbleDB cache.
+func NewPartitionManagerWithCache(nodeID string, config *types.Config, cache *pebble.Cache) *PartitionManager {
+	pm := NewPartitionManager(nodeID, config)
+	pm.pebbleCache = cache
+	return pm
 }
 
 // createPartitionLocked creates a new partition (assumes lock is held)
@@ -92,14 +101,14 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 	// Create dedup store with bloom filter for high performance
 	// Expected items per partition with 1% false positive rate
 	// Uses ~10MB memory per partition for bloom filter (at 10M items)
-	dedupStore, err := dedup.NewBloomPebbleStore(dataDir, partitionID, int32(pm.config.DedupTTLHours), pm.config.BloomCapacity, 0.01)
+	dedupStore, err := dedup.NewBloomPebbleStore(dataDir, partitionID, int32(pm.config.DedupTTLHours), pm.config.BloomCapacity, 0.01, pm.pebbleCache)
 	if err != nil {
 		return fmt.Errorf("create dedup store: %w", err)
 	}
 	dedupManager := dedup.NewManager(dedupStore)
 
 	// Create offset store for persistent consumer offsets
-	offsetStore, err := consumer.NewOffsetStore(dataDir, partitionID)
+	offsetStore, err := consumer.NewOffsetStore(dataDir, partitionID, pm.pebbleCache)
 	if err != nil {
 		return fmt.Errorf("create offset store: %w", err)
 	}
@@ -174,28 +183,30 @@ func (pm *PartitionManager) GetInternalPartition(partitionID int32) (*Partition,
 	return partition, nil
 }
 
-// GetPartitionForTopic gets partition for a topic using consistent hashing
+// GetPartitionForTopic gets partition for a topic using consistent hashing.
+// It computes the partition ID from the topic hash (same algorithm as the
+// cluster router) so that every node derives the same partition ID for a
+// given topic. If the partition does not exist locally, it is auto-created.
 func (pm *PartitionManager) GetPartitionForTopic(topic string) (*types.Partition, error) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
-	// Check if partition already exists for this topic
-	for _, partition := range pm.partitions {
-		if partition.Topic == topic {
-			return &types.Partition{
-				ID:            partition.ID,
-				Topic:         partition.Topic,
-				NextOffset:    0,
-				HighWatermark: 0,
-				Active:        true,
-				CreatedTS:     partition.CreatedTS.UnixMilli(),
-				UpdatedTS:     partition.UpdatedTS.UnixMilli(),
-			}, nil
-		}
+	partitionID := utils.HashToPartitionID(topic, pm.config.PartitionCount)
+
+	// Check if the computed partition already exists locally
+	if partition, exists := pm.partitions[partitionID]; exists {
+		return &types.Partition{
+			ID:            partition.ID,
+			Topic:         partition.Topic,
+			NextOffset:    0,
+			HighWatermark: 0,
+			Active:        true,
+			CreatedTS:     partition.CreatedTS.UnixMilli(),
+			UpdatedTS:     partition.UpdatedTS.UnixMilli(),
+		}, nil
 	}
 
-	// Auto-create partition for unknown topic
-	partitionID := int32(len(pm.partitions))
+	// Auto-create the partition with the CORRECT hash-derived ID
 	if err := pm.createPartitionLocked(partitionID, topic); err != nil {
 		return nil, fmt.Errorf("auto-create partition: %w", err)
 	}
@@ -218,8 +229,12 @@ func (pm *PartitionManager) GetPartitionForTopic(topic string) (*types.Partition
 	}, nil
 }
 
-// GetPartitionForKey gets partition for a key using hash-based distribution
-// This provides Kafka-like key-based partitioning for even distribution
+// GetPartitionForKey gets partition for a key using hash-based distribution.
+// It uses the same SHA-256 hash algorithm as the cluster router so that all
+// nodes agree on which partition owns a given key. The partition ID is
+// derived from key hash modulo PartitionCount (not len(pm.partitions)),
+// ensuring stable routing regardless of how many partitions are currently
+// created on this node.
 func (pm *PartitionManager) GetPartitionForKey(key string) (*types.Partition, error) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
@@ -228,13 +243,7 @@ func (pm *PartitionManager) GetPartitionForKey(key string) (*types.Partition, er
 		return nil, fmt.Errorf("no partitions available")
 	}
 
-	// Hash the key to determine partition
-	h := fnv.New32a()
-	h.Write([]byte(key))
-	hash := h.Sum32()
-
-	// Select partition based on hash
-	partitionID := int32(hash % uint32(len(pm.partitions)))
+	partitionID := utils.HashToPartitionID(key, pm.config.PartitionCount)
 
 	partition, exists := pm.partitions[partitionID]
 	if !exists {
@@ -279,30 +288,7 @@ func (pm *PartitionManager) startPartitionInternal(partition *Partition) error {
 		pollInterval = 10 * time.Millisecond
 	}
 
-	// Create dispatch channel for parallel processing
-	dispatchCh := make(chan *types.Event, 10000)
-
-	// Start multiple dispatch workers (parallel delivery)
-	numWorkers := 4
-	for i := 0; i < numWorkers; i++ {
-		go func() {
-			for {
-				select {
-				case event, ok := <-dispatchCh:
-					if !ok {
-						return
-					}
-					if err := partition.Dispatcher.Dispatch(event); err != nil {
-						log.Printf("Dispatch failed: %v", err)
-					}
-				case <-partition.deliveryQuit:
-					return
-				}
-			}
-		}()
-	}
-
-	// Start delivery loop (poll scheduler for ready events and dispatch them)
+	// Start delivery loop (poll scheduler for ready events and feed to worker)
 	go func() {
 		ticker := time.NewTicker(pollInterval)
 		defer ticker.Stop()
@@ -310,23 +296,13 @@ func (pm *PartitionManager) startPartitionInternal(partition *Partition) error {
 		for {
 			select {
 			case <-ticker.C:
-				// Get ready events from scheduler
+				// Get ready events from scheduler and feed to worker in batch
+				// to minimize lock contention.
 				readyEvents := partition.Scheduler.GetReadyEvents()
 				if len(readyEvents) > 0 {
-					// Send to dispatch workers
-					for _, event := range readyEvents {
-						select {
-						case dispatchCh <- event:
-						default:
-							// Channel full - dispatch directly
-							if err := partition.Dispatcher.Dispatch(event); err != nil {
-								log.Printf("Dispatch failed: %v", err)
-							}
-						}
-					}
+					partition.Worker.AddReadyEvents(readyEvents)
 				}
 			case <-partition.deliveryQuit:
-				close(dispatchCh)
 				return
 			}
 		}
@@ -556,20 +532,26 @@ func (pm *PartitionManager) StopPartition(partitionID int32) error {
 		close(partition.deliveryQuit)
 	}
 
-	// Stop scheduler (safe now since delivery goroutines will exit)
+	// Stop scheduler: no new events will be added to the ready queue
 	if partition.Scheduler != nil {
 		partition.Scheduler.Stop()
 	}
 
-	// Stop delivery worker
+	// Stop delivery worker: let it finish processing its remaining queue
 	if partition.Worker != nil {
 		partition.Worker.Stop()
 	}
 
-	// Close WAL
+	// Drain in-flight deliveries: wait for active deliveries to ack or timeout
+	if partition.Dispatcher != nil {
+		if err := partition.Dispatcher.Drain(30 * time.Second); err != nil {
+			log.Printf("[Partition %d] Drain incomplete: %v", partition.ID, err)
+		}
+		partition.Dispatcher.Close()
+	}
+
+	// Flush and close WAL
 	if partition.Wal != nil {
-		// Flush before close to ensure durability
-		partition.Wal.Flush()
 		if err := partition.Wal.Close(); err != nil {
 			return fmt.Errorf("close WAL: %w", err)
 		}
