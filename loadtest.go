@@ -82,7 +82,7 @@ func parseFlags() *LoadTestConfig {
 	flag.IntVar(&config.NumSubscribers, "subscribers", 4, "Number of concurrent subscribers")
 	flag.IntVar(&config.EventsPerPub, "events", 2000, "Events per publisher")
 	flag.IntVar(&config.PayloadSize, "payload-size", 256, "Payload size in bytes")
-	flag.DurationVar(&config.ScheduleDelay, "schedule-delay", 500*time.Millisecond, "Schedule delay from now")
+	flag.DurationVar(&config.ScheduleDelay, "schedule-delay", 0, "Schedule delay from now (0 = immediate)")
 	flag.StringVar(&config.Topic, "topic", "load-test-topic", "Topic name")
 	flag.StringVar(&config.ConsumerGroup, "consumer-group", "load-test-group", "Consumer group name")
 	flag.DurationVar(&config.Duration, "duration", 0, "Test duration (0 = until complete)")

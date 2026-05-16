@@ -51,9 +51,14 @@ func NewGRPCServer(config *Config) *GRPCServer {
 	server := grpc.NewServer(
 		grpc.MaxRecvMsgSize(config.MaxRecvMsgSize),
 		grpc.MaxSendMsgSize(config.MaxSendMsgSize),
+		grpc.MaxConcurrentStreams(10000), // Prevent OOM from too many concurrent streams
 		grpc.KeepaliveParams(keepalive.ServerParameters{
 			Time:    config.KeepaliveMinTime,
 			Timeout: config.KeepaliveTimeout,
+		}),
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+			MinTime:             5 * time.Second,
+			PermitWithoutStream: true,
 		}),
 		grpc.ChainUnaryInterceptor(
 			tracing.GRPCServerInterceptor(),

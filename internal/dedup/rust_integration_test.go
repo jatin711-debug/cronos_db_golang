@@ -48,7 +48,7 @@ func TestBloomPebbleStore_WithRust(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// NewBloomPebbleStore uses NewBloomFilter which calls NewRustBloomFilter
-	store, err := NewBloomPebbleStore(tmpDir, 100, 1, 10000, 0.01)
+	store, err := NewBloomPebbleStore(tmpDir, 100, 1, 10000, 0.01, nil)
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)
 	}

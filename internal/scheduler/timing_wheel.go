@@ -226,19 +226,10 @@ func (tw *TimingWheel) tickLocked() {
 	// Clear the slot head
 	tw.wheel[currentSlot] = nil
 
-	// Send expired timers to channel (non-blocking with large buffer)
-	// If buffer is full, we MUST NOT drop - use blocking send
+	// Send expired timers to channel. Use blocking send to provide
+	// backpressure instead of spawning unbounded goroutines.
 	if len(expiredTimers) > 0 {
-		select {
-		case tw.expired <- expiredTimers:
-			// Sent successfully
-		default:
-			// Channel full - send in goroutine to avoid blocking tick
-			// This ensures no events are lost
-			go func(timers []*Timer) {
-				tw.expired <- timers
-			}(expiredTimers)
-		}
+		tw.expired <- expiredTimers
 	}
 
 	// Advance tick

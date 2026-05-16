@@ -20,7 +20,7 @@ type PebbleStore struct {
 }
 
 // NewPebbleStore creates a new PebbleStore
-func NewPebbleStore(dataDir string, partitionID int32, ttlHours int32) (*PebbleStore, error) {
+func NewPebbleStore(dataDir string, partitionID int32, ttlHours int32, cache *pebble.Cache) (*PebbleStore, error) {
 	// Create data directory
 	dir := filepath.Join(dataDir, fmt.Sprintf("dedup_%d", partitionID))
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -36,6 +36,9 @@ func NewPebbleStore(dataDir string, partitionID int32, ttlHours int32) (*PebbleS
 		L0StopWritesThreshold:       20,                      // Allow more L0 files before stalling (increased from 12)
 		MaxConcurrentCompactions:    func() int { return 3 }, // Increase parallel compaction (increased from 2)
 		DisableWAL:                  true,                    // Disable PebbleDB WAL (we have our own)
+	}
+	if cache != nil {
+		opts.Cache = cache
 	}
 
 	db, err := pebble.Open(dir, opts)
@@ -149,18 +152,12 @@ func (p *PebbleStore) PruneExpired() (int, error) {
 	return pruned, nil
 }
 
-// GetStats returns store statistics
+// GetStats returns store statistics using PebbleDB metrics (O(1)).
+// Avoids expensive full-table scans that cause latency spikes.
 func (p *PebbleStore) GetStats() (*DedupStats, error) {
-	approxCount := int64(0)
-	iter, err := p.db.NewIter(nil)
-	if err != nil {
-		return nil, fmt.Errorf("create iterator: %w", err)
-	}
-	defer iter.Close()
-
-	for iter.First(); iter.Valid(); iter.Next() {
-		approxCount++
-	}
+	m := p.db.Metrics()
+	// Approximate count from LSM file metadata; much cheaper than iterating
+	approxCount := int64(m.Total().Size)
 
 	return &DedupStats{
 		ApproximateCount: approxCount,

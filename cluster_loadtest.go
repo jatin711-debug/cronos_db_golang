@@ -78,7 +78,7 @@ func main() {
 	publishers := flag.Int("publishers", 10, "Publishers per node")
 	events := flag.Int("events", 10000, "Events per publisher")
 	payloadSize := flag.Int("payload", 256, "Payload size in bytes")
-	scheduleDelay := flag.Duration("delay", 5*time.Second, "Schedule delay from now")
+	scheduleDelay := flag.Duration("delay", 0, "Schedule delay from now (0 = immediate, for pure throughput tests)")
 	topic := flag.String("topic", "cluster-loadtest", "Topic name")
 	roundRobin := flag.Bool("round-robin", true, "Distribute events round-robin across nodes")
 	testFailover := flag.Bool("failover", false, "Test failover scenario")

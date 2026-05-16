@@ -22,6 +22,9 @@ type Dispatcher struct {
 	// Partition-to-subscribers index for O(1) lookup instead of scanning all shards
 	partitionsMu sync.RWMutex
 	partitionSubs map[int32][]*Subscription
+	// In-flight limiter to protect memory under slow consumers
+	inFlightMu    sync.RWMutex
+	inFlightCount int64
 }
 
 // DispatcherShard represents a shard of the dispatcher
@@ -96,6 +99,7 @@ type Config struct {
 	DefaultAckTimeout  time.Duration
 	MaxDeliveryCredits int32
 	RetryBackoff       time.Duration
+	MaxInFlightEvents  int64 // Global cap on in-flight deliveries across all subscriptions
 }
 
 // DefaultConfig returns default config
@@ -105,6 +109,7 @@ func DefaultConfig() *Config {
 		DefaultAckTimeout:  30 * time.Second,
 		MaxDeliveryCredits: 1000,
 		RetryBackoff:       1 * time.Second,
+		MaxInFlightEvents:  100000, // Default 100K in-flight events cap
 	}
 }
 
@@ -234,6 +239,11 @@ func (d *Dispatcher) Unsubscribe(subscriptionID string) error {
 
 // Dispatch dispatches an event to subscribers
 func (d *Dispatcher) Dispatch(event *types.Event) error {
+	// Backpressure: reject if global in-flight limit exceeded
+	if d.config.MaxInFlightEvents > 0 && d.getInFlight() >= d.config.MaxInFlightEvents {
+		return fmt.Errorf("in-flight limit exceeded")
+	}
+
 	// Use partition index for O(1) lookup instead of scanning all shards
 	d.partitionsMu.RLock()
 	allSubs := d.partitionSubs[event.GetPartitionId()]
@@ -303,6 +313,11 @@ func (d *Dispatcher) Dispatch(event *types.Event) error {
 func (d *Dispatcher) DispatchBatch(events []*types.Event) error {
 	if len(events) == 0 {
 		return nil
+	}
+
+	// Backpressure: reject if global in-flight limit exceeded
+	if d.config.MaxInFlightEvents > 0 && d.getInFlight()+int64(len(events)) > d.config.MaxInFlightEvents {
+		return fmt.Errorf("in-flight limit exceeded")
 	}
 
 	// Optimization: Group events by topic/partition to minimize subscription lookups
@@ -417,6 +432,7 @@ func (d *Dispatcher) trackDelivery(delivery *DeliveryMessage, sub *Subscription)
 	}
 
 	shard.activeDeliveries[delivery.DeliveryID] = active
+	d.incInFlight(1)
 
 	// Wait for ack or timeout
 	go func(deliveryID string, timer *time.Timer, quit chan struct{}, s *DispatcherShard) {
@@ -428,6 +444,27 @@ func (d *Dispatcher) trackDelivery(delivery *DeliveryMessage, sub *Subscription)
 			return
 		}
 	}(delivery.DeliveryID, active.Timer, active.quit, shard)
+}
+
+func (d *Dispatcher) incInFlight(n int64) {
+	d.inFlightMu.Lock()
+	d.inFlightCount += n
+	d.inFlightMu.Unlock()
+}
+
+func (d *Dispatcher) decInFlight(n int64) {
+	d.inFlightMu.Lock()
+	d.inFlightCount -= n
+	if d.inFlightCount < 0 {
+		d.inFlightCount = 0
+	}
+	d.inFlightMu.Unlock()
+}
+
+func (d *Dispatcher) getInFlight() int64 {
+	d.inFlightMu.RLock()
+	defer d.inFlightMu.RUnlock()
+	return d.inFlightCount
 }
 
 // HandleAck handles acknowledgment from subscriber
@@ -468,6 +505,7 @@ func (d *Dispatcher) HandleAck(deliveryID string, success bool, nextOffset int64
 
 	active.Subscription.Credits++
 	delete(shard.activeDeliveries, deliveryID)
+	d.decInFlight(1)
 
 	if !success {
 		if active.Attempt < d.config.MaxRetries {
@@ -494,6 +532,7 @@ func (d *Dispatcher) handleDeliveryTimeout(deliveryID string, shard *DispatcherS
 	}
 
 	delete(shard.activeDeliveries, deliveryID)
+	d.decInFlight(1)
 
 	if active.Subscription != nil {
 		active.Subscription.Credits++
@@ -584,6 +623,21 @@ type DispatcherStats struct {
 	ActiveDeliveries    int64
 	CreditsInUse        int64
 	CreditsAvailable    int64
+}
+
+// Drain waits for all active deliveries to complete or the timeout to expire.
+// Call this before Close() during graceful shutdown to allow in-flight events
+// to be acked rather than forcefully cancelled.
+func (d *Dispatcher) Drain(timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		stats := d.GetStats()
+		if stats.ActiveDeliveries == 0 {
+			return nil
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return fmt.Errorf("drain timeout: %d deliveries still active", d.GetStats().ActiveDeliveries)
 }
 
 // Close closes the dispatcher and cleans up all resources
