@@ -492,10 +492,10 @@ Consumers reconnect to new partition nodes
 
 ### Throughput (Benchmarked)
 
-- **Single Node**: ~100K events/sec (batch mode)
-- **3-Node Cluster**: ~425K events/sec (batch mode with 500 events/batch)
-- **Latency P50**: ~244µs (batch publish)
-- **Latency P99**: ~1.1ms (batch publish)
+- **Single Node**: ~180K events/sec (batch mode)
+- **3-Node Cluster**: ~550K events/sec (batch mode with 1000 events/batch)
+- **Latency P50**: ~84µs (batch publish)
+- **Latency P99**: ~273µs (batch publish)
 - **Scheduling**: 100ms tick default, hierarchical timing wheels for overflow
 
 ### Performance Optimizations
