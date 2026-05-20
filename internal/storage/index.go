@@ -11,10 +11,10 @@ import (
 )
 
 const (
-	indexEntrySize     = 24   // timestamp(8) + offset(8) + filePosition(8)
-	indexMagic         = "CRNIDX1"
-	indexVersion       = 1
-	indexSyncInterval  = 100 // Sync every N entries for performance
+	indexEntrySize    = 24 // timestamp(8) + offset(8) + filePosition(8)
+	indexMagic        = "CRNIDX1"
+	indexVersion      = 1
+	indexSyncInterval = 100 // Sync every N entries for performance
 )
 
 // IndexEntry represents a sparse index entry
@@ -86,8 +86,8 @@ func (idx *Index) load() error {
 	idx.entries = make([]IndexEntry, 0, entryCount)
 
 	for i := int64(0); i < entryCount; i++ {
-		entryBytes := make([]byte, indexEntrySize)
-		if _, err := io.ReadFull(idx.file, entryBytes); err != nil {
+		var entryBytes [indexEntrySize]byte
+		if _, err := io.ReadFull(idx.file, entryBytes[:]); err != nil {
 			if err == io.EOF {
 				break
 			}
@@ -120,7 +120,7 @@ func (idx *Index) AddEntry(timestamp, offset, filePosition int64) error {
 	idx.entries = append(idx.entries, entry)
 
 	// Write to file
-	entryBytes := make([]byte, indexEntrySize)
+	var entryBytes [indexEntrySize]byte
 	binary.BigEndian.PutUint64(entryBytes[0:8], uint64(timestamp))
 	binary.BigEndian.PutUint64(entryBytes[8:16], uint64(offset))
 	binary.BigEndian.PutUint64(entryBytes[16:24], uint64(filePosition))
@@ -129,7 +129,7 @@ func (idx *Index) AddEntry(timestamp, offset, filePosition int64) error {
 		return fmt.Errorf("seek to end: %w", err)
 	}
 
-	if _, err := idx.file.Write(entryBytes); err != nil {
+	if _, err := idx.file.Write(entryBytes[:]); err != nil {
 		return fmt.Errorf("write entry: %w", err)
 	}
 

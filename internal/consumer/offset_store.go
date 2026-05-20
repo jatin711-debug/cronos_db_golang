@@ -6,16 +6,19 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/cockroachdb/pebble"
 )
 
 // OffsetStore stores consumer group offsets
 type OffsetStore struct {
-	mu         sync.RWMutex
-	db         *pebble.DB
-	dataDir    string
+	mu          sync.RWMutex
+	db          *pebble.DB
+	dataDir     string
 	partitionID int32
+	quit        chan struct{}
+	wg          sync.WaitGroup
 }
 
 // NewOffsetStore creates a new offset store
@@ -39,11 +42,33 @@ func NewOffsetStore(dataDir string, partitionID int32, cache *pebble.Cache) (*Of
 		return nil, fmt.Errorf("open pebble db: %w", err)
 	}
 
-	return &OffsetStore{
-		db:         db,
-		dataDir:    dataDir,
+	store := &OffsetStore{
+		db:          db,
+		dataDir:     dataDir,
 		partitionID: partitionID,
-	}, nil
+		quit:        make(chan struct{}),
+	}
+	store.startFlushLoop()
+
+	return store, nil
+}
+
+func (s *OffsetStore) startFlushLoop() {
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		ticker := time.NewTicker(200 * time.Millisecond)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				_ = s.db.Flush()
+			case <-s.quit:
+				return
+			}
+		}
+	}()
 }
 
 // CommitOffset commits an offset for a consumer group
@@ -54,7 +79,7 @@ func (s *OffsetStore) CommitOffset(groupID string, partitionID int32, offset int
 	key := s.buildKey(groupID, partitionID)
 	value := s.buildValue(offset)
 
-	return s.db.Set(key, value, pebble.Sync)
+	return s.db.Set(key, value, pebble.NoSync)
 }
 
 // GetOffset gets committed offset for a consumer group
@@ -81,7 +106,7 @@ func (s *OffsetStore) DeleteOffset(groupID string, partitionID int32) error {
 	defer s.mu.Unlock()
 
 	key := s.buildKey(groupID, partitionID)
-	return s.db.Delete(key, pebble.Sync)
+	return s.db.Delete(key, pebble.NoSync)
 }
 
 // buildKey builds storage key
@@ -123,5 +148,10 @@ func (s *OffsetStore) parseValue(value []byte) (int64, error) {
 
 // Close closes the offset store
 func (s *OffsetStore) Close() error {
+	close(s.quit)
+	s.wg.Wait()
+	if err := s.db.Flush(); err != nil {
+		return err
+	}
 	return s.db.Close()
 }

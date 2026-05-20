@@ -10,13 +10,14 @@ import (
 
 // Worker processes ready events from scheduler
 type Worker struct {
-	mu              sync.RWMutex
-	dispatcher      *Dispatcher
-	readyQueue      []*types.Event
-	batchSize       int32
-	processing      bool
-	quit            chan struct{}
-	stats           *WorkerStats
+	mu         sync.RWMutex
+	dispatcher *Dispatcher
+	readyQueue []*types.Event
+	notify     chan struct{}
+	batchSize  int32
+	processing bool
+	quit       chan struct{}
+	stats      *WorkerStats
 }
 
 // NewWorker creates a new delivery worker
@@ -24,9 +25,17 @@ func NewWorker(dispatcher *Dispatcher, batchSize int32) *Worker {
 	return &Worker{
 		dispatcher: dispatcher,
 		readyQueue: make([]*types.Event, 0),
+		notify:     make(chan struct{}, 1),
 		batchSize:  batchSize,
 		quit:       make(chan struct{}),
 		stats:      &WorkerStats{},
+	}
+}
+
+func (w *Worker) signal() {
+	select {
+	case w.notify <- struct{}{}:
+	default:
 	}
 }
 
@@ -35,6 +44,7 @@ func (w *Worker) AddReadyEvent(event *types.Event) {
 	w.mu.Lock()
 	w.readyQueue = append(w.readyQueue, event)
 	w.mu.Unlock()
+	w.signal()
 }
 
 // AddReadyEvents adds multiple ready events in a single lock acquisition.
@@ -43,6 +53,7 @@ func (w *Worker) AddReadyEvents(events []*types.Event) {
 	w.mu.Lock()
 	w.readyQueue = append(w.readyQueue, events...)
 	w.mu.Unlock()
+	w.signal()
 }
 
 // Start starts the worker
@@ -56,17 +67,16 @@ func (w *Worker) Start() {
 
 	w.processing = true
 	go w.loop()
+	w.signal()
 }
 
 // loop is the main worker loop
 func (w *Worker) loop() {
-	ticker := time.NewTicker(10 * time.Millisecond) // Process every 10ms
-	defer ticker.Stop()
-
 	for {
 		select {
-		case <-ticker.C:
-			w.processBatch()
+		case <-w.notify:
+			for w.processBatch() {
+			}
 
 		case <-w.quit:
 			return
@@ -75,11 +85,11 @@ func (w *Worker) loop() {
 }
 
 // processBatch processes a batch of ready events
-func (w *Worker) processBatch() {
+func (w *Worker) processBatch() bool {
 	w.mu.Lock()
 	if len(w.readyQueue) == 0 {
 		w.mu.Unlock()
-		return
+		return false
 	}
 
 	// Process up to batchSize events
@@ -104,6 +114,8 @@ func (w *Worker) processBatch() {
 	w.mu.Lock()
 	w.stats.LastDispatchTS = time.Now().UnixMilli()
 	w.mu.Unlock()
+
+	return true
 }
 
 // Stop stops the worker

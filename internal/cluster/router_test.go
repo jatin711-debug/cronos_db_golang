@@ -135,11 +135,20 @@ func TestPartitionInfo(t *testing.T) {
 	if info.ID != 0 {
 		t.Errorf("Expected ID 0, got %d", info.ID)
 	}
+	if info.Topic != "test-topic" {
+		t.Errorf("Expected topic test-topic, got %s", info.Topic)
+	}
 	if info.LeaderID != "node1" {
 		t.Errorf("Expected leader node1, got %s", info.LeaderID)
 	}
 	if len(info.Replicas) != 3 {
 		t.Errorf("Expected 3 replicas, got %d", len(info.Replicas))
+	}
+	if len(info.ISR) != 2 {
+		t.Errorf("Expected 2 ISR nodes, got %d", len(info.ISR))
+	}
+	if info.Epoch != 5 {
+		t.Errorf("Expected epoch 5, got %d", info.Epoch)
 	}
 	if info.State.String() != "online" {
 		t.Errorf("Expected online state, got %s", info.State.String())
@@ -158,6 +167,15 @@ func TestNode(t *testing.T) {
 
 	if node.ID != "node1" {
 		t.Errorf("Expected ID node1, got %s", node.ID)
+	}
+	if node.Address != "localhost:9000" {
+		t.Errorf("Expected address localhost:9000, got %s", node.Address)
+	}
+	if node.HTTPAddr != "localhost:8080" {
+		t.Errorf("Expected HTTP address localhost:8080, got %s", node.HTTPAddr)
+	}
+	if node.RaftAddr != "localhost:7948" {
+		t.Errorf("Expected Raft address localhost:7948, got %s", node.RaftAddr)
 	}
 	if node.State.String() != "alive" {
 		t.Errorf("Expected alive state, got %s", node.State.String())
@@ -184,6 +202,12 @@ func TestClusterState(t *testing.T) {
 
 	if state.Term != 5 {
 		t.Errorf("Expected term 5, got %d", state.Term)
+	}
+	if state.ClusterID != "test-cluster" {
+		t.Errorf("Expected cluster ID test-cluster, got %s", state.ClusterID)
+	}
+	if state.LeaderID != "node1" {
+		t.Errorf("Expected leader ID node1, got %s", state.LeaderID)
 	}
 	if len(state.Nodes) != 2 {
 		t.Errorf("Expected 2 nodes, got %d", len(state.Nodes))

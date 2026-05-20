@@ -147,7 +147,7 @@ func (m *Manager) Start() error {
 	}
 
 	// Create router
-	m.router = NewRouter(m.membership, m.config.NumPartitions, m.config.ReplicationFactor, m.partitionAccessor)
+	m.router = NewRouter(m.membership, m.config.NumPartitions, m.config.ReplicationFactor, m.config.VirtualNodes, m.partitionAccessor)
 
 	// Start background tasks
 	go m.leaderTasks()
@@ -343,18 +343,24 @@ func (m *Manager) SetPartitionAccessor(accessor PartitionAccessor) {
 // It contacts the leader to be added to the Raft cluster and initiates
 // state transfer to sync partition data
 func (m *Manager) JoinCluster(leaderAddr string) error {
-	m.mu.Lock()
+	m.mu.RLock()
 	if m.raft == nil {
-		m.mu.Unlock()
+		m.mu.RUnlock()
 		return fmt.Errorf("raft not initialized")
 	}
 	if m.partitionAccessor == nil {
-		m.mu.Unlock()
+		m.mu.RUnlock()
 		return fmt.Errorf("partition accessor not set - call SetPartitionAccessor first")
 	}
+	if m.router == nil || m.membership == nil {
+		m.mu.RUnlock()
+		return fmt.Errorf("cluster services not initialized")
+	}
 	partitionAccessor := m.partitionAccessor
-	localPartitions := m.router.GetLocalPartitions()
-	m.mu.Unlock()
+	router := m.router
+	membership := m.membership
+	localNodeID := m.config.NodeID
+	m.mu.RUnlock()
 
 	log.Printf("[CLUSTER] Requesting to join cluster via %s", leaderAddr)
 
@@ -364,16 +370,37 @@ func (m *Manager) JoinCluster(leaderAddr string) error {
 	// 2. Initiate partition reassignment
 	// 3. Start state transfer
 
-	// For now, we trigger local partition sync for any partitions this node should own
-	// This simulates what would happen after Raft adds this node
-	leader, err := m.router.GetPartitionLeader(0) // Get any leader to sync from
-	if err != nil || leader == nil {
-		log.Printf("[CLUSTER] No leader found for initial sync: %v", err)
+	// Wait briefly for membership discovery so router assignments are not based
+	// on a single-node view (which would incorrectly claim all partitions local).
+	waitDeadline := time.Now().Add(3 * time.Second)
+	for {
+		if len(membership.GetAliveNodes()) > 1 || time.Now().After(waitDeadline) {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	localPartitions := router.GetLocalPartitions()
+	if len(localPartitions) == 0 {
+		log.Printf("[CLUSTER] Join cluster complete, no local partitions assigned yet")
 		return nil
 	}
 
-	// Sync all partitions this node should own
+	synced := 0
 	for _, partitionID := range localPartitions {
+		leader, err := router.GetPartitionLeader(partitionID)
+		if err != nil {
+			log.Printf("[CLUSTER] Cannot resolve leader for partition %d: %v", partitionID, err)
+			continue
+		}
+		if leader == nil || leader.Address == "" {
+			log.Printf("[CLUSTER] No leader address for partition %d", partitionID)
+			continue
+		}
+		if leader.ID == localNodeID {
+			continue // Nothing to sync from remote
+		}
+
 		log.Printf("[CLUSTER] Syncing partition %d from leader %s", partitionID, leader.Address)
 		if err := partitionAccessor.GetOrCreatePartition(partitionID); err != nil {
 			log.Printf("[CLUSTER] Failed to create partition %d: %v", partitionID, err)
@@ -383,9 +410,10 @@ func (m *Manager) JoinCluster(leaderAddr string) error {
 			log.Printf("[CLUSTER] Failed to sync partition %d: %v", partitionID, err)
 			continue
 		}
+		synced++
 	}
 
-	log.Printf("[CLUSTER] Join cluster complete, synced %d partitions", len(localPartitions))
+	log.Printf("[CLUSTER] Join cluster complete, synced %d/%d local partitions", synced, len(localPartitions))
 	return nil
 }
 

@@ -6,28 +6,31 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"cronos_db/pkg/types"
 )
 
-// Dispatcher manages event delivery to subscribers
-// Optimized with sharding for reduced lock contention
+// Dispatcher manages event delivery to subscribers.
+// It is optimized with sharding for reduced lock contention.
 type Dispatcher struct {
-	shards       []*DispatcherShard
-	shardCount   int
-	config       *Config
-	dlq          *DeadLetterQueue
-	quit         chan struct{}
-	// Partition-to-subscribers index for O(1) lookup instead of scanning all shards
-	partitionsMu sync.RWMutex
+	shards     []*DispatcherShard
+	shardCount int
+	config     *Config
+	dlq        *DeadLetterQueue
+	quit       chan struct{}
+	wg         sync.WaitGroup
+
+	// Partition-to-subscribers index for O(1) lookup instead of scanning all shards.
+	partitionsMu  sync.RWMutex
 	partitionSubs map[int32][]*Subscription
-	// In-flight limiter to protect memory under slow consumers
-	inFlightMu    sync.RWMutex
-	inFlightCount int64
+
+	// In-flight limiter to protect memory under slow consumers.
+	inFlightCount atomic.Int64
 }
 
-// DispatcherShard represents a shard of the dispatcher
+// DispatcherShard represents a shard of the dispatcher.
 type DispatcherShard struct {
 	mu               sync.RWMutex
 	subscriptions    map[string]*Subscription
@@ -35,7 +38,7 @@ type DispatcherShard struct {
 	dlq              *DeadLetterQueue
 }
 
-// Subscription represents a subscriber
+// Subscription represents a subscriber.
 type Subscription struct {
 	ID            string
 	ConsumerGroup string
@@ -47,14 +50,14 @@ type Subscription struct {
 	CreatedTS     int64
 }
 
-// Stream represents gRPC stream
+// Stream represents gRPC stream.
 type Stream interface {
 	Send(delivery *DeliveryMessage) error
 	Recv() (*Control, error)
 	Context() context.Context
 }
 
-// DeliveryMessage represents a delivery to subscriber
+// DeliveryMessage represents a delivery to subscriber.
 type DeliveryMessage struct {
 	Event      *types.Event
 	DeliveryID string
@@ -63,13 +66,13 @@ type DeliveryMessage struct {
 	Batch      []*types.Event // For batched delivery
 }
 
-// DeliveryControl represents control message from subscriber
+// DeliveryControl represents control message from subscriber.
 type Control struct {
 	Ack    *AckMessage
 	Credit *CreditMessage
 }
 
-// AckMessage represents acknowledgment
+// AckMessage represents acknowledgment.
 type AckMessage struct {
 	DeliveryID string
 	Success    bool
@@ -77,23 +80,22 @@ type AckMessage struct {
 	NextOffset int64
 }
 
-// CreditMessage represents flow control credit
+// CreditMessage represents flow control credit.
 type CreditMessage struct {
 	Credits int32
 }
 
-// ActiveDelivery represents an active delivery
+// ActiveDelivery represents an active delivery.
 type ActiveDelivery struct {
-	Delivery     *DeliveryMessage
-	Subscription *Subscription
-	Attempt      int32
-	CreatedTS    int64
-	AckDeadline  time.Time
-	Timer        *time.Timer
-	quit         chan struct{} // Quit channel for timeout goroutine
+	Delivery        *DeliveryMessage
+	Subscription    *Subscription
+	Attempt         int32
+	CreatedTS       int64
+	AckDeadline     time.Time
+	CreditsConsumed int32
 }
 
-// Config represents dispatcher configuration
+// Config represents dispatcher configuration.
 type Config struct {
 	MaxRetries         int32
 	DefaultAckTimeout  time.Duration
@@ -102,7 +104,7 @@ type Config struct {
 	MaxInFlightEvents  int64 // Global cap on in-flight deliveries across all subscriptions
 }
 
-// DefaultConfig returns default config
+// DefaultConfig returns default config.
 func DefaultConfig() *Config {
 	return &Config{
 		MaxRetries:         5,
@@ -113,9 +115,9 @@ func DefaultConfig() *Config {
 	}
 }
 
-// NewDispatcher creates a new dispatcher with sharding
+// NewDispatcher creates a new dispatcher with sharding.
 func NewDispatcher(config *Config) *Dispatcher {
-	shardCount := 32 // Default shard count
+	shardCount := 32
 	shards := make([]*DispatcherShard, shardCount)
 	for i := 0; i < shardCount; i++ {
 		shards[i] = &DispatcherShard{
@@ -124,7 +126,7 @@ func NewDispatcher(config *Config) *Dispatcher {
 		}
 	}
 
-	return &Dispatcher{
+	d := &Dispatcher{
 		shards:        shards,
 		shardCount:    shardCount,
 		config:        config,
@@ -132,16 +134,21 @@ func NewDispatcher(config *Config) *Dispatcher {
 		quit:          make(chan struct{}),
 		partitionSubs: make(map[int32][]*Subscription),
 	}
+
+	d.wg.Add(1)
+	go d.timeoutLoop()
+
+	return d
 }
 
-// NewDispatcherWithDLQ creates a new dispatcher with a dead-letter queue
+// NewDispatcherWithDLQ creates a new dispatcher with a dead-letter queue.
 func NewDispatcherWithDLQ(config *Config, dlq *DeadLetterQueue) *Dispatcher {
 	d := NewDispatcher(config)
 	d.SetDLQ(dlq)
 	return d
 }
 
-// SetDLQ sets the dead-letter queue
+// SetDLQ sets the dead-letter queue.
 func (d *Dispatcher) SetDLQ(dlq *DeadLetterQueue) {
 	d.dlq = dlq
 	for _, shard := range d.shards {
@@ -149,9 +156,8 @@ func (d *Dispatcher) SetDLQ(dlq *DeadLetterQueue) {
 	}
 }
 
-// getShard returns the shard for a given key
+// getShard returns the shard for a given key.
 func (d *Dispatcher) getShard(key string) *DispatcherShard {
-	// Simple hash
 	var h uint32
 	for i := 0; i < len(key); i++ {
 		h = 31*h + uint32(key[i])
@@ -159,9 +165,44 @@ func (d *Dispatcher) getShard(key string) *DispatcherShard {
 	return d.shards[h%uint32(d.shardCount)]
 }
 
-// Subscribe adds a subscription
+// tryConsumeCredit decrements one credit for a subscription if available.
+func (d *Dispatcher) tryConsumeCredit(sub *Subscription) bool {
+	shard := d.getShard(sub.ID)
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+
+	if sub.Credits <= 0 {
+		return false
+	}
+
+	sub.Credits--
+	return true
+}
+
+// releaseCredits returns n credits to a subscription (capped at MaxCredits).
+func (d *Dispatcher) releaseCredits(sub *Subscription, n int32) {
+	if sub == nil || n <= 0 {
+		return
+	}
+
+	shard := d.getShard(sub.ID)
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+
+	next := sub.Credits + n
+	if next > sub.MaxCredits {
+		next = sub.MaxCredits
+	}
+	sub.Credits = next
+}
+
+// releaseCredit returns one credit to a subscription.
+func (d *Dispatcher) releaseCredit(sub *Subscription) {
+	d.releaseCredits(sub, 1)
+}
+
+// Subscribe adds a subscription.
 func (d *Dispatcher) Subscribe(sub *Subscription) error {
-	// Shard by subscription ID
 	shard := d.getShard(sub.ID)
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
@@ -169,12 +210,10 @@ func (d *Dispatcher) Subscribe(sub *Subscription) error {
 	log.Printf("[DISPATCHER] Subscribe: Registering subscription %s (partition=%d, maxCredits=%d)",
 		sub.ID, sub.Partition.ID, sub.MaxCredits)
 
-	// Check if subscription already exists
 	if _, exists := shard.subscriptions[sub.ID]; exists {
 		return fmt.Errorf("subscription %s already exists", sub.ID)
 	}
 
-	// Set initial credits
 	if sub.MaxCredits == 0 {
 		sub.MaxCredits = d.config.MaxDeliveryCredits
 	}
@@ -182,7 +221,6 @@ func (d *Dispatcher) Subscribe(sub *Subscription) error {
 
 	shard.subscriptions[sub.ID] = sub
 
-	// Also add to partition index for O(1) lookup during dispatch
 	d.partitionsMu.Lock()
 	d.partitionSubs[sub.Partition.ID] = append(d.partitionSubs[sub.Partition.ID], sub)
 	d.partitionsMu.Unlock()
@@ -191,7 +229,7 @@ func (d *Dispatcher) Subscribe(sub *Subscription) error {
 	return nil
 }
 
-// Unsubscribe removes a subscription
+// Unsubscribe removes a subscription.
 func (d *Dispatcher) Unsubscribe(subscriptionID string) error {
 	shard := d.getShard(subscriptionID)
 	shard.mu.Lock()
@@ -202,22 +240,17 @@ func (d *Dispatcher) Unsubscribe(subscriptionID string) error {
 		return fmt.Errorf("subscription %s not found", subscriptionID)
 	}
 
-	// Get partition ID before deleting
 	partitionID := sub.Partition.ID
 
-	// Cancel active deliveries
 	for deliveryID, active := range shard.activeDeliveries {
-		if active.Subscription.ID == subscriptionID {
-			if active.Timer != nil {
-				active.Timer.Stop()
-			}
+		if active.Subscription != nil && active.Subscription.ID == subscriptionID {
+			d.decInFlight(1)
 			delete(shard.activeDeliveries, deliveryID)
 		}
 	}
 
 	delete(shard.subscriptions, subscriptionID)
 
-	// Remove from partition index
 	d.partitionsMu.Lock()
 	if subs := d.partitionSubs[partitionID]; subs != nil {
 		newSubs := make([]*Subscription, 0, len(subs))
@@ -237,14 +270,27 @@ func (d *Dispatcher) Unsubscribe(subscriptionID string) error {
 	return nil
 }
 
-// Dispatch dispatches an event to subscribers
-func (d *Dispatcher) Dispatch(event *types.Event) error {
-	// Backpressure: reject if global in-flight limit exceeded
-	if d.config.MaxInFlightEvents > 0 && d.getInFlight() >= d.config.MaxInFlightEvents {
-		return fmt.Errorf("in-flight limit exceeded")
+func groupSubscriptionsByConsumer(allSubs []*Subscription) map[string][]*Subscription {
+	consumerGroupSubs := make(map[string][]*Subscription)
+	for _, sub := range allSubs {
+		consumerGroupSubs[sub.ConsumerGroup] = append(consumerGroupSubs[sub.ConsumerGroup], sub)
 	}
+	return consumerGroupSubs
+}
 
-	// Use partition index for O(1) lookup instead of scanning all shards
+func (d *Dispatcher) pickSubscriber(groupSubs []*Subscription, startIdx int) *Subscription {
+	for i := 0; i < len(groupSubs); i++ {
+		idx := (startIdx + i) % len(groupSubs)
+		candidate := groupSubs[idx]
+		if d.tryConsumeCredit(candidate) {
+			return candidate
+		}
+	}
+	return nil
+}
+
+// Dispatch dispatches an event to subscribers.
+func (d *Dispatcher) Dispatch(event *types.Event) error {
 	d.partitionsMu.RLock()
 	allSubs := d.partitionSubs[event.GetPartitionId()]
 	d.partitionsMu.RUnlock()
@@ -253,42 +299,17 @@ func (d *Dispatcher) Dispatch(event *types.Event) error {
 		return nil
 	}
 
-	// Group subscriptions by consumer group
-	consumerGroupSubs := make(map[string][]*Subscription)
-	for _, sub := range allSubs {
-		consumerGroupSubs[sub.ConsumerGroup] = append(consumerGroupSubs[sub.ConsumerGroup], sub)
-	}
+	consumerGroupSubs := groupSubscriptionsByConsumer(allSubs)
 
-	// For each consumer group, pick ONE subscriber
 	for groupID, groupSubs := range consumerGroupSubs {
-		var selectedSub *Subscription
 		startIdx := int(event.Offset % int64(len(groupSubs)))
-
-		for i := 0; i < len(groupSubs); i++ {
-			idx := (startIdx + i) % len(groupSubs)
-			// Lock shard to check credits safely
-			sSub := groupSubs[idx]
-			sShard := d.getShard(sSub.ID)
-
-			// We need to lock to check and decrement credits.
-			// To avoid deadlock, we tryLock or just lock briefly.
-			sShard.mu.Lock()
-			if sSub.Credits > 0 {
-				selectedSub = sSub
-				sSub.Credits-- // Decrement immediately
-				sShard.mu.Unlock()
-				break
-			}
-			sShard.mu.Unlock()
-		}
-
+		selectedSub := d.pickSubscriber(groupSubs, startIdx)
 		if selectedSub == nil {
 			log.Printf("[DISPATCHER] No subscriber with credits in group %s for event %s",
 				groupID, event.GetMessageId())
 			continue
 		}
 
-		// Create delivery
 		delivery := &DeliveryMessage{
 			Event:      event,
 			DeliveryID: fmt.Sprintf("%s-%d", selectedSub.ID, event.Offset),
@@ -296,41 +317,46 @@ func (d *Dispatcher) Dispatch(event *types.Event) error {
 			AckTimeout: int32(d.config.DefaultAckTimeout / time.Millisecond),
 		}
 
-		// Send to subscriber
+		if !d.tryReserveInFlight(1) {
+			d.releaseCredit(selectedSub)
+			return fmt.Errorf("in-flight limit exceeded")
+		}
+
 		if err := selectedSub.Stream.Send(delivery); err != nil {
+			d.decInFlight(1)
+			d.releaseCredit(selectedSub)
 			log.Printf("[DISPATCHER] Failed to send to subscriber %s: %v", selectedSub.ID, err)
 			continue
 		}
 
-		// Track active delivery in the subscriber's shard
 		d.trackDelivery(delivery, selectedSub)
 	}
 
 	return nil
 }
 
-// DispatchBatch dispatches a batch of events
+// DispatchBatch dispatches a batch of events.
 func (d *Dispatcher) DispatchBatch(events []*types.Event) error {
 	if len(events) == 0 {
 		return nil
 	}
 
-	// Backpressure: reject if global in-flight limit exceeded
-	if d.config.MaxInFlightEvents > 0 && d.getInFlight()+int64(len(events)) > d.config.MaxInFlightEvents {
-		return fmt.Errorf("in-flight limit exceeded")
+	// Support mixed-partition batches without additional caller assumptions.
+	byPartition := make(map[int32][]*types.Event)
+	for _, ev := range events {
+		byPartition[ev.GetPartitionId()] = append(byPartition[ev.GetPartitionId()], ev)
 	}
 
-	// Optimization: Group events by topic/partition to minimize subscription lookups
-	// For simplicity, we process grouping by consumer group
+	for partitionID, partitionEvents := range byPartition {
+		if err := d.dispatchPartitionBatch(partitionID, partitionEvents); err != nil {
+			return err
+		}
+	}
 
-	// Map[ConsumerGroup] -> Map[Subscriber] -> Batch
-	batches := make(map[string]map[string][]*types.Event)
+	return nil
+}
 
-	// We need to look up subscriptions for each event or the whole batch if they belong to same partition
-	// Assumption: Batch belongs to same partition usually.
-	partitionID := events[0].GetPartitionId()
-
-	// Use partition index for O(1) lookup instead of scanning all shards
+func (d *Dispatcher) dispatchPartitionBatch(partitionID int32, events []*types.Event) error {
 	d.partitionsMu.RLock()
 	allSubs := d.partitionSubs[partitionID]
 	d.partitionsMu.RUnlock()
@@ -339,217 +365,224 @@ func (d *Dispatcher) DispatchBatch(events []*types.Event) error {
 		return nil
 	}
 
-	// Group subs by consumer group
-	consumerGroupSubs := make(map[string][]*Subscription)
-	for _, sub := range allSubs {
-		consumerGroupSubs[sub.ConsumerGroup] = append(consumerGroupSubs[sub.ConsumerGroup], sub)
-	}
+	consumerGroupSubs := groupSubscriptionsByConsumer(allSubs)
 
-	// Assign events to subscribers
+	// Maintain rolling cursor per group to avoid recomputing random starts.
+	groupCursor := make(map[string]int)
+	batchesBySub := make(map[*Subscription][]*types.Event)
+
 	for _, event := range events {
-		for _, groupSubs := range consumerGroupSubs {
-			// Round robin
-			startIdx := int(event.Offset % int64(len(groupSubs)))
-			var selectedSub *Subscription
-
-			for i := 0; i < len(groupSubs); i++ {
-				idx := (startIdx + i) % len(groupSubs)
-				sSub := groupSubs[idx]
-				sShard := d.getShard(sSub.ID)
-
-				sShard.mu.Lock()
-				if sSub.Credits > 0 {
-					selectedSub = sSub
-					sSub.Credits--
-					sShard.mu.Unlock()
-					break
-				}
-				sShard.mu.Unlock()
+		for groupID, groupSubs := range consumerGroupSubs {
+			if len(groupSubs) == 0 {
+				continue
 			}
 
-			if selectedSub != nil {
-				if batches[selectedSub.ConsumerGroup] == nil {
-					batches[selectedSub.ConsumerGroup] = make(map[string][]*types.Event)
-				}
-				batches[selectedSub.ConsumerGroup][selectedSub.ID] = append(batches[selectedSub.ConsumerGroup][selectedSub.ID], event)
+			start := groupCursor[groupID]
+			if start < 0 || start >= len(groupSubs) {
+				start = int(event.Offset % int64(len(groupSubs)))
 			}
+
+			selectedSub := d.pickSubscriber(groupSubs, start)
+			if selectedSub == nil {
+				continue
+			}
+
+			groupCursor[groupID] = (start + 1) % len(groupSubs)
+			batchesBySub[selectedSub] = append(batchesBySub[selectedSub], event)
 		}
 	}
 
-	// Send batches
-	for _, subBatches := range batches {
-		for subID, batchEvents := range subBatches {
-			// We need the subscriber object. We can find it again or store it.
-			// Finding it is safer.
-			shard := d.getShard(subID)
-			shard.mu.RLock()
-			sub, exists := shard.subscriptions[subID]
-			shard.mu.RUnlock()
-
-			if !exists {
-				continue
-			}
-
-			// Create batch delivery
-			// We use the new 'Batch' field in proto, or just send individual messages if proto not updated?
-			// We updated proto.
-
-			delivery := &DeliveryMessage{
-				Event: nil, // Batch mode
-				// Use ID of first event for tracking?
-				DeliveryID: fmt.Sprintf("%s-batch-%d-%d", sub.ID, batchEvents[0].Offset, len(batchEvents)),
-				Attempt:    1,
-				AckTimeout: int32(d.config.DefaultAckTimeout / time.Millisecond),
-				Batch:      batchEvents,
-			}
-
-			if err := sub.Stream.Send(delivery); err != nil {
-				log.Printf("[DISPATCHER] Failed to send batch to %s: %v", sub.ID, err)
-				continue
-			}
-
-			d.trackDelivery(delivery, sub)
+	for sub, batchEvents := range batchesBySub {
+		if len(batchEvents) == 0 {
+			continue
 		}
+
+		delivery := &DeliveryMessage{
+			Event:      nil,
+			DeliveryID: fmt.Sprintf("%s-batch-%d-%d", sub.ID, batchEvents[0].Offset, len(batchEvents)),
+			Attempt:    1,
+			AckTimeout: int32(d.config.DefaultAckTimeout / time.Millisecond),
+			Batch:      batchEvents,
+		}
+
+		if !d.tryReserveInFlight(1) {
+			// Credits were consumed per event while assigning.
+			d.releaseCredits(sub, int32(len(batchEvents)))
+			return fmt.Errorf("in-flight limit exceeded")
+		}
+
+		if err := sub.Stream.Send(delivery); err != nil {
+			d.decInFlight(1)
+			d.releaseCredits(sub, int32(len(batchEvents)))
+			log.Printf("[DISPATCHER] Failed to send batch to %s: %v", sub.ID, err)
+			continue
+		}
+
+		d.trackDelivery(delivery, sub)
 	}
 
 	return nil
 }
 
-// trackDelivery tracks an active delivery
+// trackDelivery tracks an active delivery.
 func (d *Dispatcher) trackDelivery(delivery *DeliveryMessage, sub *Subscription) {
-	shard := d.getShard(sub.ID)
-	shard.mu.Lock()
-	defer shard.mu.Unlock()
-
-	active := &ActiveDelivery{
-		Delivery:     delivery,
-		Subscription: sub,
-		Attempt:      delivery.Attempt,
-		CreatedTS:    time.Now().UnixMilli(),
-		AckDeadline:  time.Now().Add(d.config.DefaultAckTimeout),
-		Timer:        time.NewTimer(d.config.DefaultAckTimeout),
-		quit:         make(chan struct{}),
+	creditsConsumed := int32(1)
+	if len(delivery.Batch) > 0 {
+		creditsConsumed = int32(len(delivery.Batch))
 	}
 
-	shard.activeDeliveries[delivery.DeliveryID] = active
-	d.incInFlight(1)
-
-	// Wait for ack or timeout
-	go func(deliveryID string, timer *time.Timer, quit chan struct{}, s *DispatcherShard) {
-		select {
-		case <-timer.C:
-			d.handleDeliveryTimeout(deliveryID, s)
-		case <-quit:
-			timer.Stop()
-			return
-		}
-	}(delivery.DeliveryID, active.Timer, active.quit, shard)
+	shard := d.getShard(sub.ID)
+	shard.mu.Lock()
+	shard.activeDeliveries[delivery.DeliveryID] = &ActiveDelivery{
+		Delivery:        delivery,
+		Subscription:    sub,
+		Attempt:         delivery.Attempt,
+		CreatedTS:       time.Now().UnixMilli(),
+		AckDeadline:     time.Now().Add(d.config.DefaultAckTimeout),
+		CreditsConsumed: creditsConsumed,
+	}
+	shard.mu.Unlock()
 }
 
-func (d *Dispatcher) incInFlight(n int64) {
-	d.inFlightMu.Lock()
-	d.inFlightCount += n
-	d.inFlightMu.Unlock()
+func (d *Dispatcher) timeoutLoop() {
+	defer d.wg.Done()
+
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			d.scanExpiredDeliveries(time.Now())
+		case <-d.quit:
+			return
+		}
+	}
+}
+
+func (d *Dispatcher) scanExpiredDeliveries(now time.Time) {
+	expired := make([]*ActiveDelivery, 0)
+
+	for _, shard := range d.shards {
+		shard.mu.Lock()
+		for deliveryID, active := range shard.activeDeliveries {
+			if now.After(active.AckDeadline) {
+				delete(shard.activeDeliveries, deliveryID)
+				d.decInFlight(1)
+				expired = append(expired, active)
+			}
+		}
+		shard.mu.Unlock()
+	}
+
+	for _, active := range expired {
+		d.processDeliveryFailure(active, "delivery timeout")
+	}
+}
+
+func (d *Dispatcher) processDeliveryFailure(active *ActiveDelivery, reason string) {
+	if active == nil || active.Subscription == nil {
+		return
+	}
+
+	if active.Attempt < d.config.MaxRetries {
+		if err := d.retryDelivery(active); err == nil {
+			return
+		} else {
+			d.releaseCredits(active.Subscription, active.CreditsConsumed)
+			d.sendToDLQ(active, fmt.Sprintf("%s; retry failed: %v", reason, err))
+			return
+		}
+	}
+
+	d.releaseCredits(active.Subscription, active.CreditsConsumed)
+	d.sendToDLQ(active, fmt.Sprintf("%s after max retries", reason))
+}
+
+// tryReserveInFlight atomically reserves capacity in the global in-flight budget.
+func (d *Dispatcher) tryReserveInFlight(n int64) bool {
+	for {
+		current := d.inFlightCount.Load()
+		if d.config.MaxInFlightEvents > 0 && current+n > d.config.MaxInFlightEvents {
+			return false
+		}
+		if d.inFlightCount.CompareAndSwap(current, current+n) {
+			return true
+		}
+	}
 }
 
 func (d *Dispatcher) decInFlight(n int64) {
-	d.inFlightMu.Lock()
-	d.inFlightCount -= n
-	if d.inFlightCount < 0 {
-		d.inFlightCount = 0
+	for {
+		current := d.inFlightCount.Load()
+		next := current - n
+		if next < 0 {
+			next = 0
+		}
+		if d.inFlightCount.CompareAndSwap(current, next) {
+			return
+		}
 	}
-	d.inFlightMu.Unlock()
 }
 
 func (d *Dispatcher) getInFlight() int64 {
-	d.inFlightMu.RLock()
-	defer d.inFlightMu.RUnlock()
-	return d.inFlightCount
+	return d.inFlightCount.Load()
 }
 
-// HandleAck handles acknowledgment from subscriber
-func (d *Dispatcher) HandleAck(deliveryID string, success bool, nextOffset int64) error {
-	// We don't know the shard from deliveryID easily unless we parse it or store a map.
-	// deliveryID format: "subID-offset" or "subID-batch-offset-count"
-	// We extract subID by finding the first '-'
-	var subID string
-	// Find the first index of "-" to split subID from rest
-	if idx := strings.IndexByte(deliveryID, '-'); idx != -1 {
-		subID = deliveryID[:idx]
-	} else {
-		return fmt.Errorf("invalid delivery ID format")
+func parseSubIDFromDeliveryID(deliveryID string) (string, error) {
+	idx := strings.IndexByte(deliveryID, '-')
+	if idx == -1 {
+		return "", fmt.Errorf("invalid delivery ID format")
 	}
-
+	subID := deliveryID[:idx]
 	if subID == "" {
-		return fmt.Errorf("invalid delivery ID format")
+		return "", fmt.Errorf("invalid delivery ID format")
+	}
+	return subID, nil
+}
+
+// HandleAck handles acknowledgment from subscriber.
+func (d *Dispatcher) HandleAck(deliveryID string, success bool, nextOffset int64) error {
+	subID, err := parseSubIDFromDeliveryID(deliveryID)
+	if err != nil {
+		return err
 	}
 
 	shard := d.getShard(subID)
 	shard.mu.Lock()
-	defer shard.mu.Unlock()
-
 	active, exists := shard.activeDeliveries[deliveryID]
 	if !exists {
+		shard.mu.Unlock()
 		return nil
 	}
+	delete(shard.activeDeliveries, deliveryID)
+	shard.mu.Unlock()
 
-	// Stop timer
-	if active.Timer != nil {
-		active.Timer.Stop()
-	}
-	close(active.quit)
+	d.decInFlight(1)
 
 	if success {
 		active.Subscription.NextOffset = nextOffset
-	}
-
-	active.Subscription.Credits++
-	delete(shard.activeDeliveries, deliveryID)
-	d.decInFlight(1)
-
-	if !success {
-		if active.Attempt < d.config.MaxRetries {
-			// Unlock shard before retry to avoid holding lock during sleep/send
-			shard.mu.Unlock()
-			err := d.retryDelivery(active)
-			shard.mu.Lock() // Re-lock
-			return err
-		}
-		d.sendToDLQ(active, "max retries exceeded", shard)
-	}
-
-	return nil
-}
-
-// handleDeliveryTimeout handles delivery timeout
-func (d *Dispatcher) handleDeliveryTimeout(deliveryID string, shard *DispatcherShard) {
-	shard.mu.Lock()
-	defer shard.mu.Unlock()
-
-	active, exists := shard.activeDeliveries[deliveryID]
-	if !exists {
-		return
-	}
-
-	delete(shard.activeDeliveries, deliveryID)
-	d.decInFlight(1)
-
-	if active.Subscription != nil {
-		active.Subscription.Credits++
+		d.releaseCredits(active.Subscription, active.CreditsConsumed)
+		return nil
 	}
 
 	if active.Attempt < d.config.MaxRetries {
-		shard.mu.Unlock()
-		d.retryDelivery(active)
-		shard.mu.Lock()
-	} else {
-		d.sendToDLQ(active, "delivery timeout after max retries", shard)
+		if retryErr := d.retryDelivery(active); retryErr != nil {
+			d.releaseCredits(active.Subscription, active.CreditsConsumed)
+			d.sendToDLQ(active, fmt.Sprintf("ack failure; retry failed: %v", retryErr))
+			return retryErr
+		}
+		return nil
 	}
+
+	d.releaseCredits(active.Subscription, active.CreditsConsumed)
+	d.sendToDLQ(active, "ack failure after max retries")
+	return nil
 }
 
-// sendToDLQ sends a failed delivery to the dead-letter queue
-func (d *Dispatcher) sendToDLQ(active *ActiveDelivery, reason string, shard *DispatcherShard) {
-	if shard.dlq == nil {
+// sendToDLQ sends a failed delivery to the dead-letter queue.
+func (d *Dispatcher) sendToDLQ(active *ActiveDelivery, reason string) {
+	if d.dlq == nil {
 		log.Printf("[DISPATCHER] DLQ not configured, dropping failed delivery %s: %s",
 			active.Delivery.DeliveryID, reason)
 		return
@@ -560,7 +593,7 @@ func (d *Dispatcher) sendToDLQ(active *ActiveDelivery, reason string, shard *Dis
 		subscriberID = active.Subscription.ID
 	}
 
-	if err := shard.dlq.Add(
+	if err := d.dlq.Add(
 		active.Delivery.Event,
 		active.Delivery.DeliveryID,
 		active.Attempt,
@@ -574,33 +607,43 @@ func (d *Dispatcher) sendToDLQ(active *ActiveDelivery, reason string, shard *Dis
 	}
 }
 
-// retryDelivery retries a failed delivery
+// retryDelivery retries a failed delivery.
 func (d *Dispatcher) retryDelivery(active *ActiveDelivery) error {
 	retryDelivery := &DeliveryMessage{
 		Event:      active.Delivery.Event,
 		DeliveryID: active.Delivery.DeliveryID,
 		Attempt:    active.Attempt + 1,
 		AckTimeout: active.Delivery.AckTimeout,
+		Batch:      active.Delivery.Batch,
+	}
+
+	if !d.tryReserveInFlight(1) {
+		return fmt.Errorf("in-flight limit exceeded on retry")
 	}
 
 	backoff := time.Duration(active.Attempt) * d.config.RetryBackoff
-	time.Sleep(backoff)
+	if backoff > 0 {
+		timer := time.NewTimer(backoff)
+		select {
+		case <-timer.C:
+			timer.Stop()
+		case <-d.quit:
+			timer.Stop()
+			d.decInFlight(1)
+			return fmt.Errorf("dispatcher closing")
+		}
+	}
 
 	if err := active.Subscription.Stream.Send(retryDelivery); err != nil {
+		d.decInFlight(1)
 		return fmt.Errorf("resend failed: %w", err)
 	}
 
-	// We need to re-track this delivery.
-	// NOTE: This requires locking the shard again.
-	// Since retryDelivery is called when lock is NOT held (in HandleAck/Timeout logic above),
-	// we call trackDelivery which takes the lock.
-
 	d.trackDelivery(retryDelivery, active.Subscription)
-
 	return nil
 }
 
-// GetStats returns dispatcher statistics
+// GetStats returns dispatcher statistics.
 func (d *Dispatcher) GetStats() *DispatcherStats {
 	stats := &DispatcherStats{}
 	for _, shard := range d.shards {
@@ -617,7 +660,7 @@ func (d *Dispatcher) GetStats() *DispatcherStats {
 	return stats
 }
 
-// DispatcherStats represents dispatcher statistics
+// DispatcherStats represents dispatcher statistics.
 type DispatcherStats struct {
 	ActiveSubscriptions int64
 	ActiveDeliveries    int64
@@ -626,8 +669,6 @@ type DispatcherStats struct {
 }
 
 // Drain waits for all active deliveries to complete or the timeout to expire.
-// Call this before Close() during graceful shutdown to allow in-flight events
-// to be acked rather than forcefully cancelled.
 func (d *Dispatcher) Drain(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -640,22 +681,15 @@ func (d *Dispatcher) Drain(timeout time.Duration) error {
 	return fmt.Errorf("drain timeout: %d deliveries still active", d.GetStats().ActiveDeliveries)
 }
 
-// Close closes the dispatcher and cleans up all resources
+// Close closes the dispatcher and cleans up all resources.
 func (d *Dispatcher) Close() {
 	close(d.quit)
+	d.wg.Wait()
+
 	for _, shard := range d.shards {
 		shard.mu.Lock()
-		for deliveryID, active := range shard.activeDeliveries {
-			if active.Timer != nil {
-				active.Timer.Stop()
-			}
-			if active.quit != nil {
-				select {
-				case <-active.quit:
-				default:
-					close(active.quit)
-				}
-			}
+		for deliveryID := range shard.activeDeliveries {
+			d.decInFlight(1)
 			delete(shard.activeDeliveries, deliveryID)
 		}
 		shard.subscriptions = make(map[string]*Subscription)

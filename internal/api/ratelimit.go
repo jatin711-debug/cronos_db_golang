@@ -13,20 +13,19 @@ import (
 )
 
 type rateLimiter struct {
-	mu       sync.Mutex
-	clients  map[string]*tokenBucket
+	clients  sync.Map // ip -> *tokenBucket
 	rate     float64
 	capacity float64
 }
 
 type tokenBucket struct {
+	mu           sync.Mutex
 	tokens       float64
 	lastRefillTS time.Time
 }
 
 func newRateLimiter(rate float64, capacity float64) *rateLimiter {
 	rl := &rateLimiter{
-		clients:  make(map[string]*tokenBucket),
 		rate:     rate,
 		capacity: capacity,
 	}
@@ -43,30 +42,30 @@ func newRateLimiter(rate float64, capacity float64) *rateLimiter {
 }
 
 func (rl *rateLimiter) cleanup() {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
 	cutoff := time.Now().Add(-10 * time.Minute)
-	for ip, tb := range rl.clients {
-		if tb.lastRefillTS.Before(cutoff) {
-			delete(rl.clients, ip)
+	rl.clients.Range(func(key, value interface{}) bool {
+		ip := key.(string)
+		tb := value.(*tokenBucket)
+		tb.mu.Lock()
+		lastRefill := tb.lastRefillTS
+		tb.mu.Unlock()
+		if lastRefill.Before(cutoff) {
+			rl.clients.Delete(ip)
 		}
-	}
+		return true
+	})
 }
 
 func (rl *rateLimiter) allow(ip string) bool {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-
-	tb, exists := rl.clients[ip]
 	now := time.Now()
+	v, _ := rl.clients.LoadOrStore(ip, &tokenBucket{
+		tokens:       rl.capacity,
+		lastRefillTS: now,
+	})
+	tb := v.(*tokenBucket)
 
-	if !exists {
-		tb = &tokenBucket{
-			tokens:       rl.capacity,
-			lastRefillTS: now,
-		}
-		rl.clients[ip] = tb
-	}
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
 
 	elapsed := now.Sub(tb.lastRefillTS).Seconds()
 	tb.tokens += elapsed * rl.rate
@@ -90,7 +89,7 @@ func RateLimitInterceptor(requestsPerSecond float64, burstCapacity float64) grpc
 		if !ok {
 			return handler(ctx, req)
 		}
-		
+
 		host, _, err := net.SplitHostPort(p.Addr.String())
 		if err != nil {
 			host = p.Addr.String()

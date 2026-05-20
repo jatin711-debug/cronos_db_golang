@@ -256,10 +256,11 @@ func (m *Membership) handleNodeJoinedBroadcast(msg *GossipMessage) {
 		return // Ignore broadcast about ourselves
 	}
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
+	_, exists := m.nodes[msg.NodeID]
+	m.mu.RUnlock()
 
-	if _, exists := m.nodes[msg.NodeID]; exists {
+	if exists {
 		return // Already know about this node
 	}
 
@@ -274,8 +275,10 @@ func (m *Membership) handleNodeJoinedBroadcast(msg *GossipMessage) {
 		UpdatedAt:  time.Now(),
 	}
 
-	m.nodes[msg.NodeID] = node
-	m.state.Nodes[msg.NodeID] = node
+	if err := m.Join(node); err != nil {
+		log.Printf("[MEMBERSHIP] Failed to process node_joined broadcast for %s: %v", msg.NodeID, err)
+		return
+	}
 	log.Printf("[MEMBERSHIP] Learned about node %s at gossip=%s via broadcast", msg.NodeID, msg.GossipAddr)
 }
 
@@ -636,7 +639,8 @@ func (m *Membership) joinSeedNodes(ctx context.Context) {
 
 // joinViaNode attempts to join the cluster via a specific node
 func (m *Membership) joinViaNode(ctx context.Context, addr string) error {
-	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return fmt.Errorf("connect to %s: %w", addr, err)
 	}
@@ -686,10 +690,10 @@ func (m *Membership) joinViaNode(ctx context.Context, addr string) error {
 						JoinedAt:   time.Now(),
 						UpdatedAt:  time.Now(),
 					}
-					m.mu.Lock()
-					m.nodes[nodeID] = node
-					m.state.Nodes[nodeID] = node
-					m.mu.Unlock()
+					if err := m.Join(node); err != nil {
+						log.Printf("[MEMBERSHIP] Failed to register discovered node %s: %v", nodeID, err)
+						continue
+					}
 					log.Printf("[MEMBERSHIP] Discovered node %s at gossip=%s", nodeID, node.GossipAddr)
 				}
 			}

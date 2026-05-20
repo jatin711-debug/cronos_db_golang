@@ -307,7 +307,7 @@ func (s *Segment) buildEventRecord(event *types.Event) ([]byte, error) {
 	for k, v := range event.Meta {
 		metaEntrySize := 2 + len(k) + 2 + len(v)
 		// Check for integer overflow
-		if size > (1<<63 - 1) - metaEntrySize {
+		if size > (1<<63-1)-metaEntrySize {
 			return nil, fmt.Errorf("event record too large: overflow in size calculation")
 		}
 		size += metaEntrySize
@@ -601,10 +601,12 @@ func (s *Segment) readEventFile(targetOffset int64, startPos int64) (*types.Even
 		return nil, fmt.Errorf("seek: %w", err)
 	}
 
+	lengthBytes := make([]byte, 4)
+	recordBuf := make([]byte, 0, 4096)
+
 	// Scan from index position to find target event
 	for {
 		// Read record length
-		lengthBytes := make([]byte, 4)
 		if _, err := io.ReadFull(file, lengthBytes); err != nil {
 			if err == io.EOF {
 				break
@@ -618,7 +620,11 @@ func (s *Segment) readEventFile(targetOffset int64, startPos int64) (*types.Even
 		}
 
 		// Read full record (length includes the 4-byte length field)
-		record := make([]byte, length-4)
+		recordLen := int(length - 4)
+		if cap(recordBuf) < recordLen {
+			recordBuf = make([]byte, recordLen)
+		}
+		record := recordBuf[:recordLen]
 		if _, err := io.ReadFull(file, record); err != nil {
 			if err == io.EOF {
 				break
@@ -678,9 +684,11 @@ func (s *Segment) ReadEventsByTime(startTS, endTS int64) ([]*types.Event, error)
 		return nil, fmt.Errorf("seek: %w", err)
 	}
 
+	lengthBytes := make([]byte, 4)
+	recordBuf := make([]byte, 0, 4096)
+
 	for {
 		// Read record length
-		lengthBytes := make([]byte, 4)
 		if _, err := io.ReadFull(file, lengthBytes); err != nil {
 			if err == io.EOF {
 				break
@@ -694,7 +702,11 @@ func (s *Segment) ReadEventsByTime(startTS, endTS int64) ([]*types.Event, error)
 		}
 
 		// Read full record
-		record := make([]byte, length-4)
+		recordLen := int(length - 4)
+		if cap(recordBuf) < recordLen {
+			recordBuf = make([]byte, recordLen)
+		}
+		record := recordBuf[:recordLen]
 		if _, err := io.ReadFull(file, record); err != nil {
 			if err == io.EOF {
 				break
@@ -714,7 +726,7 @@ func (s *Segment) ReadEventsByTime(startTS, endTS int64) ([]*types.Event, error)
 
 		// Stop early if we passed the endTS (assuming timestamps are roughly ordered)
 		// Wait, timestamps are just event creation/schedule. But WAL strictly ordered by offset.
-		// Schedule timestamp might not be perfectly ordered, so it's safer to read to the end of the segment 
+		// Schedule timestamp might not be perfectly ordered, so it's safer to read to the end of the segment
 		// but typically events are added mostly in order with drift.
 		// For now, let's stop if event.Offset == s.lastOffset
 		if event.Offset == s.lastOffset {
@@ -751,9 +763,11 @@ func (s *Segment) ReadEventsByOffsetRange(startOffset, endOffset int64) ([]*type
 		return nil, fmt.Errorf("seek: %w", err)
 	}
 
+	lengthBytes := make([]byte, 4)
+	recordBuf := make([]byte, 0, 4096)
+
 	for {
 		// Read record length
-		lengthBytes := make([]byte, 4)
 		if _, err := io.ReadFull(file, lengthBytes); err != nil {
 			if err == io.EOF {
 				break
@@ -767,7 +781,11 @@ func (s *Segment) ReadEventsByOffsetRange(startOffset, endOffset int64) ([]*type
 		}
 
 		// Read full record
-		record := make([]byte, length-4)
+		recordLen := int(length - 4)
+		if cap(recordBuf) < recordLen {
+			recordBuf = make([]byte, recordLen)
+		}
+		record := recordBuf[:recordLen]
 		if _, err := io.ReadFull(file, record); err != nil {
 			if err == io.EOF {
 				break
@@ -808,14 +826,15 @@ func (s *Segment) scan() error {
 
 	var lastGoodPos int64 = 64 // Track position of last valid record end
 	var recordStartPos int64 = 64
+	lengthBytes := make([]byte, 4)
+	recordBuf := make([]byte, 0, 4096)
 
 	// Read through all records
 	for {
 		recordStartPos = lastGoodPos
 
 		// Read record length
-		lengthBytes := make([]byte, 4)
-		if _, err := file.Read(lengthBytes); err != nil {
+		if _, err := io.ReadFull(file, lengthBytes); err != nil {
 			if err == io.EOF {
 				// Clean end of file
 				break
@@ -835,7 +854,11 @@ func (s *Segment) scan() error {
 		}
 
 		// Read remainder of record (length includes the 4-byte length field itself)
-		recordData := make([]byte, length-4)
+		recordLen := int(length - 4)
+		if cap(recordBuf) < recordLen {
+			recordBuf = make([]byte, recordLen)
+		}
+		recordData := recordBuf[:recordLen]
 		if _, err := io.ReadFull(file, recordData); err != nil {
 			if err == io.EOF || err == io.ErrUnexpectedEOF {
 				// Truncated or incomplete file - corrupt tail detected
@@ -981,7 +1004,7 @@ func (s *Segment) Delete() error {
 	if s.segmentFile != nil {
 		_ = s.segmentFile.Close()
 	}
-	
+
 	if s.mmapData != nil {
 		munmapFile(s.mmapData)
 		s.mmapData = nil

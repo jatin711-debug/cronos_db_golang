@@ -36,6 +36,7 @@ type Scheduler struct {
 	mu               sync.RWMutex
 	timingWheel      *TimingWheel
 	readyQueue       []*types.Event
+	readySignal      chan struct{}
 	partitionID      int32
 	dataDir          string
 	active           bool
@@ -57,6 +58,7 @@ func NewScheduler(dataDir string, partitionID int32, tickMs int32, wheelSize int
 	scheduler := &Scheduler{
 		timingWheel:      NewTimingWheel(tickMs, wheelSize, 10, 0, startTime), // Pass startTime to root wheel
 		readyQueue:       make([]*types.Event, 0),
+		readySignal:      make(chan struct{}, 1),
 		partitionID:      partitionID,
 		dataDir:          dataDir,
 		active:           false,
@@ -77,6 +79,19 @@ func NewScheduler(dataDir string, partitionID int32, tickMs int32, wheelSize int
 	return scheduler, nil
 }
 
+func (s *Scheduler) notifyReady() {
+	select {
+	case s.readySignal <- struct{}{}:
+	default:
+	}
+}
+
+// ReadySignal returns a notification channel that is signaled when new ready
+// events are available.
+func (s *Scheduler) ReadySignal() <-chan struct{} {
+	return s.readySignal
+}
+
 // Schedule schedules an event
 func (s *Scheduler) Schedule(event *types.Event) error {
 	s.mu.Lock()
@@ -90,6 +105,7 @@ func (s *Scheduler) scheduleUnlocked(event *types.Event) error {
 	// If event is already expired, add to ready queue
 	if event.GetScheduleTs() <= time.Now().UnixMilli() {
 		s.readyQueue = append(s.readyQueue, event)
+		s.notifyReady()
 		return nil
 	}
 
@@ -109,11 +125,13 @@ func (s *Scheduler) ScheduleBatch(events []*types.Event) error {
 	defer s.mu.Unlock()
 
 	now := time.Now().UnixMilli()
+	hasReady := false
 
 	for _, event := range events {
 		// If event is already expired, add to ready queue
 		if event.GetScheduleTs() <= now {
 			s.readyQueue = append(s.readyQueue, event)
+			hasReady = true
 			continue
 		}
 
@@ -124,6 +142,10 @@ func (s *Scheduler) ScheduleBatch(events []*types.Event) error {
 		}
 	}
 
+	if hasReady {
+		s.notifyReady()
+	}
+
 	return nil
 }
 
@@ -132,30 +154,36 @@ func (s *Scheduler) GetReadyEvents() []*types.Event {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Drain ALL expired events from timing wheel channel
-	for {
-		select {
-		case expiredTimers := <-s.timingWheel.GetExpiredChannel():
-			for _, timer := range expiredTimers {
-				s.readyQueue = append(s.readyQueue, timer.Event)
-				// Return timer to pool
-				s.timingWheel.PutTimer(timer)
-			}
-		default:
-			// No more pending expired events
-			goto done
-		}
-	}
-done:
-
 	// Return ready events
 	if len(s.readyQueue) == 0 {
 		return nil
 	}
 
 	events := s.readyQueue
-	s.readyQueue = make([]*types.Event, 0)
+	s.readyQueue = s.readyQueue[:0]
 	return events
+}
+
+func (s *Scheduler) drainExpiredToReady() {
+	added := 0
+
+	s.mu.Lock()
+	for {
+		select {
+		case expiredTimers := <-s.timingWheel.GetExpiredChannel():
+			for _, timer := range expiredTimers {
+				s.readyQueue = append(s.readyQueue, timer.Event)
+				s.timingWheel.PutTimer(timer)
+				added++
+			}
+		default:
+			s.mu.Unlock()
+			if added > 0 {
+				s.notifyReady()
+			}
+			return
+		}
+	}
 }
 
 // Start starts the scheduler worker
@@ -169,6 +197,7 @@ func (s *Scheduler) Start() {
 
 	s.active = true
 	go s.worker()
+	go s.checkpointLoop()
 }
 
 // worker is the scheduler worker loop
@@ -179,11 +208,11 @@ func (s *Scheduler) worker() {
 
 	partitionLabel := fmt.Sprintf("%d", s.partitionID)
 
-	for s.active {
+	for {
 		select {
 		case <-ticker.C:
 			s.timingWheel.Tick()
-			s.checkpoint()
+			s.drainExpiredToReady()
 
 			// Emit metrics
 			s.mu.RLock()
@@ -199,44 +228,65 @@ func (s *Scheduler) worker() {
 	}
 }
 
+func (s *Scheduler) checkpointLoop() {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			s.checkpoint()
+		case <-s.workerDone:
+			return
+		}
+	}
+}
+
 // checkpoint saves scheduler state
 func (s *Scheduler) checkpoint() {
 	now := time.Now().UnixMilli()
 
-	// Checkpoint every 10 seconds
-	if now-s.lastCheckpointTS < 10000 {
+	s.mu.RLock()
+	lastCheckpointTS := s.lastCheckpointTS
+	partitionID := s.partitionID
+	readyEvents := int64(len(s.readyQueue))
+	twStats := s.timingWheel.GetStats()
+	s.mu.RUnlock()
+
+	if now-lastCheckpointTS < 10000 {
 		return
 	}
 
-	s.mu.Lock()
-
-	// Build checkpoint
 	checkpoint := &SchedulerCheckpoint{
-		PartitionID:      s.partitionID,
-		CurrentTick:      s.timingWheel.currentTick,
-		ActiveTimers:     int64(len(s.timingWheel.timers)),
-		ReadyEvents:      int64(len(s.readyQueue)),
-		NextTickMs:       int64(s.timingWheel.tickMs),
-		WheelSize:        int64(s.timingWheel.wheelSize),
+		PartitionID:      partitionID,
+		CurrentTick:      twStats.CurrentTick,
+		ActiveTimers:     twStats.ActiveTimers,
+		ReadyEvents:      readyEvents,
+		NextTickMs:       int64(twStats.TickMs),
+		WheelSize:        int64(twStats.WheelSize),
 		LastCheckpointTS: now,
 	}
 
 	// Write to file
 	checkpointPath := filepath.Join(s.dataDir, "timer_state.json")
-	data, err := json.MarshalIndent(checkpoint, "", "  ")
+	data, err := json.Marshal(checkpoint)
 	if err != nil {
-		s.mu.Unlock()
 		return
 	}
 
 	tmpPath := checkpointPath + ".tmp"
 	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
-		s.mu.Unlock()
 		return
 	}
 
-	os.Rename(tmpPath, checkpointPath)
-	s.lastCheckpointTS = now
+	if err := os.Rename(tmpPath, checkpointPath); err != nil {
+		return
+	}
+
+	s.mu.Lock()
+	if now > s.lastCheckpointTS {
+		s.lastCheckpointTS = now
+	}
 	s.mu.Unlock()
 }
 
@@ -268,16 +318,16 @@ func (s *Scheduler) recover() error {
 // Stop stops the scheduler
 func (s *Scheduler) Stop() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if !s.active {
+		s.mu.Unlock()
 		return
 	}
 
 	s.active = false
 	close(s.workerDone)
+	s.mu.Unlock()
 
-	// Final checkpoint
+	// Final checkpoint after loops have stopped.
 	s.checkpoint()
 }
 

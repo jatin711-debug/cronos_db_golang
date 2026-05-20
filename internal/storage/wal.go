@@ -15,19 +15,19 @@ import (
 
 // WAL represents Write-Ahead Log with segmented storage
 type WAL struct {
-	mu               sync.RWMutex
-	dataDir          string
-	partitionID      int32
-	segments         []*Segment
-	activeSegment    *Segment
-	nextSegment      *Segment      // Pre-created next segment for fast rotation
-	nextSegMu        sync.Mutex    // Protects nextSegment
+	mu                 sync.RWMutex
+	dataDir            string
+	partitionID        int32
+	segments           []*Segment
+	activeSegment      *Segment
+	nextSegment        *Segment    // Pre-created next segment for fast rotation
+	nextSegMu          sync.Mutex  // Protects nextSegment
 	preCreateTriggered atomic.Bool // Atomic flag to avoid duplicate pre-creation goroutines
-	nextOffset       int64
-	highWatermark    int64
-	config           *WALConfig
-	quit             chan struct{}
-	wg               sync.WaitGroup
+	nextOffset         int64
+	highWatermark      int64
+	config             *WALConfig
+	quit               chan struct{}
+	wg                 sync.WaitGroup
 }
 
 // WALConfig represents WAL configuration
@@ -136,8 +136,10 @@ func (w *WAL) AppendBatch(events []*types.Event) error {
 
 	w.highWatermark = events[len(events)-1].Offset
 
-	// Sync inline for every_event and batch modes
-	if w.config.FsyncMode == "every_event" || w.config.FsyncMode == "batch" {
+	// Sync inline only for every_event mode.
+	// In batch/periodic modes, background flush loop performs fsync to avoid
+	// adding synchronous IO latency to the publish hot path.
+	if w.config.FsyncMode == "every_event" {
 		if err := w.activeSegment.FlushBuffer(); err != nil {
 			return fmt.Errorf("flush batch: %w", err)
 		}
@@ -305,7 +307,7 @@ func (w *WAL) ReadEvents(startOffset, endOffset int64) ([]*types.Event, error) {
 		if err != nil {
 			return nil, fmt.Errorf("read offset range from segment %s: %w", segment.GetFilename(), err)
 		}
-		
+
 		for _, event := range events {
 			event.PartitionId = w.partitionID
 			result = append(result, event)
@@ -332,7 +334,7 @@ func (w *WAL) ReadEventsByTime(startTS, endTS int64) ([]*types.Event, error) {
 		if err != nil {
 			return nil, fmt.Errorf("read from segment %s: %w", segment.GetFilename(), err)
 		}
-		
+
 		for _, event := range events {
 			event.PartitionId = w.partitionID
 			result = append(result, event)

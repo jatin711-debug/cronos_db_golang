@@ -27,10 +27,12 @@ type Router struct {
 	assignments map[int32]*PartitionInfo
 }
 
-// NewRouter creates a new partition router
-func NewRouter(membership *Membership, numPartitions, replicationFactor int, accessor PartitionAccessor) *Router {
+// NewRouter creates a new partition router.
+// virtualNodes controls hash-ring granularity and can materially impact
+// partition leader distribution when partition counts are small.
+func NewRouter(membership *Membership, numPartitions, replicationFactor, virtualNodes int, accessor PartitionAccessor) *Router {
 	r := &Router{
-		hashRing:          NewHashRing(150, replicationFactor),
+		hashRing:          NewHashRing(virtualNodes, replicationFactor),
 		membership:        membership,
 		numPartitions:     numPartitions,
 		localNodeID:       membership.GetLocalNode().ID,
@@ -93,9 +95,6 @@ func (r *Router) watchMembershipEvents() {
 
 // onNodeJoin handles a new node joining
 func (r *Router) onNodeJoin(node *Node) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
 	// Save old assignments for rebalancing
 	oldAssignments := r.hashRing.GetPartitionAssignments(r.numPartitions)
 
@@ -105,8 +104,10 @@ func (r *Router) onNodeJoin(node *Node) {
 	// Compute moves
 	moves := r.hashRing.Rebalance(oldAssignments, r.numPartitions)
 
-	// Update assignments
+	// Update cached assignments with minimal router lock hold time.
+	r.mu.Lock()
 	r.updateAssignments()
+	r.mu.Unlock()
 
 	log.Printf("[ROUTER] Node %s joined, %d partition moves needed", node.ID, len(moves))
 
@@ -116,9 +117,6 @@ func (r *Router) onNodeJoin(node *Node) {
 
 // onNodeLeave handles a node leaving
 func (r *Router) onNodeLeave(node *Node) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
 	// Save old assignments for rebalancing
 	oldAssignments := r.hashRing.GetPartitionAssignments(r.numPartitions)
 
@@ -128,8 +126,10 @@ func (r *Router) onNodeLeave(node *Node) {
 	// Compute moves
 	moves := r.hashRing.Rebalance(oldAssignments, r.numPartitions)
 
-	// Update assignments
+	// Update cached assignments with minimal router lock hold time.
+	r.mu.Lock()
 	r.updateAssignments()
+	r.mu.Unlock()
 
 	log.Printf("[ROUTER] Node %s left, %d partition moves needed", node.ID, len(moves))
 

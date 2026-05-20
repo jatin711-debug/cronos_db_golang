@@ -66,6 +66,8 @@ func main() {
 		}
 
 		clusterMgr = cluster.NewManager(clusterConfig)
+		// Wire partition state transfer hooks before starting cluster services.
+		clusterMgr.SetPartitionAccessor(pm)
 		if err := clusterMgr.Start(); err != nil {
 			slog.Error("Failed to start cluster manager", "error", err)
 			os.Exit(1)
@@ -172,7 +174,7 @@ func main() {
 			fmt.Fprintf(w, "OK - Standalone Mode\n")
 		}
 	})
-	
+
 	mux.Handle("/metrics", promhttp.Handler())
 
 	healthServer := &http.Server{

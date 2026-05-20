@@ -262,9 +262,8 @@ func (tw *TimingWheel) cascadeFromOverflow() {
 	// Get current absolute time for this wheel
 	currentAbsoluteMs := tw.startTimeMs + tw.currentTick*int64(tw.tickMs)
 
-	// Collect all timers to move and organize them by target slot
-	// Using bucket-based approach for O(N) instead of O(N*logN) or O(N^2)
-	timersBySlot := make(map[int32][]*Timer) // slot -> timers
+	// Collect timers in slot-indexed buckets to avoid map allocations under lock.
+	timersBySlot := make([][]*Timer, tw.wheelSize)
 
 	curr := tw.overflowWheel.wheel[overflowSlot]
 	for curr != nil {
@@ -292,7 +291,8 @@ func (tw *TimingWheel) cascadeFromOverflow() {
 	tw.overflowWheel.wheel[overflowSlot] = nil
 
 	// Batch insert all timers into their target slots - O(N) total
-	for slot, timers := range timersBySlot {
+	for slot := int32(0); slot < tw.wheelSize; slot++ {
+		timers := timersBySlot[slot]
 		// Prepend all timers for this slot to the existing head (if any)
 		if len(timers) > 0 {
 			head := tw.wheel[slot]
