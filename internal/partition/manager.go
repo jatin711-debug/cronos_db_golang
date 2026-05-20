@@ -17,8 +17,9 @@ import (
 	"cronos_db/pkg/types"
 	"cronos_db/pkg/utils"
 
-	"github.com/cockroachdb/pebble"
 	log2 "log/slog"
+
+	"github.com/cockroachdb/pebble"
 )
 
 // Partition represents a data partition
@@ -183,15 +184,44 @@ func (pm *PartitionManager) GetInternalPartition(partitionID int32) (*Partition,
 	return partition, nil
 }
 
+// GetPartitionIDForTopic returns the stable partition ID for a topic without
+// creating or starting any local partition state.
+func (pm *PartitionManager) GetPartitionIDForTopic(topic string) int32 {
+	return utils.HashToPartitionID(topic, pm.config.PartitionCount)
+}
+
+// GetPartitionIDForKey returns the stable partition ID for a key without
+// creating or starting any local partition state.
+func (pm *PartitionManager) GetPartitionIDForKey(key string) int32 {
+	return utils.HashToPartitionID(key, pm.config.PartitionCount)
+}
+
 // GetPartitionForTopic gets partition for a topic using consistent hashing.
 // It computes the partition ID from the topic hash (same algorithm as the
 // cluster router) so that every node derives the same partition ID for a
 // given topic. If the partition does not exist locally, it is auto-created.
 func (pm *PartitionManager) GetPartitionForTopic(topic string) (*types.Partition, error) {
+	partitionID := pm.GetPartitionIDForTopic(topic)
+
+	// Fast path: read lock for existing partition lookups.
+	pm.mu.RLock()
+	if partition, exists := pm.partitions[partitionID]; exists {
+		pm.mu.RUnlock()
+		return &types.Partition{
+			ID:            partition.ID,
+			Topic:         partition.Topic,
+			NextOffset:    0,
+			HighWatermark: 0,
+			Active:        true,
+			CreatedTS:     partition.CreatedTS.UnixMilli(),
+			UpdatedTS:     partition.UpdatedTS.UnixMilli(),
+		}, nil
+	}
+	pm.mu.RUnlock()
+
+	// Slow path: partition missing, escalate to write lock.
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
-
-	partitionID := utils.HashToPartitionID(topic, pm.config.PartitionCount)
 
 	// Check if the computed partition already exists locally
 	if partition, exists := pm.partitions[partitionID]; exists {
@@ -236,10 +266,27 @@ func (pm *PartitionManager) GetPartitionForTopic(topic string) (*types.Partition
 // ensuring stable routing regardless of how many partitions are currently
 // created on this node.
 func (pm *PartitionManager) GetPartitionForKey(key string) (*types.Partition, error) {
+	partitionID := pm.GetPartitionIDForKey(key)
+
+	// Fast path: read lock for existing partition lookups.
+	pm.mu.RLock()
+	if partition, exists := pm.partitions[partitionID]; exists {
+		pm.mu.RUnlock()
+		return &types.Partition{
+			ID:            partition.ID,
+			Topic:         partition.Topic,
+			NextOffset:    0,
+			HighWatermark: 0,
+			Active:        true,
+			CreatedTS:     partition.CreatedTS.UnixMilli(),
+			UpdatedTS:     partition.UpdatedTS.UnixMilli(),
+		}, nil
+	}
+	pm.mu.RUnlock()
+
+	// Slow path: partition missing, escalate to write lock.
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
-
-	partitionID := utils.HashToPartitionID(key, pm.config.PartitionCount)
 
 	// Check if the computed partition already exists locally
 	if partition, exists := pm.partitions[partitionID]; exists {
@@ -298,24 +345,17 @@ func (pm *PartitionManager) startPartitionInternal(partition *Partition) error {
 	// Start worker
 	partition.Worker.Start()
 
-	// Get poll interval from config (default 10ms for better responsiveness)
-	pollInterval := time.Duration(pm.config.DeliveryPollMS) * time.Millisecond
-	if pollInterval == 0 {
-		pollInterval = 10 * time.Millisecond
-	}
-
-	// Start delivery loop (poll scheduler for ready events and feed to worker)
+	// Start delivery loop (event-driven): consume scheduler ready signals and
+	// immediately hand over batches to the worker.
 	go func() {
-		ticker := time.NewTicker(pollInterval)
-		defer ticker.Stop()
-
 		for {
 			select {
-			case <-ticker.C:
-				// Get ready events from scheduler and feed to worker in batch
-				// to minimize lock contention.
-				readyEvents := partition.Scheduler.GetReadyEvents()
-				if len(readyEvents) > 0 {
+			case <-partition.Scheduler.ReadySignal():
+				for {
+					readyEvents := partition.Scheduler.GetReadyEvents()
+					if len(readyEvents) == 0 {
+						break
+					}
 					partition.Worker.AddReadyEvents(readyEvents)
 				}
 			case <-partition.deliveryQuit:
@@ -389,28 +429,33 @@ func (pm *PartitionManager) replayWALTimers(partition *Partition) {
 	}
 
 	now := time.Now().UnixMilli()
-	events, err := partition.Wal.ReadEvents(startOffset, lastOffset)
-	if err != nil {
-		log2.Warn("WAL replay failed", "partition", partition.ID, "error", err)
-		return
-	}
-
 	scheduledCount := 0
 	expiredCount := 0
 	lastScheduled := startOffset - 1
 
-	for _, event := range events {
-		if event.GetScheduleTs() > now {
-			// Future event — re-schedule it
-			if err := partition.Scheduler.Schedule(event); err != nil {
-				// Timer may already exist if recovery runs twice; skip silently
-				continue
-			}
-			scheduledCount++
-		} else {
-			expiredCount++
+	const replayBatchSize int64 = 10000
+	for batchStart := startOffset; batchStart <= lastOffset; batchStart += replayBatchSize {
+		batchEnd := min(batchStart+replayBatchSize-1, lastOffset)
+
+		events, err := partition.Wal.ReadEvents(batchStart, batchEnd)
+		if err != nil {
+			log2.Warn("WAL replay failed", "partition", partition.ID, "start_offset", batchStart, "end_offset", batchEnd, "error", err)
+			return
 		}
-		lastScheduled = event.Offset
+
+		for _, event := range events {
+			if event.GetScheduleTs() > now {
+				// Future event — re-schedule it
+				if err := partition.Scheduler.Schedule(event); err != nil {
+					// Timer may already exist if recovery runs twice; skip silently
+					continue
+				}
+				scheduledCount++
+			} else {
+				expiredCount++
+			}
+			lastScheduled = event.Offset
+		}
 	}
 
 	// Update checkpoint incrementally
@@ -423,7 +468,7 @@ func (pm *PartitionManager) replayWALTimers(partition *Partition) {
 // TimerCheckpoint stores the incremental replay progress
 type TimerCheckpoint struct {
 	LastScheduledOffset int64 `json:"last_scheduled_offset"`
-	LastCheckpointTime int64 `json:"last_checkpoint_time"`
+	LastCheckpointTime  int64 `json:"last_checkpoint_time"`
 }
 
 // readTimerCheckpoint reads the timer replay checkpoint
@@ -464,7 +509,7 @@ func (pm *PartitionManager) writeTimerCheckpoint(partition *Partition, lastOffse
 // and safely removes obsolete WAL segments.
 func (p *Partition) runCompaction() {
 	groups := p.ConsumerGroup.ListGroups()
-	
+
 	hasActiveConsumers := false
 	minConsumedOffset := p.Wal.GetHighWatermark()
 
@@ -476,13 +521,13 @@ func (p *Partition) runCompaction() {
 				break
 			}
 		}
-		
+
 		if !hasPartition {
 			continue
 		}
-		
+
 		hasActiveConsumers = true
-		
+
 		offset, ok := group.CommittedOffsets[p.ID]
 		if ok {
 			if offset == -1 {
@@ -579,7 +624,7 @@ func (pm *PartitionManager) StopPartition(partitionID int32) error {
 // StopAllPartitions stops all active partitions concurrently and gracefully
 func (pm *PartitionManager) StopAllPartitions() error {
 	partitions := pm.ListPartitions()
-	
+
 	var wg sync.WaitGroup
 	errCh := make(chan error, len(partitions))
 

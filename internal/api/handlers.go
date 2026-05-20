@@ -94,6 +94,26 @@ func (h *EventServiceHandler) SetClusterRouter(router ClusterRouter) {
 	h.clusterRouter = router
 }
 
+// ensureClusterPartitionWritable validates that this node should accept writes
+// for the target partition when running in cluster mode.
+func (h *EventServiceHandler) ensureClusterPartitionWritable(partitionID int32) error {
+	if h.clusterRouter == nil {
+		return nil
+	}
+
+	if !h.clusterRouter.IsLocalPartition(partitionID) {
+		return status.Errorf(codes.Unavailable,
+			"partition %d is not owned by this node; retry against the partition leader", partitionID)
+	}
+
+	if !h.clusterRouter.IsPartitionLeader(partitionID) {
+		return status.Errorf(codes.FailedPrecondition,
+			"partition %d is local but this node is not the leader; retry against the partition leader", partitionID)
+	}
+
+	return nil
+}
+
 // Publish handles publish requests
 func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishRequest) (*types.PublishResponse, error) {
 	event := req.Event
@@ -120,19 +140,24 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 		}, nil
 	}
 
-	// Get partition - use partition_key from meta if available, otherwise use message_id
-	var partition *types.Partition
-	var err error
-
 	partitionKey := event.GetMessageId() // Default to message_id for distribution
 	if pk, ok := event.Meta["partition_key"]; ok && pk != "" {
 		partitionKey = pk
 	}
+	partitionID := h.partitionManager.GetPartitionIDForKey(partitionKey)
+	if err := h.ensureClusterPartitionWritable(partitionID); err != nil {
+		return nil, err
+	}
 
 	// Use key-based partitioning for better distribution
-	partition, err = h.partitionManager.GetPartitionForKey(partitionKey)
+	partition, err := h.partitionManager.GetPartitionForKey(partitionKey)
 	if err != nil {
 		// Fallback to topic-based partitioning
+		topicPartitionID := h.partitionManager.GetPartitionIDForTopic(event.Topic)
+		if ownerErr := h.ensureClusterPartitionWritable(topicPartitionID); ownerErr != nil {
+			return nil, ownerErr
+		}
+
 		partition, err = h.partitionManager.GetPartitionForTopic(event.Topic)
 		if err != nil {
 			return &types.PublishResponse{
@@ -151,14 +176,12 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 		}, nil
 	}
 
-	// Cluster mode: check if this partition is local to this node
-	if h.clusterRouter != nil && !h.clusterRouter.IsLocalPartition(partition.ID) {
-		return nil, status.Errorf(codes.Unavailable,
-			"partition %d is not owned by this node; retry against the partition leader", partition.ID)
-	}
-
 	// Check if duplicate (unless explicitly allowed)
 	if !req.AllowDuplicate {
+		if h.dedupManager == nil {
+			return nil, status.Error(codes.Unavailable, "dedup manager not initialized on this node")
+		}
+
 		isDuplicate, err := h.dedupManager.IsDuplicate(event.GetMessageId(), 0) // offset will be assigned
 		if err != nil {
 			return &types.PublishResponse{
@@ -207,6 +230,10 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 		}, nil
 	}
 
+	if !req.AllowDuplicate && h.dedupManager == nil {
+		return nil, status.Error(codes.Unavailable, "dedup manager not initialized on this node")
+	}
+
 	var publishedCount, duplicateCount, errorCount int32
 	var firstOffset, lastOffset int64 = -1, -1
 	var lastError string
@@ -231,8 +258,26 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 			partitionKey = pk
 		}
 
+		partitionID := h.partitionManager.GetPartitionIDForKey(partitionKey)
+		if ownerErr := h.ensureClusterPartitionWritable(partitionID); ownerErr != nil {
+			errorCount++
+			if lastError == "" {
+				lastError = ownerErr.Error()
+			}
+			continue
+		}
+
 		partition, err := h.partitionManager.GetPartitionForKey(partitionKey)
 		if err != nil {
+			topicPartitionID := h.partitionManager.GetPartitionIDForTopic(event.Topic)
+			if ownerErr := h.ensureClusterPartitionWritable(topicPartitionID); ownerErr != nil {
+				errorCount++
+				if lastError == "" {
+					lastError = ownerErr.Error()
+				}
+				continue
+			}
+
 			partition, err = h.partitionManager.GetPartitionForTopic(event.Topic)
 			if err != nil {
 				errorCount++
@@ -321,6 +366,10 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 
 // Subscribe handles streaming subscription
 func (h *EventServiceHandler) Subscribe(stream grpc.BidiStreamingServer[types.SubscribeRequest, types.Delivery]) error {
+	if h.consumerManager == nil {
+		return status.Error(codes.Unavailable, "consumer manager not initialized on this node")
+	}
+
 	// Receive subscription request
 	req, err := stream.Recv()
 	if err != nil {
@@ -330,7 +379,16 @@ func (h *EventServiceHandler) Subscribe(stream grpc.BidiStreamingServer[types.Su
 	// Handle partition auto-assignment
 	partitionID := req.GetPartitionId()
 	if partitionID < 0 {
-		// Auto-assign partition based on topic
+		// Compute partition first so cluster checks do not trigger remote auto-creation.
+		partitionID = h.partitionManager.GetPartitionIDForTopic(req.GetTopic())
+	}
+
+	if err := h.ensureClusterPartitionWritable(partitionID); err != nil {
+		return err
+	}
+
+	if req.GetPartitionId() < 0 {
+		// Ensure local state exists for auto-assigned partition.
 		partitionInfo, err := h.partitionManager.GetPartitionForTopic(req.GetTopic())
 		if err != nil {
 			return fmt.Errorf("auto-assign partition for topic %s: %w", req.GetTopic(), err)
@@ -388,10 +446,8 @@ func (h *EventServiceHandler) Subscribe(stream grpc.BidiStreamingServer[types.Su
 	}
 
 	// Create consumer group subscription
-	if h.consumerManager != nil {
-		if _, err := h.consumerManager.Subscribe(req); err != nil {
-			return fmt.Errorf("create consumer group: %w", err)
-		}
+	if _, err := h.consumerManager.Subscribe(req); err != nil {
+		return fmt.Errorf("create consumer group: %w", err)
 	}
 
 	// Wait for context cancellation (client disconnect)
@@ -401,6 +457,10 @@ func (h *EventServiceHandler) Subscribe(stream grpc.BidiStreamingServer[types.Su
 
 // Ack handles streaming ack requests
 func (h *EventServiceHandler) Ack(stream types.EventService_AckServer) error {
+	if h.consumerManager == nil {
+		return status.Error(codes.Unavailable, "consumer manager not initialized on this node")
+	}
+
 	for {
 		req, err := stream.Recv()
 		if err != nil {
@@ -426,12 +486,9 @@ func (h *EventServiceHandler) Ack(stream types.EventService_AckServer) error {
 				p.Dispatcher.HandleAck(deliveryID, req.GetSuccess(), req.GetNextOffset())
 			}
 		} else {
-			// Fallback: broadcast to all partitions (legacy delivery ID format)
-			for _, p := range h.partitionManager.ListPartitions() {
-				if p.Dispatcher != nil {
-					p.Dispatcher.HandleAck(deliveryID, req.GetSuccess(), req.GetNextOffset())
-				}
-			}
+			// Skip dispatcher routing for malformed/legacy IDs to avoid O(partitions)
+			// scans on the ack hot path. Consumer offset commit below will validate
+			// delivery_id format and return a proper error when invalid.
 		}
 
 		err = h.consumerManager.Ack(req)

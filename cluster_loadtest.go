@@ -15,6 +15,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"cronos_db/pkg/utils"
+
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
@@ -44,6 +46,7 @@ type ClusterLoadTestConfig struct {
 	FailoverAfter  time.Duration // When to simulate node failure
 	BatchMode      bool          // Use batch publish API
 	BatchSize      int           // Events per batch
+	PartitionCount int           // Total cluster partitions (for route discovery)
 }
 
 // ClusterMetrics holds cluster-wide metrics
@@ -85,6 +88,7 @@ func main() {
 	failoverAfter := flag.Duration("failover-after", 10*time.Second, "When to simulate failover")
 	batchMode := flag.Bool("batch", false, "Use batch publish API for higher throughput")
 	batchSize := flag.Int("batch-size", 100, "Events per batch when using batch mode")
+	partitionCount := flag.Int("partition-count", 16, "Total number of partitions in the cluster")
 
 	flag.Parse()
 
@@ -110,6 +114,7 @@ func main() {
 		FailoverAfter:  *failoverAfter,
 		BatchMode:      *batchMode,
 		BatchSize:      *batchSize,
+		PartitionCount: *partitionCount,
 	}
 
 	fmt.Println("╔═══════════════════════════════════════════════════════════════╗")
@@ -189,6 +194,12 @@ func runClusterLoadTest(config ClusterLoadTestConfig) *ClusterMetrics {
 	var totalPublished int64
 	totalEvents := int64(config.NumPublishers * config.EventsPerPub * len(config.Nodes))
 
+	leadersByPartition, err := discoverPartitionLeaders(config)
+	if err != nil {
+		log.Fatalf("Failed to discover partition leaders: %v", err)
+	}
+	logPartitionLeaders(config, leadersByPartition)
+
 	// Start progress reporter
 	done := make(chan struct{})
 	go func() {
@@ -218,7 +229,7 @@ func runClusterLoadTest(config ClusterLoadTestConfig) *ClusterMetrics {
 			wg.Add(1)
 			go func(publisherID int) {
 				defer wg.Done()
-				runBatchPublisher(config, metrics, publisherID, &totalPublished)
+				runBatchPublisher(config, metrics, publisherID, &totalPublished, leadersByPartition)
 			}(pubIdx)
 		}
 	} else if config.RoundRobin {
@@ -227,7 +238,7 @@ func runClusterLoadTest(config ClusterLoadTestConfig) *ClusterMetrics {
 			wg.Add(1)
 			go func(publisherID int) {
 				defer wg.Done()
-				runRoundRobinPublisher(config, metrics, publisherID, &totalPublished)
+				runRoundRobinPublisher(config, metrics, publisherID, &totalPublished, leadersByPartition)
 			}(pubIdx)
 		}
 	} else {
@@ -250,30 +261,116 @@ func runClusterLoadTest(config ClusterLoadTestConfig) *ClusterMetrics {
 	return metrics
 }
 
+func buildProbeKeys(partitionCount int) (map[int32]string, error) {
+	if partitionCount <= 0 {
+		return nil, fmt.Errorf("invalid partition-count: %d", partitionCount)
+	}
+
+	keys := make(map[int32]string, partitionCount)
+	maxAttempts := partitionCount * 50000
+
+	for i := 0; i < maxAttempts && len(keys) < partitionCount; i++ {
+		key := fmt.Sprintf("route-probe-key-%d", i)
+		pid := utils.HashToPartitionID(key, partitionCount)
+		if _, exists := keys[pid]; !exists {
+			keys[pid] = key
+		}
+	}
+
+	if len(keys) != partitionCount {
+		return nil, fmt.Errorf("could not generate probe keys for all partitions (got %d/%d)", len(keys), partitionCount)
+	}
+
+	return keys, nil
+}
+
+func discoverPartitionLeaders(config ClusterLoadTestConfig) (map[int32]int, error) {
+	probeKeys, err := buildProbeKeys(config.PartitionCount)
+	if err != nil {
+		return nil, err
+	}
+
+	leaders := make(map[int32]int, config.PartitionCount)
+	probeTopic := config.Topic + "-route-probe"
+
+	for partitionID := int32(0); partitionID < int32(config.PartitionCount); partitionID++ {
+		probeKey := probeKeys[partitionID]
+		found := false
+
+		for nodeIdx := range config.Nodes {
+			node := config.Nodes[nodeIdx]
+			req := &types.PublishRequest{
+				AllowDuplicate: true,
+				Event: &types.Event{
+					MessageId:  fmt.Sprintf("route-probe-%d-%d", partitionID, time.Now().UnixNano()),
+					ScheduleTs: time.Now().UnixMilli(),
+					Payload:    []byte("probe"),
+					Topic:      probeTopic,
+					Meta: map[string]string{
+						"partition_key": probeKey,
+					},
+				},
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			resp, err := node.client.Publish(ctx, req)
+			cancel()
+
+			if err != nil || resp == nil || !resp.Success {
+				continue
+			}
+
+			leaders[partitionID] = nodeIdx
+			found = true
+			break
+		}
+
+		if !found {
+			return nil, fmt.Errorf("could not discover leader for partition %d", partitionID)
+		}
+	}
+
+	return leaders, nil
+}
+
+func logPartitionLeaders(config ClusterLoadTestConfig, leadersByPartition map[int32]int) {
+	counts := make(map[string]int)
+	for _, idx := range leadersByPartition {
+		nodeID := config.Nodes[idx].ID
+		counts[nodeID]++
+	}
+
+	for _, n := range config.Nodes {
+		log.Printf("Leader partitions on %s: %d", n.ID, counts[n.ID])
+	}
+}
+
 // runBatchPublisher sends events in batches for high throughput
-func runBatchPublisher(config ClusterLoadTestConfig, metrics *ClusterMetrics, publisherID int, totalPublished *int64) {
+func runBatchPublisher(config ClusterLoadTestConfig, metrics *ClusterMetrics, publisherID int, totalPublished *int64, leadersByPartition map[int32]int) {
 	payload := make([]byte, config.PayloadSize)
 	rand.Read(payload)
 
-	nodeCount := len(config.Nodes)
 	batchSize := config.BatchSize
 	totalEvents := config.EventsPerPub
 
 	for batchStart := 0; batchStart < totalEvents; batchStart += batchSize {
-		// Select node in round-robin fashion based on batch
-		node := config.Nodes[(publisherID+batchStart/batchSize)%nodeCount]
-
 		// Build batch
 		batchEnd := batchStart + batchSize
 		if batchEnd > totalEvents {
 			batchEnd = totalEvents
 		}
 
-		events := make([]*types.Event, 0, batchEnd-batchStart)
+		eventsByNode := make(map[int][]*types.Event)
 		scheduleTime := time.Now().Add(config.ScheduleDelay)
 
 		for i := batchStart; i < batchEnd; i++ {
 			eventKey := fmt.Sprintf("pub-%d-event-%d", publisherID, i)
+			partitionID := utils.HashToPartitionID(eventKey, config.PartitionCount)
+			nodeIdx, ok := leadersByPartition[partitionID]
+			if !ok {
+				nodeIdx = (publisherID + i) % len(config.Nodes)
+			}
+
 			event := &types.Event{
 				MessageId:  fmt.Sprintf("batch-%d-%d-%d", publisherID, i, time.Now().UnixNano()),
 				ScheduleTs: scheduleTime.UnixMilli(),
@@ -285,63 +382,61 @@ func runBatchPublisher(config ClusterLoadTestConfig, metrics *ClusterMetrics, pu
 					"partition_key": eventKey,
 				},
 			}
-			events = append(events, event)
+			eventsByNode[nodeIdx] = append(eventsByNode[nodeIdx], event)
 		}
 
-		req := &types.PublishBatchRequest{
-			Events: events,
-		}
+		eventsInBatch := int64(batchEnd - batchStart)
+		for nodeIdx, events := range eventsByNode {
+			node := config.Nodes[nodeIdx]
+			req := &types.PublishBatchRequest{Events: events}
 
-		// Publish batch with timing
-		start := time.Now()
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		resp, err := node.client.PublishBatch(ctx, req)
-		cancel()
-		latency := time.Since(start)
+			start := time.Now()
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			resp, err := node.client.PublishBatch(ctx, req)
+			cancel()
+			latency := time.Since(start)
 
-		eventsInBatch := int64(len(events))
-
-		metrics.mu.Lock()
-		if err != nil {
-			metrics.NodeErrors[node.ID] += eventsInBatch
-			metrics.TotalErrors += eventsInBatch
-			// Log first gRPC error for debugging
-			log.Printf("gRPC ERROR %s: %v (errors so far: %d)", node.ID, err, metrics.NodeErrors[node.ID])
-		} else if resp != nil {
-			metrics.NodePublished[node.ID] += int64(resp.PublishedCount)
-			metrics.TotalPublished += int64(resp.PublishedCount)
-			metrics.TotalErrors += int64(resp.ErrorCount)
-			// Log first handler-level error
-			if resp.ErrorCount > 0 {
-				log.Printf("Handler ERROR %s: resp.ErrorCount=%d (dup=%d, published=%d)",
-					node.ID, resp.ErrorCount, resp.DuplicateCount, resp.PublishedCount)
+			metrics.mu.Lock()
+			if err != nil {
+				n := int64(len(events))
+				metrics.NodeErrors[node.ID] += n
+				metrics.TotalErrors += n
+				log.Printf("gRPC ERROR %s: %v (errors so far: %d)", node.ID, err, metrics.NodeErrors[node.ID])
+			} else if resp != nil {
+				metrics.NodePublished[node.ID] += int64(resp.PublishedCount)
+				metrics.TotalPublished += int64(resp.PublishedCount)
+				metrics.TotalErrors += int64(resp.ErrorCount)
+				if resp.ErrorCount > 0 {
+					log.Printf("Handler ERROR %s: resp.ErrorCount=%d (dup=%d, published=%d, reqSize=%d, err=%q)",
+						node.ID, resp.ErrorCount, resp.DuplicateCount, resp.PublishedCount, len(events), resp.GetError())
+				}
+				perEventLatency := latency / time.Duration(len(events))
+				for range events {
+					metrics.NodeLatencies[node.ID] = append(metrics.NodeLatencies[node.ID], perEventLatency)
+					metrics.AllLatencies = append(metrics.AllLatencies, perEventLatency)
+				}
 			}
-			// Record latency per event (amortized)
-			perEventLatency := latency / time.Duration(len(events))
-			for range events {
-				metrics.NodeLatencies[node.ID] = append(metrics.NodeLatencies[node.ID], perEventLatency)
-				metrics.AllLatencies = append(metrics.AllLatencies, perEventLatency)
-			}
+			metrics.mu.Unlock()
 		}
-		metrics.mu.Unlock()
 
 		atomic.AddInt64(totalPublished, eventsInBatch)
 	}
 }
 
 // runRoundRobinPublisher sends events across all nodes in rotation
-func runRoundRobinPublisher(config ClusterLoadTestConfig, metrics *ClusterMetrics, publisherID int, totalPublished *int64) {
+func runRoundRobinPublisher(config ClusterLoadTestConfig, metrics *ClusterMetrics, publisherID int, totalPublished *int64, leadersByPartition map[int32]int) {
 	payload := make([]byte, config.PayloadSize)
 	rand.Read(payload)
 
-	nodeCount := len(config.Nodes)
-
 	for i := 0; i < config.EventsPerPub; i++ {
-		// Select node in round-robin fashion
-		node := config.Nodes[(publisherID+i)%nodeCount]
-
 		// Create event with unique key for partition distribution
 		eventKey := fmt.Sprintf("pub-%d-event-%d", publisherID, i)
+		partitionID := utils.HashToPartitionID(eventKey, config.PartitionCount)
+		nodeIdx, ok := leadersByPartition[partitionID]
+		if !ok {
+			nodeIdx = (publisherID + i) % len(config.Nodes)
+		}
+		node := config.Nodes[nodeIdx]
 		scheduleTime := time.Now().Add(config.ScheduleDelay)
 
 		event := &types.Event{
@@ -350,10 +445,10 @@ func runRoundRobinPublisher(config ClusterLoadTestConfig, metrics *ClusterMetric
 			Payload:    payload,
 			Topic:      config.Topic,
 			Meta: map[string]string{
-				"publisher":   fmt.Sprintf("%d", publisherID),
-				"sequence":    fmt.Sprintf("%d", i),
-				"target_node": node.ID,
-				"event_key":   eventKey,
+				"publisher":     fmt.Sprintf("%d", publisherID),
+				"sequence":      fmt.Sprintf("%d", i),
+				"target_node":   node.ID,
+				"partition_key": eventKey,
 			},
 		}
 
@@ -402,10 +497,10 @@ func runNodePublisher(config ClusterLoadTestConfig, metrics *ClusterMetrics, nod
 			Payload:    payload,
 			Topic:      config.Topic,
 			Meta: map[string]string{
-				"publisher":   fmt.Sprintf("%d", publisherID),
-				"sequence":    fmt.Sprintf("%d", i),
-				"target_node": node.ID,
-				"event_key":   eventKey,
+				"publisher":     fmt.Sprintf("%d", publisherID),
+				"sequence":      fmt.Sprintf("%d", i),
+				"target_node":   node.ID,
+				"partition_key": eventKey,
 			},
 		}
 

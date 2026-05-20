@@ -1,7 +1,7 @@
 package dedup
 
 /*
-#cgo LDFLAGS: -L./rust/target/release -lcronos_dedup -lm
+#cgo LDFLAGS: -L${SRCDIR}/rust/target/release -lcronos_dedup -lm
 // Windows specific: might need Reference to .lib?
 // Go on Windows usually links against .dll if -l specifies it?
 // Usually needs import library. Rust produces .dll.lib for .dll.
@@ -22,12 +22,33 @@ void bloom_reset(void* ptr);
 import "C"
 import (
 	"runtime"
+	"sync"
 	"unsafe"
 )
 
 // RustBloomFilter is a wrapper around the Rust implementation
 type RustBloomFilter struct {
 	ptr unsafe.Pointer
+}
+
+type rustBatchScratch struct {
+	keyPtrs  []*C.uchar
+	keyLens  []C.size_t
+	results  []C.bool
+	goResult []bool
+}
+
+var rustBatchScratchPool = sync.Pool{
+	New: func() interface{} {
+		return &rustBatchScratch{}
+	},
+}
+
+func ensureBatchCap[T any](s []T, n int) []T {
+	if cap(s) < n {
+		return make([]T, n)
+	}
+	return s[:n]
 }
 
 // NewRustBloomFilter creates a new Rust-backed bloom filter
@@ -61,11 +82,18 @@ func (bf *RustBloomFilter) MayContainBatch(keys []string) []bool {
 		return nil
 	}
 
-	// Allocate arrays for C transfer
-	// Note: optimization possible with arena / sync.Pool
-	keyPtrs := make([]*C.uchar, n)
-	keyLens := make([]C.size_t, n)
-	results := make([]C.bool, n)
+	scratch := rustBatchScratchPool.Get().(*rustBatchScratch)
+	defer rustBatchScratchPool.Put(scratch)
+
+	keyPtrs := ensureBatchCap(scratch.keyPtrs, n)
+	keyLens := ensureBatchCap(scratch.keyLens, n)
+	results := ensureBatchCap(scratch.results, n)
+	goResults := ensureBatchCap(scratch.goResult, n)
+
+	scratch.keyPtrs = keyPtrs
+	scratch.keyLens = keyLens
+	scratch.results = results
+	scratch.goResult = goResults
 
 	for i, k := range keys {
 		keyPtrs[i] = (*C.uchar)(unsafe.Pointer(unsafe.StringData(k)))
@@ -80,12 +108,13 @@ func (bf *RustBloomFilter) MayContainBatch(keys []string) []bool {
 		(*C.bool)(unsafe.Pointer(&results[0])),
 	)
 
-	goResults := make([]bool, n)
 	for i, r := range results {
 		goResults[i] = bool(r)
 	}
 
-	return goResults
+	out := make([]bool, n)
+	copy(out, goResults)
+	return out
 }
 
 func (bf *RustBloomFilter) Count() uint64 {

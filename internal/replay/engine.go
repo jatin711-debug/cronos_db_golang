@@ -31,16 +31,26 @@ func (r *ReplayEngine) ReplayByTimeRange(ctx context.Context, startTS, endTS int
 	// Get all segments and scan for time range
 	events, err := r.wal.ReadEventsByTime(startTS, endTS)
 	if err != nil {
-		// Fall back to offset-based scan if time-based not implemented
-		// Read all events and filter by timestamp
+		// Fall back to offset-based scan in chunks if time index lookup fails.
 		lastOffset := r.wal.GetLastOffset()
 		if lastOffset < 0 {
 			return []*types.Event{}, nil
 		}
 
-		events, err = r.wal.ReadEvents(0, lastOffset)
-		if err != nil {
-			return nil, fmt.Errorf("read events: %w", err)
+		const scanBatchSize int64 = 10000
+		events = make([]*types.Event, 0)
+		for batchStart := int64(0); batchStart <= lastOffset; batchStart += scanBatchSize {
+			batchEnd := batchStart + scanBatchSize - 1
+			if batchEnd > lastOffset {
+				batchEnd = lastOffset
+			}
+
+			batchEvents, readErr := r.wal.ReadEvents(batchStart, batchEnd)
+			if readErr != nil {
+				return nil, fmt.Errorf("read events %d-%d: %w", batchStart, batchEnd, readErr)
+			}
+
+			events = append(events, batchEvents...)
 		}
 	}
 

@@ -141,7 +141,7 @@ func (p *PebbleStore) PruneExpired() (int, error) {
 			continue
 		}
 
-		if expirationTS < now {
+		if expirationTS <= now {
 			if err := p.db.Delete(iter.Key(), pebble.NoSync); err != nil {
 				return pruned, fmt.Errorf("delete expired key: %w", err)
 			}
@@ -152,15 +152,26 @@ func (p *PebbleStore) PruneExpired() (int, error) {
 	return pruned, nil
 }
 
-// GetStats returns store statistics using PebbleDB metrics (O(1)).
-// Avoids expensive full-table scans that cause latency spikes.
+// GetStats returns store statistics.
+// This is used for observability and test verification, so we compute key count
+// exactly via iteration rather than using file-size based approximations.
 func (p *PebbleStore) GetStats() (*DedupStats, error) {
-	m := p.db.Metrics()
-	// Approximate count from LSM file metadata; much cheaper than iterating
-	approxCount := int64(m.Total().Size)
+	iter, err := p.db.NewIter(nil)
+	if err != nil {
+		return nil, fmt.Errorf("create iterator: %w", err)
+	}
+	defer iter.Close()
+
+	count := int64(0)
+	for iter.First(); iter.Valid(); iter.Next() {
+		count++
+	}
+	if err := iter.Error(); err != nil {
+		return nil, fmt.Errorf("iterate keys: %w", err)
+	}
 
 	return &DedupStats{
-		ApproximateCount: approxCount,
+		ApproximateCount: count,
 		TTLHours:         p.ttlHours,
 		LastPruneTS:      time.Now().UnixMilli(),
 	}, nil
@@ -168,6 +179,9 @@ func (p *PebbleStore) GetStats() (*DedupStats, error) {
 
 // Close closes the store
 func (p *PebbleStore) Close() error {
+	if err := p.db.Flush(); err != nil {
+		return fmt.Errorf("flush before close: %w", err)
+	}
 	return p.db.Close()
 }
 

@@ -1,6 +1,7 @@
 package dedup
 
 import (
+	"runtime"
 	"sync"
 	"sync/atomic"
 
@@ -20,11 +21,11 @@ type BloomFilter interface {
 // GoBloomFilter is a simple bloom filter implementation for fast dedup checks
 type GoBloomFilter struct {
 	bits       []uint64
-	size       uint64         // Number of bits
-	numHash    uint64         // Number of hash functions
-	count      uint64         // Approximate number of items (atomic)
-	resetMu    sync.Mutex     // Protects reset operations
-	generation uint64         // Generation counter for detecting resets
+	size       uint64     // Number of bits
+	numHash    uint64     // Number of hash functions
+	count      uint64     // Approximate number of items (atomic)
+	resetMu    sync.Mutex // Protects reset operations
+	generation uint64     // Generation counter for detecting resets
 }
 
 // NewBloomFilter creates a bloom filter sized for expectedItems with targetFPR false positive rate
@@ -173,9 +174,9 @@ type BloomPebbleStore struct {
 	pebbleHits    uint64 // Actually found in PebbleDB
 
 	// Configuration for bloom filter maintenance
-	bloomCapacity        uint64        // Max items before considering reset
-	falsePositiveThresh  float64       // FPR threshold (e.g., 0.05 = 5%) to trigger reset
-	resetInProgress      atomic.Bool   // True when a reset is in progress
+	bloomCapacity       uint64      // Max items before considering reset
+	falsePositiveThresh float64     // FPR threshold (e.g., 0.05 = 5%) to trigger reset
+	resetInProgress     atomic.Bool // True when a reset is in progress
 }
 
 // NewBloomPebbleStore creates a new bloom filter + PebbleDB store
@@ -196,9 +197,9 @@ func NewBloomPebbleStore(dataDir string, partitionID int32, ttlHours int32, expe
 	bloom := NewBloomFilter(expectedItems, falsePositiveRate)
 
 	return &BloomPebbleStore{
-		bloom:              bloom,
-		pebble:             pebble,
-		bloomCapacity:      expectedItems,
+		bloom:               bloom,
+		pebble:              pebble,
+		bloomCapacity:       expectedItems,
 		falsePositiveThresh: 0.05, // 5% FPR threshold triggers reset
 	}, nil
 }
@@ -211,6 +212,7 @@ func (s *BloomPebbleStore) CheckAndStore(messageID string, offset int64) (bool, 
 		if !s.bloom.MayContain(messageID) {
 			// Check if reset is in progress
 			if s.resetInProgress.Load() {
+				runtime.Gosched()
 				continue // Retry after reset completes
 			}
 
