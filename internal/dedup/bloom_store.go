@@ -216,21 +216,15 @@ func (s *BloomPebbleStore) CheckAndStore(messageID string, offset int64) (bool, 
 				continue // Retry after reset completes
 			}
 
-			// Add to bloom filter with lock to prevent race with reset
-			s.bloomMu.Lock()
-			// Double-check after acquiring lock
-			if !s.bloom.MayContain(messageID) {
-				s.bloom.Add(messageID)
-				s.bloomMu.Unlock()
-				atomic.AddUint64(&s.bloomHits, 1)
+			// Add to bloom filter (lock-free for Rust/Go atomic bloom)
+			s.bloom.Add(messageID)
+			atomic.AddUint64(&s.bloomHits, 1)
 
-				// Store in PebbleDB directly (skip check since bloom said it's new)
-				if err := s.pebble.StoreOnly(messageID, offset); err != nil {
-					return false, err
-				}
-				return false, nil
+			// Store in PebbleDB directly (skip check since bloom said it's new)
+			if err := s.pebble.StoreOnly(messageID, offset); err != nil {
+				return false, err
 			}
-			s.bloomMu.Unlock()
+			return false, nil
 		}
 
 		// Slow path: bloom filter says "maybe exists", must check PebbleDB
@@ -243,14 +237,80 @@ func (s *BloomPebbleStore) CheckAndStore(messageID string, offset int64) (bool, 
 			atomic.AddUint64(&s.pebbleHits, 1)
 		} else {
 			atomic.AddUint64(&s.bloomFalsePos, 1)
-			// Add to bloom filter since it's new - with lock to prevent reset race
-			s.bloomMu.Lock()
+			// Add to bloom filter since it's new
 			s.bloom.Add(messageID)
-			s.bloomMu.Unlock()
 		}
 
 		return exists, nil
 	}
+}
+
+// CheckAndStoreBatch checks multiple message IDs for duplicates in a single pass.
+// Returns a slice of booleans where true means the message is a duplicate.
+// This is significantly faster than calling CheckAndStore per-event because:
+// 1. Bloom filter checks are batched (better CPU cache utilization)
+// 2. PebbleDB writes are batched into a single commit
+// 3. Bloom filter adds are batched under a single lock acquisition
+func (s *BloomPebbleStore) CheckAndStoreBatch(messageIDs []string, offsets []int64) ([]bool, error) {
+	results := make([]bool, len(messageIDs))
+
+	if s.resetInProgress.Load() {
+		// Fallback to per-item during reset
+		for i, id := range messageIDs {
+			exists, err := s.CheckAndStore(id, offsets[i])
+			if err != nil {
+				return nil, err
+			}
+			results[i] = exists
+		}
+		return results, nil
+	}
+
+	// Phase 1: Batch bloom filter check (lock-free reads)
+	bloomResults := s.bloom.MayContainBatch(messageIDs)
+
+	// Separate into "definitely new" and "maybe exists" buckets
+	var newIndices []int    // Bloom says definitely new
+	var maybeIndices []int  // Bloom says maybe exists, need PebbleDB check
+
+	for i, mayExist := range bloomResults {
+		if !mayExist {
+			newIndices = append(newIndices, i)
+		} else {
+			maybeIndices = append(maybeIndices, i)
+		}
+	}
+
+	// Phase 2: Check PebbleDB for "maybe exists" items
+	for _, idx := range maybeIndices {
+		exists, err := s.pebble.CheckAndStore(messageIDs[idx], offsets[idx])
+		if err != nil {
+			return nil, err
+		}
+		results[idx] = exists
+		if exists {
+			atomic.AddUint64(&s.pebbleHits, 1)
+		} else {
+			atomic.AddUint64(&s.bloomFalsePos, 1)
+			// It's new - add to bloom
+			s.bloom.Add(messageIDs[idx])
+		}
+	}
+
+	// Phase 3: Batch store all "definitely new" items in PebbleDB
+	if len(newIndices) > 0 {
+		if err := s.pebble.StoreBatch(messageIDs, offsets, newIndices); err != nil {
+			return nil, err
+		}
+
+		// Batch add to bloom filter
+		for _, idx := range newIndices {
+			s.bloom.Add(messageIDs[idx])
+		}
+		atomic.AddUint64(&s.bloomHits, uint64(len(newIndices)))
+	}
+
+	return results, nil
 }
 
 // GetOffset returns stored offset for message ID

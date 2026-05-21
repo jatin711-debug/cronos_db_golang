@@ -163,6 +163,31 @@ func (m *Manager) IsDuplicate(messageID string, offset int64) (bool, error) {
 	return exists, err
 }
 
+// IsDuplicateBatch checks multiple messages for duplicates in a single pass.
+// Returns a slice of booleans where true means the message is a duplicate.
+func (m *Manager) IsDuplicateBatch(messageIDs []string, offsets []int64) ([]bool, error) {
+	// Try batch interface if the store supports it
+	if batchStore, ok := m.store.(BatchDedupStore); ok {
+		return batchStore.CheckAndStoreBatch(messageIDs, offsets)
+	}
+
+	// Fallback to per-item check
+	results := make([]bool, len(messageIDs))
+	for i, id := range messageIDs {
+		exists, err := m.store.CheckAndStore(id, offsets[i])
+		if err != nil {
+			return nil, err
+		}
+		results[i] = exists
+	}
+	return results, nil
+}
+
+// BatchDedupStore is an optional interface for stores that support batch operations
+type BatchDedupStore interface {
+	CheckAndStoreBatch(messageIDs []string, offsets []int64) ([]bool, error)
+}
+
 // PruneExpired removes expired dedup entries from the underlying store
 func (m *Manager) PruneExpired() (int, error) {
 	return m.store.PruneExpired()

@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"cronos_db/internal/consumer"
@@ -32,6 +34,7 @@ type EventServiceHandler struct {
 // DedupManager interface
 type DedupManager interface {
 	IsDuplicate(messageID string, offset int64) (bool, error)
+	IsDuplicateBatch(messageIDs []string, offsets []int64) ([]bool, error)
 }
 
 // ConsumerManager interface
@@ -234,7 +237,7 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 	for _, event := range req.Events {
 		// Basic validation
 		if event.GetMessageId() == "" || event.GetScheduleTs() <= 0 || len(event.Payload) == 0 {
-			errorCount++
+			atomic.AddInt32(&errorCount, 1)
 			if lastError == "" {
 				lastError = fmt.Sprintf("validation failed: msgId=%q, scheduleTs=%d, payloadLen=%d",
 					event.GetMessageId(), event.GetScheduleTs(), len(event.Payload))
@@ -250,7 +253,7 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 
 		partitionID := h.partitionManager.GetPartitionIDForKey(partitionKey)
 		if ownerErr := h.ensureClusterPartitionWritable(partitionID); ownerErr != nil {
-			errorCount++
+			atomic.AddInt32(&errorCount, 1)
 			if lastError == "" {
 				lastError = ownerErr.Error()
 			}
@@ -261,14 +264,14 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 		if !req.AllowDuplicate {
 			isDuplicate, err := h.dedupManager.IsDuplicate(event.GetMessageId(), 0)
 			if err != nil {
-				errorCount++
+				atomic.AddInt32(&errorCount, 1)
 				if lastError == "" {
 					lastError = fmt.Sprintf("dedup check failed for %s: %v", event.GetMessageId(), err)
 				}
 				continue
 			}
 			if isDuplicate {
-				duplicateCount++
+				atomic.AddInt32(&duplicateCount, 1)
 				continue
 			}
 		}
@@ -276,56 +279,75 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 		partitionEvents[partitionID] = append(partitionEvents[partitionID], event)
 	}
 
-	// Batch write to each partition's WAL and schedule
+	// Parallel batch write to each partition's WAL and schedule
+	var wg sync.WaitGroup
+	var mu sync.Mutex // protects firstOffset, lastOffset, lastError
+
 	for partitionID, events := range partitionEvents {
-		partitionInternal, err := h.partitionManager.GetOrCreateInternalPartition(partitionID, events[0].Topic)
-		if err != nil {
-			// Fallback to topic-based partitioning
-			topicPartitionID := h.partitionManager.GetPartitionIDForTopic(events[0].Topic)
-			if ownerErr := h.ensureClusterPartitionWritable(topicPartitionID); ownerErr != nil {
-				errorCount += int32(len(events))
-				if lastError == "" {
-					lastError = fmt.Sprintf("get internal partition %d: %v", partitionID, err)
-				}
-				continue
-			}
-			partitionInternal, err = h.partitionManager.GetOrCreateInternalPartition(topicPartitionID, events[0].Topic)
+		wg.Add(1)
+		go func(pid int32, evts []*types.Event) {
+			defer wg.Done()
+
+			partitionInternal, err := h.partitionManager.GetOrCreateInternalPartition(pid, evts[0].Topic)
 			if err != nil {
-				errorCount += int32(len(events))
-				if lastError == "" {
-					lastError = fmt.Sprintf("get internal partition %d: %v", topicPartitionID, err)
+				// Fallback to topic-based partitioning
+				topicPartitionID := h.partitionManager.GetPartitionIDForTopic(evts[0].Topic)
+				if ownerErr := h.ensureClusterPartitionWritable(topicPartitionID); ownerErr != nil {
+					atomic.AddInt32(&errorCount, int32(len(evts)))
+					mu.Lock()
+					if lastError == "" {
+						lastError = fmt.Sprintf("get internal partition %d: %v", pid, err)
+					}
+					mu.Unlock()
+					return
 				}
-				continue
+				partitionInternal, err = h.partitionManager.GetOrCreateInternalPartition(topicPartitionID, evts[0].Topic)
+				if err != nil {
+					atomic.AddInt32(&errorCount, int32(len(evts)))
+					mu.Lock()
+					if lastError == "" {
+						lastError = fmt.Sprintf("get internal partition %d: %v", topicPartitionID, err)
+					}
+					mu.Unlock()
+					return
+				}
 			}
-		}
 
-		// Batch append to WAL (single syscall for all events)
-		if err := partitionInternal.Wal.AppendBatch(events); err != nil {
-			errorCount += int32(len(events))
-			if lastError == "" {
-				lastError = fmt.Sprintf("WAL append for partition %d: %v", partitionID, err)
+			// Batch append to WAL (single syscall for all events)
+			if err := partitionInternal.Wal.AppendBatch(evts); err != nil {
+				atomic.AddInt32(&errorCount, int32(len(evts)))
+				mu.Lock()
+				if lastError == "" {
+					lastError = fmt.Sprintf("WAL append for partition %d: %v", pid, err)
+				}
+				mu.Unlock()
+				return
 			}
-			continue
-		}
 
-		// Batch schedule all events (single lock acquisition)
-		if err := partitionInternal.Scheduler.ScheduleBatch(events); err != nil {
-			// Events are in WAL, just log scheduling error
-			slog.Warn("batch schedule partially failed", "partition", partitionID, "count", len(events), "error", err)
-		}
-
-		// Update stats
-		for _, event := range events {
-			publishedCount++
-
-			if firstOffset == -1 || event.Offset < firstOffset {
-				firstOffset = event.Offset
+			// Batch schedule all events (single lock acquisition)
+			if err := partitionInternal.Scheduler.ScheduleBatch(evts); err != nil {
+				// Events are in WAL, just log scheduling error
+				slog.Warn("batch schedule partially failed", "partition", pid, "count", len(evts), "error", err)
 			}
-			if event.Offset > lastOffset {
-				lastOffset = event.Offset
+
+			// Update stats
+			localPublished := int32(len(evts))
+			atomic.AddInt32(&publishedCount, localPublished)
+
+			mu.Lock()
+			for _, event := range evts {
+				if firstOffset == -1 || event.Offset < firstOffset {
+					firstOffset = event.Offset
+				}
+				if event.Offset > lastOffset {
+					lastOffset = event.Offset
+				}
 			}
-		}
+			mu.Unlock()
+		}(partitionID, events)
 	}
+
+	wg.Wait()
 
 	// Log errors periodically to help debug
 	if errorCount > 0 && errorCount%1000 == 0 {

@@ -92,6 +92,30 @@ func (p *PebbleStore) StoreOnly(messageID string, offset int64) error {
 	return nil
 }
 
+// StoreBatch stores multiple message IDs in a single PebbleDB batch commit.
+// indices specifies which elements from messageIDs/offsets to store.
+// This is much faster than individual StoreOnly calls because it uses a single
+// write batch with one commit instead of N individual Set calls.
+func (p *PebbleStore) StoreBatch(messageIDs []string, offsets []int64, indices []int) error {
+	batch := p.db.NewBatch()
+	defer batch.Close()
+
+	expirationTS := time.Now().UnixMilli() + int64(p.ttlHours)*60*60*1000
+
+	for _, idx := range indices {
+		key := []byte(messageIDs[idx])
+		value := p.buildValue(offsets[idx], expirationTS)
+		if err := batch.Set(key, value, nil); err != nil {
+			return fmt.Errorf("batch set key: %w", err)
+		}
+	}
+
+	if err := batch.Commit(pebble.NoSync); err != nil {
+		return fmt.Errorf("batch commit: %w", err)
+	}
+	return nil
+}
+
 // GetOffset returns stored offset for message ID
 func (p *PebbleStore) GetOffset(messageID string) (int64, bool, error) {
 	key := []byte(messageID)

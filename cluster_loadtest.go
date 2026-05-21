@@ -11,6 +11,7 @@ import (
 	"math/rand"
 	"net/http"
 	"sort"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -23,13 +24,17 @@ import (
 	"cronos_db/pkg/types"
 )
 
+const connsPerNode = 4 // Multiple gRPC connections per node for better throughput
+
 // ClusterNode represents a node in the cluster
 type ClusterNode struct {
 	ID       string
 	GRPCAddr string
 	HTTPAddr string
 	conn     *grpc.ClientConn
-	client   types.EventServiceClient
+	conns    []*grpc.ClientConn          // Multiple connections for throughput
+	clients  []types.EventServiceClient  // Round-robin clients
+	client   types.EventServiceClient    // Legacy single client (for probing)
 }
 
 // ClusterLoadTestConfig holds cluster load test configuration
@@ -49,24 +54,78 @@ type ClusterLoadTestConfig struct {
 	PartitionCount int           // Total cluster partitions (for route discovery)
 }
 
-// ClusterMetrics holds cluster-wide metrics
+// ClusterMetrics holds cluster-wide metrics with sharded collection to reduce lock contention
 type ClusterMetrics struct {
 	mu sync.Mutex
 
 	// Per-node metrics
-	NodePublished map[string]int64
-	NodeErrors    map[string]int64
-	NodeLatencies map[string][]time.Duration
+	NodePublished map[string]*atomic.Int64
+	NodeErrors    map[string]*atomic.Int64
 
-	// Aggregate metrics
-	TotalPublished int64
-	TotalErrors    int64
-	AllLatencies   []time.Duration
+	// Sharded latency collection - each publisher writes to its own shard
+	latencyShards []*latencyShard
+
+	// Aggregate metrics (atomic for lock-free updates)
+	TotalPublished atomic.Int64
+	TotalErrors    atomic.Int64
 	StartTime      time.Time
 	EndTime        time.Time
 
 	// Partition distribution
 	PartitionCounts map[int32]int64
+}
+
+// latencyShard holds latencies for a subset of publishers to avoid contention
+type latencyShard struct {
+	mu        sync.Mutex
+	nodeID    string
+	latencies []time.Duration
+}
+
+func newClusterMetrics(nodes []ClusterNode, numShards int) *ClusterMetrics {
+	m := &ClusterMetrics{
+		NodePublished:   make(map[string]*atomic.Int64),
+		NodeErrors:      make(map[string]*atomic.Int64),
+		latencyShards:   make([]*latencyShard, numShards),
+		PartitionCounts: make(map[int32]int64),
+		StartTime:       time.Now(),
+	}
+	for _, n := range nodes {
+		m.NodePublished[n.ID] = &atomic.Int64{}
+		m.NodeErrors[n.ID] = &atomic.Int64{}
+	}
+	for i := range m.latencyShards {
+		m.latencyShards[i] = &latencyShard{
+			latencies: make([]time.Duration, 0, 1024),
+		}
+	}
+	return m
+}
+
+func (m *ClusterMetrics) recordLatency(shardID int, nodeID string, latency time.Duration, count int) {
+	shard := m.latencyShards[shardID%len(m.latencyShards)]
+	shard.mu.Lock()
+	shard.nodeID = nodeID
+	for i := 0; i < count; i++ {
+		shard.latencies = append(shard.latencies, latency)
+	}
+	shard.mu.Unlock()
+}
+
+// collectLatencies gathers all latencies from shards (call after test completes)
+func (m *ClusterMetrics) collectLatencies() (map[string][]time.Duration, []time.Duration) {
+	nodeLatencies := make(map[string][]time.Duration)
+	var allLatencies []time.Duration
+
+	for _, shard := range m.latencyShards {
+		shard.mu.Lock()
+		if len(shard.latencies) > 0 {
+			allLatencies = append(allLatencies, shard.latencies...)
+			nodeLatencies[shard.nodeID] = append(nodeLatencies[shard.nodeID], shard.latencies...)
+		}
+		shard.mu.Unlock()
+	}
+	return nodeLatencies, allLatencies
 }
 
 func main() {
@@ -168,30 +227,41 @@ func checkClusterHealth(nodes []ClusterNode) error {
 
 // runClusterLoadTest runs the distributed load test
 func runClusterLoadTest(config ClusterLoadTestConfig) *ClusterMetrics {
-	metrics := &ClusterMetrics{
-		NodePublished:   make(map[string]int64),
-		NodeErrors:      make(map[string]int64),
-		NodeLatencies:   make(map[string][]time.Duration),
-		PartitionCounts: make(map[int32]int64),
-		StartTime:       time.Now(),
-	}
+	totalPublishers := config.NumPublishers * len(config.Nodes)
+	metrics := newClusterMetrics(config.Nodes, totalPublishers)
 
-	// Connect to all nodes
+	// Connect to all nodes with multiple connections per node
 	for i := range config.Nodes {
-		conn, err := grpc.Dial(config.Nodes[i].GRPCAddr,
-			grpc.WithTransportCredentials(insecure.NewCredentials()),
-			grpc.WithBlock(),
-			grpc.WithTimeout(5*time.Second))
-		if err != nil {
-			log.Fatalf("Failed to connect to %s: %v", config.Nodes[i].ID, err)
+		// Create multiple connections for throughput
+		config.Nodes[i].conns = make([]*grpc.ClientConn, connsPerNode)
+		config.Nodes[i].clients = make([]types.EventServiceClient, connsPerNode)
+
+		for c := 0; c < connsPerNode; c++ {
+			conn, err := grpc.Dial(config.Nodes[i].GRPCAddr,
+				grpc.WithTransportCredentials(insecure.NewCredentials()),
+				grpc.WithInitialWindowSize(16*1024*1024),     // 16MB stream window
+				grpc.WithInitialConnWindowSize(32*1024*1024), // 32MB connection window
+				grpc.WithWriteBufferSize(4*1024*1024),        // 4MB write buffer
+				grpc.WithReadBufferSize(4*1024*1024),         // 4MB read buffer
+				grpc.WithDefaultCallOptions(
+					grpc.MaxCallRecvMsgSize(16*1024*1024),
+					grpc.MaxCallSendMsgSize(16*1024*1024),
+				),
+			)
+			if err != nil {
+				log.Fatalf("Failed to connect to %s (conn %d): %v", config.Nodes[i].ID, c, err)
+			}
+			config.Nodes[i].conns[c] = conn
+			config.Nodes[i].clients[c] = types.NewEventServiceClient(conn)
+			defer conn.Close()
 		}
-		config.Nodes[i].conn = conn
-		config.Nodes[i].client = types.NewEventServiceClient(conn)
-		defer conn.Close()
+
+		// Keep legacy single client for probing
+		config.Nodes[i].conn = config.Nodes[i].conns[0]
+		config.Nodes[i].client = config.Nodes[i].clients[0]
 	}
 
 	// Progress tracking
-	var totalPublished int64
 	totalEvents := int64(config.NumPublishers * config.EventsPerPub * len(config.Nodes))
 
 	leadersByPartition, err := discoverPartitionLeaders(config)
@@ -208,7 +278,7 @@ func runClusterLoadTest(config ClusterLoadTestConfig) *ClusterMetrics {
 		for {
 			select {
 			case <-ticker.C:
-				published := atomic.LoadInt64(&totalPublished)
+				published := metrics.TotalPublished.Load()
 				elapsed := time.Since(metrics.StartTime)
 				rate := float64(published) / elapsed.Seconds()
 				pct := float64(published) / float64(totalEvents) * 100
@@ -225,20 +295,20 @@ func runClusterLoadTest(config ClusterLoadTestConfig) *ClusterMetrics {
 
 	if config.BatchMode {
 		// Batch mode: use PublishBatch API
-		for pubIdx := 0; pubIdx < config.NumPublishers*len(config.Nodes); pubIdx++ {
+		for pubIdx := 0; pubIdx < totalPublishers; pubIdx++ {
 			wg.Add(1)
 			go func(publisherID int) {
 				defer wg.Done()
-				runBatchPublisher(config, metrics, publisherID, &totalPublished, leadersByPartition)
+				runBatchPublisher(config, metrics, publisherID, leadersByPartition)
 			}(pubIdx)
 		}
 	} else if config.RoundRobin {
 		// Round-robin: each publisher sends to all nodes in rotation
-		for pubIdx := 0; pubIdx < config.NumPublishers*len(config.Nodes); pubIdx++ {
+		for pubIdx := 0; pubIdx < totalPublishers; pubIdx++ {
 			wg.Add(1)
 			go func(publisherID int) {
 				defer wg.Done()
-				runRoundRobinPublisher(config, metrics, publisherID, &totalPublished, leadersByPartition)
+				runRoundRobinPublisher(config, metrics, publisherID, leadersByPartition)
 			}(pubIdx)
 		}
 	} else {
@@ -248,7 +318,7 @@ func runClusterLoadTest(config ClusterLoadTestConfig) *ClusterMetrics {
 				wg.Add(1)
 				go func(n ClusterNode, pid int) {
 					defer wg.Done()
-					runNodePublisher(config, metrics, n, pid, &totalPublished)
+					runNodePublisher(config, metrics, n, pid)
 				}(node, pubIdx)
 			}
 		}
@@ -355,12 +425,15 @@ func logPartitionLeaders(config ClusterLoadTestConfig, leadersByPartition map[in
 }
 
 // runBatchPublisher sends events in batches for high throughput
-func runBatchPublisher(config ClusterLoadTestConfig, metrics *ClusterMetrics, publisherID int, totalPublished *int64, leadersByPartition map[int32]int) {
+func runBatchPublisher(config ClusterLoadTestConfig, metrics *ClusterMetrics, publisherID int, leadersByPartition map[int32]int) {
 	payload := make([]byte, config.PayloadSize)
 	rand.Read(payload)
 
 	batchSize := config.BatchSize
 	totalEvents := config.EventsPerPub
+
+	// Pre-compute publisher ID string to avoid repeated fmt.Sprintf
+	pubIDStr := strconv.Itoa(publisherID)
 
 	for batchStart := 0; batchStart < totalEvents; batchStart += batchSize {
 		// Build batch
@@ -371,6 +444,8 @@ func runBatchPublisher(config ClusterLoadTestConfig, metrics *ClusterMetrics, pu
 
 		eventsByNode := make(map[int][]*types.Event)
 		scheduleTime := time.Now().Add(config.ScheduleDelay)
+		scheduleMs := scheduleTime.UnixMilli()
+		nowNano := time.Now().UnixNano()
 
 		for i := batchStart; i < batchEnd; i++ {
 			eventKey := fmt.Sprintf("pub-%d-event-%d", publisherID, i)
@@ -381,13 +456,13 @@ func runBatchPublisher(config ClusterLoadTestConfig, metrics *ClusterMetrics, pu
 			}
 
 			event := &types.Event{
-				MessageId:  fmt.Sprintf("batch-%d-%d-%d", publisherID, i, time.Now().UnixNano()),
-				ScheduleTs: scheduleTime.UnixMilli(),
+				MessageId:  fmt.Sprintf("batch-%d-%d-%d", publisherID, i, nowNano),
+				ScheduleTs: scheduleMs,
 				Payload:    payload,
 				Topic:      config.Topic,
 				Meta: map[string]string{
-					"publisher":     fmt.Sprintf("%d", publisherID),
-					"sequence":      fmt.Sprintf("%d", i),
+					"publisher":     pubIDStr,
+					"sequence":      strconv.Itoa(i),
 					"partition_key": eventKey,
 				},
 			}
@@ -395,47 +470,55 @@ func runBatchPublisher(config ClusterLoadTestConfig, metrics *ClusterMetrics, pu
 		}
 
 		eventsInBatch := int64(batchEnd - batchStart)
+
+		// Send to different nodes IN PARALLEL
+		var batchWg sync.WaitGroup
 		for nodeIdx, events := range eventsByNode {
-			node := config.Nodes[nodeIdx]
-			req := &types.PublishBatchRequest{Events: events}
+			batchWg.Add(1)
+			go func(nIdx int, evts []*types.Event) {
+				defer batchWg.Done()
+				node := config.Nodes[nIdx]
+				// Round-robin across connections for this node
+				client := node.clients[publisherID%connsPerNode]
+				req := &types.PublishBatchRequest{Events: evts, AllowDuplicate: true}
 
-			start := time.Now()
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			resp, err := node.client.PublishBatch(ctx, req)
-			cancel()
-			latency := time.Since(start)
+				start := time.Now()
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				resp, err := client.PublishBatch(ctx, req)
+				cancel()
+				latency := time.Since(start)
 
-			metrics.mu.Lock()
-			if err != nil {
-				n := int64(len(events))
-				metrics.NodeErrors[node.ID] += n
-				metrics.TotalErrors += n
-				log.Printf("gRPC ERROR %s: %v (errors so far: %d)", node.ID, err, metrics.NodeErrors[node.ID])
-			} else if resp != nil {
-				metrics.NodePublished[node.ID] += int64(resp.PublishedCount)
-				metrics.TotalPublished += int64(resp.PublishedCount)
-				metrics.TotalErrors += int64(resp.ErrorCount)
-				if resp.ErrorCount > 0 {
-					log.Printf("Handler ERROR %s: resp.ErrorCount=%d (dup=%d, published=%d, reqSize=%d, err=%q)",
-						node.ID, resp.ErrorCount, resp.DuplicateCount, resp.PublishedCount, len(events), resp.GetError())
+				if err != nil {
+					n := int64(len(evts))
+					metrics.NodeErrors[node.ID].Add(n)
+					metrics.TotalErrors.Add(n)
+					log.Printf("gRPC ERROR %s: %v (errors so far: %d)", node.ID, err, metrics.NodeErrors[node.ID].Load())
+				} else if resp != nil {
+					metrics.NodePublished[node.ID].Add(int64(resp.PublishedCount))
+					metrics.TotalPublished.Add(int64(resp.PublishedCount))
+					if resp.ErrorCount > 0 {
+						metrics.TotalErrors.Add(int64(resp.ErrorCount))
+						log.Printf("Handler ERROR %s: resp.ErrorCount=%d (dup=%d, published=%d, reqSize=%d, err=%q)",
+							node.ID, resp.ErrorCount, resp.DuplicateCount, resp.PublishedCount, len(evts), resp.GetError())
+					}
+					// Record per-event latency to shard (no global lock)
+					perEventLatency := latency / time.Duration(len(evts))
+					metrics.recordLatency(publisherID, node.ID, perEventLatency, len(evts))
 				}
-				perEventLatency := latency / time.Duration(len(events))
-				for range events {
-					metrics.NodeLatencies[node.ID] = append(metrics.NodeLatencies[node.ID], perEventLatency)
-					metrics.AllLatencies = append(metrics.AllLatencies, perEventLatency)
-				}
-			}
-			metrics.mu.Unlock()
+			}(nodeIdx, events)
 		}
+		batchWg.Wait()
 
-		atomic.AddInt64(totalPublished, eventsInBatch)
+		_ = eventsInBatch // Progress tracked via TotalPublished
 	}
 }
 
 // runRoundRobinPublisher sends events across all nodes in rotation
-func runRoundRobinPublisher(config ClusterLoadTestConfig, metrics *ClusterMetrics, publisherID int, totalPublished *int64, leadersByPartition map[int32]int) {
+func runRoundRobinPublisher(config ClusterLoadTestConfig, metrics *ClusterMetrics, publisherID int, leadersByPartition map[int32]int) {
 	payload := make([]byte, config.PayloadSize)
 	rand.Read(payload)
+
+	pubIDStr := strconv.Itoa(publisherID)
 
 	for i := 0; i < config.EventsPerPub; i++ {
 		// Create event with unique key for partition distribution
@@ -446,6 +529,7 @@ func runRoundRobinPublisher(config ClusterLoadTestConfig, metrics *ClusterMetric
 			nodeIdx = (publisherID + i) % len(config.Nodes)
 		}
 		node := config.Nodes[nodeIdx]
+		client := node.clients[publisherID%connsPerNode]
 		scheduleTime := time.Now().Add(config.ScheduleDelay)
 
 		event := &types.Event{
@@ -454,8 +538,8 @@ func runRoundRobinPublisher(config ClusterLoadTestConfig, metrics *ClusterMetric
 			Payload:    payload,
 			Topic:      config.Topic,
 			Meta: map[string]string{
-				"publisher":     fmt.Sprintf("%d", publisherID),
-				"sequence":      fmt.Sprintf("%d", i),
+				"publisher":     pubIDStr,
+				"sequence":      strconv.Itoa(i),
 				"target_node":   node.ID,
 				"partition_key": eventKey,
 			},
@@ -468,33 +552,28 @@ func runRoundRobinPublisher(config ClusterLoadTestConfig, metrics *ClusterMetric
 		// Publish with timing
 		start := time.Now()
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		resp, err := node.client.Publish(ctx, req)
+		_, err := client.Publish(ctx, req)
 		cancel()
 		latency := time.Since(start)
 
-		metrics.mu.Lock()
 		if err != nil {
-			metrics.NodeErrors[node.ID]++
-			metrics.TotalErrors++
+			metrics.NodeErrors[node.ID].Add(1)
+			metrics.TotalErrors.Add(1)
 		} else {
-			metrics.NodePublished[node.ID]++
-			metrics.TotalPublished++
-			metrics.NodeLatencies[node.ID] = append(metrics.NodeLatencies[node.ID], latency)
-			metrics.AllLatencies = append(metrics.AllLatencies, latency)
-			if resp != nil {
-				metrics.PartitionCounts[resp.PartitionId]++
-			}
+			metrics.NodePublished[node.ID].Add(1)
+			metrics.TotalPublished.Add(1)
+			metrics.recordLatency(publisherID, node.ID, latency, 1)
 		}
-		metrics.mu.Unlock()
-
-		atomic.AddInt64(totalPublished, 1)
 	}
 }
 
 // runNodePublisher sends all events to a specific node
-func runNodePublisher(config ClusterLoadTestConfig, metrics *ClusterMetrics, node ClusterNode, publisherID int, totalPublished *int64) {
+func runNodePublisher(config ClusterLoadTestConfig, metrics *ClusterMetrics, node ClusterNode, publisherID int) {
 	payload := make([]byte, config.PayloadSize)
 	rand.Read(payload)
+
+	pubIDStr := strconv.Itoa(publisherID)
+	client := node.clients[publisherID%connsPerNode]
 
 	for i := 0; i < config.EventsPerPub; i++ {
 		eventKey := fmt.Sprintf("%s-pub-%d-event-%d", node.ID, publisherID, i)
@@ -506,8 +585,8 @@ func runNodePublisher(config ClusterLoadTestConfig, metrics *ClusterMetrics, nod
 			Payload:    payload,
 			Topic:      config.Topic,
 			Meta: map[string]string{
-				"publisher":     fmt.Sprintf("%d", publisherID),
-				"sequence":      fmt.Sprintf("%d", i),
+				"publisher":     pubIDStr,
+				"sequence":      strconv.Itoa(i),
 				"target_node":   node.ID,
 				"partition_key": eventKey,
 			},
@@ -519,26 +598,18 @@ func runNodePublisher(config ClusterLoadTestConfig, metrics *ClusterMetrics, nod
 
 		start := time.Now()
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		resp, err := node.client.Publish(ctx, req)
+		_, err := client.Publish(ctx, req)
 		cancel()
 		latency := time.Since(start)
 
-		metrics.mu.Lock()
 		if err != nil {
-			metrics.NodeErrors[node.ID]++
-			metrics.TotalErrors++
+			metrics.NodeErrors[node.ID].Add(1)
+			metrics.TotalErrors.Add(1)
 		} else {
-			metrics.NodePublished[node.ID]++
-			metrics.TotalPublished++
-			metrics.NodeLatencies[node.ID] = append(metrics.NodeLatencies[node.ID], latency)
-			metrics.AllLatencies = append(metrics.AllLatencies, latency)
-			if resp != nil {
-				metrics.PartitionCounts[resp.PartitionId]++
-			}
+			metrics.NodePublished[node.ID].Add(1)
+			metrics.TotalPublished.Add(1)
+			metrics.recordLatency(publisherID, node.ID, latency, 1)
 		}
-		metrics.mu.Unlock()
-
-		atomic.AddInt64(totalPublished, 1)
 	}
 }
 
@@ -547,18 +618,23 @@ func printClusterResults(config ClusterLoadTestConfig, metrics *ClusterMetrics) 
 	duration := metrics.EndTime.Sub(metrics.StartTime)
 	totalEvents := config.NumPublishers * config.EventsPerPub * len(config.Nodes)
 
+	// Collect latencies from shards
+	nodeLatencies, allLatencies := metrics.collectLatencies()
+
 	fmt.Println()
 	fmt.Println("╔═══════════════════════════════════════════════════════════════╗")
 	fmt.Println("║                    CLUSTER LOAD TEST RESULTS                  ║")
 	fmt.Println("╠═══════════════════════════════════════════════════════════════╣")
 
 	// Overall stats
-	successRate := float64(metrics.TotalPublished) / float64(totalEvents) * 100
-	throughput := float64(metrics.TotalPublished) / duration.Seconds()
+	totalPublished := metrics.TotalPublished.Load()
+	totalErrors := metrics.TotalErrors.Load()
+	successRate := float64(totalPublished) / float64(totalEvents) * 100
+	throughput := float64(totalPublished) / duration.Seconds()
 
 	fmt.Printf("║ Duration:           %-42v ║\n", duration.Round(time.Millisecond))
-	fmt.Printf("║ Total Published:    %-42d ║\n", metrics.TotalPublished)
-	fmt.Printf("║ Total Errors:       %-42d ║\n", metrics.TotalErrors)
+	fmt.Printf("║ Total Published:    %-42d ║\n", totalPublished)
+	fmt.Printf("║ Total Errors:       %-42d ║\n", totalErrors)
 	fmt.Printf("║ Success Rate:       %-42.2f%% ║\n", successRate)
 	fmt.Printf("║ Throughput:         %-42.0f events/sec ║\n", throughput)
 
@@ -568,9 +644,9 @@ func printClusterResults(config ClusterLoadTestConfig, metrics *ClusterMetrics) 
 	fmt.Println("╠═══════════════════════════════════════════════════════════════╣")
 
 	for _, node := range config.Nodes {
-		published := metrics.NodePublished[node.ID]
-		errors := metrics.NodeErrors[node.ID]
-		latencies := metrics.NodeLatencies[node.ID]
+		published := metrics.NodePublished[node.ID].Load()
+		errors := metrics.NodeErrors[node.ID].Load()
+		latencies := nodeLatencies[node.ID]
 		nodeRate := float64(published) / duration.Seconds()
 
 		fmt.Printf("║ %s:                                                          ║\n", node.ID)
@@ -592,7 +668,7 @@ func printClusterResults(config ClusterLoadTestConfig, metrics *ClusterMetrics) 
 	fmt.Println("╠═══════════════════════════════════════════════════════════════╣")
 
 	for partID, count := range metrics.PartitionCounts {
-		pct := float64(count) / float64(metrics.TotalPublished) * 100
+		pct := float64(count) / float64(totalPublished) * 100
 		fmt.Printf("║ Partition %-3d:      %-30d (%.1f%%) ║\n", partID, count, pct)
 	}
 
@@ -601,9 +677,9 @@ func printClusterResults(config ClusterLoadTestConfig, metrics *ClusterMetrics) 
 	fmt.Println("║                    OVERALL LATENCY STATS                      ║")
 	fmt.Println("╠═══════════════════════════════════════════════════════════════╣")
 
-	if len(metrics.AllLatencies) > 0 {
-		p50, p95, p99 := calculatePercentiles(metrics.AllLatencies)
-		min, max, avg := calculateMinMaxAvg(metrics.AllLatencies)
+	if len(allLatencies) > 0 {
+		p50, p95, p99 := calculatePercentiles(allLatencies)
+		min, max, avg := calculateMinMaxAvg(allLatencies)
 
 		fmt.Printf("║ Min:                %-42v ║\n", min.Round(time.Microsecond))
 		fmt.Printf("║ Max:                %-42v ║\n", max.Round(time.Microsecond))
