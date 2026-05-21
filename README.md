@@ -15,12 +15,14 @@ It combines the durability of a write-ahead log, the precision of a hierarchical
 
 | Metric | Value |
 |--------|-------|
-| **Cluster Throughput** | **550K+ events/sec** |
-| **Publish Latency P99** | **273µs** |
+| **Cluster Throughput** | **1,010,933 events/sec** |
+| **Publish Latency P50** | **105µs** |
+| **Publish Latency P99** | **468µs** |
+| **Success Rate** | **100%** (zero errors, 96M events) |
 | **Timer Precision** | 100ms tick (configurable) |
 | **Dedup False Positive Rate** | <1% (Rust bloom filter) |
-| **Max Partitions** | 16+ per cluster |
-| **Replication** | Async leader→follower |
+
+> Benchmarked on a **single machine** running all 3 cluster nodes simultaneously.
 
 ---
 
@@ -154,7 +156,10 @@ make health
 ### Load Test
 
 ```bash
-# Batch mode (recommended) — ~550K events/sec
+# Batch mode — ~1M events/sec (3 nodes on same machine)
+make loadtest-batch PUBLISHERS=32 EVENTS=1000000 BATCH_SIZE=4000
+
+# Standard benchmark
 make loadtest-batch PUBLISHERS=20 EVENTS=50000 BATCH_SIZE=1000
 
 # Max throughput profile
@@ -200,24 +205,29 @@ grpcurl -plaintext \
 
 ## Performance
 
-### Benchmarks (3-Node Cluster)
+### Benchmarks (3-Node Cluster on Single Machine)
 
 | Metric | Value | Notes |
 |--------|-------|-------|
-| **Cluster Throughput** | **550,907 events/sec** | Batch mode, 1000/batch, 60 publishers |
-| **Per-Node Throughput** | **183,636 events/sec** | Distributed round-robin |
-| **Publish Latency P50** | **84µs** | Batch publish |
-| **Publish Latency P95** | **218µs** | Batch publish |
-| **Publish Latency P99** | **273µs** | Batch publish |
-| **Success Rate** | **100%** | Zero errors under sustained load |
+| **Cluster Throughput** | **1,010,933 events/sec** | 96M events, batch 4000, 32 publishers/node |
+| **Per-Node Throughput** | **336,978 events/sec** | 3 nodes on same machine |
+| **Publish Latency P50** | **105µs** | Batch publish |
+| **Publish Latency P95** | **337µs** | Batch publish |
+| **Publish Latency P99** | **468µs** | Batch publish |
+| **Latency Min** | **5µs** | Best case |
+| **Latency Max** | **900µs** | Worst case |
+| **Success Rate** | **100.00%** | Zero errors across 96 million events |
+| **Duration** | **1m 35s** | For 96M events total |
 
-### Single Node
+> All 3 nodes running on the **same physical machine** — sharing CPU, memory, and disk I/O.
 
-| Metric | Value |
-|--------|-------|
-| Throughput (batch) | ~180K events/sec |
-| Throughput (single) | ~10K events/sec |
-| Latency P99 (batch) | <300µs |
+### Previous Benchmark (smaller batch)
+
+| Metric | Value | Notes |
+|--------|-------|-------|
+| Cluster Throughput | 550K events/sec | Batch 1000, 20 publishers/node |
+| Single Node Throughput | ~180K events/sec | Batch mode |
+| Single Event Throughput | ~10K events/sec | One event per RPC |
 
 ### What Makes It Fast
 
@@ -374,7 +384,7 @@ See [proto/events.proto](proto/events.proto) for the complete specification.
 - [x] Partition leader election on failure
 
 ### Performance ✅ Optimized
-- [x] 550K+ events/sec (3-node cluster, batch mode)
+- [x] 1M+ events/sec (3-node cluster, batch mode, single machine)
 - [x] Lock-free Rust bloom filter via CGO FFI
 - [x] sync.Pool for timers, record buffers, transport buffers
 - [x] Batch WAL writes (single buffered write per batch)

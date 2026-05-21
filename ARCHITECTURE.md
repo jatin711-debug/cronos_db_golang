@@ -39,41 +39,58 @@ CronosDB is a **time-aware event store**. Events are published with a future `sc
 ### Core Subsystems
 
 ```mermaid
-graph LR
-    subgraph Storage
-        A1[WAL Segments]
-        A2[Sparse Index]
-        A3[Memory-Mapped Reads]
-        A4[CRC32 Integrity]
+graph TB
+    subgraph Clients
+        C1[Producer Client]
+        C2[Consumer Client]
+        C3[Replay Client]
     end
 
-    subgraph Scheduling
-        B1[Timing Wheel]
-        B2[Hierarchical Overflow]
-        B3[Batch Scheduling]
-        B4[Checkpoint Recovery]
+    subgraph "API Layer (gRPC :9000)"
+        GW[gRPC Server]
+        RL[Rate Limiter<br/>Token Bucket per IP]
+        MT[Metrics Interceptor<br/>Prometheus]
+        TR[Tracing Interceptor<br/>OpenTelemetry]
     end
 
-    subgraph Delivery
-        C1[Backpressure Credits]
-        C2[At-Least-Once]
-        C3[Dead Letter Queue]
-        C4[Retry with Backoff]
+    subgraph "Routing Layer"
+        PM[Partition Manager]
+        HR[Hash Ring Router]
     end
 
-    subgraph Clustering
-        D1[Raft Consensus]
-        D2[Gossip Membership]
-        D3[Consistent Hashing]
-        D4[Leader-Follower Replication]
+    subgraph "Partition N (per-partition isolation)"
+        WAL[WAL Storage<br/>Segmented + Indexed]
+        SCH[Scheduler<br/>Timing Wheel]
+        DD[Dedup Manager<br/>Bloom + PebbleDB]
+        DSP[Dispatcher<br/>32 Shards]
+        WRK[Delivery Worker<br/>Batch Processing]
+        CG[Consumer Groups<br/>Offset Store]
+        DLQ[Dead Letter Queue]
     end
 
-    subgraph Deduplication
-        E1[Rust Bloom Filter]
-        E2[PebbleDB Fallback]
-        E3[TTL Expiration]
-        E4[Lock-Free Atomics]
+    subgraph "Cluster Layer"
+        RAFT[Raft Consensus<br/>HashiCorp Raft]
+        GOSSIP[Gossip Protocol<br/>TCP Heartbeats]
+        REPL[Replication<br/>Binary Protocol]
     end
+
+    C1 -->|Publish/PublishBatch| GW
+    C2 -->|Subscribe stream| GW
+    C3 -->|Replay stream| GW
+    GW --> RL --> MT --> TR
+    TR --> PM
+    PM --> HR
+    HR -->|Route to partition| WAL
+    WAL --> SCH
+    SCH -->|Ready events| WRK
+    WRK --> DSP
+    DSP -->|gRPC stream| C2
+    DSP -->|Failed after retries| DLQ
+    DD -.->|Dedup check| WAL
+    CG -.->|Offset tracking| DSP
+    WAL -.->|Async replication| REPL
+    PM -.->|Metadata| RAFT
+    GOSSIP -.->|Node discovery| HR
 ```
 
 ---
@@ -1052,3 +1069,190 @@ flowchart TD
     A1 --> A2 --> A3 --> A4
 ```
 
+
+### Startup and Bootstrap Sequence
+
+```mermaid
+flowchart TD
+    A[main.go starts] --> B[Load config from flags + env]
+    B --> C[Create shared PebbleDB cache 256MB]
+    C --> D{Cluster enabled?}
+
+    D -->|Yes| E[Create Raft node]
+    E --> F{Seed nodes provided?}
+    F -->|No| G[Bootstrap Raft as single leader]
+    F -->|Yes| H[Join existing cluster]
+    G --> I[Start Gossip membership]
+    H --> I
+    I --> J[Create Router with hash ring]
+    J --> K[Create partition 0 only - others lazy-created]
+
+    D -->|No| L[Create all partitions locally]
+
+    K --> M[Start partitions]
+    L --> M
+    M --> N[Per partition: replay WAL + start scheduler + start worker + start delivery + start compaction]
+    N --> O[Create gRPC server with interceptors]
+    O --> P[Register EventService + ConsumerGroupService]
+    P --> Q[Start gRPC on :9000]
+    Q --> R[Start HTTP health on :8080]
+    R --> S[Wait for SIGINT or SIGTERM]
+```
+
+### Graceful Shutdown Sequence
+
+```mermaid
+flowchart TD
+    A[SIGINT or SIGTERM received] --> B[Cancel context]
+    B --> C[gRPC GracefulStop with 10s timeout]
+    C --> D[HTTP server Shutdown]
+    D --> E[StopAllPartitions in parallel]
+    E --> F[Per partition: close delivery + stop scheduler + drain dispatcher + flush WAL]
+    F --> G[Stop cluster manager]
+    G --> H[Raft shutdown + Gossip stop]
+    H --> I[Exit]
+```
+
+---
+
+## Performance Characteristics
+
+### Benchmarks
+
+| Metric | Single Node | 3-Node Cluster | Notes |
+|--------|-------------|----------------|-------|
+| **Throughput (batch)** | ~180K ev/sec | **1,010,933 ev/sec** | Batch 4000, 32 pub/node, single machine |
+| **Throughput (single)** | ~10K ev/sec | ~30K ev/sec | One event per RPC |
+| **Latency P50** | ~60us | **105us** | Batch publish |
+| **Latency P95** | ~180us | **337us** | Batch publish |
+| **Latency P99** | ~250us | **468us** | Batch publish |
+| **Latency Min** | - | **5us** | Best case |
+| **Latency Max** | - | **900us** | Worst case under sustained load |
+| **Success Rate** | 100% | **100%** | Zero errors across 96M events |
+| **Total Events** | - | **96,000,000** | Completed in 1 min 35 sec |
+
+> All 3 nodes running on the **same physical machine** sharing CPU, memory, and disk I/O.
+
+### Optimization Techniques
+
+| Category | Technique | Impact |
+|----------|-----------|--------|
+| Zero-Allocation | sync.Pool for Timer objects | Near-zero GC on hot path |
+| Zero-Allocation | sync.Pool for record buffers | Eliminates per-write alloc |
+| Zero-Allocation | unsafe.StringData for Rust FFI | Zero-copy string pass |
+| Zero-Allocation | strconv.AppendInt for delivery IDs | No fmt.Sprintf |
+| Lock Reduction | Bloom filter: atomic CAS lock-free | No mutex on dedup check |
+| Lock Reduction | Dispatcher: 32 shards | Contention divided by 32 |
+| Lock Reduction | WAL: prepare records outside lock | Serialization is lock-free |
+| Lock Reduction | Scheduler: batch AddTimers single lock | One lock per N events |
+| Lock Reduction | Index: O_APPEND eliminates Seek | No seek syscall per write |
+| I/O | 4MB segment write buffer | Amortized syscalls |
+| I/O | Background periodic flush | Not per-write fsync |
+| I/O | PebbleDB: NoSync + disabled internal WAL | Our WAL is truth |
+| I/O | Pre-created next segment at 90% capacity | Zero-latency rotation |
+| Algorithmic | Timing wheel: O(1) add/remove/tick | Constant time scheduling |
+| Algorithmic | Sparse index: O(log N) seeks | Binary search |
+| Algorithmic | FNV-1a partition routing | ~5ns vs ~400ns SHA-256 |
+| Algorithmic | Bloom filter: O(k) checks, k=7 | Sub-microsecond dedup |
+
+---
+
+## Configuration Reference
+
+| Category | Flag | Default | Description |
+|----------|------|---------|-------------|
+| Node | `-node-id` | required | Unique node identifier |
+| Node | `-data-dir` | `./data` | Data directory |
+| Node | `-grpc-addr` | `:9000` | gRPC listen address |
+| Node | `-http-addr` | `:8080` | HTTP health + metrics |
+| Node | `-partition-count` | `1` | Number of partitions |
+| WAL | `-segment-size` | `512MB` | Segment size before rotation |
+| WAL | `-index-interval` | `1000` | Sparse index interval |
+| WAL | `-fsync-mode` | `periodic` | every_event, batch, periodic |
+| WAL | `-flush-interval` | `1000` | Background flush interval ms |
+| Scheduler | `-tick-ms` | `100` | Timing wheel tick duration |
+| Scheduler | `-wheel-size` | `60` | Slots per timing wheel level |
+| Delivery | `-ack-timeout` | `30s` | Delivery ack timeout |
+| Delivery | `-max-retries` | `5` | Max delivery retry attempts |
+| Delivery | `-max-credits` | `1000` | Max credits per subscriber |
+| Dedup | `-dedup-ttl` | `168` | Dedup TTL in hours (7 days) |
+| Dedup | `-bloom-capacity` | `100000000` | Bloom filter capacity |
+| Cluster | `-cluster` | `false` | Enable cluster mode |
+| Cluster | `-cluster-seeds` | empty | Comma-separated seed nodes |
+| Cluster | `-virtual-nodes` | `150` | Virtual nodes per physical node |
+| Cluster | `-heartbeat-interval` | `1s` | Gossip heartbeat interval |
+| Cluster | `-failure-timeout` | `5s` | Node failure detection timeout |
+
+---
+
+## Technology Stack
+
+```mermaid
+graph TB
+    subgraph Language
+        GO[Go 1.25+]
+        RUST[Rust - Bloom filter FFI]
+    end
+
+    subgraph Storage
+        PEBBLE[PebbleDB - Dedup + Offsets]
+        BOLT[BoltDB - Raft log]
+        FS[File System - WAL + Index]
+    end
+
+    subgraph Networking
+        GRPC[gRPC - Client API]
+        TCP[Raw TCP - Replication]
+        HTTP[net/http - Health + Metrics]
+    end
+
+    subgraph Consensus
+        HRAFT[HashiCorp Raft]
+        GOSSIP[Custom Gossip TCP]
+    end
+
+    subgraph Observability
+        PROM[Prometheus]
+        OTEL[OpenTelemetry]
+    end
+
+    GO --> PEBBLE
+    GO --> BOLT
+    GO --> FS
+    GO --> GRPC
+    GO --> TCP
+    GO --> HTTP
+    GO --> HRAFT
+    GO --> PROM
+    RUST -->|CGO FFI| GO
+```
+
+---
+
+## Consistency and Guarantees
+
+| Property | Guarantee | Mechanism |
+|----------|-----------|-----------|
+| **Metadata** | Strong consistency | Raft consensus |
+| **WAL writes** | Eventual consistency | Async leader to follower replication |
+| **Delivery** | At-least-once | Ack-based with retry + DLQ |
+| **Ordering** | Per-partition, per-consumer-group | Offset-based sequential delivery |
+| **Dedup** | Best-effort 7-day window | Bloom + PebbleDB with TTL |
+| **Durability** | Configurable | fsync mode: every_event / periodic / batch |
+| **Availability** | Partition-tolerant | Leader election on failure |
+
+---
+
+## Security
+
+| Layer | Mechanism |
+|-------|-----------|
+| **Rate Limiting** | Per-IP token bucket (1M req/s default) |
+| **gRPC** | Max message size 16MB, max 10K concurrent streams |
+| **Keepalive** | 10s interval, 20s timeout, enforcement policy |
+| **Container** | Non-root user, minimal Debian slim image |
+| **Data** | CRC32 integrity checks on every WAL record |
+
+---
+
+*CronosDB — Where time meets data.*
