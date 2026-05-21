@@ -206,11 +206,67 @@ func (s *Segment) AppendEvent(event *types.Event, indexInterval int64) error {
 	return fmt.Errorf("cannot append to closed segment")
 }
 
-// AppendBatch appends a batch of events
+// AppendBatch appends a batch of events (thread-safe)
 func (s *Segment) AppendBatch(events []*types.Event, indexInterval int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	return s.appendBatchInternal(events, indexInterval)
+}
+
+// AppendBatchUnsafe appends a batch of events without acquiring s.mu.
+// The caller MUST guarantee exclusive access (e.g. WAL.mu is held).
+// This eliminates double-locking in the WAL→Segment write path.
+func (s *Segment) AppendBatchUnsafe(events []*types.Event, indexInterval int64) error {
+	return s.appendBatchInternal(events, indexInterval)
+}
+
+// AppendPreparedBatchUnsafe appends a batch of pre-encoded records without acquiring s.mu.
+// The caller MUST guarantee exclusive access (e.g. WAL.mu is held).
+func (s *Segment) AppendPreparedBatchUnsafe(prepared []*PreparedRecord, indexInterval int64) error {
+	if !s.isActive {
+		return fmt.Errorf("cannot append to closed segment")
+	}
+
+	// Track position from current size (buffered writes)
+	filePos := s.sizeBytes
+
+	for _, prep := range prepared {
+		// Write record to buffer
+		if err := s.writeRecord(prep.Buf); err != nil {
+			return fmt.Errorf("write record: %w", err)
+		}
+
+		// Update metadata
+		s.lastOffset = prep.Event.Offset
+		s.lastTS = prep.Event.GetScheduleTs()
+		if s.firstTS == 0 {
+			s.firstTS = prep.Event.GetScheduleTs()
+		}
+		s.nextOffset++
+
+		recordLen := int64(len(prep.Buf))
+		s.sizeBytes = filePos + recordLen
+
+		// Write index entry if needed (using sparse indexing)
+		// Use AddEntryUnsafe to avoid nested locking
+		if s.nextOffset-s.firstOffset >= s.nextIndexOffset {
+			if err := s.index.AddEntryUnsafe(prep.Event.GetScheduleTs(), prep.Event.Offset, filePos); err != nil {
+				return fmt.Errorf("write index: %w", err)
+			}
+			s.nextIndexOffset += indexInterval
+			s.indexEntries++
+		}
+
+		// Advance file pos for next event in batch
+		filePos += recordLen
+	}
+
+	return nil
+}
+
+// appendBatchInternal is the shared batch append implementation
+func (s *Segment) appendBatchInternal(events []*types.Event, indexInterval int64) error {
 	if !s.isActive {
 		return fmt.Errorf("cannot append to closed segment")
 	}
@@ -242,8 +298,9 @@ func (s *Segment) AppendBatch(events []*types.Event, indexInterval int64) error 
 		s.sizeBytes = filePos + recordLen
 
 		// Write index entry if needed (using sparse indexing)
+		// Use AddEntryUnsafe to avoid triple-lock (WAL→Segment→Index)
 		if s.nextOffset-s.firstOffset >= s.nextIndexOffset {
-			if err := s.index.AddEntry(event.GetScheduleTs(), event.Offset, filePos); err != nil {
+			if err := s.index.AddEntryUnsafe(event.GetScheduleTs(), event.Offset, filePos); err != nil {
 				return fmt.Errorf("write index: %w", err)
 			}
 			s.nextIndexOffset += indexInterval
@@ -257,7 +314,7 @@ func (s *Segment) AppendBatch(events []*types.Event, indexInterval int64) error 
 	return nil
 }
 
-// appendEventActive appends to active segment
+// appendEventActive appends to active segment (internal, caller holds lock)
 func (s *Segment) appendEventActive(event *types.Event, indexInterval int64) error {
 	// Get current buffered position (approximation - will be exact after flush)
 	filePos := s.sizeBytes
@@ -283,8 +340,9 @@ func (s *Segment) appendEventActive(event *types.Event, indexInterval int64) err
 	s.sizeBytes = filePos + int64(len(record))
 
 	// Write index entry if needed (using sparse indexing)
+	// Use AddEntryUnsafe to avoid nested locking
 	if s.nextOffset-s.firstOffset >= s.nextIndexOffset {
-		if err := s.index.AddEntry(event.GetScheduleTs(), event.Offset, filePos); err != nil {
+		if err := s.index.AddEntryUnsafe(event.GetScheduleTs(), event.Offset, filePos); err != nil {
 			return fmt.Errorf("write index: %w", err)
 		}
 		s.nextIndexOffset += indexInterval
@@ -292,6 +350,15 @@ func (s *Segment) appendEventActive(event *types.Event, indexInterval int64) err
 	}
 
 	return nil
+}
+
+// AppendEventUnsafe appends an event without acquiring s.mu.
+// The caller MUST guarantee exclusive access.
+func (s *Segment) AppendEventUnsafe(event *types.Event, indexInterval int64) error {
+	if s.isActive {
+		return s.appendEventActive(event, indexInterval)
+	}
+	return fmt.Errorf("cannot append to closed segment")
 }
 
 // buildEventRecord builds binary event record
@@ -586,33 +653,22 @@ func (s *Segment) readEventMmap(targetOffset int64, startPos int64) (*types.Even
 	return s.readEventFile(targetOffset, int64(pos))
 }
 
-// readEventFile reads event from file
+// readEventFile reads event from file using ReadAt (pread, no file handle allocation)
 func (s *Segment) readEventFile(targetOffset int64, startPos int64) (*types.Event, error) {
-	// Open a separate file handle for reading to avoid conflicts with writer
-	filePath := filepath.Join(s.dataDir, "segments", s.filename)
-	file, err := os.Open(filePath)
-	if err != nil {
-		return nil, fmt.Errorf("open for read: %w", err)
-	}
-	defer file.Close()
-
-	// Seek to starting position
-	if _, err := file.Seek(startPos, io.SeekStart); err != nil {
-		return nil, fmt.Errorf("seek: %w", err)
-	}
-
 	lengthBytes := make([]byte, 4)
 	recordBuf := make([]byte, 0, 4096)
+	currentPos := startPos
 
 	// Scan from index position to find target event
 	for {
-		// Read record length
-		if _, err := io.ReadFull(file, lengthBytes); err != nil {
+		// Read record length using ReadAt (thread-safe pread)
+		if _, err := s.segmentFile.ReadAt(lengthBytes, currentPos); err != nil {
 			if err == io.EOF {
 				break
 			}
 			return nil, fmt.Errorf("read length: %w", err)
 		}
+		currentPos += 4
 
 		length := int64(binary.BigEndian.Uint32(lengthBytes))
 		if length <= 0 || length > 10*1024*1024 { // Sanity check
@@ -625,11 +681,23 @@ func (s *Segment) readEventFile(targetOffset int64, startPos int64) (*types.Even
 			recordBuf = make([]byte, recordLen)
 		}
 		record := recordBuf[:recordLen]
-		if _, err := io.ReadFull(file, record); err != nil {
+		if _, err := s.segmentFile.ReadAt(record, currentPos); err != nil {
 			if err == io.EOF {
 				break
 			}
 			return nil, fmt.Errorf("read record: %w", err)
+		}
+		currentPos += int64(recordLen)
+
+		// Early offset check: offset is at bytes 4-12 of record (after CRC)
+		if len(record) > 12 {
+			offsetVal := int64(binary.BigEndian.Uint64(record[4:12]))
+			if offsetVal > targetOffset {
+				break // Past target
+			}
+			if offsetVal < targetOffset {
+				continue // Skip full parse
+			}
 		}
 
 		// Parse event - record doesn't include length prefix
@@ -640,11 +708,6 @@ func (s *Segment) readEventFile(targetOffset int64, startPos int64) (*types.Even
 
 		if event.Offset == targetOffset {
 			return event, nil
-		}
-
-		// If we've gone past the target, stop
-		if event.Offset > targetOffset {
-			break
 		}
 	}
 
@@ -673,28 +736,20 @@ func (s *Segment) ReadEventsByTime(startTS, endTS int64) ([]*types.Event, error)
 		}
 	}
 
-	filePath := filepath.Join(s.dataDir, "segments", s.filename)
-	file, err := os.Open(filePath)
-	if err != nil {
-		return nil, fmt.Errorf("open for read: %w", err)
-	}
-	defer file.Close()
-
-	if _, err := file.Seek(startPos, io.SeekStart); err != nil {
-		return nil, fmt.Errorf("seek: %w", err)
-	}
-
+	// Use ReadAt on existing file handle instead of opening new file
 	lengthBytes := make([]byte, 4)
 	recordBuf := make([]byte, 0, 4096)
+	currentPos := startPos
 
 	for {
-		// Read record length
-		if _, err := io.ReadFull(file, lengthBytes); err != nil {
+		// Read record length using ReadAt
+		if _, err := s.segmentFile.ReadAt(lengthBytes, currentPos); err != nil {
 			if err == io.EOF {
 				break
 			}
 			return nil, fmt.Errorf("read length: %w", err)
 		}
+		currentPos += 4
 
 		length := int64(binary.BigEndian.Uint32(lengthBytes))
 		if length <= 0 || length > 10*1024*1024 {
@@ -707,12 +762,13 @@ func (s *Segment) ReadEventsByTime(startTS, endTS int64) ([]*types.Event, error)
 			recordBuf = make([]byte, recordLen)
 		}
 		record := recordBuf[:recordLen]
-		if _, err := io.ReadFull(file, record); err != nil {
+		if _, err := s.segmentFile.ReadAt(record, currentPos); err != nil {
 			if err == io.EOF {
 				break
 			}
 			return nil, fmt.Errorf("read record: %w", err)
 		}
+		currentPos += int64(recordLen)
 
 		event, err := parseEventRecordWithoutLength(record)
 		if err != nil {
@@ -724,11 +780,6 @@ func (s *Segment) ReadEventsByTime(startTS, endTS int64) ([]*types.Event, error)
 			result = append(result, event)
 		}
 
-		// Stop early if we passed the endTS (assuming timestamps are roughly ordered)
-		// Wait, timestamps are just event creation/schedule. But WAL strictly ordered by offset.
-		// Schedule timestamp might not be perfectly ordered, so it's safer to read to the end of the segment
-		// but typically events are added mostly in order with drift.
-		// For now, let's stop if event.Offset == s.lastOffset
 		if event.Offset == s.lastOffset {
 			break
 		}
@@ -752,28 +803,20 @@ func (s *Segment) ReadEventsByOffsetRange(startOffset, endOffset int64) ([]*type
 		}
 	}
 
-	filePath := filepath.Join(s.dataDir, "segments", s.filename)
-	file, err := os.Open(filePath)
-	if err != nil {
-		return nil, fmt.Errorf("open for read: %w", err)
-	}
-	defer file.Close()
-
-	if _, err := file.Seek(startPos, io.SeekStart); err != nil {
-		return nil, fmt.Errorf("seek: %w", err)
-	}
-
+	// Use ReadAt on existing file handle (pread is thread-safe)
 	lengthBytes := make([]byte, 4)
 	recordBuf := make([]byte, 0, 4096)
+	currentPos := startPos
 
 	for {
-		// Read record length
-		if _, err := io.ReadFull(file, lengthBytes); err != nil {
+		// Read record length using ReadAt
+		if _, err := s.segmentFile.ReadAt(lengthBytes, currentPos); err != nil {
 			if err == io.EOF {
 				break
 			}
 			return nil, fmt.Errorf("read length: %w", err)
 		}
+		currentPos += 4
 
 		length := int64(binary.BigEndian.Uint32(lengthBytes))
 		if length <= 0 || length > 10*1024*1024 {
@@ -786,11 +829,25 @@ func (s *Segment) ReadEventsByOffsetRange(startOffset, endOffset int64) ([]*type
 			recordBuf = make([]byte, recordLen)
 		}
 		record := recordBuf[:recordLen]
-		if _, err := io.ReadFull(file, record); err != nil {
+		if _, err := s.segmentFile.ReadAt(record, currentPos); err != nil {
 			if err == io.EOF {
 				break
 			}
 			return nil, fmt.Errorf("read record: %w", err)
+		}
+		currentPos += int64(recordLen)
+
+		// Early offset check before full event parsing.
+		// Offset is at bytes 4-12 of record (after 4-byte CRC).
+		// This avoids CRC check + string allocs for out-of-range records.
+		if len(record) > 12 {
+			eventOffset := int64(binary.BigEndian.Uint64(record[4:12]))
+			if eventOffset > endOffset {
+				break // Past range, done
+			}
+			if eventOffset < startOffset {
+				continue // Before range, skip full parse
+			}
 		}
 
 		event, err := parseEventRecordWithoutLength(record)

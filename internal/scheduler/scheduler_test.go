@@ -17,9 +17,10 @@ func TestTimingWheel_AddTimer(t *testing.T) {
 		MessageId:  "test-1",
 		ScheduleTs: startTime + 500, // 500ms in future
 		Topic:      "test",
+		Offset:     1,
 	}
 
-	timer := NewTimer(event.MessageId, event)
+	timer := NewTimer(event.Offset, event)
 
 	err := tw.AddTimer(timer)
 	if err != nil {
@@ -40,14 +41,15 @@ func TestTimingWheel_RemoveTimer(t *testing.T) {
 	event := &types.Event{
 		MessageId:  "remove-test",
 		ScheduleTs: startTime + 1000, // 1s in future
+		Offset:     2,
 	}
-	timer := NewTimer(event.MessageId, event)
+	timer := NewTimer(event.Offset, event)
 
 	if err := tw.AddTimer(timer); err != nil {
 		t.Fatalf("Failed to add timer: %v", err)
 	}
 
-	if err := tw.RemoveTimer("remove-test"); err != nil {
+	if err := tw.RemoveTimer(int64(2)); err != nil {
 		t.Fatalf("Failed to remove timer: %v", err)
 	}
 
@@ -67,8 +69,9 @@ func TestTimingWheel_Tick(t *testing.T) {
 		MessageId:  "tick-test",
 		ScheduleTs: startTime + 20, // 20ms in future = 2 ticks
 		Topic:      "test",
+		Offset:     3,
 	}
-	timer := NewTimer(event.MessageId, event)
+	timer := NewTimer(event.Offset, event)
 
 	if err := tw.AddTimer(timer); err != nil {
 		t.Fatalf("Failed to add timer: %v", err)
@@ -85,8 +88,8 @@ func TestTimingWheel_Tick(t *testing.T) {
 		if len(expired) != 1 {
 			t.Errorf("Expected 1 expired timer, got %d", len(expired))
 		}
-		if expired[0].EventID != "tick-test" {
-			t.Errorf("Expected event ID tick-test, got %s", expired[0].EventID)
+		if expired[0].EventID != 3 {
+			t.Errorf("Expected event ID 3, got %d", expired[0].EventID)
 		}
 	case <-time.After(100 * time.Millisecond):
 		t.Error("Timeout waiting for expired timer")
@@ -102,8 +105,9 @@ func TestTimingWheel_OverflowWheel(t *testing.T) {
 	event := &types.Event{
 		MessageId:  "overflow-test",
 		ScheduleTs: startTime + 1500, // 1.5s in future
+		Offset:     4,
 	}
-	timer := NewTimer(event.MessageId, event)
+	timer := NewTimer(event.Offset, event)
 
 	err := tw.AddTimer(timer)
 	if err != nil {
@@ -134,8 +138,9 @@ func TestTimingWheel_OverflowLimit(t *testing.T) {
 	event := &types.Event{
 		MessageId:  "overflow-limit-test",
 		ScheduleTs: startTime + 2000000, // 2000s in future, exceeds 3 levels
+		Offset:     5,
 	}
-	timer := NewTimer(event.MessageId, event)
+	timer := NewTimer(event.Offset, event)
 
 	err := tw.AddTimer(timer)
 	if err == nil {
@@ -152,8 +157,9 @@ func TestTimingWheel_Cascade(t *testing.T) {
 	event := &types.Event{
 		MessageId:  "cascade-test",
 		ScheduleTs: startTime + 150,
+		Offset:     6,
 	}
-	timer := NewTimer(event.MessageId, event)
+	timer := NewTimer(event.Offset, event)
 
 	if err := tw.AddTimer(timer); err != nil {
 		t.Fatalf("Failed to add timer: %v", err)
@@ -190,8 +196,8 @@ func TestTimingWheel_Cascade(t *testing.T) {
 		if len(expired) != 1 {
 			t.Errorf("Expected 1 expired timer, got %d", len(expired))
 		}
-		if expired[0].EventID != "cascade-test" {
-			t.Errorf("Expected event ID cascade-test, got %s", expired[0].EventID)
+		if expired[0].EventID != 6 {
+			t.Errorf("Expected event ID 6, got %d", expired[0].EventID)
 		}
 	case <-time.After(100 * time.Millisecond):
 		t.Error("Timeout waiting for cascaded timer to expire")
@@ -278,13 +284,18 @@ func TestNewTimer(t *testing.T) {
 	event := &types.Event{
 		MessageId:  "timer-test",
 		ScheduleTs: expirationTime,
+		Offset:     42,
 	}
 
-	timer := NewTimer("timer-test", event)
+	timer := NewTimer(event.Offset, event)
 
 	// Timer should store absolute expiration time
 	if timer.ExpirationMs != expirationTime {
 		t.Errorf("Expected expiration time %d, got %d", expirationTime, timer.ExpirationMs)
+	}
+
+	if timer.EventID != 42 {
+		t.Errorf("Expected EventID 42, got %d", timer.EventID)
 	}
 }
 

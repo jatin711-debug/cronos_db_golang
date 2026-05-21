@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -12,14 +13,16 @@ import (
 
 // Membership manages cluster membership and node discovery
 type Membership struct {
-	mu        sync.RWMutex
-	config    *ClusterConfig
-	localNode *Node
-	nodes     map[string]*Node
-	state     *ClusterState
-	eventCh   chan MemberEvent
-	stopCh    chan struct{}
-	listener  net.Listener
+	mu          sync.RWMutex
+	config      *ClusterConfig
+	localNode   *Node
+	nodes       map[string]*Node
+	state       *ClusterState
+	eventCh     chan MemberEvent
+	stopCh      chan struct{}
+	listener    net.Listener
+	gossipConns map[string]net.Conn // Persistent connections for heartbeats
+	connMu      sync.Mutex          // Protects gossipConns
 
 	// Callbacks
 	onJoin   func(node *Node)
@@ -75,9 +78,10 @@ func NewMembership(config *ClusterConfig) (*Membership, error) {
 	}
 
 	m := &Membership{
-		config:    config,
-		localNode: localNode,
-		nodes:     make(map[string]*Node),
+		config:      config,
+		localNode:   localNode,
+		nodes:       make(map[string]*Node),
+		gossipConns: make(map[string]net.Conn),
 		state: &ClusterState{
 			ClusterID:  config.ClusterID,
 			Nodes:      make(map[string]*Node),
@@ -130,6 +134,13 @@ func (m *Membership) Stop() {
 	if m.listener != nil {
 		m.listener.Close()
 	}
+	// Close all persistent gossip connections
+	m.connMu.Lock()
+	for addr, conn := range m.gossipConns {
+		conn.Close()
+		delete(m.gossipConns, addr)
+	}
+	m.connMu.Unlock()
 }
 
 // acceptLoop accepts incoming gossip connections
@@ -158,37 +169,45 @@ func (m *Membership) acceptLoop(ctx context.Context) {
 	}
 }
 
-// handleConnection handles an incoming gossip connection
+// handleConnection handles an incoming gossip connection in a loop to allow socket reuse
 func (m *Membership) handleConnection(conn net.Conn) {
 	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(10 * time.Second))
+	scanner := bufio.NewScanner(conn)
 
-	// Read message
-	buf := make([]byte, 4096)
-	n, err := conn.Read(buf)
-	if err != nil {
-		return
-	}
+	for {
+		// Reset the deadline for each message
+		conn.SetDeadline(time.Now().Add(10 * time.Second))
+		if !scanner.Scan() {
+			break
+		}
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
 
-	// Parse message
-	var msg GossipMessage
-	if err := json.Unmarshal(buf[:n], &msg); err != nil {
-		log.Printf("[MEMBERSHIP] Failed to parse gossip message: %v", err)
-		return
-	}
+		// Parse message
+		var msg GossipMessage
+		if err := json.Unmarshal(line, &msg); err != nil {
+			log.Printf("[MEMBERSHIP] Failed to parse gossip message: %v", err)
+			return
+		}
 
-	// Handle message based on type
-	switch msg.Type {
-	case "join":
-		m.handleJoinRequest(conn, &msg)
-	case "heartbeat":
-		m.handleHeartbeatMessage(&msg)
-	case "state":
-		m.handleStateRequest(conn)
-	case "node_joined":
-		m.handleNodeJoinedBroadcast(&msg)
-	default:
-		log.Printf("[MEMBERSHIP] Unknown message type: %s", msg.Type)
+		// Handle message based on type
+		switch msg.Type {
+		case "join":
+			m.handleJoinRequest(conn, &msg)
+			return
+		case "heartbeat":
+			m.handleHeartbeatMessage(&msg)
+		case "state":
+			m.handleStateRequest(conn)
+			return
+		case "node_joined":
+			m.handleNodeJoinedBroadcast(&msg)
+			return
+		default:
+			log.Printf("[MEMBERSHIP] Unknown message type: %s", msg.Type)
+		}
 	}
 }
 
@@ -555,7 +574,7 @@ func (m *Membership) sendHeartbeats() {
 	}
 }
 
-// sendHeartbeat sends a heartbeat to a specific node
+// sendHeartbeat sends a heartbeat to a specific node using persistent connections
 func (m *Membership) sendHeartbeat(node *Node) {
 	// Create heartbeat message
 	hb := &GossipMessage{
@@ -571,16 +590,47 @@ func (m *Membership) sendHeartbeat(node *Node) {
 		targetAddr = node.Address
 	}
 
-	// Try to connect and send heartbeat
-	conn, err := net.DialTimeout("tcp", targetAddr, 2*time.Second)
+	data, err := json.Marshal(hb)
+	if err != nil {
+		return
+	}
+
+	// Try sending on persistent connection first
+	m.connMu.Lock()
+	conn, exists := m.gossipConns[targetAddr]
+	m.connMu.Unlock()
+
+	if exists && conn != nil {
+		conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+		if _, err := conn.Write(append(data, '\n')); err == nil {
+			return // Success on cached connection
+		}
+		// Write failed — stale connection, close and reconnect
+		conn.Close()
+		m.connMu.Lock()
+		delete(m.gossipConns, targetAddr)
+		m.connMu.Unlock()
+	}
+
+	// Establish new connection
+	newConn, err := net.DialTimeout("tcp", targetAddr, 2*time.Second)
 	if err != nil {
 		log.Printf("[MEMBERSHIP] Heartbeat to %s failed: %v", node.ID, err)
 		return
 	}
-	defer conn.Close()
 
-	// Send heartbeat as GossipMessage
-	json.NewEncoder(conn).Encode(hb)
+	// Send heartbeat on new connection
+	newConn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+	if _, err := newConn.Write(append(data, '\n')); err != nil {
+		newConn.Close()
+		log.Printf("[MEMBERSHIP] Heartbeat write to %s failed: %v", node.ID, err)
+		return
+	}
+
+	// Cache the connection for future heartbeats
+	m.connMu.Lock()
+	m.gossipConns[targetAddr] = newConn
+	m.connMu.Unlock()
 }
 
 // failureDetectorLoop detects failed nodes

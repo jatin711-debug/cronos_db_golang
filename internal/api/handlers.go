@@ -149,8 +149,7 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 		return nil, err
 	}
 
-	// Use key-based partitioning for better distribution
-	partition, err := h.partitionManager.GetPartitionForKey(partitionKey)
+	partitionInternal, err := h.partitionManager.GetOrCreateInternalPartition(partitionID, partitionKey)
 	if err != nil {
 		// Fallback to topic-based partitioning
 		topicPartitionID := h.partitionManager.GetPartitionIDForTopic(event.Topic)
@@ -158,22 +157,13 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 			return nil, ownerErr
 		}
 
-		partition, err = h.partitionManager.GetPartitionForTopic(event.Topic)
+		partitionInternal, err = h.partitionManager.GetOrCreateInternalPartition(topicPartitionID, event.Topic)
 		if err != nil {
 			return &types.PublishResponse{
 				Success: false,
 				Error:   fmt.Sprintf("get partition: %v", err),
 			}, nil
 		}
-	}
-
-	// Get internal partition object for WAL access
-	partitionInternal, err := h.partitionManager.GetInternalPartition(partition.ID)
-	if err != nil {
-		return &types.PublishResponse{
-			Success: false,
-			Error:   fmt.Sprintf("get internal partition: %v", err),
-		}, nil
 	}
 
 	// Check if duplicate (unless explicitly allowed)
@@ -217,7 +207,7 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 		Success:     true,
 		Error:       "",
 		Offset:      event.Offset,
-		PartitionId: partition.ID,
+		PartitionId: partitionInternal.ID,
 		ScheduleTs:  event.GetScheduleTs(),
 	}, nil
 }
@@ -267,27 +257,6 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 			continue
 		}
 
-		partition, err := h.partitionManager.GetPartitionForKey(partitionKey)
-		if err != nil {
-			topicPartitionID := h.partitionManager.GetPartitionIDForTopic(event.Topic)
-			if ownerErr := h.ensureClusterPartitionWritable(topicPartitionID); ownerErr != nil {
-				errorCount++
-				if lastError == "" {
-					lastError = ownerErr.Error()
-				}
-				continue
-			}
-
-			partition, err = h.partitionManager.GetPartitionForTopic(event.Topic)
-			if err != nil {
-				errorCount++
-				if lastError == "" {
-					lastError = fmt.Sprintf("partition lookup failed: %v", err)
-				}
-				continue
-			}
-		}
-
 		// Check dedup
 		if !req.AllowDuplicate {
 			isDuplicate, err := h.dedupManager.IsDuplicate(event.GetMessageId(), 0)
@@ -304,18 +273,30 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 			}
 		}
 
-		partitionEvents[partition.ID] = append(partitionEvents[partition.ID], event)
+		partitionEvents[partitionID] = append(partitionEvents[partitionID], event)
 	}
 
 	// Batch write to each partition's WAL and schedule
 	for partitionID, events := range partitionEvents {
-		partitionInternal, err := h.partitionManager.GetInternalPartition(partitionID)
+		partitionInternal, err := h.partitionManager.GetOrCreateInternalPartition(partitionID, events[0].Topic)
 		if err != nil {
-			errorCount += int32(len(events))
-			if lastError == "" {
-				lastError = fmt.Sprintf("get internal partition %d: %v", partitionID, err)
+			// Fallback to topic-based partitioning
+			topicPartitionID := h.partitionManager.GetPartitionIDForTopic(events[0].Topic)
+			if ownerErr := h.ensureClusterPartitionWritable(topicPartitionID); ownerErr != nil {
+				errorCount += int32(len(events))
+				if lastError == "" {
+					lastError = fmt.Sprintf("get internal partition %d: %v", partitionID, err)
+				}
+				continue
 			}
-			continue
+			partitionInternal, err = h.partitionManager.GetOrCreateInternalPartition(topicPartitionID, events[0].Topic)
+			if err != nil {
+				errorCount += int32(len(events))
+				if lastError == "" {
+					lastError = fmt.Sprintf("get internal partition %d: %v", topicPartitionID, err)
+				}
+				continue
+			}
 		}
 
 		// Batch append to WAL (single syscall for all events)
@@ -356,6 +337,7 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 
 	return &types.PublishBatchResponse{
 		Success:        errorCount == 0 && duplicateCount == 0,
+		Error:          lastError,
 		PublishedCount: publishedCount,
 		DuplicateCount: duplicateCount,
 		ErrorCount:     errorCount,

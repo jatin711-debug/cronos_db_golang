@@ -32,14 +32,23 @@ func (r *ReplayEngine) ReplayByTimeRange(ctx context.Context, startTS, endTS int
 	events, err := r.wal.ReadEventsByTime(startTS, endTS)
 	if err != nil {
 		// Fall back to offset-based scan in chunks if time index lookup fails.
+		// FIX: Filter events by timestamp DURING the scan to prevent OOM
+		// on large WALs. Previously all events were loaded into memory first.
 		lastOffset := r.wal.GetLastOffset()
 		if lastOffset < 0 {
 			return []*types.Event{}, nil
 		}
 
 		const scanBatchSize int64 = 10000
-		events = make([]*types.Event, 0)
+		var filtered []*types.Event
 		for batchStart := int64(0); batchStart <= lastOffset; batchStart += scanBatchSize {
+			// Check context cancellation between batches
+			select {
+			case <-ctx.Done():
+				return filtered, ctx.Err()
+			default:
+			}
+
 			batchEnd := batchStart + scanBatchSize - 1
 			if batchEnd > lastOffset {
 				batchEnd = lastOffset
@@ -50,8 +59,16 @@ func (r *ReplayEngine) ReplayByTimeRange(ctx context.Context, startTS, endTS int
 				return nil, fmt.Errorf("read events %d-%d: %w", batchStart, batchEnd, readErr)
 			}
 
-			events = append(events, batchEvents...)
+			// Filter in-place during scan instead of accumulating all events
+			for _, event := range batchEvents {
+				ts := event.GetScheduleTs()
+				if ts >= startTS && ts <= endTS {
+					filtered = append(filtered, event)
+				}
+			}
 		}
+
+		return filtered, nil
 	}
 
 	// Filter by timestamp range
@@ -132,6 +149,12 @@ func (r *ReplayEngine) ReplayStream(ctx context.Context, req *ReplayRequest, eve
 		delay = time.Duration(float64(time.Millisecond*10) / req.Speed)
 	}
 
+	// FIX: Use a single reusable timer instead of time.After() per event.
+	// time.After() creates a new timer/channel/goroutine per call that leaks
+	// until the timer fires. For 1M events, that's 1M leaked timers.
+	sendTimer := time.NewTimer(30 * time.Second)
+	defer sendTimer.Stop()
+
 	for i, event := range events {
 		select {
 		case <-ctx.Done():
@@ -144,11 +167,20 @@ func (r *ReplayEngine) ReplayStream(ctx context.Context, req *ReplayRequest, eve
 			ReplayOffset: int64(i),
 		}
 
+		// Reset the timer for each send attempt
+		if !sendTimer.Stop() {
+			select {
+			case <-sendTimer.C:
+			default:
+			}
+		}
+		sendTimer.Reset(30 * time.Second)
+
 		select {
 		case eventCh <- replayEvent:
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(30 * time.Second):
+		case <-sendTimer.C:
 			return fmt.Errorf("timeout sending replay event")
 		}
 

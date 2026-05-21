@@ -27,6 +27,7 @@ type Leader struct {
 
 // FollowerInfo represents metadata about a follower replica
 type FollowerInfo struct {
+	mu            sync.Mutex     // Protects mutable fields below from concurrent goroutine access
 	ID            string
 	Address       string
 	NextOffset    int64
@@ -174,33 +175,74 @@ func (l *Leader) Replicate(events []*types.Event) error {
 		return nil // No followers to replicate to
 	}
 
-	// Send to all followers
-	var wg sync.WaitGroup
+	var activeCount int
+	for _, follower := range l.followers {
+		if follower.Connected {
+			activeCount++
+		}
+	}
+
+	neededAcks := (len(l.followers) + 1) / 2
+	if activeCount < neededAcks {
+		return fmt.Errorf("replication quorum failed: only %d of %d followers connected", activeCount, len(l.followers))
+	}
+
+	ackChan := make(chan error, activeCount)
 	for _, follower := range l.followers {
 		if !follower.Connected {
 			continue
 		}
 
-		wg.Add(1)
 		go func(f *FollowerInfo) {
-			defer wg.Done()
-			if err := l.sendBatch(f, events); err != nil {
+			f.mu.Lock()
+			err := l.sendBatchLocked(f, events)
+			if err != nil {
 				f.LastError = err
 				f.InSync = false
 				log.Printf("[LEADER] Failed to replicate to %s: %v", f.ID, err)
+				f.mu.Unlock()
+				ackChan <- err
 			} else {
 				f.LastError = nil
 				f.LastAckTS = time.Now().UnixMilli()
+				f.mu.Unlock()
+				ackChan <- nil
 			}
 		}(follower)
 	}
-	wg.Wait()
+
+	successes := 0
+	failures := 0
+	maxFailures := activeCount - neededAcks
+
+	for i := 0; i < activeCount; i++ {
+		err := <-ackChan
+		if err == nil {
+			successes++
+			if successes >= neededAcks {
+				return nil // Quorum achieved! Return early.
+			}
+		} else {
+			failures++
+			if failures > maxFailures {
+				// We can no longer achieve quorum
+				return fmt.Errorf("replication quorum failed: too many follower replication errors: %w", err)
+			}
+		}
+	}
 
 	return nil
 }
 
-// sendBatch sends a batch to a follower
+// sendBatch sends a batch to a follower (public, acquires f.mu)
 func (l *Leader) sendBatch(follower *FollowerInfo, events []*types.Event) error {
+	follower.mu.Lock()
+	defer follower.mu.Unlock()
+	return l.sendBatchLocked(follower, events)
+}
+
+// sendBatchLocked sends a batch to a follower (caller must hold f.mu)
+func (l *Leader) sendBatchLocked(follower *FollowerInfo, events []*types.Event) error {
 	// Add to follower's buffer
 	follower.Buffer = append(follower.Buffer, events...)
 
@@ -223,19 +265,14 @@ func (l *Leader) flushFollower(follower *FollowerInfo) error {
 		return fmt.Errorf("no connection to follower %s", follower.ID)
 	}
 
-	// Create AppendEntries message
-	msg := &AppendEntriesMessage{
-		PartitionId: l.partitionID,
-		Term:        l.epoch,
-		Events:      follower.Buffer,
+	req := &types.ReplicationAppendRequest{
+		PartitionId:        l.partitionID,
+		Events:             follower.Buffer,
+		ExpectedNextOffset: follower.NextOffset,
+		Term:               l.epoch,
 	}
 
-	payload, err := msg.Encode()
-	if err != nil {
-		return err
-	}
-
-	if err := trans.WriteMessage(MsgTypeAppendEntries, payload); err != nil {
+	if err := trans.WriteProtoMessage(MsgTypeAppendEntries, req); err != nil {
 		return err
 	}
 
@@ -258,7 +295,11 @@ func (l *Leader) flushFollower(follower *FollowerInfo) error {
 func (l *Leader) GetHighWatermark() int64 {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
+	return l.getHighWatermarkLocked()
+}
 
+// getHighWatermarkLocked returns the min high watermark (caller must hold RLock)
+func (l *Leader) getHighWatermarkLocked() int64 {
 	if len(l.followers) == 0 {
 		return 0
 	}
@@ -364,7 +405,7 @@ func (l *Leader) GetStats() *LeaderStats {
 		Followers:          int64(len(l.followers)),
 		ConnectedFollowers: l.countConnectedFollowers(),
 		InSyncFollowers:    l.countInSyncFollowers(),
-		HighWatermark:      l.GetHighWatermark(),
+		HighWatermark:      l.getHighWatermarkLocked(),
 		Epoch:              l.epoch,
 	}
 }

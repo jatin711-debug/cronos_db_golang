@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync"
 
 	"cronos_db/pkg/types"
 	"google.golang.org/protobuf/proto"
@@ -45,27 +46,77 @@ func (t *Transport) Close() error {
 	return t.conn.Close()
 }
 
-// WriteMessage writes a message
+var transportWritePool = sync.Pool{
+	New: func() interface{} {
+		return make([]byte, 65536)
+	},
+}
+
+// WriteMessage writes a message (header + payload combined into single TCP write)
 func (t *Transport) WriteMessage(msgType uint8, payload []byte) error {
-	// Header: [Magic:4][Version:1][Type:1][PayloadLen:4]
-	header := make([]byte, 10)
-	binary.BigEndian.PutUint32(header[0:4], uint32(MagicBytes))
-	header[4] = ProtocolVersion
-	header[5] = msgType
-	binary.BigEndian.PutUint32(header[6:10], uint32(len(payload)))
-
-	// Write header
-	if _, err := t.conn.Write(header); err != nil {
-		return fmt.Errorf("write header: %w", err)
+	totalLen := 10 + len(payload)
+	var buf []byte
+	if totalLen <= 65536 {
+		x := transportWritePool.Get().([]byte)
+		buf = x[:totalLen]
+		defer transportWritePool.Put(x)
+	} else {
+		buf = make([]byte, totalLen)
 	}
 
-	// Write payload
-	if len(payload) > 0 {
-		if _, err := t.conn.Write(payload); err != nil {
-			return fmt.Errorf("write payload: %w", err)
+	binary.BigEndian.PutUint32(buf[0:4], uint32(MagicBytes))
+	buf[4] = ProtocolVersion
+	buf[5] = msgType
+	binary.BigEndian.PutUint32(buf[6:10], uint32(len(payload)))
+	copy(buf[10:], payload)
+
+	_, err := t.conn.Write(buf)
+	if err != nil {
+		return fmt.Errorf("write message: %w", err)
+	}
+	return nil
+}
+
+// WriteProtoMessage serializes a protobuf message directly into the packet buffer
+// and writes it to the connection in a single write, avoiding intermediate allocations.
+func (t *Transport) WriteProtoMessage(msgType uint8, msg proto.Message) error {
+	msgSize := proto.Size(msg)
+	totalLen := 10 + msgSize
+
+	var buf []byte
+	var isPooled bool
+	var pooledBuf []byte
+
+	if totalLen <= 65536 {
+		pooledBuf = transportWritePool.Get().([]byte)
+		buf = pooledBuf[:10]
+		isPooled = true
+	} else {
+		buf = make([]byte, 10, totalLen)
+	}
+
+	binary.BigEndian.PutUint32(buf[0:4], uint32(MagicBytes))
+	buf[4] = ProtocolVersion
+	buf[5] = msgType
+	binary.BigEndian.PutUint32(buf[6:10], uint32(msgSize))
+
+	var err error
+	buf, err = proto.MarshalOptions{}.MarshalAppend(buf, msg)
+	if err != nil {
+		if isPooled {
+			transportWritePool.Put(pooledBuf)
 		}
+		return fmt.Errorf("marshal proto message: %w", err)
 	}
 
+	_, err = t.conn.Write(buf)
+	if isPooled {
+		transportWritePool.Put(pooledBuf)
+	}
+
+	if err != nil {
+		return fmt.Errorf("write proto message: %w", err)
+	}
 	return nil
 }
 

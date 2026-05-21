@@ -3,6 +3,7 @@ package delivery
 import (
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"cronos_db/pkg/types"
@@ -10,14 +11,18 @@ import (
 
 // Worker processes ready events from scheduler
 type Worker struct {
-	mu         sync.RWMutex
+	mu         sync.Mutex // Only protects readyQueue and processing flag
 	dispatcher *Dispatcher
 	readyQueue []*types.Event
 	notify     chan struct{}
 	batchSize  int32
 	processing bool
 	quit       chan struct{}
-	stats      *WorkerStats
+
+	// Atomic stats — no lock needed for read/write
+	statsDispatched atomic.Int64
+	statsFailed     atomic.Int64
+	statsLastDispTS atomic.Int64
 }
 
 // NewWorker creates a new delivery worker
@@ -28,7 +33,6 @@ func NewWorker(dispatcher *Dispatcher, batchSize int32) *Worker {
 		notify:     make(chan struct{}, 1),
 		batchSize:  batchSize,
 		quit:       make(chan struct{}),
-		stats:      &WorkerStats{},
 	}
 }
 
@@ -106,14 +110,13 @@ func (w *Worker) processBatch() bool {
 	// Lock is released so AddReadyEvent/AddReadyEvents can proceed concurrently.
 	if err := w.dispatcher.DispatchBatch(batch); err != nil {
 		log.Printf("Failed to dispatch batch: %v", err)
-		w.stats.EventsFailed += int64(len(batch))
+		w.statsFailed.Add(int64(len(batch)))
 	} else {
-		w.stats.EventsDispatched += int64(len(batch))
+		w.statsDispatched.Add(int64(len(batch)))
 	}
 
-	w.mu.Lock()
-	w.stats.LastDispatchTS = time.Now().UnixMilli()
-	w.mu.Unlock()
+	// Atomic store — no lock needed
+	w.statsLastDispTS.Store(time.Now().UnixMilli())
 
 	return true
 }
@@ -133,15 +136,17 @@ func (w *Worker) Stop() {
 
 // GetStats returns worker statistics
 func (w *Worker) GetStats() *WorkerStats {
-	w.mu.RLock()
-	defer w.mu.RUnlock()
+	w.mu.Lock()
+	queueLen := int64(len(w.readyQueue))
+	isProcessing := w.processing
+	w.mu.Unlock()
 
 	return &WorkerStats{
-		EventsDispatched: w.stats.EventsDispatched,
-		EventsFailed:     w.stats.EventsFailed,
-		QueueLength:      int64(len(w.readyQueue)),
-		LastDispatchTS:   w.stats.LastDispatchTS,
-		Processing:       w.processing,
+		EventsDispatched: w.statsDispatched.Load(),
+		EventsFailed:     w.statsFailed.Load(),
+		QueueLength:      queueLen,
+		LastDispatchTS:   w.statsLastDispTS.Load(),
+		Processing:       isProcessing,
 	}
 }
 

@@ -421,11 +421,25 @@ func (f *ClusterFSM) Restore(rc io.ReadCloser) error {
 	return nil
 }
 
-// GetState returns the current cluster state
+// GetState returns a deep copy of the current cluster state.
+// FIX: Previously returned a live pointer to f.state, causing data races
+// when callers read the returned state concurrently with FSM Apply mutations.
 func (f *ClusterFSM) GetState() *ClusterState {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
-	return f.state
+
+	// Deep copy via JSON to safely clone maps of pointers
+	data, err := json.Marshal(f.state)
+	if err != nil {
+		log.Printf("[FSM] GetState marshal error: %v", err)
+		return nil
+	}
+	var stateCopy ClusterState
+	if err := json.Unmarshal(data, &stateCopy); err != nil {
+		log.Printf("[FSM] GetState unmarshal error: %v", err)
+		return nil
+	}
+	return &stateCopy
 }
 
 // FSMSnapshot represents a snapshot of the FSM

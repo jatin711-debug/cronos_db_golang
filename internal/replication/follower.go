@@ -130,13 +130,11 @@ func (f *Follower) handleMessage(t *Transport, msgType uint8, payload []byte) er
 			if err := f.wal.AppendBatch(msg.Events); err != nil {
 				log.Printf("[FOLLOWER] Failed to append batch: %v", err)
 				// Send failure ack
-				ack := &AppendAckMessage{
-					Term:    msg.Term,
-					Success: false,
-					Offset:  f.nextOffset,
+				ack := &types.ReplicationAppendResponse{
+					Success:    false,
+					LastOffset: f.nextOffset,
 				}
-				pl, _ := ack.Encode()
-				return t.WriteMessage(MsgTypeAppendAck, pl)
+				return t.WriteProtoMessage(MsgTypeAppendAck, ack)
 			}
 		}
 
@@ -146,23 +144,19 @@ func (f *Follower) handleMessage(t *Transport, msgType uint8, payload []byte) er
 		}
 
 		// Send success ack
-		ack := &AppendAckMessage{
-			Term:    msg.Term,
-			Success: true,
-			Offset:  f.nextOffset - 1,
+		ack := &types.ReplicationAppendResponse{
+			Success:    true,
+			LastOffset: f.nextOffset - 1,
 		}
-		pl, _ := ack.Encode()
-		return t.WriteMessage(MsgTypeAppendAck, pl)
+		return t.WriteProtoMessage(MsgTypeAppendAck, ack)
 
 	case MsgTypeHeartbeat:
 		// Respond to heartbeat
-		ack := &AppendAckMessage{
-			Term:    0,
-			Success: true,
-			Offset:  f.nextOffset - 1,
+		ack := &types.ReplicationAppendResponse{
+			Success:    true,
+			LastOffset: f.nextOffset - 1,
 		}
-		pl, _ := ack.Encode()
-		return t.WriteMessage(MsgTypeHeartbeatAck, pl)
+		return t.WriteProtoMessage(MsgTypeHeartbeatAck, ack)
 	}
 
 	return nil

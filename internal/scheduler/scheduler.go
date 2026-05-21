@@ -94,55 +94,61 @@ func (s *Scheduler) ReadySignal() <-chan struct{} {
 
 // Schedule schedules an event
 func (s *Scheduler) Schedule(event *types.Event) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	return s.scheduleUnlocked(event)
-}
-
-// scheduleUnlocked schedules an event (caller must hold lock)
-func (s *Scheduler) scheduleUnlocked(event *types.Event) error {
+	now := time.Now().UnixMilli()
 	// If event is already expired, add to ready queue
-	if event.GetScheduleTs() <= time.Now().UnixMilli() {
+	if event.GetScheduleTs() <= now {
+		s.mu.Lock()
 		s.readyQueue = append(s.readyQueue, event)
+		s.mu.Unlock()
 		s.notifyReady()
 		return nil
 	}
 
-	// Create timer and add to timing wheel
-	// Use offset as unique ID (cheaper than fmt.Sprintf)
-	timer := s.timingWheel.GetTimerFast(event.GetOffset(), event)
-	return s.timingWheel.AddTimer(timer)
+	// Create timer and add to timing wheel (locks tw.mu)
+	timer := s.timingWheel.GetTimerFast(event.GetOffset(), event, now)
+	if err := s.timingWheel.AddTimer(timer); err != nil {
+		s.timingWheel.PutTimer(timer)
+		return err
+	}
+	return nil
 }
 
-// ScheduleBatch schedules multiple events efficiently (single lock acquisition)
+// ScheduleBatch schedules multiple events efficiently
 func (s *Scheduler) ScheduleBatch(events []*types.Event) error {
 	if len(events) == 0 {
 		return nil
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	now := time.Now().UnixMilli()
-	hasReady := false
+	var readyEvents []*types.Event
+	var wheelTimers []*Timer
 
 	for _, event := range events {
 		// If event is already expired, add to ready queue
 		if event.GetScheduleTs() <= now {
-			s.readyQueue = append(s.readyQueue, event)
-			hasReady = true
+			readyEvents = append(readyEvents, event)
 			continue
 		}
 
-		// Create timer and add to timing wheel
-		timer := s.timingWheel.GetTimerFast(event.GetOffset(), event)
-		if err := s.timingWheel.AddTimer(timer); err != nil {
+		// Create timer with pre-sampled time
+		timer := s.timingWheel.GetTimerFast(event.GetOffset(), event, now)
+		wheelTimers = append(wheelTimers, timer)
+	}
+
+	if len(wheelTimers) > 0 {
+		if err := s.timingWheel.AddTimers(wheelTimers); err != nil {
+			// Put timers back to pool on error to avoid leak
+			for _, t := range wheelTimers {
+				s.timingWheel.PutTimer(t)
+			}
 			return err
 		}
 	}
 
-	if hasReady {
+	if len(readyEvents) > 0 {
+		s.mu.Lock()
+		s.readyQueue = append(s.readyQueue, readyEvents...)
+		s.mu.Unlock()
 		s.notifyReady()
 	}
 
@@ -165,24 +171,26 @@ func (s *Scheduler) GetReadyEvents() []*types.Event {
 }
 
 func (s *Scheduler) drainExpiredToReady() {
-	added := 0
-
-	s.mu.Lock()
+	// FIX: Drain channel WITHOUT holding s.mu to prevent lock contention
+	// between the timing wheel tick and concurrent Schedule/GetReadyEvents calls.
+	var localBuf []*types.Event
 	for {
 		select {
 		case expiredTimers := <-s.timingWheel.GetExpiredChannel():
 			for _, timer := range expiredTimers {
-				s.readyQueue = append(s.readyQueue, timer.Event)
+				localBuf = append(localBuf, timer.Event)
 				s.timingWheel.PutTimer(timer)
-				added++
 			}
 		default:
-			s.mu.Unlock()
-			if added > 0 {
-				s.notifyReady()
-			}
-			return
+			goto done
 		}
+	}
+done:
+	if len(localBuf) > 0 {
+		s.mu.Lock()
+		s.readyQueue = append(s.readyQueue, localBuf...)
+		s.mu.Unlock()
+		s.notifyReady()
 	}
 }
 
@@ -207,6 +215,7 @@ func (s *Scheduler) worker() {
 	defer ticker.Stop()
 
 	partitionLabel := fmt.Sprintf("%d", s.partitionID)
+	var tickCount int64
 
 	for {
 		select {
@@ -214,13 +223,17 @@ func (s *Scheduler) worker() {
 			s.timingWheel.Tick()
 			s.drainExpiredToReady()
 
-			// Emit metrics
-			s.mu.RLock()
-			readyCount := int64(len(s.readyQueue))
-			twStats := s.timingWheel.GetStats()
-			s.mu.RUnlock()
-			schedulerReadyEvents.WithLabelValues(partitionLabel).Set(float64(readyCount))
-			schedulerActiveTimers.WithLabelValues(partitionLabel).Set(float64(twStats.ActiveTimers))
+			// FIX: Only emit metrics every 10th tick to reduce
+			// RLock acquisitions and GetStats overhead
+			tickCount++
+			if tickCount%10 == 0 {
+				s.mu.RLock()
+				readyCount := int64(len(s.readyQueue))
+				twStats := s.timingWheel.GetStats()
+				s.mu.RUnlock()
+				schedulerReadyEvents.WithLabelValues(partitionLabel).Set(float64(readyCount))
+				schedulerActiveTimers.WithLabelValues(partitionLabel).Set(float64(twStats.ActiveTimers))
+			}
 
 		case <-s.workerDone:
 			return
@@ -352,7 +365,7 @@ func (s *Scheduler) GetNextEventTime() time.Time {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	nextTick := s.timingWheel.currentTick + 1
+	nextTick := s.timingWheel.GetCurrentTick() + 1
 	nextTime := time.UnixMilli(nextTick * int64(s.timingWheel.tickMs))
 	return nextTime
 }

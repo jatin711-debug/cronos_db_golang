@@ -85,13 +85,13 @@ func (c *ClusterClient) GetConnection(addr string) (*grpc.ClientConn, error) {
 		return conn, nil
 	}
 
-	// Create new connection
-	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
-	defer cancel()
-
-	conn, err := grpc.DialContext(ctx, addr,
+	// Create new connection — non-blocking dial.
+	// grpc.WithBlock() was removed because it blocks the caller for the entire
+	// timeout duration if the target is unreachable. Without WithBlock(),
+	// the connection is established lazily on the first RPC call, and
+	// the context timeout on the RPC itself handles unreachable nodes.
+	conn, err := grpc.DialContext(context.Background(), addr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithBlock(),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("dial %s: %w", addr, err)

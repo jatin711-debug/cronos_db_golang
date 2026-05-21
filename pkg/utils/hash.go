@@ -2,11 +2,10 @@ package utils
 
 import (
 	"crypto/sha1"
-	"crypto/sha256"
-	"encoding/binary"
 	"encoding/hex"
 	"hash"
 	"hash/crc32"
+	"hash/fnv"
 )
 
 // Hash is a simple interface for hashing
@@ -147,16 +146,15 @@ func (c *ConsistentHash) GetN(key string, n int) []string {
 }
 
 // HashToPartitionID computes a stable partition ID from an input string using
-// SHA-256 (same algorithm as the cluster router). This guarantees that every
-// node derives the same partition ID for a given topic or key, which is
-// essential for correct request routing in a multi-node cluster.
+// FNV-1a (fast, zero-alloc, excellent distribution for routing).
+// All nodes derive the same partition ID for a given topic/key since FNV-1a
+// is deterministic. Replaced SHA-256 (~400ns, heap alloc) which was overkill
+// for non-cryptographic partition routing.
 func HashToPartitionID(input string, numPartitions int) int32 {
 	if numPartitions <= 0 {
 		return 0
 	}
-	hasher := sha256.New()
-	hasher.Write([]byte(input))
-	sum := hasher.Sum(nil)
-	hash := binary.BigEndian.Uint64(sum[:8])
-	return int32(hash % uint64(numPartitions))
+	h := fnv.New64a()
+	h.Write([]byte(input))
+	return int32(h.Sum64() % uint64(numPartitions))
 }
