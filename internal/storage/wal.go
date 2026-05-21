@@ -555,25 +555,24 @@ func (w *WAL) periodicFlushLoop() {
 				continue
 			}
 
+			// Flush buffer under lock (fast — just memcpy to kernel page cache)
 			w.mu.Lock()
 			seg := w.activeSegment
-			var err error
+			var flushErr error
 			if seg != nil {
-				err = seg.FlushBuffer()
+				flushErr = seg.FlushBuffer()
 			}
 			w.mu.Unlock()
 
-			if seg == nil {
+			if seg == nil || flushErr != nil {
+				if flushErr != nil {
+					log.Printf("[WAL-%d] background flush error: %v", w.partitionID, flushErr)
+				}
 				continue
 			}
 
-			if err != nil {
-				log.Printf("[WAL-%d] background flush error: %v", w.partitionID, err)
-				continue
-			}
-
-			// For periodic and batch modes, sync in the background loop.
-			// every_event mode already syncs inline after each append.
+			// Sync OUTSIDE the lock — fsync doesn't need to block writers
+			// Writers can continue appending to the bufio.Writer while we sync.
 			if w.fsyncMode == FsyncPeriodic || w.fsyncMode == FsyncBatch {
 				if err := seg.Sync(); err != nil {
 					log.Printf("[WAL-%d] background sync error: %v", w.partitionID, err)

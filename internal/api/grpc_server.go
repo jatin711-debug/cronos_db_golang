@@ -36,8 +36,8 @@ type Config struct {
 func DefaultConfig() *Config {
 	return &Config{
 		Address:                   ":9000",
-		MaxRecvMsgSize:           4 * 1024 * 1024, // 4MB
-		MaxSendMsgSize:           4 * 1024 * 1024, // 4MB
+		MaxRecvMsgSize:           16 * 1024 * 1024, // 16MB - supports large batches (4000 events × 256B+)
+		MaxSendMsgSize:           16 * 1024 * 1024, // 16MB
 		KeepaliveMinTime:         10 * time.Second,
 		KeepaliveTimeout:         20 * time.Second,
 		MaxConnectionIdle:        120 * time.Second,
@@ -52,6 +52,10 @@ func NewGRPCServer(config *Config) *GRPCServer {
 		grpc.MaxRecvMsgSize(config.MaxRecvMsgSize),
 		grpc.MaxSendMsgSize(config.MaxSendMsgSize),
 		grpc.MaxConcurrentStreams(10000), // Prevent OOM from too many concurrent streams
+		grpc.InitialWindowSize(16*1024*1024),     // 16MB stream flow control window
+		grpc.InitialConnWindowSize(32*1024*1024), // 32MB connection flow control window
+		grpc.WriteBufferSize(4*1024*1024),        // 4MB write buffer
+		grpc.ReadBufferSize(4*1024*1024),         // 4MB read buffer
 		grpc.KeepaliveParams(keepalive.ServerParameters{
 			Time:    config.KeepaliveMinTime,
 			Timeout: config.KeepaliveTimeout,
@@ -63,7 +67,7 @@ func NewGRPCServer(config *Config) *GRPCServer {
 		grpc.ChainUnaryInterceptor(
 			tracing.GRPCServerInterceptor(),
 			MetricsInterceptor(),
-			RateLimitInterceptor(100000.0, 500000.0), // 100K req/s, burst of 500K per IP for load testing
+			RateLimitInterceptor(1000000.0, 2000000.0), // 1M req/s, burst of 2M per IP for load testing
 		),
 	)
 

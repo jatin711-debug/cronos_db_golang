@@ -74,7 +74,7 @@ func NewSegment(dataDir string, firstOffset int64, isActive bool) (*Segment, err
 
 	segment := &Segment{
 		segmentFile:     file,
-		writer:          bufio.NewWriterSize(file, 1024*1024), // 1MB buffer
+		writer:          bufio.NewWriterSize(file, 4*1024*1024), // 4MB buffer for high throughput
 		reader:          file,                                 // io.ReaderAt doesn't have buffered option
 		mmapData:        mmapData,
 		firstOffset:     firstOffset,
@@ -138,7 +138,7 @@ func OpenSegment(dataDir string, filename string) (*Segment, error) {
 
 	segment := &Segment{
 		segmentFile:   file,
-		writer:        bufio.NewWriterSize(file, 1024*1024),
+		writer:        bufio.NewWriterSize(file, 4*1024*1024), // 4MB buffer for high throughput
 		reader:        file,
 		mmapData:      mmapData,
 		firstOffset:   firstOffset,

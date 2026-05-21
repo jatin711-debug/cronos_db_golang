@@ -86,7 +86,7 @@ endif
 PARTITION_COUNT ?= 16
 REPLICATION_FACTOR ?= 1
 FSYNC_MODE ?= periodic
-FLUSH_INTERVAL_MS ?= 100
+FLUSH_INTERVAL_MS ?= 50
 INDEX_INTERVAL ?= 4096
 SEGMENT_SIZE_BYTES ?= 1073741824
 VIRTUAL_NODES ?= 2048
@@ -279,7 +279,7 @@ loadtest-batch:
 	go run -tags clustertest cluster_loadtest.go -nodes=$(NODES) -publishers=$(PUBLISHERS) -events=$(EVENTS) -payload=$(PAYLOAD) -delay=$(SCHEDULE_DELAY) -topic=$(TOPIC) -round-robin=$(ROUND_ROBIN) -batch -batch-size=$(BATCH_SIZE) -partition-count=$(PARTITION_COUNT)
 
 loadtest-max:
-	go run -tags clustertest cluster_loadtest.go -nodes=3 -publishers=24 -events=40000 -payload=256 -delay=0 -topic=cluster-loadtest -round-robin=true -batch -batch-size=4000 -partition-count=16
+	go run -tags clustertest cluster_loadtest.go -nodes=3 -publishers=32 -events=100000 -payload=256 -delay=0 -topic=cluster-loadtest -round-robin=true -batch -batch-size=4000 -partition-count=16
 
 loadtest-small:
 	go run -tags clustertest cluster_loadtest.go -publishers=10 -events=1000
