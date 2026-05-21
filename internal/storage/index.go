@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bufio"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -29,6 +30,7 @@ type Index struct {
 	mu       sync.RWMutex
 	entries  []IndexEntry
 	file     *os.File
+	writer   *bufio.Writer // Buffered writer eliminates Seek+Write per entry
 	filePath string
 }
 
@@ -42,7 +44,8 @@ func NewIndex(dataDir string, segmentFirstOffset int64) (*Index, error) {
 	filename := fmt.Sprintf("%020d.index", segmentFirstOffset)
 	filePath := filepath.Join(indexDir, filename)
 
-	file, err := os.OpenFile(filePath, os.O_RDWR|os.O_CREATE, 0644)
+	// O_APPEND eliminates the Seek call before each Write
+	file, err := os.OpenFile(filePath, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
 	if err != nil {
 		return nil, fmt.Errorf("open index file: %w", err)
 	}
@@ -50,6 +53,7 @@ func NewIndex(dataDir string, segmentFirstOffset int64) (*Index, error) {
 	idx := &Index{
 		entries:  make([]IndexEntry, 0),
 		file:     file,
+		writer:   bufio.NewWriterSize(file, 64*1024), // 64KB buffer
 		filePath: filePath,
 	}
 
@@ -76,10 +80,12 @@ func (idx *Index) load() error {
 		return nil // Empty index
 	}
 
-	// Seek to beginning
-	if _, err := idx.file.Seek(0, io.SeekStart); err != nil {
-		return fmt.Errorf("seek: %w", err)
+	// Use a separate reader for loading since file is O_APPEND
+	readFile, err := os.Open(idx.filePath)
+	if err != nil {
+		return fmt.Errorf("open for reading: %w", err)
 	}
+	defer readFile.Close()
 
 	// Read all entries
 	entryCount := stat.Size() / indexEntrySize
@@ -87,7 +93,7 @@ func (idx *Index) load() error {
 
 	for i := int64(0); i < entryCount; i++ {
 		var entryBytes [indexEntrySize]byte
-		if _, err := io.ReadFull(idx.file, entryBytes[:]); err != nil {
+		if _, err := io.ReadFull(readFile, entryBytes[:]); err != nil {
 			if err == io.EOF {
 				break
 			}
@@ -105,11 +111,23 @@ func (idx *Index) load() error {
 	return nil
 }
 
-// AddEntry adds an index entry
+// AddEntry adds an index entry (thread-safe, acquires lock)
 func (idx *Index) AddEntry(timestamp, offset, filePosition int64) error {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 
+	return idx.addEntryLocked(timestamp, offset, filePosition)
+}
+
+// AddEntryUnsafe adds an index entry without acquiring the lock.
+// The caller MUST guarantee exclusive access (e.g. parent WAL.mu is held).
+// This eliminates the triple-nested lock hierarchy WAL→Segment→Index.
+func (idx *Index) AddEntryUnsafe(timestamp, offset, filePosition int64) error {
+	return idx.addEntryLocked(timestamp, offset, filePosition)
+}
+
+// addEntryLocked is the internal implementation (caller must ensure exclusion)
+func (idx *Index) addEntryLocked(timestamp, offset, filePosition int64) error {
 	entry := IndexEntry{
 		Timestamp:    timestamp,
 		Offset:       offset,
@@ -119,23 +137,21 @@ func (idx *Index) AddEntry(timestamp, offset, filePosition int64) error {
 	// Append to in-memory entries
 	idx.entries = append(idx.entries, entry)
 
-	// Write to file
+	// Write to buffered writer (O_APPEND eliminates Seek)
 	var entryBytes [indexEntrySize]byte
 	binary.BigEndian.PutUint64(entryBytes[0:8], uint64(timestamp))
 	binary.BigEndian.PutUint64(entryBytes[8:16], uint64(offset))
 	binary.BigEndian.PutUint64(entryBytes[16:24], uint64(filePosition))
 
-	if _, err := idx.file.Seek(0, io.SeekEnd); err != nil {
-		return fmt.Errorf("seek to end: %w", err)
-	}
-
-	if _, err := idx.file.Write(entryBytes[:]); err != nil {
+	if _, err := idx.writer.Write(entryBytes[:]); err != nil {
 		return fmt.Errorf("write entry: %w", err)
 	}
 
 	// Batch sync: sync every N entries instead of every entry for performance
-	// This reduces I/O overhead significantly while maintaining reasonable durability
 	if len(idx.entries)%indexSyncInterval == 0 {
+		if err := idx.writer.Flush(); err != nil {
+			return err
+		}
 		return idx.file.Sync()
 	}
 	return nil
@@ -208,6 +224,11 @@ func (idx *Index) Flush() error {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 
+	if idx.writer != nil {
+		if err := idx.writer.Flush(); err != nil {
+			return err
+		}
+	}
 	if idx.file != nil {
 		return idx.file.Sync()
 	}
@@ -219,6 +240,9 @@ func (idx *Index) Close() error {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 
+	if idx.writer != nil {
+		idx.writer.Flush()
+	}
 	if idx.file != nil {
 		// Sync before close to ensure all data is persisted
 		idx.file.Sync()

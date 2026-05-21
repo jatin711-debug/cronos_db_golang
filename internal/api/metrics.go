@@ -2,12 +2,23 @@ package api
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/status"
+)
+
+type counterKey struct {
+	method string
+	status string
+}
+
+var (
+	counterCache  sync.Map // key: counterKey, value: prometheus.Counter
+	observerCache sync.Map // key: string (method), value: prometheus.Observer
 )
 
 var (
@@ -79,8 +90,28 @@ func MetricsInterceptor() grpc.UnaryServerInterceptor {
 			}
 		}
 
-		grpcRequestsTotal.WithLabelValues(info.FullMethod, statusCode).Inc()
-		grpcRequestDuration.WithLabelValues(info.FullMethod).Observe(duration)
+		key := counterKey{method: info.FullMethod, status: statusCode}
+		var counter prometheus.Counter
+		if val, ok := counterCache.Load(key); ok {
+			counter = val.(prometheus.Counter)
+		} else {
+			counter = grpcRequestsTotal.WithLabelValues(info.FullMethod, statusCode)
+			if actual, loaded := counterCache.LoadOrStore(key, counter); loaded {
+				counter = actual.(prometheus.Counter)
+			}
+		}
+		counter.Inc()
+
+		var observer prometheus.Observer
+		if val, ok := observerCache.Load(info.FullMethod); ok {
+			observer = val.(prometheus.Observer)
+		} else {
+			observer = grpcRequestDuration.WithLabelValues(info.FullMethod)
+			if actual, loaded := observerCache.LoadOrStore(info.FullMethod, observer); loaded {
+				observer = actual.(prometheus.Observer)
+			}
+		}
+		observer.Observe(duration)
 
 		return resp, err
 	}

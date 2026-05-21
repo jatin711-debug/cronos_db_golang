@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -167,16 +168,15 @@ func (d *Dispatcher) getShard(key string) *DispatcherShard {
 
 // tryConsumeCredit decrements one credit for a subscription if available.
 func (d *Dispatcher) tryConsumeCredit(sub *Subscription) bool {
-	shard := d.getShard(sub.ID)
-	shard.mu.Lock()
-	defer shard.mu.Unlock()
-
-	if sub.Credits <= 0 {
-		return false
+	for {
+		curr := atomic.LoadInt32(&sub.Credits)
+		if curr <= 0 {
+			return false
+		}
+		if atomic.CompareAndSwapInt32(&sub.Credits, curr, curr-1) {
+			return true
+		}
 	}
-
-	sub.Credits--
-	return true
 }
 
 // releaseCredits returns n credits to a subscription (capped at MaxCredits).
@@ -185,15 +185,16 @@ func (d *Dispatcher) releaseCredits(sub *Subscription, n int32) {
 		return
 	}
 
-	shard := d.getShard(sub.ID)
-	shard.mu.Lock()
-	defer shard.mu.Unlock()
-
-	next := sub.Credits + n
-	if next > sub.MaxCredits {
-		next = sub.MaxCredits
+	for {
+		curr := atomic.LoadInt32(&sub.Credits)
+		next := curr + n
+		if next > sub.MaxCredits {
+			next = sub.MaxCredits
+		}
+		if atomic.CompareAndSwapInt32(&sub.Credits, curr, next) {
+			return
+		}
 	}
-	sub.Credits = next
 }
 
 // releaseCredit returns one credit to a subscription.
@@ -217,7 +218,7 @@ func (d *Dispatcher) Subscribe(sub *Subscription) error {
 	if sub.MaxCredits == 0 {
 		sub.MaxCredits = d.config.MaxDeliveryCredits
 	}
-	sub.Credits = sub.MaxCredits
+	atomic.StoreInt32(&sub.Credits, sub.MaxCredits)
 
 	shard.subscriptions[sub.ID] = sub
 
@@ -271,6 +272,21 @@ func (d *Dispatcher) Unsubscribe(subscriptionID string) error {
 }
 
 func groupSubscriptionsByConsumer(allSubs []*Subscription) map[string][]*Subscription {
+	// Fast path: if all subs share the same consumer group, skip map allocation
+	if len(allSubs) > 0 {
+		firstGroup := allSubs[0].ConsumerGroup
+		allSame := true
+		for i := 1; i < len(allSubs); i++ {
+			if allSubs[i].ConsumerGroup != firstGroup {
+				allSame = false
+				break
+			}
+		}
+		if allSame {
+			return map[string][]*Subscription{firstGroup: allSubs}
+		}
+	}
+
 	consumerGroupSubs := make(map[string][]*Subscription)
 	for _, sub := range allSubs {
 		consumerGroupSubs[sub.ConsumerGroup] = append(consumerGroupSubs[sub.ConsumerGroup], sub)
@@ -299,6 +315,12 @@ func (d *Dispatcher) Dispatch(event *types.Event) error {
 		return nil
 	}
 
+	// Fast path: single subscriber (very common case)
+	// Avoids map allocation from groupSubscriptionsByConsumer entirely.
+	if len(allSubs) == 1 {
+		return d.dispatchToSub(allSubs[0], event)
+	}
+
 	consumerGroupSubs := groupSubscriptionsByConsumer(allSubs)
 
 	for groupID, groupSubs := range consumerGroupSubs {
@@ -312,7 +334,7 @@ func (d *Dispatcher) Dispatch(event *types.Event) error {
 
 		delivery := &DeliveryMessage{
 			Event:      event,
-			DeliveryID: fmt.Sprintf("%s-%d", selectedSub.ID, event.Offset),
+			DeliveryID: makeDeliveryID(selectedSub.ID, event.Offset),
 			Attempt:    1,
 			AckTimeout: int32(d.config.DefaultAckTimeout / time.Millisecond),
 		}
@@ -332,6 +354,36 @@ func (d *Dispatcher) Dispatch(event *types.Event) error {
 		d.trackDelivery(delivery, selectedSub)
 	}
 
+	return nil
+}
+
+// dispatchToSub handles the fast path for a single subscriber.
+// No map allocation, no round-robin selection needed.
+func (d *Dispatcher) dispatchToSub(sub *Subscription, event *types.Event) error {
+	if !d.tryConsumeCredit(sub) {
+		return nil // No credits available
+	}
+
+	delivery := &DeliveryMessage{
+		Event:      event,
+		DeliveryID: makeDeliveryID(sub.ID, event.Offset),
+		Attempt:    1,
+		AckTimeout: int32(d.config.DefaultAckTimeout / time.Millisecond),
+	}
+
+	if !d.tryReserveInFlight(1) {
+		d.releaseCredit(sub)
+		return fmt.Errorf("in-flight limit exceeded")
+	}
+
+	if err := sub.Stream.Send(delivery); err != nil {
+		d.decInFlight(1)
+		d.releaseCredit(sub)
+		log.Printf("[DISPATCHER] Failed to send to subscriber %s: %v", sub.ID, err)
+		return nil
+	}
+
+	d.trackDelivery(delivery, sub)
 	return nil
 }
 
@@ -399,7 +451,7 @@ func (d *Dispatcher) dispatchPartitionBatch(partitionID int32, events []*types.E
 
 		delivery := &DeliveryMessage{
 			Event:      nil,
-			DeliveryID: fmt.Sprintf("%s-batch-%d-%d", sub.ID, batchEvents[0].Offset, len(batchEvents)),
+			DeliveryID: makeDeliveryIDBatch(sub.ID, batchEvents[0].Offset, len(batchEvents)),
 			Attempt:    1,
 			AckTimeout: int32(d.config.DefaultAckTimeout / time.Millisecond),
 			Batch:      batchEvents,
@@ -431,17 +483,40 @@ func (d *Dispatcher) trackDelivery(delivery *DeliveryMessage, sub *Subscription)
 		creditsConsumed = int32(len(delivery.Batch))
 	}
 
+	// Single time.Now() call instead of two separate calls
+	now := time.Now()
+
 	shard := d.getShard(sub.ID)
 	shard.mu.Lock()
 	shard.activeDeliveries[delivery.DeliveryID] = &ActiveDelivery{
 		Delivery:        delivery,
 		Subscription:    sub,
 		Attempt:         delivery.Attempt,
-		CreatedTS:       time.Now().UnixMilli(),
-		AckDeadline:     time.Now().Add(d.config.DefaultAckTimeout),
+		CreatedTS:       now.UnixMilli(),
+		AckDeadline:     now.Add(d.config.DefaultAckTimeout),
 		CreditsConsumed: creditsConsumed,
 	}
 	shard.mu.Unlock()
+}
+
+// makeDeliveryID creates a delivery ID without fmt.Sprintf allocation.
+func makeDeliveryID(subID string, offset int64) string {
+	buf := make([]byte, 0, len(subID)+20)
+	buf = append(buf, subID...)
+	buf = append(buf, '-')
+	buf = strconv.AppendInt(buf, offset, 10)
+	return string(buf)
+}
+
+// makeDeliveryIDBatch creates a batch delivery ID without fmt.Sprintf allocation.
+func makeDeliveryIDBatch(subID string, offset int64, count int) string {
+	buf := make([]byte, 0, len(subID)+30)
+	buf = append(buf, subID...)
+	buf = append(buf, "-batch-"...)
+	buf = strconv.AppendInt(buf, offset, 10)
+	buf = append(buf, '-')
+	buf = strconv.AppendInt(buf, int64(count), 10)
+	return string(buf)
 }
 
 func (d *Dispatcher) timeoutLoop() {
@@ -652,8 +727,9 @@ func (d *Dispatcher) GetStats() *DispatcherStats {
 		stats.ActiveDeliveries += int64(len(shard.activeDeliveries))
 
 		for _, sub := range shard.subscriptions {
-			stats.CreditsInUse += int64(sub.MaxCredits - sub.Credits)
-			stats.CreditsAvailable += int64(sub.Credits)
+			credits := atomic.LoadInt32(&sub.Credits)
+			stats.CreditsInUse += int64(sub.MaxCredits - credits)
+			stats.CreditsAvailable += int64(credits)
 		}
 		shard.mu.RUnlock()
 	}

@@ -1,7 +1,9 @@
 package storage
 
 import (
+	"encoding/binary"
 	"fmt"
+	"hash/crc32"
 	"log"
 	"os"
 	"path/filepath"
@@ -12,6 +14,28 @@ import (
 
 	"cronos_db/pkg/types"
 )
+
+// FsyncMode controls when the WAL performs fsync.
+// Using int enum instead of string comparison eliminates per-write overhead.
+type FsyncMode int
+
+const (
+	FsyncPeriodic   FsyncMode = iota // Sync in background flush loop
+	FsyncEveryEvent                  // Sync after every write (safest, slowest)
+	FsyncBatch                       // Sync in background flush loop (like periodic)
+)
+
+// ParseFsyncMode converts a string to FsyncMode enum
+func ParseFsyncMode(s string) FsyncMode {
+	switch s {
+	case "every_event":
+		return FsyncEveryEvent
+	case "batch":
+		return FsyncBatch
+	default:
+		return FsyncPeriodic
+	}
+}
 
 // WAL represents Write-Ahead Log with segmented storage
 type WAL struct {
@@ -26,6 +50,8 @@ type WAL struct {
 	nextOffset         int64
 	highWatermark      int64
 	config             *WALConfig
+	fsyncMode          FsyncMode   // Parsed once at init, avoids per-write string cmp
+	dirty              atomic.Bool // Set on write, cleared on flush
 	quit               chan struct{}
 	wg                 sync.WaitGroup
 }
@@ -34,7 +60,7 @@ type WAL struct {
 type WALConfig struct {
 	SegmentSizeBytes int64
 	IndexInterval    int64
-	FsyncMode        string
+	FsyncMode        string // Raw string config, parsed to enum at WAL init
 	FlushIntervalMS  int32
 }
 
@@ -51,6 +77,7 @@ func NewWAL(dataDir string, partitionID int32, config *WALConfig) (*WAL, error) 
 		nextOffset:    0,
 		highWatermark: 0,
 		config:        config,
+		fsyncMode:     ParseFsyncMode(config.FsyncMode),
 		quit:          make(chan struct{}),
 	}
 
@@ -113,38 +140,178 @@ func (w *WAL) loadSegments() error {
 	return nil
 }
 
+// PreparedRecord holds pre-encoded record buffer for fast serialization
+type PreparedRecord struct {
+	Event *types.Event
+	Buf   []byte
+}
+
+var recordBufPool = sync.Pool{
+	New: func() interface{} {
+		return make([]byte, 4096)
+	},
+}
+
+// PrepareRecord serializes an event to a byte slice with placeholders for offset and CRC
+func PrepareRecord(event *types.Event) (*PreparedRecord, error) {
+	msgIDLen := len(event.GetMessageId())
+	topicLen := len(event.Topic)
+	payloadLen := len(event.Payload)
+	metaCount := len(event.Meta)
+
+	// Calculate size
+	size := 4 + 4 + 8 + 8 + 2 + msgIDLen + 2 + topicLen + 4 + payloadLen + 2
+	for k, v := range event.Meta {
+		metaEntrySize := 2 + len(k) + 2 + len(v)
+		if size > (1<<63-1)-metaEntrySize {
+			return nil, fmt.Errorf("event record too large: overflow in size calculation")
+		}
+		size += metaEntrySize
+	}
+
+	var buf []byte
+	if size <= 4096 {
+		x := recordBufPool.Get().([]byte)
+		buf = x[:size]
+	} else {
+		buf = make([]byte, size)
+	}
+
+	offset := 0
+
+	// Length (4 bytes)
+	binary.BigEndian.PutUint32(buf[offset:offset+4], uint32(size))
+	offset += 4
+
+	// CRC32 (4 bytes) - placeholder
+	offset += 4
+
+	// Offset (8 bytes) - placeholder
+	offset += 8
+
+	// Schedule timestamp (8 bytes)
+	binary.BigEndian.PutUint64(buf[offset:offset+8], uint64(event.GetScheduleTs()))
+	offset += 8
+
+	// Message ID length (2 bytes)
+	binary.BigEndian.PutUint16(buf[offset:offset+2], uint16(msgIDLen))
+	offset += 2
+	copy(buf[offset:offset+msgIDLen], event.GetMessageId())
+	offset += msgIDLen
+
+	// Topic length (2 bytes)
+	binary.BigEndian.PutUint16(buf[offset:offset+2], uint16(topicLen))
+	offset += 2
+	copy(buf[offset:offset+topicLen], event.Topic)
+	offset += topicLen
+
+	// Payload length (4 bytes)
+	binary.BigEndian.PutUint32(buf[offset:offset+4], uint32(payloadLen))
+	offset += 4
+	copy(buf[offset:offset+payloadLen], event.Payload)
+	offset += payloadLen
+
+	// Meta count (2 bytes)
+	binary.BigEndian.PutUint16(buf[offset:offset+2], uint16(metaCount))
+	offset += 2
+
+	for k, v := range event.Meta {
+		binary.BigEndian.PutUint16(buf[offset:offset+2], uint16(len(k)))
+		offset += 2
+		copy(buf[offset:offset+len(k)], k)
+		offset += len(k)
+
+		binary.BigEndian.PutUint16(buf[offset:offset+2], uint16(len(v)))
+		offset += 2
+		copy(buf[offset:offset+len(v)], v)
+		offset += len(v)
+	}
+
+	return &PreparedRecord{
+		Event: event,
+		Buf:   buf,
+	}, nil
+}
+
 // AppendBatch appends a batch of events to WAL
 func (w *WAL) AppendBatch(events []*types.Event) error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
 	if len(events) == 0 {
 		return nil
 	}
 
-	// Set offsets
-	for _, event := range events {
-		event.Offset = w.nextOffset
-		event.PartitionId = w.partitionID
-		w.nextOffset++
+	// 1. Prepare records OUTSIDE the lock
+	prepared := make([]*PreparedRecord, len(events))
+	for i, event := range events {
+		prep, err := PrepareRecord(event)
+		if err != nil {
+			// If error, return already allocated buffers to pool
+			for j := 0; j < i; j++ {
+				if len(prepared[j].Buf) <= 4096 {
+					recordBufPool.Put(prepared[j].Buf)
+				}
+			}
+			return err
+		}
+		prepared[i] = prep
 	}
 
-	// Append to active segment
-	if err := w.activeSegment.AppendBatch(events, w.config.IndexInterval); err != nil {
-		return fmt.Errorf("append batch to segment: %w", err)
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	// 2. Set offsets and partition IDs, fill them in the prepared records
+	for _, prep := range prepared {
+		prep.Event.Offset = w.nextOffset
+		prep.Event.PartitionId = w.partitionID
+		w.nextOffset++
+
+		// Fill offset (bytes 8-16)
+		binary.BigEndian.PutUint64(prep.Buf[8:16], uint64(prep.Event.Offset))
+
+		// Compute and fill CRC32 (bytes 4-8)
+		crc := crc32.ChecksumIEEE(prep.Buf[8:])
+		binary.BigEndian.PutUint32(prep.Buf[4:8], crc)
+	}
+
+	// 3. Append to active segment — use Unsafe since we hold w.mu
+	if err := w.activeSegment.AppendPreparedBatchUnsafe(prepared, w.config.IndexInterval); err != nil {
+		// Return buffers to pool
+		for _, prep := range prepared {
+			if len(prep.Buf) <= 4096 {
+				recordBufPool.Put(prep.Buf)
+			}
+		}
+		return fmt.Errorf("append prepared batch to segment: %w", err)
 	}
 
 	w.highWatermark = events[len(events)-1].Offset
+	w.dirty.Store(true)
 
 	// Sync inline only for every_event mode.
-	// In batch/periodic modes, background flush loop performs fsync to avoid
-	// adding synchronous IO latency to the publish hot path.
-	if w.config.FsyncMode == "every_event" {
+	if w.fsyncMode == FsyncEveryEvent {
 		if err := w.activeSegment.FlushBuffer(); err != nil {
+			// Return buffers to pool
+			for _, prep := range prepared {
+				if len(prep.Buf) <= 4096 {
+					recordBufPool.Put(prep.Buf)
+				}
+			}
 			return fmt.Errorf("flush batch: %w", err)
 		}
 		if err := w.activeSegment.Sync(); err != nil {
+			// Return buffers to pool
+			for _, prep := range prepared {
+				if len(prep.Buf) <= 4096 {
+					recordBufPool.Put(prep.Buf)
+				}
+			}
 			return fmt.Errorf("sync batch: %w", err)
+		}
+	}
+
+	// 4. Return buffers to pool
+	for _, prep := range prepared {
+		if len(prep.Buf) <= 4096 {
+			recordBufPool.Put(prep.Buf)
 		}
 	}
 
@@ -157,7 +324,7 @@ func (w *WAL) AppendBatch(events []*types.Event) error {
 		// Trigger background pre-creation at 90% capacity
 		threshold := int64(float64(w.config.SegmentSizeBytes) * 0.9)
 		if w.activeSegment.GetSize() >= threshold && w.preCreateTriggered.CompareAndSwap(false, true) {
-			go w.maybePreCreateNextSegment()
+			go w.maybePreCreateNextSegment(w.nextOffset)
 		}
 	}
 
@@ -166,7 +333,7 @@ func (w *WAL) AppendBatch(events []*types.Event) error {
 
 // maybePreCreateNextSegment creates the next segment in the background
 // so that rotation can swap it in with minimal lock hold time.
-func (w *WAL) maybePreCreateNextSegment() {
+func (w *WAL) maybePreCreateNextSegment(nextOffset int64) {
 	w.nextSegMu.Lock()
 	if w.nextSegment != nil {
 		w.nextSegMu.Unlock()
@@ -174,7 +341,7 @@ func (w *WAL) maybePreCreateNextSegment() {
 	}
 	w.nextSegMu.Unlock()
 
-	seg, err := NewSegment(w.dataDir, w.nextOffset, true)
+	seg, err := NewSegment(w.dataDir, nextOffset, true)
 	if err != nil {
 		log.Printf("[WAL-%d] failed to pre-create next segment: %v", w.partitionID, err)
 		w.preCreateTriggered.Store(false)
@@ -213,29 +380,56 @@ func (w *WAL) openActiveSegment() error {
 
 // AppendEvent appends an event to WAL
 func (w *WAL) AppendEvent(event *types.Event) error {
+	// Prepare record outside the lock
+	prep, err := PrepareRecord(event)
+	if err != nil {
+		return err
+	}
+
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
 	// Set offset
 	event.Offset = w.nextOffset
 	event.PartitionId = w.partitionID
+	w.nextOffset++
 
-	// Append to active segment
-	if err := w.activeSegment.AppendEvent(event, w.config.IndexInterval); err != nil {
+	// Fill offset (bytes 8-16)
+	binary.BigEndian.PutUint64(prep.Buf[8:16], uint64(event.Offset))
+
+	// Compute and fill CRC32 (bytes 4-8)
+	crc := crc32.ChecksumIEEE(prep.Buf[8:])
+	binary.BigEndian.PutUint32(prep.Buf[4:8], crc)
+
+	// Append to active segment — use Unsafe since we hold w.mu
+	if err := w.activeSegment.AppendPreparedBatchUnsafe([]*PreparedRecord{prep}, w.config.IndexInterval); err != nil {
+		if len(prep.Buf) <= 4096 {
+			recordBufPool.Put(prep.Buf)
+		}
 		return fmt.Errorf("append to segment: %w", err)
 	}
 
-	w.nextOffset++
 	w.highWatermark = event.Offset
+	w.dirty.Store(true)
 
 	// Sync inline for every_event mode
-	if w.config.FsyncMode == "every_event" {
+	if w.fsyncMode == FsyncEveryEvent {
 		if err := w.activeSegment.FlushBuffer(); err != nil {
+			if len(prep.Buf) <= 4096 {
+				recordBufPool.Put(prep.Buf)
+			}
 			return fmt.Errorf("flush event: %w", err)
 		}
 		if err := w.activeSegment.Sync(); err != nil {
+			if len(prep.Buf) <= 4096 {
+				recordBufPool.Put(prep.Buf)
+			}
 			return fmt.Errorf("sync event: %w", err)
 		}
+	}
+
+	if len(prep.Buf) <= 4096 {
+		recordBufPool.Put(prep.Buf)
 	}
 
 	// Rotate segment if full
@@ -247,7 +441,7 @@ func (w *WAL) AppendEvent(event *types.Event) error {
 		// Trigger background pre-creation at 90% capacity
 		threshold := int64(float64(w.config.SegmentSizeBytes) * 0.9)
 		if w.activeSegment.GetSize() >= threshold && w.preCreateTriggered.CompareAndSwap(false, true) {
-			go w.maybePreCreateNextSegment()
+			go w.maybePreCreateNextSegment(w.nextOffset)
 		}
 	}
 
@@ -355,23 +549,32 @@ func (w *WAL) periodicFlushLoop() {
 	for {
 		select {
 		case <-ticker.C:
-			w.mu.RLock()
+			// FIX: Skip flush if nothing was written since last flush.
+			// This eliminates unnecessary RLock + syscall overhead on idle partitions.
+			if !w.dirty.CompareAndSwap(true, false) {
+				continue
+			}
+
+			w.mu.Lock()
 			seg := w.activeSegment
-			mode := w.config.FsyncMode
-			w.mu.RUnlock()
+			var err error
+			if seg != nil {
+				err = seg.FlushBuffer()
+			}
+			w.mu.Unlock()
 
 			if seg == nil {
 				continue
 			}
 
-			if err := seg.FlushBuffer(); err != nil {
+			if err != nil {
 				log.Printf("[WAL-%d] background flush error: %v", w.partitionID, err)
 				continue
 			}
 
 			// For periodic and batch modes, sync in the background loop.
 			// every_event mode already syncs inline after each append.
-			if mode == "periodic" || mode == "batch" {
+			if w.fsyncMode == FsyncPeriodic || w.fsyncMode == FsyncBatch {
 				if err := seg.Sync(); err != nil {
 					log.Printf("[WAL-%d] background sync error: %v", w.partitionID, err)
 				}
@@ -387,15 +590,19 @@ func (w *WAL) periodicFlushLoop() {
 // This performs both buffer flush and fsync regardless of mode,
 // and is intended for explicit durability checkpoints (e.g. shutdown).
 func (w *WAL) Flush() error {
-	w.mu.RLock()
+	w.mu.Lock()
 	seg := w.activeSegment
-	w.mu.RUnlock()
+	var err error
+	if seg != nil {
+		err = seg.FlushBuffer()
+	}
+	w.mu.Unlock()
 
 	if seg == nil {
 		return nil
 	}
 
-	if err := seg.FlushBuffer(); err != nil {
+	if err != nil {
 		return err
 	}
 	return seg.Sync()

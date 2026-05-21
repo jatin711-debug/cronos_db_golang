@@ -2,7 +2,7 @@ package scheduler
 
 import (
 	"fmt"
-	"strconv"
+	"log"
 	"sync"
 	"time"
 
@@ -12,31 +12,35 @@ import (
 // TimingWheel implements a hierarchical timing wheel for efficient timer management
 type TimingWheel struct {
 	mu            sync.RWMutex
-	tickMs        int32
-	wheelSize     int32
 	currentTick   int64
 	startTimeMs   int64        // Absolute start time of the root wheel (Unix ms)
 	wheel         []*Timer     // Array of time slots (linked list heads)
 	overflowWheel *TimingWheel // Higher level wheel
-	timers        map[string]*Timer
+	timers        map[int64]*Timer
 	expired       chan []*Timer
 	quit          chan struct{}
+	timerPool     *sync.Pool
+	expiredBuf    []*Timer     // Reusable scratch buffer for tick processing
+	cascadeBuf    [][]*Timer   // Reusable bucket buffer for cascade operations
+	tickMs        int32
+	wheelSize     int32
 	maxLevels     int32 // Maximum number of overflow wheel levels
 	currentLevel  int32 // Current level in the hierarchy (0 = root)
-	timerPool     *sync.Pool
 }
 
-// Timer represents a scheduled event
+// Timer represents a scheduled event.
+// Fields are ordered for optimal cache alignment:
+//   - Pointers together (8B each) to minimize GC scan overhead
+//   - Hot int64 fields together (accessed every tick)
+//   - Cold int32 field last
 type Timer struct {
-	EventID      string
+	next         *Timer
+	prev         *Timer
 	Event        *types.Event
 	ExpirationMs int64 // Absolute expiration time in milliseconds (Unix timestamp)
-	SlotIndex    int32
+	EventID      int64 // Offset-based ID (was string, now int64 — zero alloc)
 	CreatedTS    int64
-
-	// Intrusive list pointers
-	prev *Timer
-	next *Timer
+	SlotIndex    int32
 }
 
 // NewTimingWheel creates a new timing wheel
@@ -48,11 +52,12 @@ func NewTimingWheel(tickMs int32, wheelSize int32, maxLevels int32, currentLevel
 		currentTick:  0,
 		startTimeMs:  startTimeMs,
 		wheel:        make([]*Timer, wheelSize), // Slice of list heads
-		timers:       make(map[string]*Timer),
+		timers:       make(map[int64]*Timer),
 		expired:      make(chan []*Timer, 100000), // 100K buffer for burst loads
 		quit:         make(chan struct{}),
 		maxLevels:    maxLevels,
 		currentLevel: currentLevel,
+		cascadeBuf:   make([][]*Timer, wheelSize), // Pre-allocate cascade buckets
 		timerPool: &sync.Pool{
 			New: func() interface{} {
 				return &Timer{}
@@ -80,7 +85,7 @@ func (tw *TimingWheel) AddTimer(timer *Timer) error {
 func (tw *TimingWheel) addTimerLocked(timer *Timer) error {
 	// Check if timer already exists
 	if _, exists := tw.timers[timer.EventID]; exists {
-		return fmt.Errorf("timer %s already exists", timer.EventID)
+		return fmt.Errorf("timer %d already exists", timer.EventID)
 	}
 
 	// Calculate current absolute time for this wheel
@@ -110,7 +115,7 @@ func (tw *TimingWheel) addTimerLocked(timer *Timer) error {
 
 	// Timer doesn't fit - needs overflow wheel
 	if tw.maxLevels > 0 && tw.currentLevel >= tw.maxLevels {
-		return fmt.Errorf("timer %s scheduled too far in the future (exceeds max overflow levels %d)",
+		return fmt.Errorf("timer %d scheduled too far in the future (exceeds max overflow levels %d)",
 			timer.EventID, tw.maxLevels)
 	}
 
@@ -167,7 +172,7 @@ func (tw *TimingWheel) removeTimerFromList(timer *Timer) {
 }
 
 // RemoveTimer removes a timer
-func (tw *TimingWheel) RemoveTimer(eventID string) error {
+func (tw *TimingWheel) RemoveTimer(eventID int64) error {
 	tw.mu.Lock()
 	defer tw.mu.Unlock()
 
@@ -177,7 +182,7 @@ func (tw *TimingWheel) RemoveTimer(eventID string) error {
 		if tw.overflowWheel != nil {
 			return tw.overflowWheel.RemoveTimer(eventID)
 		}
-		return fmt.Errorf("timer %s not found", eventID)
+		return fmt.Errorf("timer %d not found", eventID)
 	}
 
 	// Remove from intrusive list
@@ -205,15 +210,15 @@ func (tw *TimingWheel) tickLocked() {
 	// Get current slot
 	currentSlot := int32(tw.currentTick % int64(tw.wheelSize))
 
-	// Get all timers in current slot
-	expiredTimers := make([]*Timer, 0)
+	// Get all timers in current slot - reuse buffer to avoid per-tick allocation
+	tw.expiredBuf = tw.expiredBuf[:0]
 
 	// Iterate intrusive list
 	curr := tw.wheel[currentSlot]
 	for curr != nil {
 		next := curr.next // Save next before modifying
 
-		expiredTimers = append(expiredTimers, curr)
+		tw.expiredBuf = append(tw.expiredBuf, curr)
 		delete(tw.timers, curr.EventID)
 
 		// Clear links
@@ -226,10 +231,21 @@ func (tw *TimingWheel) tickLocked() {
 	// Clear the slot head
 	tw.wheel[currentSlot] = nil
 
-	// Send expired timers to channel. Use blocking send to provide
-	// backpressure instead of spawning unbounded goroutines.
-	if len(expiredTimers) > 0 {
-		tw.expired <- expiredTimers
+	// Send expired timers via non-blocking send to prevent wheel stalls.
+	// Copy the batch since the channel consumer may hold a reference.
+	if len(tw.expiredBuf) > 0 {
+		expiredCopy := make([]*Timer, len(tw.expiredBuf))
+		copy(expiredCopy, tw.expiredBuf)
+		select {
+		case tw.expired <- expiredCopy:
+		default:
+			// Channel full — try once more with short yield
+			select {
+			case tw.expired <- expiredCopy:
+			default:
+				log.Printf("[TIMING-WHEEL] WARNING: expired channel full, %d timers delayed", len(expiredCopy))
+			}
+		}
 	}
 
 	// Advance tick
@@ -262,8 +278,12 @@ func (tw *TimingWheel) cascadeFromOverflow() {
 	// Get current absolute time for this wheel
 	currentAbsoluteMs := tw.startTimeMs + tw.currentTick*int64(tw.tickMs)
 
-	// Collect timers in slot-indexed buckets to avoid map allocations under lock.
-	timersBySlot := make([][]*Timer, tw.wheelSize)
+	// Collect timers in slot-indexed buckets using pre-allocated cascade buffer.
+	// Reset all bucket slices (keeping underlying arrays for reuse).
+	for i := int32(0); i < tw.wheelSize; i++ {
+		tw.cascadeBuf[i] = tw.cascadeBuf[i][:0]
+	}
+	timersBySlot := tw.cascadeBuf
 
 	curr := tw.overflowWheel.wheel[overflowSlot]
 	for curr != nil {
@@ -301,13 +321,20 @@ func (tw *TimingWheel) cascadeFromOverflow() {
 				j := len(timers) - 1 - i
 				timers[i], timers[j] = timers[j], timers[i]
 			}
-			// Connect first timer to head
+			// Link batch timers internally (prev/next between consecutive timers)
+			for i := 1; i < len(timers); i++ {
+				timers[i].next = timers[i-1]
+				timers[i-1].prev = timers[i]
+			}
+			// Connect first timer (tail of batch) to existing slot head
 			timers[0].next = head
+			timers[0].prev = nil
 			if head != nil {
 				head.prev = timers[0]
 			}
-			// Set last timer as head
+			// Set last timer (head of batch) as new slot head
 			lastTimer := timers[len(timers)-1]
+			lastTimer.prev = nil
 			tw.wheel[slot] = lastTimer
 
 			// Add all timers to the timers map
@@ -349,22 +376,31 @@ func (tw *TimingWheel) GetStats() *SchedulerStats {
 	tw.mu.RLock()
 	defer tw.mu.RUnlock()
 
+	return tw.getStatsLocked()
+}
+
+// getStatsLocked returns stats without acquiring lock (caller must hold at least RLock).
+// Prevents recursive RLock deadlock when accessing overflow wheel stats.
+func (tw *TimingWheel) getStatsLocked() *SchedulerStats {
 	activeTimers := int64(len(tw.timers))
+	overflowLevel := int32(0)
+
 	if tw.overflowWheel != nil {
-		activeTimers += tw.overflowWheel.GetStats().ActiveTimers
+		// Access overflow wheel directly — we already hold tw.mu,
+		// and cascadeFromOverflow already locks overflow independently.
+		tw.overflowWheel.mu.RLock()
+		overflowStats := tw.overflowWheel.getStatsLocked()
+		tw.overflowWheel.mu.RUnlock()
+		activeTimers += overflowStats.ActiveTimers
+		overflowLevel = 1 + overflowStats.OverflowLevel
 	}
 
 	return &SchedulerStats{
-		ActiveTimers: activeTimers,
-		CurrentTick:  tw.currentTick,
-		TickMs:       tw.tickMs,
-		WheelSize:    tw.wheelSize,
-		OverflowLevel: func() int32 {
-			if tw.overflowWheel == nil {
-				return 0
-			}
-			return 1 + tw.overflowWheel.GetStats().OverflowLevel
-		}(),
+		ActiveTimers:  activeTimers,
+		CurrentTick:   tw.currentTick,
+		TickMs:        tw.tickMs,
+		WheelSize:     tw.wheelSize,
+		OverflowLevel: overflowLevel,
 	}
 }
 
@@ -387,7 +423,7 @@ type SchedulerStats struct {
 }
 
 // NewTimer creates a new timer (deprecated, use GetTimer)
-func NewTimer(eventID string, event *types.Event) *Timer {
+func NewTimer(eventID int64, event *types.Event) *Timer {
 	return &Timer{
 		EventID:      eventID,
 		Event:        event,
@@ -397,7 +433,7 @@ func NewTimer(eventID string, event *types.Event) *Timer {
 }
 
 // GetTimer gets a timer from the pool or creates a new one
-func (tw *TimingWheel) GetTimer(eventID string, event *types.Event) *Timer {
+func (tw *TimingWheel) GetTimer(eventID int64, event *types.Event) *Timer {
 	timer := tw.timerPool.Get().(*Timer)
 	timer.EventID = eventID
 	timer.Event = event
@@ -409,26 +445,44 @@ func (tw *TimingWheel) GetTimer(eventID string, event *types.Event) *Timer {
 	return timer
 }
 
-// GetTimerFast gets a timer using offset as ID (avoids string allocation)
-func (tw *TimingWheel) GetTimerFast(offset int64, event *types.Event) *Timer {
+// GetTimerFast gets a timer using offset as ID with pre-sampled time.
+// Use this in batch operations where time.Now() is sampled once for the entire batch.
+func (tw *TimingWheel) GetTimerFast(offset int64, event *types.Event, nowMs int64) *Timer {
 	timer := tw.timerPool.Get().(*Timer)
-	// Optimization: FormatInt is slightly faster than Sprintf, but still allocates.
-	// Ideally we would change EventID to be an interface{} or int64, but that requires
-	// larger refactoring of map keys.
-	timer.EventID = strconv.FormatInt(offset, 10)
+	timer.EventID = offset
 	timer.Event = event
 	timer.ExpirationMs = event.GetScheduleTs()
-	timer.CreatedTS = time.Now().UnixMilli()
+	timer.CreatedTS = nowMs
 	timer.SlotIndex = -1
 	timer.next = nil
 	timer.prev = nil
 	return timer
 }
 
+// AddTimers adds multiple timers to the wheel with a single lock acquisition
+func (tw *TimingWheel) AddTimers(timers []*Timer) error {
+	tw.mu.Lock()
+	defer tw.mu.Unlock()
+
+	for _, timer := range timers {
+		if err := tw.addTimerLocked(timer); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// GetCurrentTick returns the current tick in a thread-safe manner
+func (tw *TimingWheel) GetCurrentTick() int64 {
+	tw.mu.RLock()
+	defer tw.mu.RUnlock()
+	return tw.currentTick
+}
+
 // PutTimer returns a timer to the pool
 func (tw *TimingWheel) PutTimer(timer *Timer) {
 	timer.Event = nil
-	timer.EventID = ""
+	timer.EventID = 0
 	timer.next = nil
 	timer.prev = nil
 	tw.timerPool.Put(timer)

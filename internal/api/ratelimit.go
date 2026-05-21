@@ -44,33 +44,27 @@ func newRateLimiter(rate float64, capacity float64) *rateLimiter {
 func (rl *rateLimiter) cleanup() {
 	cutoff := time.Now().Add(-10 * time.Minute)
 	rl.clients.Range(func(key, value interface{}) bool {
-		ip := key.(string)
 		tb := value.(*tokenBucket)
 		tb.mu.Lock()
 		lastRefill := tb.lastRefillTS
 		tb.mu.Unlock()
 		if lastRefill.Before(cutoff) {
-			rl.clients.Delete(ip)
+			rl.clients.Delete(key)
 		}
 		return true
 	})
 }
 
-func (rl *rateLimiter) allow(ip string) bool {
-	now := time.Now()
-	v, _ := rl.clients.LoadOrStore(ip, &tokenBucket{
-		tokens:       rl.capacity,
-		lastRefillTS: now,
-	})
-	tb := v.(*tokenBucket)
-
+// tryConsume refills tokens and attempts to consume one.
+// Extracted to avoid code duplication between Load and LoadOrStore paths.
+func (tb *tokenBucket) tryConsume(now time.Time, rate, capacity float64) bool {
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
 
 	elapsed := now.Sub(tb.lastRefillTS).Seconds()
-	tb.tokens += elapsed * rl.rate
-	if tb.tokens > rl.capacity {
-		tb.tokens = rl.capacity
+	tb.tokens += elapsed * rate
+	if tb.tokens > capacity {
+		tb.tokens = capacity
 	}
 	tb.lastRefillTS = now
 
@@ -79,6 +73,25 @@ func (rl *rateLimiter) allow(ip string) bool {
 		return true
 	}
 	return false
+}
+
+func (rl *rateLimiter) allow(ip string) bool {
+	now := time.Now()
+
+	// Fast path: Load existing bucket without allocation.
+	// sync.Map.LoadOrStore always allocates the *tokenBucket argument on the heap
+	// even when the key already exists. For steady-state traffic (same IPs),
+	// this Load-first pattern eliminates ~1 heap alloc per request.
+	if v, ok := rl.clients.Load(ip); ok {
+		return v.(*tokenBucket).tryConsume(now, rl.rate, rl.capacity)
+	}
+
+	// Slow path: new IP, allocate bucket
+	v, _ := rl.clients.LoadOrStore(ip, &tokenBucket{
+		tokens:       rl.capacity,
+		lastRefillTS: now,
+	})
+	return v.(*tokenBucket).tryConsume(now, rl.rate, rl.capacity)
 }
 
 // RateLimitInterceptor creates a gRPC unary interceptor for rate limiting

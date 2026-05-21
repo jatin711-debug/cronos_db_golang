@@ -222,7 +222,7 @@ node1: rust-dedup
 		--cluster-raft-addr=127.0.0.1:7948
 
 # Start Node 2 (joins Node 1)
-node2: rust-dedup
+node2: 
 	$(GO_RUNTIME_PREFIX) go run ./cmd/api \
 		--node-id=node2 \
 		--cluster \
@@ -244,7 +244,7 @@ node2: rust-dedup
 		--cluster-seeds=127.0.0.1:7946
 
 # Start Node 3 (joins Node 1)
-node3: rust-dedup
+node3: 
 	$(GO_RUNTIME_PREFIX) go run ./cmd/api \
 		--node-id=node3 \
 		--cluster \

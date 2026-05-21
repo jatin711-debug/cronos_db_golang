@@ -316,7 +316,16 @@ func discoverPartitionLeaders(config ClusterLoadTestConfig) (map[int32]int, erro
 			resp, err := node.client.Publish(ctx, req)
 			cancel()
 
-			if err != nil || resp == nil || !resp.Success {
+			if err != nil {
+				log.Printf("  DEBUG: node %s partition %d Publish error: %v", node.ID, partitionID, err)
+				continue
+			}
+			if resp == nil {
+				log.Printf("  DEBUG: node %s partition %d Publish response is nil", node.ID, partitionID)
+				continue
+			}
+			if !resp.Success {
+				log.Printf("  DEBUG: node %s partition %d Publish response success=false, error: %s", node.ID, partitionID, resp.Error)
 				continue
 			}
 

@@ -324,6 +324,39 @@ func (pm *PartitionManager) GetPartitionForKey(key string) (*types.Partition, er
 	}, nil
 }
 
+// GetOrCreateInternalPartition gets or auto-creates and starts an internal partition by ID
+func (pm *PartitionManager) GetOrCreateInternalPartition(partitionID int32, topic string) (*Partition, error) {
+	// Fast path: read lock for existing partition lookups.
+	pm.mu.RLock()
+	if partition, exists := pm.partitions[partitionID]; exists {
+		pm.mu.RUnlock()
+		return partition, nil
+	}
+	pm.mu.RUnlock()
+
+	// Slow path: partition missing, escalate to write lock.
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	// Double-checked locking
+	if partition, exists := pm.partitions[partitionID]; exists {
+		return partition, nil
+	}
+
+	// Auto-create
+	if err := pm.createPartitionLocked(partitionID, topic); err != nil {
+		return nil, fmt.Errorf("auto-create partition: %w", err)
+	}
+
+	// Start the newly created partition synchronously
+	partition := pm.partitions[partitionID]
+	if err := pm.startPartitionInternal(partition); err != nil {
+		log.Printf("Failed to start auto-created partition %d: %v", partitionID, err)
+	}
+
+	return partition, nil
+}
+
 // startPartitionLocked starts a partition (assumes lock is held)
 func (pm *PartitionManager) startPartitionLocked(partitionID int32) error {
 	partition, exists := pm.partitions[partitionID]
