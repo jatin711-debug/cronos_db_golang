@@ -92,7 +92,7 @@ func main() {
 	}
 
 	// ── Producer ─────────────────────────────────────────────────────────────
-	producer, err := client.NewProducer(c, client.ProducerConfig{})
+	producer, err := client.NewProducer(c, client.DefaultProducerConfig())
 	if err != nil {
 		logger.Fatalf("producer init failed: %v", err)
 	}
