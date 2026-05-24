@@ -203,6 +203,90 @@ grpcurl -plaintext \
 
 ---
 
+## Go Client SDK (`pkg/client`)
+
+The repository ships a production-oriented Go SDK with metadata-based routing, pooled gRPC connections, producer/consumer APIs, replay, retries, and compatibility checks.
+
+### Install
+
+```bash
+go get github.com/jatin711-debug/cronos_db_golang@latest
+```
+
+```go
+import client "github.com/jatin711-debug/cronos_db_golang/pkg/client"
+```
+
+### Producer example (JSON + scheduled delivery)
+
+```go
+ctx := context.Background()
+
+cfg := client.DefaultConfig("127.0.0.1:9000")
+cfg.Security.Insecure = true
+
+c, err := client.Dial(ctx, cfg)
+if err != nil {
+    return err
+}
+defer c.Close()
+
+producer, err := client.NewProducer(c, client.DefaultProducerConfig())
+if err != nil {
+    return err
+}
+defer producer.Close()
+
+_, err = producer.Send(ctx, client.Message{
+    Topic:        "orders",
+    PartitionKey: "orders", // keep routing stable for matching consumers
+    Value: map[string]any{
+        "order_id": "ord-1001",
+        "status":   "created",
+    },
+    Codec:      client.JSONCodec{},
+    ScheduleTS: time.Now().Add(10 * time.Second).UnixMilli(),
+})
+if err != nil {
+    return err
+}
+```
+
+### Consumer example (auto-ack)
+
+```go
+cons := client.DefaultConsumerConfig("orders", "order-processors")
+cons.AckMode = client.AckModeAuto
+
+err = c.Subscribe(ctx, cons, func(ctx context.Context, d client.Delivery) error {
+    var payload map[string]any
+    if err := d.Decode(client.JSONCodec{}, &payload); err != nil {
+        return err
+    }
+    log.Printf("received message_id=%s payload=%v", d.Event.GetMessageId(), payload)
+    return nil
+})
+if err != nil {
+    return err
+}
+```
+
+### Replay and compatibility helpers
+
+- `Client.Replay`, `ReplayByOffsetRange`, `ReplayByTimeRange`, `ReplayToLive`
+- `Client.DetectCapabilities` and `RequireCapabilities`
+- `Client.RouteForPartition` for explicit routing/diagnostics
+
+### End-to-end demo
+
+```bash
+go run ./examples/pubsub_demo
+```
+
+This demo publishes one JSON event with a 10-second schedule window and prints the received delivery metadata/payload.
+
+---
+
 ## Performance
 
 ### Benchmarks (3-Node Cluster on Single Machine)
@@ -325,6 +409,18 @@ cronos_db/
 └── ARCHITECTURE.md                 # Deep-dive with 30+ Mermaid diagrams
 ```
 
+### Codebase Walkthrough (by workflow)
+
+| Workflow | Start Here | Main Components |
+|----------|------------|-----------------|
+| **Publish event** | `internal/api/handlers.go` (`Publish`, `PublishBatch`) | `internal/partition` → `internal/dedup` → `internal/storage` → `internal/scheduler` |
+| **Scheduled trigger** | `internal/scheduler/scheduler.go` | `internal/scheduler/timing_wheel.go` |
+| **Delivery to consumers** | `internal/delivery/worker.go` | `internal/delivery/dispatcher.go`, `internal/consumer/group.go` |
+| **Consumer offsets + ack** | `internal/api/handlers.go` (`Ack`) | `internal/consumer/group.go`, `internal/consumer/offset_store.go` |
+| **Replay/history** | `internal/api/handlers.go` (`Replay`) | `internal/replay` + `internal/storage` |
+| **Cluster routing/leadership** | `internal/cluster/manager.go` | `internal/cluster/router.go`, `internal/cluster/raft.go`, `internal/cluster/membership.go` |
+| **Go client SDK** | `pkg/client/client.go` | `pkg/client/producer.go`, `pkg/client/consumer.go`, `pkg/client/replay.go` |
+
 ---
 
 ## gRPC API
@@ -441,6 +537,9 @@ See [proto/events.proto](proto/events.proto) for the complete specification.
 |----------|-------------|
 | **[ARCHITECTURE.md](ARCHITECTURE.md)** | Deep-dive with 30+ Mermaid diagrams — data flows, sequence diagrams, state machines |
 | [proto/events.proto](proto/events.proto) | Complete gRPC API specification (5 services, 30+ message types) |
+| [pkg/client](pkg/client) | Production Go SDK (producer/consumer/replay/metadata routing) |
+| [pkg.go.dev/client page](https://pkg.go.dev/github.com/jatin711-debug/cronos_db_golang/pkg/client) | Generated API reference and package docs |
+| [examples/pubsub_demo/main.go](examples/pubsub_demo/main.go) | Runnable publish+subscribe demo with scheduled delivery |
 | [Makefile](Makefile) | All build, test, cluster, and loadtest targets |
 | [Dockerfile](Dockerfile) | Multi-stage build: Rust → Go → Debian slim |
 | [docker-compose.yml](docker-compose.yml) | Single node + 3-node cluster configurations |
