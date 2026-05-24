@@ -36,6 +36,7 @@ It combines the durability of a write-ahead log, the precision of a hierarchical
 
 ### Scheduling
 - **Hierarchical Timing Wheel** — O(1) timer add/remove/tick for millions of events
+- **Two-Tier Cold/Hot Scheduler** — PebbleDB cold store for far-future events (>1hr); hydrator loads into timing wheel every 60s. Keeps hot memory bounded.
 - **Absolute Time Tracking** — No drift across overflow wheel cascades
 - **Batch Scheduling** — Single lock acquisition for entire batch
 - **Crash Recovery** — Incremental WAL replay with checkpointing
@@ -47,17 +48,20 @@ It combines the durability of a write-ahead log, the precision of a hierarchical
 
 ### Delivery
 - **Credit-Based Flow Control** — Backpressure prevents consumer overload
+- **Non-Blocking Retry Heap** — Min-heap by `retryAt` keeps `timeoutLoop` responsive; no inline `time.Sleep`
+- **Per-Subscription Circuit Breaker** — Atomic state machine (Closed→Open→HalfOpen) skips dead subscribers automatically
 - **At-Least-Once Semantics** — Ack-based with configurable retry + exponential backoff
-- **Dead Letter Queue** — Failed events captured for inspection/replay
+- **Dead Letter Queue** — Append-only binary segments (CRC32, 64MB rotation) for inspection/replay
 - **32-Shard Dispatcher** — Reduced lock contention under high concurrency
 
 ### Distributed
 - **Multi-Node Clustering** — 3+ nodes with automatic partition distribution
 - **Raft Consensus** — Metadata consistency (HashiCorp Raft)
-- **Gossip Protocol** — TCP heartbeats, failure detection, node discovery
+- **Pluggable Gossip** — Choose custom TCP heartbeats or HashiCorp Memberlist (SWIM protocol) via config
 - **Consistent Hashing** — SHA-256 ring with 150 virtual nodes per physical node
 - **Binary Replication Protocol** — Custom wire format (0xCAFEBABE magic)
 - **Bulk File Sync** — Segment-level transfer for new node bootstrap
+- **Clock Skew Detection** — Cross-node heartbeat timestamp comparison; warns if |skew| > 5s
 
 ### API
 - **gRPC Streaming** — Bidirectional subscribe, streaming replay
@@ -86,21 +90,24 @@ graph TB
 
     subgraph "Per-Partition Engine"
         WAL["WAL<br/>Segmented + Indexed"]
+        CS["Cold Store<br/>PebbleDB (>1hr)"]
         SCH["Timing Wheel<br/>Hierarchical"]
         DD["Dedup<br/>Rust Bloom + PebbleDB"]
-        DSP["Dispatcher<br/>32 Shards"]
+        DSP["Dispatcher<br/>32 Shards + Circuit Breaker"]
         CG["Consumer Groups<br/>Persistent Offsets"]
     end
 
     subgraph "Cluster"
         RAFT["Raft<br/>Metadata"]
-        GOSSIP["Gossip<br/>Heartbeats"]
+        GOSSIP["Gossip<br/>TCP Heartbeats or Memberlist/SWIM"]
         REPL["Replication<br/>Binary Protocol"]
     end
 
     C1 -->|"Publish/Batch"| GW
     C2 -->|"Subscribe stream"| GW
     GW --> PM --> DD --> WAL --> SCH
+    WAL --> CS
+    CS -->|"Hydrator (60s)"| SCH
     SCH -->|"Ready events"| DSP -->|"Stream"| C2
     WAL -.-> REPL
     PM -.-> RAFT
@@ -326,6 +333,9 @@ This demo publishes one JSON event with a 10-second schedule window and prints t
 | PebbleDB NoSync + disabled WAL | Our WAL provides durability |
 | FNV-1a routing (not SHA-256) | ~5ns partition lookup |
 | Atomic CAS credits | Lock-free flow control |
+| Cold store (offsets only, ~16B/key) | Millions of far-future events without RAM bloat |
+| Retry heap (non-blocking) | `timeoutLoop` stays responsive under retry storms |
+| Circuit breaker (atomic state machine) | Instant skip of dead subscribers, no goroutine leaks |
 
 ---
 
@@ -366,6 +376,14 @@ This demo publishes one JSON event with a 10-second schedule window and prints t
 | `-cluster` | `false` | Enable cluster mode |
 | `-cluster-seeds` | *(empty)* | Comma-separated seed node addresses |
 | `-virtual-nodes` | `150` | Virtual nodes per physical node in hash ring |
+| `-hot-window-minutes` | `60` | Events beyond this window go to cold store (0 = disabled) |
+| `-max-ready-queue` | `1000000` | Max ready queue depth per partition |
+| `-max-timing-wheel-size` | `10000000` | Max active timers in hot timing wheel |
+| `-max-in-flight` | `500000` | Max in-flight deliveries per partition |
+| `-cb-failure-threshold` | `0.5` | Circuit breaker failure rate to trip (0.0–1.0) |
+| `-cb-min-attempts` | `10` | Min attempts before circuit breaker evaluates |
+| `-cb-open-duration-ms` | `30000` | Circuit breaker open duration in milliseconds |
+| `-use-memberlist` | `false` | Use HashiCorp Memberlist (SWIM) instead of custom TCP gossip |
 
 ### Environment Variables
 
@@ -391,11 +409,11 @@ cronos_db/
 │   ├── consumer/                   # Consumer groups, persistent offset store
 │   ├── dedup/                      # Bloom filter (Rust FFI) + PebbleDB two-tier
 │   │   └── rust/src/lib.rs         # Rust: lock-free bloom, Rayon parallel batch
-│   ├── delivery/                   # Dispatcher (32 shards), worker, DLQ
+│   ├── delivery/                   # Dispatcher (32 shards), circuit breaker, retry heap, DLQ segments
 │   ├── partition/                  # Partition lifecycle, WAL replay, compaction
 │   ├── replay/                     # Time-range and offset-based replay engine
 │   ├── replication/                # Binary protocol, leader/follower, bulk sync
-│   ├── scheduler/                  # Timing wheel, checkpoint, recovery
+│   ├── scheduler/                  # Timing wheel, cold store, hydrator, checkpoint, recovery
 │   ├── storage/                    # WAL, segments, sparse index, mmap
 │   └── tracing/                    # OpenTelemetry integration
 ├── pkg/
@@ -506,6 +524,13 @@ See [proto/events.proto](proto/events.proto) for the complete specification.
 - [x] Health checks in Docker
 - [x] Cross-platform Makefile (Windows/Linux/macOS)
 - [x] CI pipeline target (`make ci`)
+- [x] Two-tier scheduler (cold store + hot timing wheel)
+- [x] Non-blocking retry heap (min-heap by retry deadline)
+- [x] Admission control (readyQueue / timingWheel / in-flight limits)
+- [x] Per-subscription circuit breaker (Closed→Open→HalfOpen)
+- [x] Pluggable memberlist gossip (HashiCorp Memberlist / SWIM)
+- [x] Append-only DLQ segments (binary format, CRC32, rotation)
+- [x] Clock skew detection (cross-node heartbeat comparison)
 
 ### Remaining 🚧
 - [ ] Admin CLI & dashboard

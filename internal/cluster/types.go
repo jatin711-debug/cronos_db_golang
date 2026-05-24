@@ -131,6 +131,7 @@ type Config struct {
 	SuspectTimeout    time.Duration
 	PartitionCount    int
 	ReplicationFactor int
+	UseMemberlist     bool
 }
 
 // ClusterConfig represents cluster configuration (internal)
@@ -151,6 +152,7 @@ type ClusterConfig struct {
 	ReplicationFactor int           `json:"replication_factor"`
 	NumPartitions     int           `json:"num_partitions"`
 	VirtualNodes      int           `json:"virtual_nodes"`
+	UseMemberlist     bool          `json:"use_memberlist"`
 }
 
 // DefaultClusterConfig returns default cluster configuration

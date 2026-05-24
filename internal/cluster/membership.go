@@ -11,6 +11,22 @@ import (
 	"time"
 )
 
+// MembershipService defines the interface for cluster membership implementations.
+type MembershipService interface {
+	Start(ctx context.Context) error
+	Stop()
+	Join(node *Node) error
+	Leave(nodeID string) error
+	GetNode(nodeID string) (*Node, error)
+	GetNodes() []*Node
+	GetAliveNodes() []*Node
+	GetLocalNode() *Node
+	GetClusterState() *ClusterState
+	Events() <-chan MemberEvent
+	OnJoin(cb func(node *Node))
+	OnLeave(cb func(node *Node))
+}
+
 // Membership manages cluster membership and node discovery
 type Membership struct {
 	mu          sync.RWMutex
@@ -266,6 +282,17 @@ func (m *Membership) handleHeartbeatMessage(msg *GossipMessage) {
 	if node, exists := m.nodes[msg.NodeID]; exists {
 		node.UpdatedAt = time.Now()
 		node.State = NodeStateAlive
+	}
+
+	// Clock skew detection
+	if msg.Timestamp > 0 {
+		skew := msg.Timestamp - time.Now().UnixMilli()
+		if skew < 0 {
+			skew = -skew
+		}
+		if skew > 5000 { // 5 seconds threshold
+			log.Printf("[MEMBERSHIP] WARNING: Clock skew detected with node %s: %d ms", msg.NodeID, skew)
+		}
 	}
 }
 

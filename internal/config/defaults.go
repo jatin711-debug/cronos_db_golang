@@ -44,6 +44,22 @@ const (
 	// Checkpoint configuration
 	DefaultCheckpointInterval = 10 * time.Second
 
+	// Scheduler cold store configuration
+	DefaultHotWindowMinutes = 60 // 1 hour hot window
+
+	// Admission control configuration (0 = disabled)
+	DefaultMaxReadyQueueSize       = 1_000_000
+	DefaultMaxTimingWheelSize      = 10_000_000
+	DefaultMaxInFlightPerPartition = 500_000
+
+	// Circuit breaker configuration
+	DefaultCircuitBreakerFailureThreshold = 0.5  // 50% failure rate trips breaker
+	DefaultCircuitBreakerOpenDurationMs   = 30000 // 30 seconds
+	DefaultCircuitBreakerMinAttempts      = 10
+
+	// Clock skew detection
+	DefaultClockSkewThresholdMs = 5000 // 5 seconds
+
 	// Cluster configuration
 	DefaultClusterEnabled    = false
 	DefaultClusterGossipAddr = ":7946"
@@ -53,4 +69,7 @@ const (
 	DefaultHeartbeatInterval = 1 * time.Second
 	DefaultFailureTimeout    = 5 * time.Second
 	DefaultSuspectTimeout    = 3 * time.Second
+
+	// Gossip backend
+	DefaultUseMemberlist = false // Default to custom gossip for backward compatibility
 )

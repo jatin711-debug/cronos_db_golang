@@ -207,7 +207,7 @@ func TestTimingWheel_Cascade(t *testing.T) {
 func TestScheduler_Schedule(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	scheduler, err := NewScheduler(tmpDir, 0, 100, 60)
+	scheduler, err := NewScheduler(tmpDir, 0, 100, 60, 0, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to create scheduler: %v", err)
 	}
@@ -233,7 +233,7 @@ func TestScheduler_Schedule(t *testing.T) {
 func TestScheduler_ImmediateEvent(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	scheduler, err := NewScheduler(tmpDir, 0, 100, 60)
+	scheduler, err := NewScheduler(tmpDir, 0, 100, 60, 0, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to create scheduler: %v", err)
 	}
@@ -260,7 +260,7 @@ func TestScheduler_ImmediateEvent(t *testing.T) {
 func TestScheduler_StartStop(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	scheduler, err := NewScheduler(tmpDir, 0, 50, 60)
+	scheduler, err := NewScheduler(tmpDir, 0, 50, 60, 0, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to create scheduler: %v", err)
 	}
@@ -303,7 +303,7 @@ func TestScheduler_Checkpoint(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// Create and use scheduler
-	scheduler1, err := NewScheduler(tmpDir, 0, 100, 60)
+	scheduler1, err := NewScheduler(tmpDir, 0, 100, 60, 0, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to create scheduler: %v", err)
 	}
@@ -313,7 +313,7 @@ func TestScheduler_Checkpoint(t *testing.T) {
 	scheduler1.Stop()
 
 	// Create new scheduler - should recover state
-	scheduler2, err := NewScheduler(tmpDir, 0, 100, 60)
+	scheduler2, err := NewScheduler(tmpDir, 0, 100, 60, 0, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to create second scheduler: %v", err)
 	}

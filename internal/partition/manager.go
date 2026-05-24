@@ -93,8 +93,12 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 		}
 	}()
 
-	// Create scheduler
-	scheduler, err := scheduler.NewScheduler(dataDir, partitionID, int32(pm.config.TickMS), int32(pm.config.WheelSize))
+	// Create scheduler with two-tier cold store support
+	hotWindowMinutes := pm.config.HotWindowMinutes
+	if hotWindowMinutes <= 0 {
+		hotWindowMinutes = 60 // Default 1 hour if not configured
+	}
+	sched, err := scheduler.NewScheduler(dataDir, partitionID, int32(pm.config.TickMS), int32(pm.config.WheelSize), hotWindowMinutes, wal, pm.pebbleCache)
 	if err != nil {
 		return fmt.Errorf("create scheduler: %w", err)
 	}
@@ -130,7 +134,7 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 		Topic:         topic,
 		DataDir:       dataDir,
 		Wal:           wal,
-		Scheduler:     scheduler,
+		Scheduler:     sched,
 		ConsumerGroup: consumerGroup,
 		DedupStore:    dedupManager,
 		Dispatcher:    dispatcher,
@@ -322,6 +326,34 @@ func (pm *PartitionManager) GetPartitionForKey(key string) (*types.Partition, er
 		CreatedTS:     partition.CreatedTS.UnixMilli(),
 		UpdatedTS:     partition.UpdatedTS.UnixMilli(),
 	}, nil
+}
+
+// CanAccept returns true if the partition can accept new publishes without exceeding capacity limits.
+func (pm *PartitionManager) CanAccept(partitionID int32) bool {
+	pm.mu.RLock()
+	partition, exists := pm.partitions[partitionID]
+	pm.mu.RUnlock()
+	if !exists {
+		return true // Non-existent partition can always be created
+	}
+
+	// Check admission control limits
+	if pm.config.MaxReadyQueueSize > 0 {
+		if partition.Scheduler.GetReadyQueueDepth() >= pm.config.MaxReadyQueueSize {
+			return false
+		}
+	}
+	if pm.config.MaxTimingWheelSize > 0 {
+		if partition.Scheduler.GetTimingWheelDepth() >= pm.config.MaxTimingWheelSize {
+			return false
+		}
+	}
+	if pm.config.MaxInFlightPerPartition > 0 {
+		if partition.Dispatcher.GetStats().ActiveDeliveries >= pm.config.MaxInFlightPerPartition {
+			return false
+		}
+	}
+	return true
 }
 
 // GetOrCreateInternalPartition gets or auto-creates and starts an internal partition by ID

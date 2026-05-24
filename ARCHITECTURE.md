@@ -60,17 +60,18 @@ graph TB
 
     subgraph "Partition N (per-partition isolation)"
         WAL[WAL Storage<br/>Segmented + Indexed]
-        SCH[Scheduler<br/>Timing Wheel]
+        CS[Cold Store<br/>PebbleDB Offsets]
+        SCH[Scheduler<br/>Timing Wheel + Hydrator]
         DD[Dedup Manager<br/>Bloom + PebbleDB]
-        DSP[Dispatcher<br/>32 Shards]
+        DSP[Dispatcher<br/>32 Shards + Circuit Breaker]
         WRK[Delivery Worker<br/>Batch Processing]
         CG[Consumer Groups<br/>Offset Store]
-        DLQ[Dead Letter Queue]
+        DLQ[Dead Letter Queue<br/>Binary Segments]
     end
 
     subgraph "Cluster Layer"
         RAFT[Raft Consensus<br/>HashiCorp Raft]
-        GOSSIP[Gossip Protocol<br/>TCP Heartbeats]
+        GOSSIP[Gossip Protocol<br/>TCP Heartbeats or Memberlist/SWIM]
         REPL[Replication<br/>Binary Protocol]
     end
 
@@ -82,6 +83,8 @@ graph TB
     PM --> HR
     HR -->|Route to partition| WAL
     WAL --> SCH
+    WAL --> CS
+    CS -->|Hydrator| SCH
     SCH -->|Ready events| WRK
     WRK --> DSP
     DSP -->|gRPC stream| C2
@@ -111,10 +114,12 @@ graph TB
     HR --> WAL[WAL Storage]
     HR --> DD[Dedup Manager]
     WAL --> SCH[Scheduler]
+    WAL --> CS[Cold Store]
+    CS -->|Hydrator| SCH
     SCH --> WRK[Delivery Worker]
-    WRK --> DSP[Dispatcher - 32 Shards]
+    WRK --> DSP[Dispatcher - 32 Shards + Circuit Breaker]
     DSP -->|gRPC stream| C2
-    DSP -->|Failed| DLQ[Dead Letter Queue]
+    DSP -->|Failed| DLQ[Dead Letter Queue - Segments]
 
     WAL -.->|Async| REPL[Replication]
     PM -.->|Metadata| RAFT[Raft Consensus]
@@ -492,6 +497,38 @@ flowchart TD
 
 ---
 
+### Two-Tier Cold/Hot Scheduler
+
+To keep memory bounded while supporting millions of scheduled events, the scheduler uses a **two-tier architecture**:
+
+- **Hot Tier**: Hierarchical timing wheel (in-memory) for events within the hot window (default 60 minutes).
+- **Cold Tier**: PebbleDB-backed `ColdStore` for far-future events (> hot window). Stores **only offsets** (~16 bytes per event) — full event data remains in the WAL.
+
+```mermaid
+flowchart TD
+    A[Publish event] --> B{schedule_ts <= now + hotWindow?}
+    B -->|Yes| C[Add to Timing Wheel]
+    B -->|No| D[Store offset in Cold Store]
+    D --> E[PebbleDB key: [schedule_ts:be64][offset:be64]]
+
+    F[Hydrator Loop every 60s] --> G[Scan Cold Store range]
+    G --> H[now+hotWindow to now+hotWindow+60s]
+    H --> I[Read full event from WAL via EventReader]
+    I --> C
+```
+
+**Key Design Decisions:**
+
+| Decision | Rationale |
+|----------|-----------|
+| **Offsets only in cold store** | WAL is single source of truth; avoids double-writing event data |
+| **Big-endian composite key `[ts][offset]`** | Enables efficient range scans by timestamp |
+| **Hydrator scans 60s lookahead every 60s** | Events transition to hot up to 60s before due time |
+| **EventReader interface decouples scheduler from WAL** | Clean dependency boundary; allows alternative storage backends |
+| **HotWindowMinutes = 0 disables cold store** | Full backward compatibility with legacy behavior |
+
+---
+
 ## Deduplication Engine
 
 A two-tier deduplication system ensures idempotent publishes with minimal latency.
@@ -591,8 +628,9 @@ graph LR
     SH0 --> SUB1[Consumer A]
     SH1 --> SUB2[Consumer B]
 
-    DSP -->|Timeout or Nack| RT[Retry with Backoff]
-    RT -->|Max retries| DLQ[Dead Letter Queue]
+    DSP -->|Timeout or Nack| RH[Retry Heap]
+    RH -->|Due| RT[Retry with Backoff]
+    RT -->|Max retries| DLQ[Dead Letter Queue - Segments]
 ```
 
 ### Credit-Based Flow Control
@@ -617,21 +655,66 @@ sequenceDiagram
     Note over S,C: If Credits = 0 then STOP sending and wait for Acks
 ```
 
+### Non-Blocking Retry Heap
+
+The `timeoutLoop` no longer blocks on inline `time.Sleep` during retries. Instead, expired deliveries are pushed to a **min-heap ordered by `retryAt`**:
+
+```mermaid
+flowchart TD
+    A[scanExpiredDeliveries] --> B{Delivery timed out?}
+    B -->|Yes| C[Push to RetryHeap with retryAt = now + backoff]
+    B -->|No| D[Continue]
+
+    E[processRetries every 100ms] --> F{Peek retryAt <= now?}
+    F -->|Yes| G[Pop and redispatch]
+    F -->|No| H[No-op]
+    G --> E
+```
+
+**Benefits:**
+- `timeoutLoop` stays responsive even under retry storms
+- No goroutine proliferation per retry
+- Backoff is deterministic and memory-efficient
+
+### Circuit Breaker
+
+Each subscription has an independent **circuit breaker** with atomic state machine:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Closed
+    Closed --> Open : FailureRate > Threshold && Attempts >= MinAttempts
+    Open --> HalfOpen : OpenDuration elapsed
+    HalfOpen --> Closed : Trial success
+    HalfOpen --> Open : Trial failure
+```
+
+- **Closed**: Normal operation; failures counted
+- **Open**: Skips dispatch to dead subscriber; fast-fail
+- **HalfOpen**: Allows one trial after cooldown; re-closes on success
+
+**Configuration:**
+- `CircuitBreakerFailureThreshold` (default 0.5): failure rate to trip
+- `CircuitBreakerMinAttempts` (default 10): minimum attempts before evaluation
+- `CircuitBreakerOpenDurationMs` (default 30000): cooldown before half-open
+
 ### Delivery Retry and DLQ Flow
 
 ```mermaid
 flowchart TD
-    A[Event dispatched to consumer] --> B{Ack received within 30s?}
-    B -->|Yes success| C[Commit offset and release credits]
-    B -->|Yes failure| D{Attempt less than MaxRetries?}
+    A[Event dispatched to consumer] --> CB{Circuit Breaker Open?}
+    CB -->|Yes| Z[Skip dispatch]
+    CB -->|No| B{Ack received within 30s?}
+    B -->|Yes success| C[Commit offset, release credits, CB.RecordSuccess]
+    B -->|Yes failure| D{Attempt < MaxRetries?}
     B -->|Timeout| D
 
-    D -->|Yes| E[Wait: attempt times backoff 1s]
-    E --> F[Retry delivery with attempt++]
+    D -->|Yes| E[Push to RetryHeap: retryAt = now + backoff]
+    E --> F[processRetries pops due entry and redispatches]
     F --> B
 
-    D -->|No after 5 attempts| G[Send to Dead Letter Queue]
-    G --> H[DLQ Entry: event + error + attempts + timestamp]
+    D -->|No| G[Send to Dead Letter Queue]
+    G --> H[DLQ Segment: binary record + CRC32]
     H --> I[Available for manual replay or inspection]
 ```
 
@@ -666,6 +749,26 @@ graph TB
     HASH --> S1S
     HASH --> SNS
 ```
+
+---
+
+### DLQ Segment Storage
+
+The Dead Letter Queue uses **append-only binary segments** instead of JSON files:
+
+| Feature | Implementation |
+|---------|---------------|
+| **Header** | 64-byte header with `"CRNDLQ1"` magic |
+| **Records** | Binary format identical to WAL (length + CRC32 + payload) |
+| **Buffering** | 4MB `bufio.Writer` for amortized I/O |
+| **Rotation** | 64MB per segment file |
+| **Recovery** | On startup, scan `dlq/` directory and replay all `.dlq` segments |
+
+**Benefits over JSON:**
+- ~10x smaller on disk (binary vs base64 + JSON overhead)
+- Faster append (no marshal/unmarshal)
+- CRC32 integrity per record
+- Easy to segment and archive
 
 ---
 
@@ -759,6 +862,24 @@ graph TB
     N1R <-->|Raft consensus| N3R
 ```
 
+### Pluggable Gossip Layer
+
+CronosDB supports two gossip implementations behind a common `MembershipService` interface:
+
+| Implementation | Protocol | Best For |
+|---------------|----------|----------|
+| **Custom TCP Gossip** | TCP heartbeats, custom wire format | Simple deployments, minimal dependencies |
+| **HashiCorp Memberlist** | SWIM protocol over UDP | Production clusters, faster failure detection, encryption support |
+
+Toggle via config: `UseMemberlist: true`.
+
+**Memberlist features:**
+- UDP-based SWIM gossip with indirect pings
+- Configurable gossip interval, suspicion multiplier, probe timeout
+- Metadata delegates carry gRPC/HTTP/Raft addresses
+- Event delegates for join/leave/update callbacks
+- Merge delegates for cluster merge conflict resolution
+
 ### Consistent Hashing Ring
 
 ```mermaid
@@ -839,6 +960,25 @@ flowchart LR
     C --> D[Reassign partitions via hash ring]
     D --> E[Trigger state sync to new owners]
 ```
+
+### Clock Skew Detection
+
+Cross-node heartbeats include timestamps for clock skew monitoring:
+
+```mermaid
+flowchart TD
+    A[Local heartbeat tick] --> B[Send heartbeat with local timestamp]
+    B --> C[Remote node receives]
+    C --> D[Compute skew = remote_ts - local_ts]
+    D --> E{|skew| > 5s?}
+    E -->|Yes| F[Log WARNING + emit `cronos_clock_skew_ms` metric]
+    E -->|No| G[Silent / metric only]
+```
+
+- Compares remote node timestamp against local time on every heartbeat
+- Warns if absolute skew exceeds 5 seconds
+- Metric `cronos_clock_skew_ms{source_node, target_node}` exposed for alerting
+- Helps detect NTP misconfiguration before it causes scheduling anomalies
 
 ---
 
@@ -993,10 +1133,11 @@ flowchart TD
 |----------|-------------|
 | **API** | `cronos_api_grpc_requests_total{method, status}`, `cronos_api_grpc_request_duration_seconds{method}` |
 | **WAL** | `cronos_wal_append_latency_seconds{partition}`, `cronos_wal_segment_count{partition}`, `cronos_wal_high_watermark{partition}` |
-| **Scheduler** | `cronos_scheduler_ready_events{partition}`, `cronos_scheduler_active_timers{partition}`, `cronos_timing_wheel_overflow_level{partition}` |
+| **Scheduler** | `cronos_scheduler_ready_events{partition}`, `cronos_scheduler_active_timers{partition}`, `cronos_timing_wheel_overflow_level{partition}`, `cronos_scheduler_cold_store_entries{partition}`, `cronos_scheduler_hydrated_events_total{partition}` |
 | **Dedup** | `cronos_dedup_check_latency_seconds{partition, path}`, `cronos_dedup_bloom_memory_bytes{partition}`, `cronos_dedup_bloom_false_positive_rate{partition}` |
 | **Delivery** | `cronos_dispatch_latency_seconds{partition}`, `cronos_consumer_group_lag{group, partition}` |
-| **Cluster** | `cronos_cluster_nodes_alive`, `cronos_cluster_partitions_leader`, `cronos_replication_lag_seconds{partition, follower}` |
+| **Admission** | `cronos_admission_rejected_total{partition}` |
+| **Cluster** | `cronos_cluster_nodes_alive`, `cronos_cluster_partitions_leader`, `cronos_replication_lag_seconds{partition, follower}`, `cronos_clock_skew_ms{source_node, target_node}` |
 
 ### Metrics Architecture
 
@@ -1033,9 +1174,10 @@ flowchart TD
         P1[Client sends event]
         P2[Rate limit check]
         P3[Partition routing via FNV-1a]
+        P3a[Admission control: readyQueue / timingWheel / in-flight]
         P4[Dedup: Bloom then PebbleDB]
         P5[WAL append buffered]
-        P6[Scheduler: add to timing wheel]
+        P6[Scheduler: add to timing wheel or cold store]
         P7[Return offset to client]
     end
 
@@ -1061,7 +1203,7 @@ flowchart TD
         A4[Commit offset to PebbleDB]
     end
 
-    P1 --> P2 --> P3 --> P4 --> P5 --> P6 --> P7
+    P1 --> P2 --> P3 --> P3a --> P4 --> P5 --> P6 --> P7
     P6 -.->|After schedule_ts| S1
     S1 --> S2 --> S3 --> S4
     S4 --> D1 --> D2 --> D3 --> D4 --> D5
@@ -1091,7 +1233,7 @@ flowchart TD
 
     K --> M[Start partitions]
     L --> M
-    M --> N[Per partition: replay WAL + start scheduler + start worker + start delivery + start compaction]
+    M --> N[Per partition: replay WAL + init cold store + start scheduler + start hydrator + start worker + start delivery + start compaction]
     N --> O[Create gRPC server with interceptors]
     O --> P[Register EventService + ConsumerGroupService]
     P --> Q[Start gRPC on :9000]
@@ -1154,6 +1296,9 @@ flowchart TD
 | Algorithmic | Sparse index: O(log N) seeks | Binary search |
 | Algorithmic | FNV-1a partition routing | ~5ns vs ~400ns SHA-256 |
 | Algorithmic | Bloom filter: O(k) checks, k=7 | Sub-microsecond dedup |
+| Memory | Cold store: offsets only (~16B/key) | Millions of far-future events without RAM bloat |
+| Concurrency | Retry heap: non-blocking timeoutLoop | Responsive under retry storms |
+| Resilience | Circuit breaker: atomic state machine | Instant skip of dead subscribers |
 
 ---
 
@@ -1172,14 +1317,22 @@ flowchart TD
 | WAL | `-flush-interval` | `1000` | Background flush interval ms |
 | Scheduler | `-tick-ms` | `100` | Timing wheel tick duration |
 | Scheduler | `-wheel-size` | `60` | Slots per timing wheel level |
+| Scheduler | `-hot-window-minutes` | `60` | Events beyond this go to cold store (0 = disabled) |
 | Delivery | `-ack-timeout` | `30s` | Delivery ack timeout |
 | Delivery | `-max-retries` | `5` | Max delivery retry attempts |
 | Delivery | `-max-credits` | `1000` | Max credits per subscriber |
+| Delivery | `-cb-failure-threshold` | `0.5` | Circuit breaker failure rate to trip (0.0–1.0) |
+| Delivery | `-cb-min-attempts` | `10` | Min attempts before circuit breaker evaluates |
+| Delivery | `-cb-open-duration-ms` | `30000` | Circuit breaker open duration (ms) |
+| Admission | `-max-ready-queue` | `1000000` | Max ready queue depth per partition |
+| Admission | `-max-timing-wheel-size` | `10000000` | Max active timers in hot timing wheel |
+| Admission | `-max-in-flight` | `500000` | Max in-flight deliveries per partition |
 | Dedup | `-dedup-ttl` | `168` | Dedup TTL in hours (7 days) |
 | Dedup | `-bloom-capacity` | `100000000` | Bloom filter capacity |
 | Cluster | `-cluster` | `false` | Enable cluster mode |
 | Cluster | `-cluster-seeds` | empty | Comma-separated seed nodes |
 | Cluster | `-virtual-nodes` | `150` | Virtual nodes per physical node |
+| Cluster | `-use-memberlist` | `false` | Use HashiCorp Memberlist (SWIM) instead of custom TCP gossip |
 | Cluster | `-heartbeat-interval` | `1s` | Gossip heartbeat interval |
 | Cluster | `-failure-timeout` | `5s` | Node failure detection timeout |
 
@@ -1208,7 +1361,7 @@ graph TB
 
     subgraph Consensus
         HRAFT[HashiCorp Raft]
-        GOSSIP[Custom Gossip TCP]
+        GOSSIP[Custom Gossip TCP or Memberlist/SWIM]
     end
 
     subgraph Observability
@@ -1238,6 +1391,8 @@ graph TB
 | **Delivery** | At-least-once | Ack-based with retry + DLQ |
 | **Ordering** | Per-partition, per-consumer-group | Offset-based sequential delivery |
 | **Dedup** | Best-effort 7-day window | Bloom + PebbleDB with TTL |
+| **Admission** | Reject under overload | ReadyQueue / timingWheel / in-flight limits return `ResourceExhausted` |
+| **Resilience** | Dead subscriber isolation | Per-subscription circuit breaker (Closed→Open→HalfOpen) |
 | **Durability** | Configurable | fsync mode: every_event / periodic / batch |
 | **Availability** | Partition-tolerant | Leader election on failure |
 

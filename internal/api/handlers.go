@@ -153,12 +153,26 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 		return nil, err
 	}
 
+	// Admission control: reject if partition is overloaded
+	if !h.partitionManager.CanAccept(partitionID) {
+		IncAdmissionRejected()
+		return nil, status.Errorf(codes.ResourceExhausted,
+			"partition %d is at capacity; retry with backoff", partitionID)
+	}
+
 	partitionInternal, err := h.partitionManager.GetOrCreateInternalPartition(partitionID, partitionKey)
 	if err != nil {
 		// Fallback to topic-based partitioning
 		topicPartitionID := h.partitionManager.GetPartitionIDForTopic(event.Topic)
 		if ownerErr := h.ensureClusterPartitionWritable(topicPartitionID); ownerErr != nil {
 			return nil, ownerErr
+		}
+
+		// Check admission on fallback partition too
+		if !h.partitionManager.CanAccept(topicPartitionID) {
+			IncAdmissionRejected()
+			return nil, status.Errorf(codes.ResourceExhausted,
+				"partition %d is at capacity; retry with backoff", topicPartitionID)
 		}
 
 		partitionInternal, err = h.partitionManager.GetOrCreateInternalPartition(topicPartitionID, event.Topic)
@@ -257,6 +271,16 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 			atomic.AddInt32(&errorCount, 1)
 			if lastError == "" {
 				lastError = ownerErr.Error()
+			}
+			continue
+		}
+
+		// Admission control
+		if !h.partitionManager.CanAccept(partitionID) {
+			IncAdmissionRejected()
+			atomic.AddInt32(&errorCount, 1)
+			if lastError == "" {
+				lastError = fmt.Sprintf("partition %d is at capacity", partitionID)
 			}
 			continue
 		}

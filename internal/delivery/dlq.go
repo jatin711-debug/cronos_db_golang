@@ -24,11 +24,11 @@ type DLQEntry struct {
 
 // DeadLetterQueue manages failed deliveries
 type DeadLetterQueue struct {
-	mu       sync.RWMutex
-	entries  []*DLQEntry
-	dataDir  string
-	maxSize  int
-	filePath string
+	mu      sync.RWMutex
+	entries []*DLQEntry
+	dataDir string
+	maxSize int
+	writer  *DLQSegmentWriter
 }
 
 // NewDeadLetterQueue creates a new DLQ
@@ -42,14 +42,19 @@ func NewDeadLetterQueue(dataDir string, maxSize int) (*DeadLetterQueue, error) {
 		maxSize = 10000 // Default max entries
 	}
 
-	dlq := &DeadLetterQueue{
-		entries:  make([]*DLQEntry, 0),
-		dataDir:  dlqDir,
-		maxSize:  maxSize,
-		filePath: filepath.Join(dlqDir, "dlq.json"),
+	writer, err := NewDLQSegmentWriter(dlqDir)
+	if err != nil {
+		return nil, fmt.Errorf("create dlq segment writer: %w", err)
 	}
 
-	// Load existing entries
+	dlq := &DeadLetterQueue{
+		entries: make([]*DLQEntry, 0),
+		dataDir: dlqDir,
+		maxSize: maxSize,
+		writer:  writer,
+	}
+
+	// Load existing entries from segments
 	if err := dlq.load(); err != nil {
 		// Log but don't fail - start fresh
 		fmt.Printf("[DLQ] Failed to load existing entries: %v\n", err)
@@ -80,8 +85,12 @@ func (d *DeadLetterQueue) Add(event *types.Event, deliveryID string, attempts in
 
 	d.entries = append(d.entries, entry)
 
-	// Persist to disk
-	return d.persist()
+	// Persist to segment
+	data, err := json.Marshal(entry)
+	if err != nil {
+		return fmt.Errorf("marshal dlq entry: %w", err)
+	}
+	return d.writer.WriteEntry(data)
 }
 
 // Get returns all DLQ entries
@@ -116,7 +125,7 @@ func (d *DeadLetterQueue) Remove(deliveryID string) error {
 	for i, entry := range d.entries {
 		if entry.DeliveryID == deliveryID {
 			d.entries = append(d.entries[:i], d.entries[i+1:]...)
-			return d.persist()
+			return nil
 		}
 	}
 	return fmt.Errorf("entry %s not found", deliveryID)
@@ -131,9 +140,6 @@ func (d *DeadLetterQueue) Retry(deliveryID string) (*DLQEntry, error) {
 		if entry.DeliveryID == deliveryID {
 			// Remove from DLQ
 			d.entries = append(d.entries[:i], d.entries[i+1:]...)
-			if err := d.persist(); err != nil {
-				return nil, err
-			}
 			return entry, nil
 		}
 	}
@@ -153,40 +159,29 @@ func (d *DeadLetterQueue) Clear() error {
 	defer d.mu.Unlock()
 
 	d.entries = make([]*DLQEntry, 0)
-	return d.persist()
+	if d.writer != nil {
+		return d.writer.Compact(nil)
+	}
+	return nil
 }
 
-// persist saves DLQ to disk
-func (d *DeadLetterQueue) persist() error {
-	data, err := json.MarshalIndent(d.entries, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal dlq: %w", err)
-	}
-
-	tmpPath := d.filePath + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
-		return fmt.Errorf("write dlq: %w", err)
-	}
-
-	return os.Rename(tmpPath, d.filePath)
-}
-
-// load reads DLQ from disk
+// load reads DLQ from segment files
 func (d *DeadLetterQueue) load() error {
-	data, err := os.ReadFile(d.filePath)
+	if d.writer == nil {
+		return nil
+	}
+	records, err := d.writer.Scan()
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil // No existing DLQ
+		return fmt.Errorf("scan dlq segments: %w", err)
+	}
+
+	for _, record := range records {
+		var entry DLQEntry
+		if err := json.Unmarshal(record, &entry); err != nil {
+			continue // Skip corrupt entries
 		}
-		return fmt.Errorf("read dlq: %w", err)
+		d.entries = append(d.entries, &entry)
 	}
-
-	var entries []*DLQEntry
-	if err := json.Unmarshal(data, &entries); err != nil {
-		return fmt.Errorf("unmarshal dlq: %w", err)
-	}
-
-	d.entries = entries
 	return nil
 }
 
