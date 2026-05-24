@@ -315,6 +315,7 @@ cronos_db/
 │   ├── storage/                    # WAL, segments, sparse index, mmap
 │   └── tracing/                    # OpenTelemetry integration
 ├── pkg/
+│   ├── client/                     # Go SDK (connection pool, metadata cache/routing foundation)
 │   ├── types/                      # Config, protobuf generated, errors
 │   └── utils/                      # FNV-1a hashing, CRC32
 ├── proto/events.proto              # Complete gRPC API specification
