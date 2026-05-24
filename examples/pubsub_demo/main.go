@@ -74,10 +74,14 @@ func main() {
 	// ── Consumer (start first so it's ready before the message arrives) ──────
 	consCfg := client.DefaultConsumerConfig(topic, consumerGroup)
 	consCfg.AckMode = client.AckModeAuto
+	consCfg.SubscriptionID = fmt.Sprintf("client-sub-%d", time.Now().UnixNano())
+	consCfg.OnReconnect = func(_ context.Context, attempt int, err error) {
+		logger.Printf("consumer reconnect attempt=%d err=%v", attempt, err)
+	}
 
 	consumerDone := make(chan error, 1)
 	go func() {
-		logger.Printf("subscribing to topic=%s group=%s …", topic, consumerGroup)
+		logger.Printf("subscribing to topic=%s group=%s subscription=%s …", topic, consumerGroup, consCfg.SubscriptionID)
 		consumerDone <- c.Subscribe(ctx, consCfg, func(ctx context.Context, d client.Delivery) error {
 			return handleDelivery(logger, codec, d)
 		})
