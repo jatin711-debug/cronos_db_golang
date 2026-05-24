@@ -107,10 +107,11 @@ func main() {
 	logger.Printf("publishing event (scheduled +%s): %s", scheduleDelay, string(raw))
 
 	result, err := producer.Send(ctx, client.Message{
-		Topic:      topic,
-		Value:      payload,
-		Codec:      codec,
-		ScheduleTS: time.Now().Add(scheduleDelay).UnixMilli(),
+		Topic:        topic,
+		PartitionKey: topic, // must match server's topic-based subscribe routing
+		Value:        payload,
+		Codec:        codec,
+		ScheduleTS:   time.Now().Add(scheduleDelay).UnixMilli(),
 	})
 	if err != nil {
 		logger.Printf("⚠  publish failed: %v", err)
