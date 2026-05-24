@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
 
 	"cronos_db/pkg/client/internal/connpool"
 	"cronos_db/pkg/client/internal/metadata"
@@ -57,6 +58,7 @@ func Dial(ctx context.Context, cfg Config) (*Client, error) {
 		RequestTimeout:       cfg.RequestTimeout,
 		NodeIDToAddress:      cfg.NodeIDToAddress,
 		StaticPartitionCount: cfg.PartitionCount,
+		OnRefresh:            cfg.Hooks.OnMetadataRefresh,
 	})
 
 	if err := metaManager.Refresh(ctx); err != nil {
@@ -157,6 +159,13 @@ func (c *Client) PartitionMetadata() []PartitionMetadata {
 
 func (c *Client) eventClientForAddress(addr string) (types.EventServiceClient, error) {
 	return c.pool.EventClient(addr)
+}
+
+func (c *Client) observeRequest(op string, nodeAddr string, start time.Time, err error) {
+	if c == nil || c.cfg.Hooks == nil {
+		return
+	}
+	c.cfg.Hooks.OnRequest(op, nodeAddr, time.Since(start), err)
 }
 
 func (c *Client) requestContext(ctx context.Context) (context.Context, context.CancelFunc) {

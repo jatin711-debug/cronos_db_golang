@@ -74,6 +74,7 @@ type Config struct {
 
 	Metadata MetadataConfig
 	Security SecurityConfig
+	Hooks    Hooks
 }
 
 // DefaultConfig returns a config with throughput-safe defaults.
@@ -97,6 +98,7 @@ func DefaultConfig(bootstrapAddresses ...string) Config {
 		Security: SecurityConfig{
 			Insecure: true,
 		},
+		Hooks: NopHooks{},
 	}
 }
 
@@ -141,6 +143,9 @@ func (c Config) withDefaults() Config {
 	}
 	if out.NodeIDToAddress == nil {
 		out.NodeIDToAddress = map[string]string{}
+	}
+	if out.Hooks == nil {
+		out.Hooks = NopHooks{}
 	}
 
 	return out

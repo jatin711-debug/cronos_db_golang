@@ -20,6 +20,7 @@ type Config struct {
 	RequestTimeout       time.Duration
 	NodeIDToAddress      map[string]string
 	StaticPartitionCount int
+	OnRefresh            func(duration time.Duration, err error)
 }
 
 // Manager caches partition metadata and refreshes it periodically.
@@ -90,9 +91,18 @@ func (m *Manager) MarkStale() {
 
 // Refresh fetches metadata from cluster nodes.
 func (m *Manager) Refresh(ctx context.Context) error {
+	start := time.Now()
+	var refreshErr error
+	defer func() {
+		if m.cfg.OnRefresh != nil {
+			m.cfg.OnRefresh(time.Since(start), refreshErr)
+		}
+	}()
+
 	addresses := m.pool.Addresses()
 	if len(addresses) == 0 {
-		return fmt.Errorf("no cluster addresses available")
+		refreshErr = fmt.Errorf("no cluster addresses available")
+		return refreshErr
 	}
 
 	var lastErr error
@@ -140,7 +150,8 @@ func (m *Manager) Refresh(ctx context.Context) error {
 	if lastErr == nil {
 		lastErr = fmt.Errorf("no metadata source returned a response")
 	}
-	return lastErr
+	refreshErr = lastErr
+	return refreshErr
 }
 
 // EnsureFresh refreshes metadata if stale or TTL-expired.
