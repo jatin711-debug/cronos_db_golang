@@ -1,9 +1,9 @@
 package scheduler
 
 import (
-	"cronos_db/pkg/types"
 	"encoding/json"
 	"fmt"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 	"log"
 	"os"
 	"path/filepath"

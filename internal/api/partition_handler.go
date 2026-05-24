@@ -4,9 +4,9 @@ import (
 	"context"
 	"sort"
 
-	"cronos_db/internal/cluster"
-	"cronos_db/internal/partition"
-	"cronos_db/pkg/types"
+	"github.com/jatin711-debug/cronos_db_golang/internal/cluster"
+	"github.com/jatin711-debug/cronos_db_golang/internal/partition"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"

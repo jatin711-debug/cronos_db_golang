@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"sync"
 
-	"cronos_db/pkg/utils"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 )
 
 // HashRing implements consistent hashing with virtual nodes

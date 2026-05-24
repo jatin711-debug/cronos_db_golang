@@ -9,8 +9,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"cronos_db/pkg/client/internal/connpool"
-	"cronos_db/pkg/types"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/client/internal/connpool"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 )
 
 // Config controls metadata refresh behavior.

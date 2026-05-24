@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"cronos_db/internal/storage"
-	"cronos_db/pkg/types"
+	"github.com/jatin711-debug/cronos_db_golang/internal/storage"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 )
 
 // Follower handles replication from leader
@@ -224,7 +224,7 @@ func (f *Follower) SyncFilesFromLeader() error {
 				return err
 			}
 			currentFilePath = filepath.Join(segmentsDir, msg.Filename)
-			
+
 			// Open new file for writing
 			log.Printf("[FOLLOWER] Receiving segment file: %s (%d bytes)", msg.Filename, msg.FileSize)
 			if currentFile != nil {
@@ -259,15 +259,15 @@ func (f *Follower) SyncFilesFromLeader() error {
 			if !msg.Success {
 				return fmt.Errorf("leader reported failure during bulk transfer")
 			}
-			
+
 			log.Printf("[FOLLOWER] Bulk file sync completed successfully")
-			
+
 			// Reload WAL to pick up new segments
 			f.mu.Lock()
 			f.wal.ReloadSegments()
 			f.nextOffset = f.wal.GetNextOffset()
 			f.mu.Unlock()
-			
+
 			return nil
 		default:
 			log.Printf("[FOLLOWER] Ignored unexpected msg type %d during bulk sync", msgType)

@@ -270,8 +270,8 @@ func (s *BloomPebbleStore) CheckAndStoreBatch(messageIDs []string, offsets []int
 	bloomResults := s.bloom.MayContainBatch(messageIDs)
 
 	// Separate into "definitely new" and "maybe exists" buckets
-	var newIndices []int    // Bloom says definitely new
-	var maybeIndices []int  // Bloom says maybe exists, need PebbleDB check
+	var newIndices []int   // Bloom says definitely new
+	var maybeIndices []int // Bloom says maybe exists, need PebbleDB check
 
 	for i, mayExist := range bloomResults {
 		if !mayExist {

@@ -29,8 +29,8 @@ type DedupStore interface {
 
 // MemoryStore is an in-memory dedup store for testing
 type MemoryStore struct {
-	mu      sync.RWMutex
-	entries map[string]Entry
+	mu       sync.RWMutex
+	entries  map[string]Entry
 	ttlHours int32 // TTL in hours for entries
 }
 
@@ -71,7 +71,7 @@ func (m *MemoryStore) CheckAndStore(messageID string, offset int64) (bool, error
 	// Store the entry so future lookups detect duplicates
 	m.entries[messageID] = Entry{
 		Offset:       offset,
-		CreatedTS:     now.UnixMilli(),
+		CreatedTS:    now.UnixMilli(),
 		ExpirationTS: now.Add(time.Duration(ttlMs) * time.Millisecond).UnixMilli(),
 	}
 	return false, nil

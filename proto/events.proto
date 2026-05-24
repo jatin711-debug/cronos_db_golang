@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package cronos_db;
 
-option go_package = "cronos_db/pkg/types;types";
+option go_package = "github.com/jatin711-debug/cronos_db_golang/pkg/types;types";
 
 // ============================================================================
 // Core Event Types
@@ -520,3 +520,4 @@ service RaftService {
   // Internal: Get raft status
   rpc Status(RaftStatusRequest) returns (RaftStatusResponse);
 }
+

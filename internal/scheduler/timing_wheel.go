@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"cronos_db/pkg/types"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 )
 
 // TimingWheel implements a hierarchical timing wheel for efficient timer management
@@ -20,8 +20,8 @@ type TimingWheel struct {
 	expired       chan []*Timer
 	quit          chan struct{}
 	timerPool     *sync.Pool
-	expiredBuf    []*Timer     // Reusable scratch buffer for tick processing
-	cascadeBuf    [][]*Timer   // Reusable bucket buffer for cascade operations
+	expiredBuf    []*Timer   // Reusable scratch buffer for tick processing
+	cascadeBuf    [][]*Timer // Reusable bucket buffer for cascade operations
 	tickMs        int32
 	wheelSize     int32
 	maxLevels     int32 // Maximum number of overflow wheel levels

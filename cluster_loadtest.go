@@ -16,12 +16,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"cronos_db/pkg/utils"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"cronos_db/pkg/types"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 )
 
 const connsPerNode = 4 // Multiple gRPC connections per node for better throughput

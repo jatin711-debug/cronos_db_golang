@@ -12,10 +12,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"cronos_db/pkg/client/internal/errs"
-	"cronos_db/pkg/client/internal/retry"
-	"cronos_db/pkg/types"
-	"cronos_db/pkg/utils"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/client/internal/errs"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/client/internal/retry"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 )
 
 // Message represents a producer payload.

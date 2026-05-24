@@ -10,10 +10,10 @@ import (
 	"syscall"
 	"time"
 
-	"cronos_db/internal/api"
-	"cronos_db/internal/cluster"
-	"cronos_db/internal/config"
-	"cronos_db/internal/partition"
+	"github.com/jatin711-debug/cronos_db_golang/internal/api"
+	"github.com/jatin711-debug/cronos_db_golang/internal/cluster"
+	"github.com/jatin711-debug/cronos_db_golang/internal/config"
+	"github.com/jatin711-debug/cronos_db_golang/internal/partition"
 
 	"github.com/cockroachdb/pebble"
 	"github.com/prometheus/client_golang/prometheus/promhttp"

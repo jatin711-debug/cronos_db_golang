@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"cronos_db/pkg/types"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 )
 
 // LoadConfig loads configuration from flags and environment

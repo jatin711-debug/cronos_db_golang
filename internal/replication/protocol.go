@@ -7,7 +7,7 @@ import (
 	"net"
 	"sync"
 
-	"cronos_db/pkg/types"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -19,16 +19,16 @@ const (
 
 // Message types
 const (
-	MsgTypeHandshake             = 1
-	MsgTypeHandshakeAck          = 2
-	MsgTypeAppendEntries         = 3
-	MsgTypeAppendAck             = 4
-	MsgTypeHeartbeat             = 5
-	MsgTypeHeartbeatAck          = 6
-	MsgTypeFileTransferRequest   = 7
-	MsgTypeFileTransferStart     = 8
-	MsgTypeFileTransferData      = 9
-	MsgTypeFileTransferEnd       = 10
+	MsgTypeHandshake           = 1
+	MsgTypeHandshakeAck        = 2
+	MsgTypeAppendEntries       = 3
+	MsgTypeAppendAck           = 4
+	MsgTypeHeartbeat           = 5
+	MsgTypeHeartbeatAck        = 6
+	MsgTypeFileTransferRequest = 7
+	MsgTypeFileTransferStart   = 8
+	MsgTypeFileTransferData    = 9
+	MsgTypeFileTransferEnd     = 10
 )
 
 // Transport manages binary protocol connections
