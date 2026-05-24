@@ -605,15 +605,39 @@ func (d *Dispatcher) getInFlight() int64 {
 }
 
 func parseSubIDFromDeliveryID(deliveryID string) (string, error) {
-	idx := strings.IndexByte(deliveryID, '-')
-	if idx == -1 {
+	if deliveryID == "" {
 		return "", fmt.Errorf("invalid delivery ID format")
 	}
-	subID := deliveryID[:idx]
-	if subID == "" {
+
+	// Batch format: "<subID>-batch-<offset>-<count>"
+	if batchIdx := strings.LastIndex(deliveryID, "-batch-"); batchIdx != -1 {
+		suffix := deliveryID[batchIdx+len("-batch-"):]
+		sep := strings.LastIndexByte(suffix, '-')
+		if sep <= 0 || sep == len(suffix)-1 {
+			return "", fmt.Errorf("invalid delivery ID format")
+		}
+		if _, err := strconv.ParseInt(suffix[:sep], 10, 64); err != nil {
+			return "", fmt.Errorf("invalid delivery ID format")
+		}
+		if _, err := strconv.ParseInt(suffix[sep+1:], 10, 64); err != nil {
+			return "", fmt.Errorf("invalid delivery ID format")
+		}
+		subID := deliveryID[:batchIdx]
+		if subID == "" {
+			return "", fmt.Errorf("invalid delivery ID format")
+		}
+		return subID, nil
+	}
+
+	// Single format: "<subID>-<offset>"
+	idx := strings.LastIndexByte(deliveryID, '-')
+	if idx <= 0 || idx == len(deliveryID)-1 {
 		return "", fmt.Errorf("invalid delivery ID format")
 	}
-	return subID, nil
+	if _, err := strconv.ParseInt(deliveryID[idx+1:], 10, 64); err != nil {
+		return "", fmt.Errorf("invalid delivery ID format")
+	}
+	return deliveryID[:idx], nil
 }
 
 // HandleAck handles acknowledgment from subscriber.

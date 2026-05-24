@@ -42,6 +42,7 @@ type ConsumerManager interface {
 	Subscribe(request *types.SubscribeRequest) (*consumer.Subscription, error)
 	Ack(request *types.AckRequest) error
 	GetCommittedOffset(groupID string, partitionID int32) (int64, error)
+	LeaveGroup(groupID, memberID string) error
 }
 
 // ClusterRouter provides cluster-aware partition routing.
@@ -453,6 +454,11 @@ func (h *EventServiceHandler) Subscribe(stream grpc.BidiStreamingServer[types.Su
 	if _, err := h.consumerManager.Subscribe(req); err != nil {
 		return fmt.Errorf("create consumer group: %w", err)
 	}
+	defer func() {
+		if err := h.consumerManager.LeaveGroup(req.GetConsumerGroup(), req.GetSubscriptionId()); err != nil {
+			slog.Warn("Failed to leave consumer group", "group", req.GetConsumerGroup(), "member", req.GetSubscriptionId(), "error", err)
+		}
+	}()
 
 	// Wait for context cancellation (client disconnect)
 	<-stream.Context().Done()
