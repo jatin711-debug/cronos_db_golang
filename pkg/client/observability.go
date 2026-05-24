@@ -8,6 +8,21 @@ type Hooks interface {
 	OnRequest(op string, nodeAddr string, duration time.Duration, err error)
 }
 
+// ErrorHook is an optional hook for typed error observation.
+type ErrorHook interface {
+	OnError(op string, kind ErrorKind, err error)
+}
+
+// ProducerStateHook is an optional hook for producer queue state.
+type ProducerStateHook interface {
+	OnProducerState(queueDepth int, queuedBytes int64, inFlight int)
+}
+
+// ConsumerStateHook is an optional hook for consumer queue state.
+type ConsumerStateHook interface {
+	OnConsumerState(deliveryQueueDepth int, ackQueueDepth int)
+}
+
 // NopHooks is the default no-op hooks implementation.
 type NopHooks struct{}
 

@@ -55,7 +55,7 @@ func (c *Client) DetectCapabilities(ctx context.Context) (Capabilities, error) {
 	}
 
 	addr := addresses[0]
-	partitionClient, err := c.pool.PartitionClient(addr)
+	partitionClient, err := c.partitionClientForAddress(addr)
 	if err == nil {
 		reqCtx, cancel := c.requestContext(ctx)
 		start := time.Now()
@@ -73,7 +73,7 @@ func (c *Client) DetectCapabilities(ctx context.Context) (Capabilities, error) {
 		}
 	}
 
-	eventClient, eventErr := c.pool.EventClient(addr)
+	eventClient, eventErr := c.eventClientForAddress(addr)
 	if eventErr != nil {
 		if err != nil {
 			return caps, wrapError("client.capabilities", ErrorKindTransport, err)
@@ -122,7 +122,7 @@ func (c *Client) probeReplay(ctx context.Context, addr string, info *types.Parti
 		return false
 	}
 
-	eventClient, err := c.pool.EventClient(addr)
+	eventClient, err := c.eventClientForAddress(addr)
 	if err != nil {
 		return false
 	}

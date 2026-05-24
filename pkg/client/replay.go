@@ -224,7 +224,7 @@ func (c *Client) getPartitionInfo(ctx context.Context, partitionID int32) (*type
 	}
 	var lastErr error
 	for _, addr := range route.CandidateAddresses {
-		partitionClient, clientErr := c.pool.PartitionClient(addr)
+		partitionClient, clientErr := c.partitionClientForAddress(addr)
 		if clientErr != nil {
 			lastErr = clientErr
 			continue
