@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
+	"math/rand"
 	"strconv"
 	"strings"
 	"sync"
@@ -138,11 +140,17 @@ type ConsumerConfig struct {
 	NodeAddress string
 
 	ReconnectBackoff     time.Duration
+	MaxReconnectBackoff  time.Duration
+	ReconnectJitter      float64
 	MaxReconnectAttempts int
 
-	OnAssigned  func(context.Context, Assignment)
-	OnRevoked   func(context.Context, Assignment)
-	OnReconnect func(context.Context, int, error)
+	HeartbeatInterval time.Duration
+	OnJoin            func(context.Context, Assignment)
+	OnLeave           func(context.Context, Assignment)
+	OnHeartbeat       func(context.Context, Assignment)
+	OnAssigned        func(context.Context, Assignment)
+	OnRevoked         func(context.Context, Assignment)
+	OnReconnect       func(context.Context, int, error)
 }
 
 // DefaultConsumerConfig returns safe consumer defaults.
@@ -163,7 +171,10 @@ func DefaultConsumerConfig(topic, consumerGroup string) ConsumerConfig {
 		ResumeCheckpoint:     true,
 		PreferredCodec:       JSONCodec{},
 		ReconnectBackoff:     1 * time.Second,
+		MaxReconnectBackoff:  15 * time.Second,
+		ReconnectJitter:      0.2,
 		MaxReconnectAttempts: 0,
+		HeartbeatInterval:    3 * time.Second,
 	}
 }
 
@@ -192,6 +203,15 @@ func (c ConsumerConfig) withDefaults() ConsumerConfig {
 	}
 	if out.ReconnectBackoff <= 0 {
 		out.ReconnectBackoff = 1 * time.Second
+	}
+	if out.MaxReconnectBackoff <= 0 {
+		out.MaxReconnectBackoff = 15 * time.Second
+	}
+	if out.ReconnectJitter < 0 {
+		out.ReconnectJitter = 0
+	}
+	if out.HeartbeatInterval <= 0 {
+		out.HeartbeatInterval = 3 * time.Second
 	}
 	if out.SubscriptionID == "" {
 		out.SubscriptionID = fmt.Sprintf("client-sub-%d", subscriptionCounter.Add(1))
@@ -244,7 +264,87 @@ func (c ConsumerConfig) Validate() error {
 	if c.AckQueueSize <= 0 {
 		return fmt.Errorf("ack_queue_size must be > 0")
 	}
+	if c.HeartbeatInterval <= 0 {
+		return fmt.Errorf("heartbeat_interval must be > 0")
+	}
+	if c.MaxReconnectBackoff <= 0 {
+		return fmt.Errorf("max_reconnect_backoff must be > 0")
+	}
+	if c.ReconnectBackoff > c.MaxReconnectBackoff {
+		return fmt.Errorf("reconnect_backoff must be <= max_reconnect_backoff")
+	}
+	if c.ReconnectJitter < 0 || c.ReconnectJitter > 1 {
+		return fmt.Errorf("reconnect_jitter must be between 0 and 1")
+	}
 	return nil
+}
+
+type assignmentTracker struct {
+	mu       sync.Mutex
+	current  Assignment
+	assigned bool
+
+	onAssign func(context.Context, Assignment)
+}
+
+func newAssignmentTracker(initial Assignment, onAssign func(context.Context, Assignment)) *assignmentTracker {
+	return &assignmentTracker{
+		current:  initial,
+		onAssign: onAssign,
+	}
+}
+
+func (a *assignmentTracker) assignment() Assignment {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.current
+}
+
+func (a *assignmentTracker) notifyAssigned(ctx context.Context) {
+	a.mu.Lock()
+	assignment := a.current
+	changed := !a.assigned
+	a.assigned = true
+	a.mu.Unlock()
+
+	if changed && a.onAssign != nil {
+		a.onAssign(ctx, assignment)
+	}
+}
+
+func (a *assignmentTracker) updateFromDelivery(ctx context.Context, delivery *types.Delivery) {
+	if delivery == nil {
+		return
+	}
+	partitionID, topic := deliveryPartitionTopic(delivery)
+	if partitionID < 0 {
+		return
+	}
+
+	a.mu.Lock()
+	changed := false
+	if a.current.PartitionID != partitionID {
+		a.current.PartitionID = partitionID
+		changed = true
+	}
+	if topic != "" && a.current.Topic != topic {
+		a.current.Topic = topic
+		changed = true
+	}
+	assignment := a.current
+	alreadyAssigned := a.assigned
+	if changed {
+		a.assigned = true
+	}
+	a.mu.Unlock()
+
+	if changed && a.onAssign != nil {
+		a.onAssign(ctx, assignment)
+		return
+	}
+	if !alreadyAssigned && partitionID >= 0 {
+		a.notifyAssigned(ctx)
+	}
 }
 
 type ackEnvelope struct {
@@ -311,6 +411,7 @@ func NewConsumer(client *Client, cfg ConsumerConfig, handler MessageHandler) (*C
 		cfg.MaxPayloadBytes = client.cfg.MaxRecvMsgSize
 	}
 	if err := cfg.Validate(); err != nil {
+		client.observeError("consumer.new", ErrorKindValidation, err)
 		return nil, wrapError("consumer.new", ErrorKindValidation, err)
 	}
 
@@ -342,12 +443,17 @@ func (c *Consumer) Run(ctx context.Context) error {
 			if lastErr == nil {
 				lastErr = fmt.Errorf("max reconnect attempts reached")
 			}
-			return wrapError("consumer.run", ErrorKindUnavailable, lastErr)
+			return c.wrapErr("consumer.run", ErrorKindUnavailable, lastErr)
+		}
+		if attempt > 0 && c.cfg.PartitionID >= 0 {
+			refreshCtx, cancel := context.WithTimeout(ctx, c.client.cfg.RequestTimeout)
+			_ = c.client.ForceMetadataRefresh(refreshCtx)
+			cancel()
 		}
 
 		candidates := c.candidateAddresses()
 		if len(candidates) == 0 {
-			return wrapError("consumer.run", ErrorKindValidation, fmt.Errorf("no candidate node addresses"))
+			return c.wrapErr("consumer.run", ErrorKindValidation, fmt.Errorf("no candidate node addresses"))
 		}
 
 		for _, addr := range candidates {
@@ -368,18 +474,30 @@ func (c *Consumer) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(c.cfg.ReconnectBackoff):
+		case <-time.After(c.reconnectBackoff(attempt)):
 		}
 	}
 }
 
 func (c *Consumer) candidateAddresses() []string {
 	seen := map[string]struct{}{}
-	out := make([]string, 0, len(c.client.pool.Addresses())+1)
+	out := make([]string, 0, len(c.client.pool.Addresses())+3)
 
 	if c.cfg.NodeAddress != "" {
 		out = append(out, c.cfg.NodeAddress)
 		seen[c.cfg.NodeAddress] = struct{}{}
+	}
+	if c.cfg.PartitionID >= 0 {
+		route, err := c.client.RouteForPartition(c.cfg.PartitionID)
+		if err == nil {
+			for _, addr := range route.CandidateAddresses {
+				if _, exists := seen[addr]; exists || addr == "" {
+					continue
+				}
+				seen[addr] = struct{}{}
+				out = append(out, addr)
+			}
+		}
 	}
 	for _, addr := range c.client.pool.Addresses() {
 		if _, exists := seen[addr]; exists {
@@ -394,7 +512,7 @@ func (c *Consumer) candidateAddresses() []string {
 func (c *Consumer) consumeFromNode(ctx context.Context, addr string) error {
 	eventClient, err := c.client.eventClientForAddress(addr)
 	if err != nil {
-		return wrapError("consumer.node_client", ErrorKindTransport, err)
+		return c.wrapErr("consumer.node_client", ErrorKindTransport, err)
 	}
 
 	subCtx, cancel := context.WithCancel(ctx)
@@ -404,14 +522,14 @@ func (c *Consumer) consumeFromNode(ctx context.Context, addr string) error {
 	subscribeStream, err := eventClient.Subscribe(subCtx)
 	c.client.observeRequest("event.subscribe.open", addr, start, err)
 	if err != nil {
-		return wrapError("consumer.subscribe_stream", ErrorKindTransport, err)
+		return c.wrapErr("consumer.subscribe_stream", ErrorKindTransport, err)
 	}
 
 	start = time.Now()
 	ackStream, err := eventClient.Ack(subCtx)
 	c.client.observeRequest("event.ack.open", addr, start, err)
 	if err != nil {
-		return wrapError("consumer.ack_stream", ErrorKindTransport, err)
+		return c.wrapErr("consumer.ack_stream", ErrorKindTransport, err)
 	}
 
 	startOffset := c.resolveStartOffset(subCtx)
@@ -427,7 +545,7 @@ func (c *Consumer) consumeFromNode(ctx context.Context, addr string) error {
 	err = subscribeStream.Send(subReq)
 	c.client.observeRequest("event.subscribe.send", addr, start, err)
 	if err != nil {
-		return wrapError("consumer.send_subscribe_request", ErrorKindTransport, err)
+		return c.wrapErr("consumer.send_subscribe_request", ErrorKindTransport, err)
 	}
 
 	assignment := Assignment{
@@ -437,19 +555,23 @@ func (c *Consumer) consumeFromNode(ctx context.Context, addr string) error {
 		SubscriptionID: c.cfg.SubscriptionID,
 		NodeAddress:    addr,
 	}
-	if c.cfg.OnAssigned != nil {
-		c.cfg.OnAssigned(subCtx, assignment)
+	assignmentState := newAssignmentTracker(assignment, c.cfg.OnAssigned)
+	if c.cfg.OnJoin != nil {
+		c.cfg.OnJoin(subCtx, assignmentState.assignment())
 	}
-	defer func() {
-		if c.cfg.OnRevoked != nil {
-			c.cfg.OnRevoked(context.Background(), assignment)
-		}
-	}()
+	if c.cfg.PartitionID >= 0 {
+		assignmentState.notifyAssigned(subCtx)
+	}
 
 	ackQueue := make(chan ackEnvelope, c.cfg.AckQueueSize)
 	deliveries := make(chan *types.Delivery, c.cfg.MaxBufferSize)
 
 	var infraWG sync.WaitGroup
+	infraWG.Add(1)
+	go func() {
+		defer infraWG.Done()
+		c.heartbeatLoop(subCtx, assignmentState)
+	}()
 	infraWG.Add(1)
 	go func() {
 		defer infraWG.Done()
@@ -472,12 +594,20 @@ func (c *Consumer) consumeFromNode(ctx context.Context, addr string) error {
 		}()
 	}
 
-	recvErr := c.recvLoop(subCtx, addr, subscribeStream, deliveries)
+	recvErr := c.recvLoop(subCtx, addr, subscribeStream, assignmentState, deliveries)
 
 	close(deliveries)
 	workerWG.Wait()
 	close(ackQueue)
 	infraWG.Wait()
+
+	finalAssignment := assignmentState.assignment()
+	if c.cfg.OnRevoked != nil {
+		c.cfg.OnRevoked(context.Background(), finalAssignment)
+	}
+	if c.cfg.OnLeave != nil {
+		c.cfg.OnLeave(context.Background(), finalAssignment)
+	}
 
 	if recvErr == nil || recvErr == io.EOF {
 		return nil
@@ -489,6 +619,7 @@ func (c *Consumer) recvLoop(
 	ctx context.Context,
 	addr string,
 	stream grpc.BidiStreamingClient[types.SubscribeRequest, types.Delivery],
+	assignmentState *assignmentTracker,
 	out chan<- *types.Delivery,
 ) error {
 	for {
@@ -504,11 +635,15 @@ func (c *Consumer) recvLoop(
 		if err != nil {
 			return err
 		}
+		if assignmentState != nil {
+			assignmentState.updateFromDelivery(ctx, delivery)
+		}
 
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case out <- delivery:
+			c.observeState(len(out), 0)
 		}
 	}
 }
@@ -530,6 +665,7 @@ func (c *Consumer) worker(ctx context.Context, deliveries <-chan *types.Delivery
 				case <-ctx.Done():
 					return ctx.Err()
 				case ackQueue <- env:
+					c.observeState(len(deliveries), len(ackQueue))
 					return nil
 				}
 			},
@@ -626,6 +762,7 @@ func (c *Consumer) ackSender(
 			c.persistCheckpoint(ctx, ack, ack.req.GetNextOffset())
 		}
 		batch = batch[:0]
+		c.observeState(0, len(acks))
 		return true
 	}
 
@@ -643,6 +780,7 @@ func (c *Consumer) ackSender(
 				continue
 			}
 			batch = append(batch, ack)
+			c.observeState(0, len(acks))
 			if len(batch) >= c.cfg.AckBatchSize {
 				if !flush() {
 					return
@@ -683,6 +821,56 @@ func (c *Consumer) drainAckResponses(
 			return
 		}
 	}
+}
+
+func (c *Consumer) wrapErr(op string, kind ErrorKind, err error) error {
+	if c != nil && c.client != nil {
+		c.client.observeError(op, kind, err)
+	}
+	return wrapError(op, kind, err)
+}
+
+func (c *Consumer) observeState(deliveryQueueDepth int, ackQueueDepth int) {
+	if c == nil || c.client == nil || c.client.cfg.Hooks == nil {
+		return
+	}
+	if hook, ok := c.client.cfg.Hooks.(ConsumerStateHook); ok {
+		hook.OnConsumerState(deliveryQueueDepth, ackQueueDepth)
+	}
+}
+
+func (c *Consumer) heartbeatLoop(ctx context.Context, assignmentState *assignmentTracker) {
+	if c.cfg.OnHeartbeat == nil {
+		<-ctx.Done()
+		return
+	}
+	ticker := time.NewTicker(c.cfg.HeartbeatInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			c.cfg.OnHeartbeat(ctx, assignmentState.assignment())
+		}
+	}
+}
+
+func (c *Consumer) reconnectBackoff(attempt int) time.Duration {
+	base := float64(c.cfg.ReconnectBackoff) * math.Pow(2, float64(attempt-1))
+	max := float64(c.cfg.MaxReconnectBackoff)
+	if base > max {
+		base = max
+	}
+	if c.cfg.ReconnectJitter > 0 {
+		delta := base * c.cfg.ReconnectJitter
+		base = base - delta + rand.Float64()*(2*delta)
+	}
+	if base < float64(time.Millisecond) {
+		base = float64(time.Millisecond)
+	}
+	return time.Duration(base)
 }
 
 func (c *Consumer) resolveStartOffset(ctx context.Context) int64 {

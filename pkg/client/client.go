@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -158,7 +159,37 @@ func (c *Client) PartitionMetadata() []PartitionMetadata {
 }
 
 func (c *Client) eventClientForAddress(addr string) (types.EventServiceClient, error) {
+	client, err := c.pool.EventClient(addr)
+	if err == nil {
+		return client, nil
+	}
+	if !strings.Contains(err.Error(), "not found in pool") {
+		return nil, err
+	}
+
+	bootstrapCtx, cancel := context.WithTimeout(context.Background(), c.cfg.DialTimeout)
+	defer cancel()
+	if addErr := c.pool.AddNode(bootstrapCtx, addr); addErr != nil {
+		return nil, err
+	}
 	return c.pool.EventClient(addr)
+}
+
+func (c *Client) partitionClientForAddress(addr string) (types.PartitionServiceClient, error) {
+	client, err := c.pool.PartitionClient(addr)
+	if err == nil {
+		return client, nil
+	}
+	if !strings.Contains(err.Error(), "not found in pool") {
+		return nil, err
+	}
+
+	bootstrapCtx, cancel := context.WithTimeout(context.Background(), c.cfg.DialTimeout)
+	defer cancel()
+	if addErr := c.pool.AddNode(bootstrapCtx, addr); addErr != nil {
+		return nil, err
+	}
+	return c.pool.PartitionClient(addr)
 }
 
 func (c *Client) observeRequest(op string, nodeAddr string, start time.Time, err error) {
@@ -166,6 +197,15 @@ func (c *Client) observeRequest(op string, nodeAddr string, start time.Time, err
 		return
 	}
 	c.cfg.Hooks.OnRequest(op, nodeAddr, time.Since(start), err)
+}
+
+func (c *Client) observeError(op string, kind ErrorKind, err error) {
+	if c == nil || c.cfg.Hooks == nil || err == nil {
+		return
+	}
+	if hook, ok := c.cfg.Hooks.(ErrorHook); ok {
+		hook.OnError(op, kind, err)
+	}
 }
 
 func (c *Client) requestContext(ctx context.Context) (context.Context, context.CancelFunc) {

@@ -86,6 +86,13 @@ type ProducerConfig struct {
 	BlockOnQueueFull bool
 	MaxInFlight      int
 	MaxQueuedBytes   int64
+	CircuitBreaker   CircuitBreakerConfig
+}
+
+// CircuitBreakerConfig controls producer circuit breaker behavior.
+type CircuitBreakerConfig struct {
+	FailureThreshold int
+	Cooldown         time.Duration
 }
 
 // DefaultProducerConfig returns safe producer defaults.
@@ -100,6 +107,10 @@ func DefaultProducerConfig() ProducerConfig {
 		BlockOnQueueFull:      true,
 		MaxInFlight:           1024,
 		MaxQueuedBytes:        256 * 1024 * 1024, // 256MB async queue cap
+		CircuitBreaker: CircuitBreakerConfig{
+			FailureThreshold: 0,
+			Cooldown:         5 * time.Second,
+		},
 	}
 }
 
@@ -121,6 +132,7 @@ type Producer struct {
 	closed      atomic.Bool
 	queuedBytes atomic.Int64
 	wg          sync.WaitGroup
+	breaker     circuitBreaker
 }
 
 // NewProducer creates a producer bound to a client.
@@ -149,6 +161,9 @@ func NewProducer(client *Client, cfg ProducerConfig) (*Producer, error) {
 	if cfg.MaxPayloadBytes <= 0 {
 		cfg.MaxPayloadBytes = client.cfg.MaxSendMsgSize
 	}
+	if cfg.CircuitBreaker.Cooldown <= 0 {
+		cfg.CircuitBreaker.Cooldown = 5 * time.Second
+	}
 
 	p := &Producer{
 		client:      client,
@@ -156,6 +171,10 @@ func NewProducer(client *Client, cfg ProducerConfig) (*Producer, error) {
 		partitioner: cfg.Partitioner,
 		queue:       make(chan asyncSendRequest, cfg.AsyncQueueSize),
 		inFlight:    make(chan struct{}, cfg.MaxInFlight),
+		breaker: circuitBreaker{
+			threshold: cfg.CircuitBreaker.FailureThreshold,
+			cooldown:  cfg.CircuitBreaker.Cooldown,
+		},
 	}
 	for i := 0; i < cfg.AsyncWorkers; i++ {
 		p.wg.Add(1)
@@ -171,17 +190,20 @@ func (c *Client) NewProducer(cfg ProducerConfig) (*Producer, error) {
 
 // Send publishes one message synchronously.
 func (p *Producer) Send(ctx context.Context, msg Message) (*SendResult, error) {
+	if !p.breaker.Allow() {
+		return nil, p.wrapErr("producer.send", ErrorKindUnavailable, ErrCircuitOpen)
+	}
 	if err := p.acquireInFlight(ctx); err != nil {
-		return nil, wrapError("producer.send", ErrorKindTimeout, err)
+		return nil, p.wrapErr("producer.send", ErrorKindTimeout, err)
 	}
 	defer p.releaseInFlight()
 
 	msg, err := normalizeMessage(msg, p.cfg)
 	if err != nil {
-		return nil, wrapError("producer.send", ErrorKindValidation, err)
+		return nil, p.wrapErr("producer.send", ErrorKindValidation, err)
 	}
 	if err := validateMessage(msg); err != nil {
-		return nil, wrapError("producer.send", ErrorKindValidation, err)
+		return nil, p.wrapErr("producer.send", ErrorKindValidation, err)
 	}
 
 	var lastErr error
@@ -230,7 +252,8 @@ func (p *Producer) Send(ctx context.Context, msg Message) (*SendResult, error) {
 					shouldRetry = true
 					continue
 				}
-				return nil, wrapError("producer.send", ErrorKindTransport, err)
+				p.breaker.RecordFailure()
+				return nil, p.wrapErr("producer.send", ErrorKindTransport, err)
 			}
 			if resp == nil {
 				lastErr = fmt.Errorf("nil publish response from %s", addr)
@@ -238,6 +261,7 @@ func (p *Producer) Send(ctx context.Context, msg Message) (*SendResult, error) {
 				continue
 			}
 			if resp.GetSuccess() {
+				p.breaker.RecordSuccess()
 				return &SendResult{
 					MessageID:   msg.MessageID,
 					PartitionID: resp.GetPartitionId(),
@@ -254,7 +278,8 @@ func (p *Producer) Send(ctx context.Context, msg Message) (*SendResult, error) {
 				shouldRetry = true
 				continue
 			}
-			return nil, wrapError("producer.send", ErrorKindValidation, lastErr)
+			p.breaker.RecordFailure()
+			return nil, p.wrapErr("producer.send", ErrorKindValidation, lastErr)
 		}
 
 		if !shouldRetry {
@@ -265,7 +290,8 @@ func (p *Producer) Send(ctx context.Context, msg Message) (*SendResult, error) {
 	if lastErr == nil {
 		lastErr = fmt.Errorf("publish failed after %d attempts", p.cfg.RetryPolicy.MaxAttempts)
 	}
-	return nil, wrapError("producer.send", ErrorKindUnavailable, lastErr)
+	p.breaker.RecordFailure()
+	return nil, p.wrapErr("producer.send", ErrorKindUnavailable, lastErr)
 }
 
 // SendBatch publishes a set of messages.
@@ -390,12 +416,12 @@ func (p *Producer) SendAsync(msg Message, callback DeliveryCallback) (*DeliveryF
 // SendAsyncContext publishes asynchronously and returns a future.
 func (p *Producer) SendAsyncContext(ctx context.Context, msg Message, callback DeliveryCallback) (*DeliveryFuture, error) {
 	if p.closed.Load() {
-		return nil, wrapError("producer.send_async", ErrorKindValidation, fmt.Errorf("producer is closed"))
+		return nil, p.wrapErr("producer.send_async", ErrorKindValidation, fmt.Errorf("producer is closed"))
 	}
 
 	msg, err := normalizeMessage(msg, p.cfg)
 	if err != nil {
-		return nil, wrapError("producer.send_async", ErrorKindValidation, err)
+		return nil, p.wrapErr("producer.send_async", ErrorKindValidation, err)
 	}
 	sizeHint := estimateMessageBytes(msg)
 	if err := p.reserveQueuedBytes(ctx, sizeHint); err != nil {
@@ -414,18 +440,20 @@ func (p *Producer) SendAsyncContext(ctx context.Context, msg Message, callback D
 		select {
 		case <-ctx.Done():
 			p.releaseQueuedBytes(sizeHint)
-			return nil, wrapError("producer.send_async", ErrorKindTimeout, ctx.Err())
+			return nil, p.wrapErr("producer.send_async", ErrorKindTimeout, ctx.Err())
 		case p.queue <- req:
+			p.observeState()
 		}
 		return future, nil
 	}
 
 	select {
 	case p.queue <- req:
+		p.observeState()
 		return future, nil
 	default:
 		p.releaseQueuedBytes(sizeHint)
-		return nil, wrapError("producer.send_async", ErrorKindUnavailable, fmt.Errorf("async queue is full"))
+		return nil, p.wrapErr("producer.send_async", ErrorKindUnavailable, fmt.Errorf("async queue is full"))
 	}
 }
 
@@ -436,6 +464,7 @@ func (p *Producer) Close() error {
 	}
 	close(p.queue)
 	p.wg.Wait()
+	p.observeState()
 	return nil
 }
 
@@ -446,6 +475,7 @@ func (p *Producer) worker() {
 		res, err := p.Send(ctx, req.msg)
 		cancel()
 		p.releaseQueuedBytes(req.sizeHint)
+		p.observeState()
 		req.future.complete(res, err)
 		if req.callback != nil {
 			req.callback(res, err)
@@ -567,11 +597,28 @@ func isLeaderRelatedMessage(message string) bool {
 	return strings.Contains(m, "leader") || strings.Contains(m, "partition")
 }
 
+func (p *Producer) wrapErr(op string, kind ErrorKind, err error) error {
+	if p != nil && p.client != nil {
+		p.client.observeError(op, kind, err)
+	}
+	return wrapError(op, kind, err)
+}
+
+func (p *Producer) observeState() {
+	if p == nil || p.client == nil || p.client.cfg.Hooks == nil {
+		return
+	}
+	if hook, ok := p.client.cfg.Hooks.(ProducerStateHook); ok {
+		hook.OnProducerState(len(p.queue), p.queuedBytes.Load(), len(p.inFlight))
+	}
+}
+
 func (p *Producer) acquireInFlight(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	case p.inFlight <- struct{}{}:
+		p.observeState()
 		return nil
 	}
 }
@@ -579,6 +626,7 @@ func (p *Producer) acquireInFlight(ctx context.Context) error {
 func (p *Producer) releaseInFlight() {
 	select {
 	case <-p.inFlight:
+		p.observeState()
 	default:
 	}
 }
@@ -602,10 +650,11 @@ func (p *Producer) reserveQueuedBytes(ctx context.Context, n int64) error {
 	}
 
 	if tryReserve() {
+		p.observeState()
 		return nil
 	}
 	if !p.cfg.BlockOnQueueFull {
-		return wrapError("producer.send_async", ErrorKindUnavailable, fmt.Errorf("async queued bytes limit exceeded"))
+		return p.wrapErr("producer.send_async", ErrorKindUnavailable, fmt.Errorf("async queued bytes limit exceeded"))
 	}
 
 	ticker := time.NewTicker(2 * time.Millisecond)
@@ -613,12 +662,13 @@ func (p *Producer) reserveQueuedBytes(ctx context.Context, n int64) error {
 	for {
 		select {
 		case <-ctx.Done():
-			return wrapError("producer.send_async", ErrorKindTimeout, ctx.Err())
+			return p.wrapErr("producer.send_async", ErrorKindTimeout, ctx.Err())
 		case <-ticker.C:
 			if p.closed.Load() {
-				return wrapError("producer.send_async", ErrorKindValidation, fmt.Errorf("producer is closed"))
+				return p.wrapErr("producer.send_async", ErrorKindValidation, fmt.Errorf("producer is closed"))
 			}
 			if tryReserve() {
+				p.observeState()
 				return nil
 			}
 		}
@@ -636,6 +686,7 @@ func (p *Producer) releaseQueuedBytes(n int64) {
 			next = 0
 		}
 		if p.queuedBytes.CompareAndSwap(current, next) {
+			p.observeState()
 			return
 		}
 	}
@@ -647,6 +698,55 @@ func estimateMessageBytes(msg Message) int64 {
 		size += int64(len(k) + len(v))
 	}
 	return size
+}
+
+// ErrCircuitOpen indicates producer circuit breaker is open.
+var ErrCircuitOpen = errors.New("producer circuit breaker is open")
+
+type circuitBreaker struct {
+	mu sync.Mutex
+
+	threshold int
+	cooldown  time.Duration
+
+	failures  int
+	openUntil time.Time
+}
+
+func (c *circuitBreaker) Allow() bool {
+	if c.threshold <= 0 {
+		return true
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.openUntil.IsZero() || time.Now().After(c.openUntil) {
+		return true
+	}
+	return false
+}
+
+func (c *circuitBreaker) RecordSuccess() {
+	if c.threshold <= 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.failures = 0
+	c.openUntil = time.Time{}
+}
+
+func (c *circuitBreaker) RecordFailure() {
+	if c.threshold <= 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.failures++
+	if c.failures < c.threshold {
+		return
+	}
+	c.failures = 0
+	c.openUntil = time.Now().Add(c.cooldown)
 }
 
 type deliveryOutcome struct {
