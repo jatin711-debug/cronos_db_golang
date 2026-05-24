@@ -29,7 +29,7 @@ RUN cp target/release/libcronos_dedup.so /build/libcronos_dedup.so
 # -----------------------------------------------------------------------------
 # Stage 2: Build Go application
 # -----------------------------------------------------------------------------
-FROM golang:1.24-bookworm AS go-builder
+FROM golang:1.25-bookworm AS go-builder
 
 # Install build dependencies for cgo
 RUN apt-get update && apt-get install -y --no-install-recommends \

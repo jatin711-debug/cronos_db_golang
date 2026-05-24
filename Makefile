@@ -300,6 +300,9 @@ docker:
 docker-build:
 	docker build -t cronos-db:latest --no-cache . && echo Image built successfully
 
+docker-build-hub:
+	docker build -t johnny711dock/cronos-db:latest . && echo Image built successfully
+
 docker-single:
 	$(DOCKER_COMPOSE) up -d cronos-single
 
