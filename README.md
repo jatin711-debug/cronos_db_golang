@@ -570,7 +570,7 @@ Apache 2.0 — see [LICENSE](LICENSE).
 
 ## Resources
 
-- [Timing Wheels — Varghese & Lauck (1987)](https://www.cs.columbia.edu/~nahum/6998/papers/sosp87-timing-wheels.pdf)
+- [Timing Wheels — Varghese & Lauck (1987)](https://www.cs.columbia.edu/~nahum/w6998/papers/sosp87-timing-wheels.pdf)
 - [Raft Consensus Algorithm](https://raft.github.io/)
 - [Patterns of Distributed Systems — Martin Fowler](https://martinfowler.com/articles/patterns-of-distributed-systems/)
 - [Write-Ahead Logging](https://en.wikipedia.org/wiki/Write-ahead_logging)
