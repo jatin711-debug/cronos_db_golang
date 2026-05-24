@@ -22,27 +22,27 @@ type GRPCServer struct {
 
 // Config represents gRPC server configuration
 type Config struct {
-	Address             string
-	MaxRecvMsgSize      int
-	MaxSendMsgSize      int
-	KeepaliveMinTime    time.Duration
-	KeepaliveTimeout    time.Duration
-	MaxConnectionIdle   time.Duration
-	MaxConnectionAge    time.Duration
+	Address               string
+	MaxRecvMsgSize        int
+	MaxSendMsgSize        int
+	KeepaliveMinTime      time.Duration
+	KeepaliveTimeout      time.Duration
+	MaxConnectionIdle     time.Duration
+	MaxConnectionAge      time.Duration
 	MaxConnectionAgeGrace time.Duration
 }
 
 // DefaultConfig returns default gRPC server configuration
 func DefaultConfig() *Config {
 	return &Config{
-		Address:                   ":9000",
-		MaxRecvMsgSize:           16 * 1024 * 1024, // 16MB - supports large batches (4000 events × 256B+)
-		MaxSendMsgSize:           16 * 1024 * 1024, // 16MB
-		KeepaliveMinTime:         10 * time.Second,
-		KeepaliveTimeout:         20 * time.Second,
-		MaxConnectionIdle:        120 * time.Second,
-		MaxConnectionAge:         120 * time.Second,
-		MaxConnectionAgeGrace:    5 * time.Second,
+		Address:               ":9000",
+		MaxRecvMsgSize:        16 * 1024 * 1024, // 16MB - supports large batches (4000 events × 256B+)
+		MaxSendMsgSize:        16 * 1024 * 1024, // 16MB
+		KeepaliveMinTime:      10 * time.Second,
+		KeepaliveTimeout:      20 * time.Second,
+		MaxConnectionIdle:     120 * time.Second,
+		MaxConnectionAge:      120 * time.Second,
+		MaxConnectionAgeGrace: 5 * time.Second,
 	}
 }
 
@@ -51,7 +51,7 @@ func NewGRPCServer(config *Config) *GRPCServer {
 	server := grpc.NewServer(
 		grpc.MaxRecvMsgSize(config.MaxRecvMsgSize),
 		grpc.MaxSendMsgSize(config.MaxSendMsgSize),
-		grpc.MaxConcurrentStreams(10000), // Prevent OOM from too many concurrent streams
+		grpc.MaxConcurrentStreams(10000),         // Prevent OOM from too many concurrent streams
 		grpc.InitialWindowSize(16*1024*1024),     // 16MB stream flow control window
 		grpc.InitialConnWindowSize(32*1024*1024), // 32MB connection flow control window
 		grpc.WriteBufferSize(4*1024*1024),        // 4MB write buffer
@@ -78,9 +78,18 @@ func NewGRPCServer(config *Config) *GRPCServer {
 }
 
 // RegisterServices registers all gRPC services
-func (g *GRPCServer) RegisterServices(eventHandler *EventServiceHandler, consumerHandler *ConsumerGroupServiceHandler) {
+func (g *GRPCServer) RegisterServices(
+	eventHandler *EventServiceHandler,
+	consumerHandler *ConsumerGroupServiceHandler,
+	partitionHandler *PartitionServiceHandler,
+) {
 	types.RegisterEventServiceServer(g.server, eventHandler)
-	types.RegisterConsumerGroupServiceServer(g.server, consumerHandler)
+	if consumerHandler != nil {
+		types.RegisterConsumerGroupServiceServer(g.server, consumerHandler)
+	}
+	if partitionHandler != nil {
+		types.RegisterPartitionServiceServer(g.server, partitionHandler)
+	}
 }
 
 // Start starts the gRPC server

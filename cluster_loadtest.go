@@ -32,9 +32,10 @@ type ClusterNode struct {
 	GRPCAddr string
 	HTTPAddr string
 	conn     *grpc.ClientConn
-	conns    []*grpc.ClientConn          // Multiple connections for throughput
-	clients  []types.EventServiceClient  // Round-robin clients
-	client   types.EventServiceClient    // Legacy single client (for probing)
+	conns    []*grpc.ClientConn           // Multiple connections for throughput
+	clients  []types.EventServiceClient   // Round-robin clients
+	client   types.EventServiceClient     // Legacy single client (for probing)
+	pclient  types.PartitionServiceClient // Partition metadata client
 }
 
 // ClusterLoadTestConfig holds cluster load test configuration
@@ -259,6 +260,7 @@ func runClusterLoadTest(config ClusterLoadTestConfig) *ClusterMetrics {
 		// Keep legacy single client for probing
 		config.Nodes[i].conn = config.Nodes[i].conns[0]
 		config.Nodes[i].client = config.Nodes[i].clients[0]
+		config.Nodes[i].pclient = types.NewPartitionServiceClient(config.Nodes[i].conns[0])
 	}
 
 	// Progress tracking
@@ -355,61 +357,46 @@ func buildProbeKeys(partitionCount int) (map[int32]string, error) {
 }
 
 func discoverPartitionLeaders(config ClusterLoadTestConfig) (map[int32]int, error) {
-	probeKeys, err := buildProbeKeys(config.PartitionCount)
-	if err != nil {
-		return nil, err
+	nodeIndexByID := make(map[string]int, len(config.Nodes))
+	for idx, node := range config.Nodes {
+		nodeIndexByID[node.ID] = idx
 	}
 
-	leaders := make(map[int32]int, config.PartitionCount)
-	probeTopic := config.Topic + "-route-probe"
-
-	for partitionID := int32(0); partitionID < int32(config.PartitionCount); partitionID++ {
-		probeKey := probeKeys[partitionID]
-		found := false
-
-		for nodeIdx := range config.Nodes {
-			node := config.Nodes[nodeIdx]
-			req := &types.PublishRequest{
-				AllowDuplicate: true,
-				Event: &types.Event{
-					MessageId:  fmt.Sprintf("route-probe-%d-%d", partitionID, time.Now().UnixNano()),
-					ScheduleTs: time.Now().UnixMilli(),
-					Payload:    []byte("probe"),
-					Topic:      probeTopic,
-					Meta: map[string]string{
-						"partition_key": probeKey,
-					},
-				},
-			}
-
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			resp, err := node.client.Publish(ctx, req)
-			cancel()
-
-			if err != nil {
-				log.Printf("  DEBUG: node %s partition %d Publish error: %v", node.ID, partitionID, err)
-				continue
-			}
-			if resp == nil {
-				log.Printf("  DEBUG: node %s partition %d Publish response is nil", node.ID, partitionID)
-				continue
-			}
-			if !resp.Success {
-				log.Printf("  DEBUG: node %s partition %d Publish response success=false, error: %s", node.ID, partitionID, resp.Error)
-				continue
-			}
-
-			leaders[partitionID] = nodeIdx
-			found = true
-			break
+	for _, node := range config.Nodes {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		resp, err := node.pclient.ListPartitions(ctx, &types.ListPartitionsRequest{})
+		cancel()
+		if err != nil {
+			log.Printf("  DEBUG: metadata request to %s failed: %v", node.ID, err)
+			continue
+		}
+		if resp == nil {
+			log.Printf("  DEBUG: metadata response from %s is nil", node.ID)
+			continue
 		}
 
-		if !found {
-			return nil, fmt.Errorf("could not discover leader for partition %d", partitionID)
+		leaders := make(map[int32]int, config.PartitionCount)
+		for _, partition := range resp.GetPartitions() {
+			pid := partition.GetPartitionId()
+			if pid < 0 || int(pid) >= config.PartitionCount {
+				continue
+			}
+
+			leaderID := partition.GetLeaderId()
+			leaderNodeIdx, ok := nodeIndexByID[leaderID]
+			if !ok {
+				continue
+			}
+			leaders[pid] = leaderNodeIdx
 		}
+
+		if len(leaders) == config.PartitionCount {
+			return leaders, nil
+		}
+		log.Printf("  DEBUG: metadata from %s returned leaders for %d/%d partitions", node.ID, len(leaders), config.PartitionCount)
 	}
 
-	return leaders, nil
+	return nil, fmt.Errorf("could not discover leaders for all %d partitions from metadata API", config.PartitionCount)
 }
 
 func logPartitionLeaders(config ClusterLoadTestConfig, leadersByPartition map[int32]int) {
