@@ -519,7 +519,18 @@ func (m *Manager) GetClusterState() *ClusterState {
 
 // GetPartitionInfo returns partition information
 func (m *Manager) GetPartitionInfo(partitionID int32) (*PartitionInfo, error) {
+	if m.router == nil {
+		return nil, fmt.Errorf("router not initialized")
+	}
 	return m.router.GetPartitionInfo(partitionID)
+}
+
+// GetAllPartitionInfo returns metadata for all partitions in the cluster view.
+func (m *Manager) GetAllPartitionInfo() map[int32]*PartitionInfo {
+	if m.router == nil {
+		return map[int32]*PartitionInfo{}
+	}
+	return m.router.GetAllPartitions()
 }
 
 // RouteRequest routes a request to the correct partition

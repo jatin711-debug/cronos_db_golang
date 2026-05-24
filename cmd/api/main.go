@@ -153,8 +153,11 @@ func main() {
 		consumerHandler = api.NewConsumerGroupServiceHandler(part.ConsumerGroup)
 	}
 
+	// Create partition metadata service handler
+	partitionHandler := api.NewPartitionServiceHandler(pm, clusterMgr, cfg.NodeID)
+
 	// Register services
-	grpcServer.RegisterServices(eventHandler, consumerHandler)
+	grpcServer.RegisterServices(eventHandler, consumerHandler, partitionHandler)
 
 	// Start gRPC server
 	slog.Info("Starting gRPC server", "address", cfg.GPRCAddress)
