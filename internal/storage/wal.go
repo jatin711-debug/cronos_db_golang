@@ -511,6 +511,27 @@ func (w *WAL) ReadEvents(startOffset, endOffset int64) ([]*types.Event, error) {
 	return result, nil
 }
 
+// ReadEvent reads a single event by offset
+func (w *WAL) ReadEvent(offset int64) (*types.Event, error) {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+
+	for _, segment := range w.segments {
+		if segment.GetFirstOffset() > offset || segment.GetLastOffset() < offset {
+			continue
+		}
+		event, err := segment.ReadEvent(offset)
+		if err != nil {
+			return nil, fmt.Errorf("read event at offset %d from segment %s: %w", offset, segment.GetFilename(), err)
+		}
+		if event != nil {
+			event.PartitionId = w.partitionID
+			return event, nil
+		}
+	}
+	return nil, fmt.Errorf("event at offset %d not found", offset)
+}
+
 // ReadEventsByTime reads events in timestamp range
 func (w *WAL) ReadEventsByTime(startTS, endTS int64) ([]*types.Event, error) {
 	w.mu.RLock()

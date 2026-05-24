@@ -13,7 +13,7 @@ import (
 type Manager struct {
 	mu                sync.RWMutex
 	config            *ClusterConfig
-	membership        *Membership
+	membership        MembershipService
 	router            *Router
 	raft              *RaftNode
 	partitionAccessor PartitionAccessor
@@ -113,10 +113,21 @@ func (m *Manager) Start() error {
 		}
 	}
 
-	// Create membership
-	membership, err := NewMembership(m.config)
-	if err != nil {
-		return fmt.Errorf("create membership: %w", err)
+	// Create membership (custom TCP or HashiCorp Memberlist)
+	var membership MembershipService
+	var err error
+	if m.config.UseMemberlist {
+		membership, err = NewMemberlistMembership(m.config)
+		if err != nil {
+			return fmt.Errorf("create memberlist membership: %w", err)
+		}
+		log.Printf("[CLUSTER] Using HashiCorp Memberlist (SWIM) for cluster membership")
+	} else {
+		membership, err = NewMembership(m.config)
+		if err != nil {
+			return fmt.Errorf("create membership: %w", err)
+		}
+		log.Printf("[CLUSTER] Using custom TCP gossip for cluster membership")
 	}
 	m.membership = membership
 
@@ -418,7 +429,7 @@ func (m *Manager) JoinCluster(leaderAddr string) error {
 }
 
 // GetMembership returns the membership manager
-func (m *Manager) GetMembership() *Membership {
+func (m *Manager) GetMembership() MembershipService {
 	return m.membership
 }
 

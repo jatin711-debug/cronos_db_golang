@@ -31,6 +31,22 @@ type Config struct {
 	StatsPrintInterval   time.Duration
 	CheckpointInterval   time.Duration
 
+	// Scheduler cold store configuration
+	HotWindowMinutes int // Events scheduled beyond this window go to cold store (0 = disable)
+
+	// Admission control configuration (0 = disabled)
+	MaxReadyQueueSize       int64 // Max events in ready queue before rejecting publishes
+	MaxTimingWheelSize      int64 // Max active timers before rejecting publishes
+	MaxInFlightPerPartition int64 // Max in-flight deliveries per partition
+
+	// Circuit breaker configuration
+	CircuitBreakerFailureThreshold float64 // Failure rate to trip breaker (0.0-1.0, 1.0 = disabled)
+	CircuitBreakerOpenDurationMs   int64   // How long breaker stays open
+	CircuitBreakerMinAttempts      int64   // Min attempts before breaker can trip
+
+	// Clock skew detection
+	ClockSkewThresholdMs int64 // Max allowed clock skew from leader in ms (0 = disabled)
+
 	// Cluster configuration
 	ClusterEnabled    bool
 	ClusterGossipAddr string   // UDP address for gossip protocol
@@ -41,6 +57,9 @@ type Config struct {
 	HeartbeatInterval time.Duration
 	FailureTimeout    time.Duration
 	SuspectTimeout    time.Duration
+
+	// Gossip backend selection
+	UseMemberlist bool // true = HashiCorp Memberlist, false = custom TCP gossip
 }
 
 // Partition represents a data partition

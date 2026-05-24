@@ -241,6 +241,22 @@ var (
 			Help: "Number of partitions where this node is leader",
 		},
 	)
+
+	// Clock skew metric
+	clockSkewMs = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "cronos_clock_skew_ms",
+			Help: "Absolute clock skew from leader in milliseconds",
+		},
+	)
+
+	// Admission control metric
+	admissionRejectedTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "cronos_admission_rejected_total",
+			Help: "Total number of publishes rejected by admission control",
+		},
+	)
 )
 
 // SetTimingWheelMetrics sets timing wheel metrics for a partition
@@ -305,4 +321,14 @@ func ObserveDispatch(partitionID string, d time.Duration) {
 // ObserveSegmentRotation records segment rotation latency
 func ObserveSegmentRotation(partitionID string, d time.Duration) {
 	segmentRotationLatency.WithLabelValues(partitionID).Observe(d.Seconds())
+}
+
+// SetClockSkew records clock skew from leader
+func SetClockSkew(skewMs int64) {
+	clockSkewMs.Set(float64(skewMs))
+}
+
+// IncAdmissionRejected increments the admission rejected counter
+func IncAdmissionRejected() {
+	admissionRejectedTotal.Inc()
 }

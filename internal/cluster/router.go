@@ -18,7 +18,7 @@ type PartitionAccessor interface {
 type Router struct {
 	mu                sync.RWMutex
 	hashRing          *HashRing
-	membership        *Membership
+	membership        MembershipService
 	numPartitions     int
 	localNodeID       string
 	partitionAccessor PartitionAccessor
@@ -30,7 +30,7 @@ type Router struct {
 // NewRouter creates a new partition router.
 // virtualNodes controls hash-ring granularity and can materially impact
 // partition leader distribution when partition counts are small.
-func NewRouter(membership *Membership, numPartitions, replicationFactor, virtualNodes int, accessor PartitionAccessor) *Router {
+func NewRouter(membership MembershipService, numPartitions, replicationFactor, virtualNodes int, accessor PartitionAccessor) *Router {
 	r := &Router{
 		hashRing:          NewHashRing(virtualNodes, replicationFactor),
 		membership:        membership,

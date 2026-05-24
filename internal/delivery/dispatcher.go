@@ -29,6 +29,9 @@ type Dispatcher struct {
 
 	// In-flight limiter to protect memory under slow consumers.
 	inFlightCount atomic.Int64
+
+	// Retry heap for non-blocking delayed retries.
+	retryHeap *RetryHeap
 }
 
 // DispatcherShard represents a shard of the dispatcher.
@@ -49,6 +52,9 @@ type Subscription struct {
 	MaxCredits    int32
 	Stream        Stream
 	CreatedTS     int64
+
+	// Circuit breaker protects against repeatedly sending to failed consumers.
+	circuitBreaker *CircuitBreaker
 }
 
 // Stream represents gRPC stream.
@@ -103,16 +109,24 @@ type Config struct {
 	MaxDeliveryCredits int32
 	RetryBackoff       time.Duration
 	MaxInFlightEvents  int64 // Global cap on in-flight deliveries across all subscriptions
+
+	// Circuit breaker configuration
+	CircuitBreakerFailureThreshold float64 // 0.0-1.0, 1.0 = disabled
+	CircuitBreakerOpenDurationMs   int64
+	CircuitBreakerMinAttempts      int64
 }
 
 // DefaultConfig returns default config.
 func DefaultConfig() *Config {
 	return &Config{
-		MaxRetries:         5,
-		DefaultAckTimeout:  30 * time.Second,
-		MaxDeliveryCredits: 1000,
-		RetryBackoff:       1 * time.Second,
-		MaxInFlightEvents:  100000, // Default 100K in-flight events cap
+		MaxRetries:                     5,
+		DefaultAckTimeout:              30 * time.Second,
+		MaxDeliveryCredits:             1000,
+		RetryBackoff:                   1 * time.Second,
+		MaxInFlightEvents:              100000, // Default 100K in-flight events cap
+		CircuitBreakerFailureThreshold: 0.5,
+		CircuitBreakerOpenDurationMs:   30000,
+		CircuitBreakerMinAttempts:      10,
 	}
 }
 
@@ -220,6 +234,11 @@ func (d *Dispatcher) Subscribe(sub *Subscription) error {
 	}
 	atomic.StoreInt32(&sub.Credits, sub.MaxCredits)
 
+	// Initialize circuit breaker if enabled
+	if sub.circuitBreaker == nil {
+		sub.circuitBreaker = NewCircuitBreaker()
+	}
+
 	shard.subscriptions[sub.ID] = sub
 
 	d.partitionsMu.Lock()
@@ -298,6 +317,10 @@ func (d *Dispatcher) pickSubscriber(groupSubs []*Subscription, startIdx int) *Su
 	for i := 0; i < len(groupSubs); i++ {
 		idx := (startIdx + i) % len(groupSubs)
 		candidate := groupSubs[idx]
+		// Skip subscribers with open circuit breakers
+		if candidate.circuitBreaker != nil && !candidate.circuitBreaker.CanTry() {
+			continue
+		}
 		if d.tryConsumeCredit(candidate) {
 			return candidate
 		}
@@ -360,6 +383,11 @@ func (d *Dispatcher) Dispatch(event *types.Event) error {
 // dispatchToSub handles the fast path for a single subscriber.
 // No map allocation, no round-robin selection needed.
 func (d *Dispatcher) dispatchToSub(sub *Subscription, event *types.Event) error {
+	// Circuit breaker check: skip open circuits without consuming credits
+	if sub.circuitBreaker != nil && !sub.circuitBreaker.CanTry() {
+		return nil
+	}
+
 	if !d.tryConsumeCredit(sub) {
 		return nil // No credits available
 	}
@@ -379,10 +407,20 @@ func (d *Dispatcher) dispatchToSub(sub *Subscription, event *types.Event) error 
 	if err := sub.Stream.Send(delivery); err != nil {
 		d.decInFlight(1)
 		d.releaseCredit(sub)
+		if sub.circuitBreaker != nil {
+			sub.circuitBreaker.RecordFailure(
+				d.config.CircuitBreakerFailureThreshold,
+				d.config.CircuitBreakerMinAttempts,
+				d.config.CircuitBreakerOpenDurationMs,
+			)
+		}
 		log.Printf("[DISPATCHER] Failed to send to subscriber %s: %v", sub.ID, err)
 		return nil
 	}
 
+	if sub.circuitBreaker != nil {
+		sub.circuitBreaker.RecordSuccess()
+	}
 	d.trackDelivery(delivery, sub)
 	return nil
 }
@@ -466,10 +504,20 @@ func (d *Dispatcher) dispatchPartitionBatch(partitionID int32, events []*types.E
 		if err := sub.Stream.Send(delivery); err != nil {
 			d.decInFlight(1)
 			d.releaseCredits(sub, int32(len(batchEvents)))
+			if sub.circuitBreaker != nil {
+				sub.circuitBreaker.RecordFailure(
+					d.config.CircuitBreakerFailureThreshold,
+					d.config.CircuitBreakerMinAttempts,
+					d.config.CircuitBreakerOpenDurationMs,
+				)
+			}
 			log.Printf("[DISPATCHER] Failed to send batch to %s: %v", sub.ID, err)
 			continue
 		}
 
+		if sub.circuitBreaker != nil {
+			sub.circuitBreaker.RecordSuccess()
+		}
 		d.trackDelivery(delivery, sub)
 	}
 
@@ -528,7 +576,9 @@ func (d *Dispatcher) timeoutLoop() {
 	for {
 		select {
 		case <-ticker.C:
-			d.scanExpiredDeliveries(time.Now())
+			now := time.Now()
+			d.scanExpiredDeliveries(now)
+			d.processRetries(now)
 		case <-d.quit:
 			return
 		}
@@ -536,42 +586,88 @@ func (d *Dispatcher) timeoutLoop() {
 }
 
 func (d *Dispatcher) scanExpiredDeliveries(now time.Time) {
-	expired := make([]*ActiveDelivery, 0)
-
 	for _, shard := range d.shards {
 		shard.mu.Lock()
 		for deliveryID, active := range shard.activeDeliveries {
 			if now.After(active.AckDeadline) {
 				delete(shard.activeDeliveries, deliveryID)
 				d.decInFlight(1)
-				expired = append(expired, active)
+
+				if active.Attempt < d.config.MaxRetries {
+					// Non-blocking: push to retry heap instead of sleeping inline
+					backoff := time.Duration(active.Attempt) * d.config.RetryBackoff
+					d.retryHeap.PushEntry(NewRetryEntry(active, backoff))
+				} else {
+					d.releaseCredits(active.Subscription, active.CreditsConsumed)
+					d.sendToDLQ(active, "delivery timeout after max retries")
+				}
 			}
 		}
 		shard.mu.Unlock()
 	}
-
-	for _, active := range expired {
-		d.processDeliveryFailure(active, "delivery timeout")
-	}
 }
 
-func (d *Dispatcher) processDeliveryFailure(active *ActiveDelivery, reason string) {
-	if active == nil || active.Subscription == nil {
+// processRetries dispatches any retry entries whose backoff has elapsed.
+func (d *Dispatcher) processRetries(now time.Time) {
+	entries := d.retryHeap.Due(now.UnixMilli())
+	if len(entries) == 0 {
 		return
 	}
 
-	if active.Attempt < d.config.MaxRetries {
-		if err := d.retryDelivery(active); err == nil {
-			return
-		} else {
-			d.releaseCredits(active.Subscription, active.CreditsConsumed)
-			d.sendToDLQ(active, fmt.Sprintf("%s; retry failed: %v", reason, err))
-			return
+	for _, entry := range entries {
+		active := entry.active
+		if active == nil || active.Subscription == nil {
+			continue
 		}
-	}
 
-	d.releaseCredits(active.Subscription, active.CreditsConsumed)
-	d.sendToDLQ(active, fmt.Sprintf("%s after max retries", reason))
+		// Check circuit breaker before retrying
+		if active.Subscription.circuitBreaker != nil && !active.Subscription.circuitBreaker.CanTry() {
+			// Circuit still open — re-queue with same backoff to try again later
+			d.retryHeap.PushEntry(NewRetryEntry(active, 0))
+			continue
+		}
+
+		// Attempt redelivery without sleep
+		retryDelivery := &DeliveryMessage{
+			Event:      active.Delivery.Event,
+			DeliveryID: active.Delivery.DeliveryID,
+			Attempt:    active.Attempt + 1,
+			AckTimeout: active.Delivery.AckTimeout,
+			Batch:      active.Delivery.Batch,
+		}
+
+		if !d.tryReserveInFlight(1) {
+			// Re-queue to try later
+			d.retryHeap.PushEntry(NewRetryEntry(active, 0))
+			continue
+		}
+
+		if err := active.Subscription.Stream.Send(retryDelivery); err != nil {
+			d.decInFlight(1)
+			if active.Subscription.circuitBreaker != nil {
+				active.Subscription.circuitBreaker.RecordFailure(
+					d.config.CircuitBreakerFailureThreshold,
+					d.config.CircuitBreakerMinAttempts,
+					d.config.CircuitBreakerOpenDurationMs,
+				)
+			}
+
+			if retryDelivery.Attempt < d.config.MaxRetries {
+				// Re-queue with backoff
+				backoff := time.Duration(retryDelivery.Attempt) * d.config.RetryBackoff
+				d.retryHeap.PushEntry(NewRetryEntry(active, backoff))
+			} else {
+				d.releaseCredits(active.Subscription, active.CreditsConsumed)
+				d.sendToDLQ(active, fmt.Sprintf("retry failed after max retries: %v", err))
+			}
+			continue
+		}
+
+		if active.Subscription.circuitBreaker != nil {
+			active.Subscription.circuitBreaker.RecordSuccess()
+		}
+		d.trackDelivery(retryDelivery, active.Subscription)
+	}
 }
 
 // tryReserveInFlight atomically reserves capacity in the global in-flight budget.
@@ -662,7 +758,18 @@ func (d *Dispatcher) HandleAck(deliveryID string, success bool, nextOffset int64
 	if success {
 		active.Subscription.NextOffset = nextOffset
 		d.releaseCredits(active.Subscription, active.CreditsConsumed)
+		if active.Subscription.circuitBreaker != nil {
+			active.Subscription.circuitBreaker.RecordSuccess()
+		}
 		return nil
+	}
+
+	if active.Subscription.circuitBreaker != nil {
+		active.Subscription.circuitBreaker.RecordFailure(
+			d.config.CircuitBreakerFailureThreshold,
+			d.config.CircuitBreakerMinAttempts,
+			d.config.CircuitBreakerOpenDurationMs,
+		)
 	}
 
 	if active.Attempt < d.config.MaxRetries {
