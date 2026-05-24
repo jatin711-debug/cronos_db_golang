@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
-	"cronos_db/internal/storage"
-	"cronos_db/pkg/types"
+	"github.com/jatin711-debug/cronos_db_golang/internal/storage"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 )
 
 // ReplayEngine provides event replay functionality

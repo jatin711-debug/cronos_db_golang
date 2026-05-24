@@ -1,6 +1,6 @@
 package client
 
-import "cronos_db/pkg/types"
+import "github.com/jatin711-debug/cronos_db_golang/pkg/types"
 
 // Route describes candidate addresses for a partition request.
 type Route struct {

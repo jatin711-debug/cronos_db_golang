@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
-	"cronos_db/internal/storage"
-	"cronos_db/pkg/types"
+	"github.com/jatin711-debug/cronos_db_golang/internal/storage"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 
 	"net"
 )
@@ -27,7 +27,7 @@ type Leader struct {
 
 // FollowerInfo represents metadata about a follower replica
 type FollowerInfo struct {
-	mu            sync.Mutex     // Protects mutable fields below from concurrent goroutine access
+	mu            sync.Mutex // Protects mutable fields below from concurrent goroutine access
 	ID            string
 	Address       string
 	NextOffset    int64

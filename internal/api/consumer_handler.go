@@ -3,8 +3,8 @@ package api
 import (
 	"context"
 
-	"cronos_db/internal/consumer"
-	"cronos_db/pkg/types"
+	"github.com/jatin711-debug/cronos_db_golang/internal/consumer"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 )
 
 // ConsumerGroupServiceHandler implements the ConsumerGroupService handler

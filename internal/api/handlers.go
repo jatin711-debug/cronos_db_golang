@@ -10,11 +10,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"cronos_db/internal/consumer"
-	"cronos_db/internal/delivery"
-	"cronos_db/internal/partition"
-	"cronos_db/internal/replay"
-	"cronos_db/pkg/types"
+	"github.com/jatin711-debug/cronos_db_golang/internal/consumer"
+	"github.com/jatin711-debug/cronos_db_golang/internal/delivery"
+	"github.com/jatin711-debug/cronos_db_golang/internal/partition"
+	"github.com/jatin711-debug/cronos_db_golang/internal/replay"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"

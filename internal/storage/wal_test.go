@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"cronos_db/pkg/types"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 )
 
 func TestWAL_AppendAndRead(t *testing.T) {

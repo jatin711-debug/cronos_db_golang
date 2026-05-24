@@ -8,14 +8,14 @@ import (
 	"sync"
 	"time"
 
-	"cronos_db/internal/consumer"
-	"cronos_db/internal/dedup"
-	"cronos_db/internal/delivery"
-	"cronos_db/internal/replication"
-	"cronos_db/internal/scheduler"
-	"cronos_db/internal/storage"
-	"cronos_db/pkg/types"
-	"cronos_db/pkg/utils"
+	"github.com/jatin711-debug/cronos_db_golang/internal/consumer"
+	"github.com/jatin711-debug/cronos_db_golang/internal/dedup"
+	"github.com/jatin711-debug/cronos_db_golang/internal/delivery"
+	"github.com/jatin711-debug/cronos_db_golang/internal/replication"
+	"github.com/jatin711-debug/cronos_db_golang/internal/scheduler"
+	"github.com/jatin711-debug/cronos_db_golang/internal/storage"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 
 	log2 "log/slog"
 

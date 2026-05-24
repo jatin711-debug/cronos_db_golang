@@ -4,12 +4,11 @@ import "time"
 
 // Config represents system configuration
 type Config struct {
-	NodeID               string
-	DataDir              string
-	GPRCAddress          string
-	HTTPAddress          string
-	
-	
+	NodeID      string
+	DataDir     string
+	GPRCAddress string
+	HTTPAddress string
+
 	PartitionCount       int
 	ReplicationFactor    int
 	SegmentSizeBytes     int64

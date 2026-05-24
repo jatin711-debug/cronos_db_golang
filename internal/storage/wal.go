@@ -12,7 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"cronos_db/pkg/types"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 )
 
 // FsyncMode controls when the WAL performs fsync.

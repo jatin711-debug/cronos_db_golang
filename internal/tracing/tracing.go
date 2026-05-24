@@ -17,8 +17,8 @@ import (
 
 // Config holds tracing configuration
 type Config struct {
-	ServiceName string
-	Enabled     bool
+	ServiceName  string
+	Enabled      bool
 	ExporterType string // "stdout", "otlp", "none"
 	OTLPEndpoint string
 }

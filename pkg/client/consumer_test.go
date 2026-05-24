@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"cronos_db/pkg/types"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 )
 
 func TestParsePartitionID(t *testing.T) {

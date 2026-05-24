@@ -10,10 +10,10 @@ import (
 	"sync"
 	"time"
 
-	"cronos_db/pkg/client/internal/connpool"
-	"cronos_db/pkg/client/internal/metadata"
-	"cronos_db/pkg/types"
-	"cronos_db/pkg/utils"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/client/internal/connpool"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/client/internal/metadata"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"

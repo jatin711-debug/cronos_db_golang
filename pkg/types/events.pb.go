@@ -3003,7 +3003,7 @@ const file_proto_events_proto_rawDesc = "" +
 	"\vRaftService\x12?\n" +
 	"\x04Join\x12\x1a.cronos_db.RaftJoinRequest\x1a\x1b.cronos_db.RaftJoinResponse\x12B\n" +
 	"\x05Leave\x12\x1b.cronos_db.RaftLeaveRequest\x1a\x1c.cronos_db.RaftLeaveResponse\x12E\n" +
-	"\x06Status\x12\x1c.cronos_db.RaftStatusRequest\x1a\x1d.cronos_db.RaftStatusResponseB\x1bZ\x19cronos_db/pkg/types;typesb\x06proto3"
+	"\x06Status\x12\x1c.cronos_db.RaftStatusRequest\x1a\x1d.cronos_db.RaftStatusResponseB<Z:github.com/jatin711-debug/cronos_db_golang/pkg/types;typesb\x06proto3"
 
 var (
 	file_proto_events_proto_rawDescOnce sync.Once

@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"cronos_db/pkg/types"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 )
 
 // Subscription represents a subscriber
@@ -271,7 +271,6 @@ func (g *GroupManager) CommitOffset(groupID string, partitionID int64, offset in
 
 	return nil
 }
-
 
 // GetCommittedOffset gets committed offset for a partition
 func (g *GroupManager) GetCommittedOffset(groupID string, partitionID int32) (int64, error) {

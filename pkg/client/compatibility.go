@@ -6,7 +6,7 @@ import (
 	"io"
 	"time"
 
-	"cronos_db/pkg/types"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"

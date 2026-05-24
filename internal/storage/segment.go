@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"cronos_db/pkg/types"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 )
 
 // Segment represents a WAL segment file
@@ -75,7 +75,7 @@ func NewSegment(dataDir string, firstOffset int64, isActive bool) (*Segment, err
 	segment := &Segment{
 		segmentFile:     file,
 		writer:          bufio.NewWriterSize(file, 4*1024*1024), // 4MB buffer for high throughput
-		reader:          file,                                 // io.ReaderAt doesn't have buffered option
+		reader:          file,                                   // io.ReaderAt doesn't have buffered option
 		mmapData:        mmapData,
 		firstOffset:     firstOffset,
 		nextOffset:      firstOffset,

@@ -1,4 +1,4 @@
-module cronos_db
+module github.com/jatin711-debug/cronos_db_golang
 
 go 1.25.0
 
@@ -60,3 +60,4 @@ require (
 	golang.org/x/text v0.30.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20251022142026-3a174f9686a8 // indirect
 )
+
