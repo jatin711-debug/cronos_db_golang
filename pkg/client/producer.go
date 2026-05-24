@@ -23,6 +23,8 @@ type Message struct {
 	MessageID string
 	Topic     string
 	Payload   []byte
+	Value     any
+	Codec     Codec
 
 	// Use ScheduleTS directly when already computed. If zero, ScheduleAt is used.
 	ScheduleTS int64
@@ -76,6 +78,8 @@ type ProducerConfig struct {
 	DefaultAllowDuplicate bool
 	RetryPolicy           retry.Policy
 	AutoMessageID         bool
+	Codec                 Codec
+	MaxPayloadBytes       int
 
 	AsyncQueueSize   int
 	AsyncWorkers     int
@@ -90,6 +94,7 @@ func DefaultProducerConfig() ProducerConfig {
 		DefaultAllowDuplicate: false,
 		RetryPolicy:           retry.DefaultPolicy(),
 		AutoMessageID:         true,
+		Codec:                 JSONCodec{},
 		AsyncQueueSize:        4096,
 		AsyncWorkers:          2,
 		BlockOnQueueFull:      true,
@@ -138,6 +143,12 @@ func NewProducer(client *Client, cfg ProducerConfig) (*Producer, error) {
 	if cfg.MaxInFlight <= 0 {
 		cfg.MaxInFlight = DefaultProducerConfig().MaxInFlight
 	}
+	if cfg.Codec == nil {
+		cfg.Codec = DefaultProducerConfig().Codec
+	}
+	if cfg.MaxPayloadBytes <= 0 {
+		cfg.MaxPayloadBytes = client.cfg.MaxSendMsgSize
+	}
 
 	p := &Producer{
 		client:      client,
@@ -165,7 +176,10 @@ func (p *Producer) Send(ctx context.Context, msg Message) (*SendResult, error) {
 	}
 	defer p.releaseInFlight()
 
-	msg = normalizeMessage(msg, p.cfg.AutoMessageID)
+	msg, err := normalizeMessage(msg, p.cfg)
+	if err != nil {
+		return nil, wrapError("producer.send", ErrorKindValidation, err)
+	}
 	if err := validateMessage(msg); err != nil {
 		return nil, wrapError("producer.send", ErrorKindValidation, err)
 	}
@@ -198,11 +212,13 @@ func (p *Producer) Send(ctx context.Context, msg Message) (*SendResult, error) {
 			}
 
 			reqCtx, cancel := p.client.requestContext(ctx)
+			start := time.Now()
 			resp, err := client.Publish(reqCtx, &types.PublishRequest{
 				Event:          event,
 				AllowDuplicate: allowDuplicate,
 			})
 			cancel()
+			p.client.observeRequest("event.publish", addr, start, err)
 
 			if err != nil {
 				lastErr = err
@@ -278,7 +294,11 @@ func (p *Producer) SendBatch(ctx context.Context, msgs []Message) (*BatchSendRes
 	}
 
 	for _, msg := range msgs {
-		msg = normalizeMessage(msg, p.cfg.AutoMessageID)
+		msg, err := normalizeMessage(msg, p.cfg)
+		if err != nil {
+			result.ErrorCount++
+			continue
+		}
 		if err := validateMessage(msg); err != nil {
 			result.ErrorCount++
 			continue
@@ -323,11 +343,13 @@ func (p *Producer) SendBatch(ctx context.Context, msgs []Message) (*BatchSendRes
 		}
 
 		reqCtx, cancel := p.client.requestContext(ctx)
+		start := time.Now()
 		resp, err := client.PublishBatch(reqCtx, &types.PublishBatchRequest{
 			Events:         group.events,
 			AllowDuplicate: group.allowDuplicate,
 		})
 		cancel()
+		p.client.observeRequest("event.publish_batch", group.addr, start, err)
 
 		if err != nil || resp == nil || !resp.GetSuccess() {
 			if err != nil && errs.IsLeaderRelated(err) {
@@ -371,7 +393,10 @@ func (p *Producer) SendAsyncContext(ctx context.Context, msg Message, callback D
 		return nil, wrapError("producer.send_async", ErrorKindValidation, fmt.Errorf("producer is closed"))
 	}
 
-	msg = normalizeMessage(msg, p.cfg.AutoMessageID)
+	msg, err := normalizeMessage(msg, p.cfg)
+	if err != nil {
+		return nil, wrapError("producer.send_async", ErrorKindValidation, err)
+	}
 	sizeHint := estimateMessageBytes(msg)
 	if err := p.reserveQueuedBytes(ctx, sizeHint); err != nil {
 		return nil, err
@@ -471,14 +496,32 @@ func validateMessage(msg Message) error {
 	return nil
 }
 
-func normalizeMessage(msg Message, autoMessageID bool) Message {
-	if msg.MessageID == "" && autoMessageID {
-		msg.MessageID = deterministicMessageID(msg)
-	}
+func normalizeMessage(msg Message, cfg ProducerConfig) (Message, error) {
 	if msg.Meta == nil {
 		msg.Meta = map[string]string{}
 	}
-	return msg
+
+	codec := msg.Codec
+	if codec == nil {
+		codec = cfg.Codec
+	}
+	if len(msg.Payload) == 0 && msg.Value != nil {
+		payload, codecName, err := encodeWithCodec(codec, msg.Value)
+		if err != nil {
+			return msg, err
+		}
+		msg.Payload = payload
+		if codecName != "" {
+			msg.Meta[MetaCodecNameKey] = codecName
+		}
+	}
+	if cfg.MaxPayloadBytes > 0 && len(msg.Payload) > cfg.MaxPayloadBytes {
+		return msg, fmt.Errorf("payload exceeds max_payload_bytes (%d > %d)", len(msg.Payload), cfg.MaxPayloadBytes)
+	}
+	if msg.MessageID == "" && cfg.AutoMessageID {
+		msg.MessageID = deterministicMessageID(msg)
+	}
+	return msg, nil
 }
 
 func deterministicMessageID(msg Message) string {
