@@ -1,0 +1,25 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: "cronos-host"
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - "host.docker.internal:8080"
+          - "host.docker.internal:8081"
+          - "host.docker.internal:8082"
+
+  - job_name: "cronos-docker"
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - "cronos-single:8080"
+          - "cronos-node1:8080"
+          - "cronos-node2:8080"
+          - "cronos-node3:8080"
+
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["prometheus:9090"]

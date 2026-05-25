@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/internal/cluster"
 	"github.com/jatin711-debug/cronos_db_golang/internal/config"
 	"github.com/jatin711-debug/cronos_db_golang/internal/partition"
+	"github.com/jatin711-debug/cronos_db_golang/internal/tracing"
 
 	"github.com/cockroachdb/pebble"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -30,6 +32,24 @@ func main() {
 		slog.Error("Failed to load config", "error", err)
 		os.Exit(1)
 	}
+
+	if err := tracing.InitTracing(&tracing.Config{
+		ServiceName:  "cronos-api-" + cfg.NodeID,
+		Enabled:      cfg.TracingEnabled,
+		ExporterType: cfg.TracingExporter,
+		OTLPEndpoint: cfg.TracingOTLPEndpoint,
+		SampleRatio:  cfg.TracingSampleRatio,
+		OTLPInsecure: cfg.TracingInsecure,
+	}); err != nil {
+		slog.Warn("Failed to initialize tracing; continuing without tracing", "error", err)
+	}
+	defer func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer shutdownCancel()
+		if err := tracing.Shutdown(shutdownCtx); err != nil {
+			slog.Warn("Tracing shutdown error", "error", err)
+		}
+	}()
 
 	// Create shared PebbleDB block cache sized to ~25% of available RAM.
 	// This prevents memory fragmentation when running many partitions.
@@ -213,11 +233,62 @@ func main() {
 		for {
 			select {
 			case <-ticker.C:
+				// Refresh low-frequency gauges on the same interval as stats logging.
+				for i := int32(0); i < int32(cfg.PartitionCount); i++ {
+					p, err := pm.GetInternalPartition(i)
+					if err != nil || p == nil {
+						continue
+					}
+
+					partitionLabel := strconv.FormatInt(int64(i), 10)
+
+					if p.Scheduler != nil {
+						schedulerStats := p.Scheduler.GetStats()
+						api.SetTimingWheelMetrics(partitionLabel, schedulerStats.ActiveTimers, int64(schedulerStats.OverflowLevel))
+					}
+
+					if p.Wal != nil {
+						activeSegmentSize := int64(0)
+						if activeSegment := p.Wal.GetActiveSegment(); activeSegment != nil {
+							activeSegmentSize = activeSegment.GetSize()
+						}
+						api.SetWALMetrics(partitionLabel, len(p.Wal.GetSegments()), activeSegmentSize, p.Wal.GetHighWatermark())
+					}
+
+					if p.DedupStore != nil {
+						if dedupStats, err := p.DedupStore.GetStats(); err == nil && dedupStats != nil {
+							falsePositiveRate := 0.0
+							totalBloomPositives := dedupStats.BloomHits + dedupStats.BloomFalsePositives
+							if totalBloomPositives > 0 {
+								falsePositiveRate = float64(dedupStats.BloomFalsePositives) / float64(totalBloomPositives)
+							}
+							api.SetDedupMetrics(partitionLabel, dedupStats.BloomMemoryBytes, falsePositiveRate, dedupStats.PebbleHits)
+						}
+					}
+
+					if p.Dispatcher != nil {
+						dispatcherStats := p.Dispatcher.GetStats()
+						workerQueueDepth := int64(0)
+						if p.Worker != nil {
+							workerQueueDepth = p.Worker.GetStats().QueueLength
+						}
+						api.SetDeliveryMetrics(partitionLabel, dispatcherStats.ActiveDeliveries, dispatcherStats.CreditsInUse, workerQueueDepth)
+					}
+				}
+
 				stats := pm.GetStats()
 				slog.Info("Stats", "stats", stats)
 				if cfg.ClusterEnabled && clusterMgr != nil {
 					clusterStats := clusterMgr.GetStats()
+					api.SetClusterMetrics(
+						int64(clusterStats.TotalNodes),
+						int64(clusterStats.AliveNodes),
+						int64(clusterStats.NumPartitions),
+						int64(clusterStats.LeaderPartitions),
+					)
 					slog.Info("Cluster Stats", "stats", clusterStats)
+				} else {
+					api.SetClusterMetrics(1, 1, stats.TotalPartitions, stats.LeaderPartitions)
 				}
 			case <-ctx.Done():
 				return

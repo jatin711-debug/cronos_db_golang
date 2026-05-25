@@ -44,6 +44,21 @@ var (
 		},
 		[]string{"partition"},
 	)
+	schedulerHydratorInterval = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "cronos_scheduler_hydrator_interval_ms",
+			Help: "Current adaptive hydrator scan interval in milliseconds",
+		},
+		[]string{"partition"},
+	)
+	schedulerHydratorScanDuration = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "cronos_scheduler_hydrator_scan_duration_seconds",
+			Help:    "Time spent scanning and hydrating from cold store",
+			Buckets: prometheus.ExponentialBuckets(0.001, 2, 12), // 1ms to ~4s
+		},
+		[]string{"partition"},
+	)
 )
 
 // EventReader reads a single event by offset from the WAL.
@@ -70,6 +85,12 @@ type Scheduler struct {
 	coldStore    *ColdStore
 	eventReader  EventReader
 	hotWindowMs  int64
+
+	// Adaptive hydrator state
+	hydratorMinInterval time.Duration
+	hydratorMaxInterval time.Duration
+	hydratorInterval    time.Duration
+	lastColdStoreCount  int64
 }
 
 // NewScheduler creates a new scheduler.
@@ -92,19 +113,22 @@ func NewScheduler(dataDir string, partitionID int32, tickMs int32, wheelSize int
 	}
 
 	scheduler := &Scheduler{
-		timingWheel:      NewTimingWheel(tickMs, wheelSize, 10, 0, startTime),
-		readyQueue:       make([]*types.Event, 0),
-		readySignal:      make(chan struct{}, 1),
-		partitionID:      partitionID,
-		dataDir:          dataDir,
-		active:           false,
-		workerDone:       make(chan struct{}),
-		stats:            &SchedulerStats{},
-		lastCheckpointTS: time.Now().UnixMilli(),
-		startTimeMs:      startTime,
-		coldStore:        coldStore,
-		eventReader:      eventReader,
-		hotWindowMs:      int64(hotWindowMinutes) * 60 * 1000,
+		timingWheel:         NewTimingWheel(tickMs, wheelSize, 10, 0, startTime),
+		readyQueue:          make([]*types.Event, 0),
+		readySignal:         make(chan struct{}, 1),
+		partitionID:         partitionID,
+		dataDir:             dataDir,
+		active:              false,
+		workerDone:          make(chan struct{}),
+		stats:               &SchedulerStats{},
+		lastCheckpointTS:    time.Now().UnixMilli(),
+		startTimeMs:         startTime,
+		coldStore:           coldStore,
+		eventReader:         eventReader,
+		hotWindowMs:         int64(hotWindowMinutes) * 60 * 1000,
+		hydratorMinInterval: 5 * time.Second,
+		hydratorMaxInterval: 5 * time.Minute,
+		hydratorInterval:    60 * time.Second,
 	}
 
 	// Initialize timing wheel
@@ -257,6 +281,26 @@ done:
 	}
 }
 
+// SetHydratorIntervals configures the adaptive hydrator bounds.
+// A min/max of 0 means "use defaults" (5s / 5m).
+func (s *Scheduler) SetHydratorIntervals(minMs, maxMs int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if minMs > 0 {
+		s.hydratorMinInterval = time.Duration(minMs) * time.Millisecond
+	}
+	if maxMs > 0 {
+		s.hydratorMaxInterval = time.Duration(maxMs) * time.Millisecond
+	}
+	// Ensure current interval is within bounds
+	if s.hydratorInterval < s.hydratorMinInterval {
+		s.hydratorInterval = s.hydratorMinInterval
+	}
+	if s.hydratorInterval > s.hydratorMaxInterval {
+		s.hydratorInterval = s.hydratorMaxInterval
+	}
+}
+
 // Start starts the scheduler worker
 func (s *Scheduler) Start() {
 	s.mu.Lock()
@@ -269,6 +313,7 @@ func (s *Scheduler) Start() {
 	s.active = true
 	go s.worker()
 	go s.checkpointLoop()
+	go s.hydratorLoop()
 }
 
 // worker is the scheduler worker loop
@@ -366,45 +411,116 @@ func (s *Scheduler) checkpoint() {
 	s.mu.Unlock()
 }
 
-// hydratorLoop periodically scans the cold store and hydrates near-future events into the timing wheel.
+// hydratorLoop adaptively scans the cold store and hydrates near-future events.
+// The scan interval adjusts based on hydration volume: faster when busy, slower when idle.
 func (s *Scheduler) hydratorLoop() {
 	if s.coldStore == nil || s.eventReader == nil {
 		return
 	}
 
-	ticker := time.NewTicker(60 * time.Second)
-	defer ticker.Stop()
-
 	partitionLabel := fmt.Sprintf("%d", s.partitionID)
+	timer := time.NewTimer(s.hydratorInterval)
+	defer timer.Stop()
 
 	for {
 		select {
-		case <-ticker.C:
-			s.hydrate()
+		case <-timer.C:
+			scanStart := time.Now()
+			hydrated := s.hydrate()
+			scanDuration := time.Since(scanStart)
+
+			// Update metrics
 			schedulerColdStoreEntries.WithLabelValues(partitionLabel).Set(float64(s.coldStore.Count()))
+			schedulerHydratorScanDuration.WithLabelValues(partitionLabel).Observe(scanDuration.Seconds())
+
+			// Adaptive interval adjustment
+			s.adaptHydratorInterval(hydrated, scanDuration)
+			schedulerHydratorInterval.WithLabelValues(partitionLabel).Set(float64(s.hydratorInterval.Milliseconds()))
+
+			timer.Reset(s.hydratorInterval)
 		case <-s.workerDone:
 			return
 		}
 	}
 }
 
+// adaptHydratorInterval adjusts the next scan interval based on workload.
+//   - High hydration volume → shorter interval (catch up faster)
+//   - Zero hydration → longer interval (save I/O)
+//   - Cold store growing → shorter interval (prevent backlog)
+//   - Scan taking too long → shorter interval (don't fall behind)
+func (s *Scheduler) adaptHydratorInterval(hydrated int, scanDuration time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	interval := s.hydratorInterval
+
+	switch {
+	case hydrated > 10000:
+		interval = time.Duration(float64(interval) * 0.4) // much faster
+	case hydrated > 5000:
+		interval = time.Duration(float64(interval) * 0.5)
+	case hydrated > 1000:
+		interval = time.Duration(float64(interval) * 0.6)
+	case hydrated > 100:
+		interval = time.Duration(float64(interval) * 0.8)
+	case hydrated == 0:
+		interval = time.Duration(float64(interval) * 1.5) // slow down
+	default:
+		interval = time.Duration(float64(interval) * 1.1) // slight slow down
+	}
+
+	// If scan took > 50% of the interval, we need more headroom
+	if scanDuration > interval/2 {
+		interval = time.Duration(float64(interval) * 0.7)
+	}
+
+	// If cold store is growing, speed up
+	if s.coldStore != nil {
+		currentCount := s.coldStore.Count()
+		if currentCount > s.lastColdStoreCount+1000 {
+			interval = time.Duration(float64(interval) * 0.5)
+		}
+		s.lastColdStoreCount = currentCount
+	}
+
+	// Clamp to bounds
+	if interval < s.hydratorMinInterval {
+		interval = s.hydratorMinInterval
+	}
+	if interval > s.hydratorMaxInterval {
+		interval = s.hydratorMaxInterval
+	}
+
+	s.hydratorInterval = interval
+}
+
 // hydrate scans cold store for events entering the hot window and loads them into the timing wheel.
-func (s *Scheduler) hydrate() {
+// It returns the number of events successfully hydrated.
+func (s *Scheduler) hydrate() int {
 	now := time.Now().UnixMilli()
 	startTS := now + s.hotWindowMs
-	endTS := startTS + 60000 // 60-second lookahead
+	// Adaptive lookahead: use the current hydrator interval as the lookahead window
+	// so we naturally scan further ahead when running less frequently.
+	s.mu.RLock()
+	lookaheadMs := s.hydratorInterval.Milliseconds()
+	if lookaheadMs < 10000 {
+		lookaheadMs = 10000 // minimum 10s lookahead
+	}
+	s.mu.RUnlock()
+	endTS := startTS + lookaheadMs
 
 	offsets, err := s.coldStore.ScanRange(startTS, endTS)
 	if err != nil {
 		log.Printf("[SCHEDULER] Hydrator scan error (partition=%d): %v", s.partitionID, err)
-		return
+		return 0
 	}
 	if len(offsets) == 0 {
-		return
+		return 0
 	}
 
 	partitionLabel := fmt.Sprintf("%d", s.partitionID)
-	var hydrated int64
+	var hydrated int
 	var toDelete []struct {
 		Offset     int64
 		ScheduleTS int64
@@ -453,6 +569,7 @@ func (s *Scheduler) hydrate() {
 		schedulerHydratedEvents.WithLabelValues(partitionLabel).Add(float64(hydrated))
 		log.Printf("[SCHEDULER] Hydrated %d events from cold store to timing wheel (partition=%d)", hydrated, s.partitionID)
 	}
+	return hydrated
 }
 
 // GetReadyQueueDepth returns the number of events in the ready queue.
@@ -514,6 +631,13 @@ func (s *Scheduler) Stop() {
 
 	// Final checkpoint after loops have stopped.
 	s.checkpoint()
+
+	// Close cold store if present
+	if s.coldStore != nil {
+		if err := s.coldStore.Close(); err != nil {
+			log.Printf("[SCHEDULER] Cold store close error: %v", err)
+		}
+	}
 }
 
 // GetStats returns scheduler statistics

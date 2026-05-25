@@ -7,7 +7,8 @@
 
 .PHONY: help print-config build ensure-build-dir rust-dedup test proto clean clean-data \
 	verify-env lint ci node1 node2 node3 cluster loadtest loadtest-batch loadtest-max loadtest-small health \
-	docker docker-build docker-single docker-cluster docker-logs docker-down docker-clean
+	docker docker-build docker-single docker-cluster docker-logs docker-down docker-clean \
+	observability-up observability-down
 
 # -----------------------------------------------------------------------------
 # Tooling and build settings
@@ -92,6 +93,11 @@ SEGMENT_SIZE_BYTES ?= 1073741824
 VIRTUAL_NODES ?= 2048
 MAX_CREDITS ?= 50000
 ACK_TIMEOUT ?= 60s
+TRACING_ENABLED ?= false
+TRACING_EXPORTER ?= otlp
+TRACING_OTLP_ENDPOINT ?= 127.0.0.1:4317
+TRACING_SAMPLE_RATIO ?= 0.01
+TRACING_INSECURE ?= true
 
 # Load test settings
 NODES ?= 3
@@ -127,6 +133,7 @@ help:
 	@echo   make node1          - Start node 1 (bootstrap)
 	@echo   make node2          - Start node 2 (joins node1)
 	@echo   make node3          - Start node 3 (joins node1)
+	@echo   (set TRACING_ENABLED=true to export traces with low sample ratio)
 	@echo   make cluster        - Print cluster startup order
 	@echo   make health         - Check node health endpoints
 	@echo.
@@ -139,6 +146,10 @@ help:
 	@echo   make docker         - Build image
 	@echo   make docker-single  - Start single-node container
 	@echo   make docker-cluster - Start 3-node container cluster
+	@echo.
+	@echo Observability
+	@echo   make observability-up   - Start Prometheus + Grafana + Tempo + OTEL Collector
+	@echo   make observability-down - Stop/remove observability services
 
 verify-env:
 	@echo Verifying required tools...
@@ -214,6 +225,11 @@ node1: rust-dedup
 		--virtual-nodes=$(VIRTUAL_NODES) \
 		--max-credits=$(MAX_CREDITS) \
 		--ack-timeout=$(ACK_TIMEOUT) \
+		--tracing-enabled=$(TRACING_ENABLED) \
+		--tracing-exporter=$(TRACING_EXPORTER) \
+		--tracing-otlp-endpoint=$(TRACING_OTLP_ENDPOINT) \
+		--tracing-sample-ratio=$(TRACING_SAMPLE_RATIO) \
+		--tracing-insecure=$(TRACING_INSECURE) \
 		--data-dir=./data/node1 \
 		--grpc-addr=127.0.0.1:9000 \
 		--http-addr=127.0.0.1:8080 \
@@ -235,6 +251,11 @@ node2:
 		--virtual-nodes=$(VIRTUAL_NODES) \
 		--max-credits=$(MAX_CREDITS) \
 		--ack-timeout=$(ACK_TIMEOUT) \
+		--tracing-enabled=$(TRACING_ENABLED) \
+		--tracing-exporter=$(TRACING_EXPORTER) \
+		--tracing-otlp-endpoint=$(TRACING_OTLP_ENDPOINT) \
+		--tracing-sample-ratio=$(TRACING_SAMPLE_RATIO) \
+		--tracing-insecure=$(TRACING_INSECURE) \
 		--data-dir=./data/node2 \
 		--grpc-addr=127.0.0.1:9001 \
 		--http-addr=127.0.0.1:8081 \
@@ -257,6 +278,11 @@ node3:
 		--virtual-nodes=$(VIRTUAL_NODES) \
 		--max-credits=$(MAX_CREDITS) \
 		--ack-timeout=$(ACK_TIMEOUT) \
+		--tracing-enabled=$(TRACING_ENABLED) \
+		--tracing-exporter=$(TRACING_EXPORTER) \
+		--tracing-otlp-endpoint=$(TRACING_OTLP_ENDPOINT) \
+		--tracing-sample-ratio=$(TRACING_SAMPLE_RATIO) \
+		--tracing-insecure=$(TRACING_INSECURE) \
 		--data-dir=./data/node3 \
 		--grpc-addr=127.0.0.1:9002 \
 		--http-addr=127.0.0.1:8082 \
@@ -317,3 +343,10 @@ docker-down:
 
 docker-clean:
 	$(DOCKER_COMPOSE) down -v
+
+observability-up:
+	$(DOCKER_COMPOSE) --profile observability up -d prometheus tempo otel-collector grafana
+
+observability-down:
+	$(DOCKER_COMPOSE) --profile observability stop grafana prometheus tempo otel-collector
+	$(DOCKER_COMPOSE) --profile observability rm -f grafana prometheus tempo otel-collector

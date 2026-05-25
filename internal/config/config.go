@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -38,6 +39,30 @@ func LoadConfig() (*types.Config, error) {
 	config.RaftDir = DefaultRaftDir
 	config.StatsPrintInterval = DefaultStatsPrintInterval
 	config.CheckpointInterval = DefaultCheckpointInterval
+	config.TracingEnabled = DefaultTracingEnabled
+	config.TracingExporter = DefaultTracingExporter
+	config.TracingOTLPEndpoint = DefaultTracingOTLPEndpoint
+	config.TracingSampleRatio = DefaultTracingSampleRatio
+	config.TracingInsecure = DefaultTracingInsecure
+
+	// Scheduler cold store defaults
+	config.HotWindowMinutes = DefaultHotWindowMinutes
+
+	// Admission control defaults
+	config.MaxReadyQueueSize = DefaultMaxReadyQueueSize
+	config.MaxTimingWheelSize = DefaultMaxTimingWheelSize
+	config.MaxInFlightPerPartition = DefaultMaxInFlightPerPartition
+
+	// Circuit breaker defaults
+	config.CircuitBreakerFailureThreshold = DefaultCircuitBreakerFailureThreshold
+	config.CircuitBreakerOpenDurationMs = DefaultCircuitBreakerOpenDurationMs
+	config.CircuitBreakerMinAttempts = DefaultCircuitBreakerMinAttempts
+
+	// Clock skew defaults
+	config.ClockSkewThresholdMs = DefaultClockSkewThresholdMs
+
+	// Gossip backend defaults
+	config.UseMemberlist = DefaultUseMemberlist
 
 	// Cluster defaults
 	config.ClusterEnabled = DefaultClusterEnabled
@@ -63,16 +88,27 @@ func LoadConfig() (*types.Config, error) {
 	flag.StringVar(&config.FsyncMode, "fsync-mode", DefaultFsyncMode, "fsync mode: every_event, batch, periodic")
 	var flushInterval int
 	flag.IntVar(&flushInterval, "flush-interval", DefaultFlushIntervalMS, "Flush interval in milliseconds")
-	config.FlushIntervalMS = int32(flushInterval)
 
 	// Scheduler configuration
 	flag.IntVar(&config.TickMS, "tick-ms", DefaultTickMS, "Scheduler tick duration in milliseconds")
 	flag.IntVar(&config.WheelSize, "wheel-size", DefaultWheelSize, "Timing wheel size")
+	flag.IntVar(&config.HotWindowMinutes, "hot-window-minutes", DefaultHotWindowMinutes, "Hot window in minutes for cold store (0 = disable)")
+	flag.IntVar(&config.HydratorMinIntervalMs, "hydrator-min-interval", DefaultHydratorMinIntervalMs, "Minimum hydrator scan interval in ms")
+	flag.IntVar(&config.HydratorMaxIntervalMs, "hydrator-max-interval", DefaultHydratorMaxIntervalMs, "Maximum hydrator scan interval in ms")
+
+	// Admission control configuration
+	flag.Int64Var(&config.MaxReadyQueueSize, "max-ready-queue", DefaultMaxReadyQueueSize, "Max ready queue depth per partition")
+	flag.Int64Var(&config.MaxTimingWheelSize, "max-timing-wheel-size", DefaultMaxTimingWheelSize, "Max active timers in hot timing wheel")
+	flag.Int64Var(&config.MaxInFlightPerPartition, "max-in-flight", DefaultMaxInFlightPerPartition, "Max in-flight deliveries per partition")
+
 	// Delivery configuration
 	flag.DurationVar(&config.DefaultAckTimeout, "ack-timeout", 30*time.Second, "Default ack timeout")
 	flag.IntVar(&config.MaxRetries, "max-retries", DefaultMaxRetries, "Maximum delivery retries")
 	flag.DurationVar(&config.RetryBackoff, "retry-backoff", 1*time.Second, "Retry backoff")
 	flag.IntVar(&config.MaxDeliveryCredits, "max-credits", DefaultMaxDeliveryCredits, "Maximum delivery credits")
+	flag.Float64Var(&config.CircuitBreakerFailureThreshold, "cb-failure-threshold", DefaultCircuitBreakerFailureThreshold, "Circuit breaker failure rate to trip (0.0-1.0)")
+	flag.Int64Var(&config.CircuitBreakerMinAttempts, "cb-min-attempts", DefaultCircuitBreakerMinAttempts, "Min attempts before circuit breaker evaluates")
+	flag.Int64Var(&config.CircuitBreakerOpenDurationMs, "cb-open-duration-ms", DefaultCircuitBreakerOpenDurationMs, "Circuit breaker open duration in milliseconds")
 
 	// Dedup configuration
 	flag.IntVar(&config.DedupTTLHours, "dedup-ttl", DefaultDedupTTLHours, "Deduplication TTL in hours (7 days)")
@@ -95,11 +131,21 @@ func LoadConfig() (*types.Config, error) {
 	flag.DurationVar(&config.HeartbeatInterval, "heartbeat-interval", DefaultHeartbeatInterval, "Cluster heartbeat interval")
 	flag.DurationVar(&config.FailureTimeout, "failure-timeout", DefaultFailureTimeout, "Node failure detection timeout")
 	flag.DurationVar(&config.SuspectTimeout, "suspect-timeout", DefaultSuspectTimeout, "Node suspect timeout")
+	flag.BoolVar(&config.UseMemberlist, "use-memberlist", DefaultUseMemberlist, "Use HashiCorp Memberlist (SWIM) instead of custom TCP gossip")
+	flag.Int64Var(&config.ClockSkewThresholdMs, "clock-skew-threshold-ms", DefaultClockSkewThresholdMs, "Max allowed clock skew from leader in ms (0 = disabled)")
 
 	var clusterSeeds string
 	flag.StringVar(&clusterSeeds, "cluster-seeds", "", "Comma-separated list of seed node addresses")
 
+	// Tracing configuration
+	flag.BoolVar(&config.TracingEnabled, "tracing-enabled", DefaultTracingEnabled, "Enable OpenTelemetry tracing")
+	flag.StringVar(&config.TracingExporter, "tracing-exporter", DefaultTracingExporter, "Tracing exporter: none, stdout, otlp")
+	flag.StringVar(&config.TracingOTLPEndpoint, "tracing-otlp-endpoint", DefaultTracingOTLPEndpoint, "OTLP gRPC endpoint (host:port)")
+	flag.Float64Var(&config.TracingSampleRatio, "tracing-sample-ratio", DefaultTracingSampleRatio, "Tracing sample ratio from 0.0 to 1.0")
+	flag.BoolVar(&config.TracingInsecure, "tracing-insecure", DefaultTracingInsecure, "Use insecure OTLP connection (no TLS)")
+
 	flag.Parse()
+	config.FlushIntervalMS = int32(flushInterval)
 
 	// Parse cluster seeds
 	if clusterSeeds != "" {
@@ -119,6 +165,9 @@ func LoadConfig() (*types.Config, error) {
 	if grpcAddr := os.Getenv("CRONOS_GRPC_ADDR"); grpcAddr != "" && config.GPRCAddress == DefaultGRPCAddress {
 		config.GPRCAddress = grpcAddr
 	}
+	if httpAddr := os.Getenv("CRONOS_HTTP_ADDR"); httpAddr != "" && config.HTTPAddress == DefaultHTTPAddress {
+		config.HTTPAddress = httpAddr
+	}
 	if clusterEnabled := os.Getenv("CRONOS_CLUSTER"); clusterEnabled == "true" {
 		config.ClusterEnabled = true
 	}
@@ -126,6 +175,27 @@ func LoadConfig() (*types.Config, error) {
 		config.ClusterSeeds = strings.Split(seeds, ",")
 		for i, seed := range config.ClusterSeeds {
 			config.ClusterSeeds[i] = strings.TrimSpace(seed)
+		}
+	}
+	if tracingEnabled := os.Getenv("CRONOS_TRACING_ENABLED"); tracingEnabled != "" {
+		if parsed, err := strconv.ParseBool(tracingEnabled); err == nil {
+			config.TracingEnabled = parsed
+		}
+	}
+	if tracingExporter := os.Getenv("CRONOS_TRACING_EXPORTER"); tracingExporter != "" {
+		config.TracingExporter = strings.TrimSpace(tracingExporter)
+	}
+	if tracingEndpoint := os.Getenv("CRONOS_TRACING_OTLP_ENDPOINT"); tracingEndpoint != "" {
+		config.TracingOTLPEndpoint = strings.TrimSpace(tracingEndpoint)
+	}
+	if tracingRatio := os.Getenv("CRONOS_TRACING_SAMPLE_RATIO"); tracingRatio != "" {
+		if parsed, err := strconv.ParseFloat(tracingRatio, 64); err == nil {
+			config.TracingSampleRatio = parsed
+		}
+	}
+	if tracingInsecure := os.Getenv("CRONOS_TRACING_INSECURE"); tracingInsecure != "" {
+		if parsed, err := strconv.ParseBool(tracingInsecure); err == nil {
+			config.TracingInsecure = parsed
 		}
 	}
 
@@ -153,6 +223,9 @@ func ValidateConfig(c *types.Config) error {
 	}
 	if c.GPRCAddress == "" {
 		return fmt.Errorf("grpc-addr is required")
+	}
+	if c.TracingSampleRatio < 0 || c.TracingSampleRatio > 1 {
+		return fmt.Errorf("tracing-sample-ratio must be between 0.0 and 1.0")
 	}
 	return nil
 }

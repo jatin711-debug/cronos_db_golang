@@ -132,6 +132,10 @@ func DefaultConfig() *Config {
 
 // NewDispatcher creates a new dispatcher with sharding.
 func NewDispatcher(config *Config) *Dispatcher {
+	if config == nil {
+		config = DefaultConfig()
+	}
+
 	shardCount := 32
 	shards := make([]*DispatcherShard, shardCount)
 	for i := 0; i < shardCount; i++ {
@@ -148,6 +152,7 @@ func NewDispatcher(config *Config) *Dispatcher {
 		dlq:           nil,
 		quit:          make(chan struct{}),
 		partitionSubs: make(map[int32][]*Subscription),
+		retryHeap:     NewRetryHeap(),
 	}
 
 	d.wg.Add(1)

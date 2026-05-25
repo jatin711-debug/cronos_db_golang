@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
+	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -21,6 +23,8 @@ type Config struct {
 	Enabled      bool
 	ExporterType string // "stdout", "otlp", "none"
 	OTLPEndpoint string
+	SampleRatio  float64
+	OTLPInsecure bool
 }
 
 // Tracer is the global tracer instance
@@ -33,14 +37,21 @@ var TracerProvider *sdktrace.TracerProvider
 func InitTracing(cfg *Config) error {
 	if cfg == nil || !cfg.Enabled {
 		log.Printf("[TRACING] Tracing disabled")
+		Tracer = nil
+		TracerProvider = nil
 		return nil
+	}
+
+	exporterType := strings.ToLower(strings.TrimSpace(cfg.ExporterType))
+	if exporterType == "" {
+		exporterType = "none"
 	}
 
 	// Create exporter based on config
 	var exporter sdktrace.SpanExporter
 	var err error
 
-	switch cfg.ExporterType {
+	switch exporterType {
 	case "stdout":
 		exp, err := stdouttrace.New(stdouttrace.WithPrettyPrint())
 		if err != nil {
@@ -48,18 +59,29 @@ func InitTracing(cfg *Config) error {
 		}
 		exporter = exp
 	case "otlp":
-		// Would use otlptrace/otlptracegrpc or otlptrace/otlptracehttp
-		// For now, fall back to noop
-		log.Printf("[TRACING] OTLP exporter not configured, using no-op")
-		cfg.ExporterType = "none"
+		log.Printf("[TRACING] OTLP exporter is not enabled in this build; using no-op tracing")
+		exporterType = "none"
+	case "none":
+		log.Printf("[TRACING] Using no-op tracing")
 	default:
-		log.Printf("[TRACING] Using no-op tracer (exporter type: %s)", cfg.ExporterType)
+		return fmt.Errorf("unsupported tracing exporter: %s", cfg.ExporterType)
+	}
+
+	if exporter == nil {
+		Tracer = nil
+		TracerProvider = nil
+		return nil
+	}
+
+	serviceName := strings.TrimSpace(cfg.ServiceName)
+	if serviceName == "" {
+		serviceName = "cronos-api"
 	}
 
 	// Create resource with service info
 	res, err := resource.New(context.Background(),
 		resource.WithAttributes(
-			semconv.ServiceName(cfg.ServiceName),
+			semconv.ServiceName(serviceName),
 			semconv.ServiceVersion("1.0.0"),
 		),
 	)
@@ -67,19 +89,29 @@ func InitTracing(cfg *Config) error {
 		return fmt.Errorf("create resource: %w", err)
 	}
 
-	// Create tracer provider
-	if cfg.ExporterType == "none" {
-		TracerProvider = sdktrace.NewTracerProvider(
-			sdktrace.WithResource(res),
-			sdktrace.WithSampler(sdktrace.NeverSample()),
-		)
-	} else {
-		TracerProvider = sdktrace.NewTracerProvider(
-			sdktrace.WithBatcher(exporter),
-			sdktrace.WithResource(res),
-			sdktrace.WithSampler(sdktrace.AlwaysSample()),
-		)
+	sampleRatio := cfg.SampleRatio
+	if sampleRatio < 0 {
+		sampleRatio = 0
 	}
+	if sampleRatio > 1 {
+		sampleRatio = 1
+	}
+
+	sampler := sdktrace.Sampler(sdktrace.NeverSample())
+	if sampleRatio > 0 {
+		sampler = sdktrace.ParentBased(sdktrace.TraceIDRatioBased(sampleRatio))
+	}
+
+	// Create tracer provider.
+	TracerProvider = sdktrace.NewTracerProvider(
+		sdktrace.WithBatcher(exporter,
+			sdktrace.WithBatchTimeout(2*time.Second),
+			sdktrace.WithMaxExportBatchSize(256),
+			sdktrace.WithMaxQueueSize(2048),
+		),
+		sdktrace.WithResource(res),
+		sdktrace.WithSampler(sampler),
+	)
 
 	// Set global tracer provider
 	otel.SetTracerProvider(TracerProvider)
@@ -91,11 +123,11 @@ func InitTracing(cfg *Config) error {
 	))
 
 	// Create tracer
-	Tracer = TracerProvider.Tracer(cfg.ServiceName,
+	Tracer = TracerProvider.Tracer(serviceName,
 		trace.WithInstrumentationVersion("1.0.0"),
 	)
 
-	log.Printf("[TRACING] Initialized with exporter type: %s", cfg.ExporterType)
+	log.Printf("[TRACING] Initialized exporter=%s sample_ratio=%.4f", exporterType, sampleRatio)
 	return nil
 }
 

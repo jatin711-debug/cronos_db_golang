@@ -162,6 +162,29 @@ var (
 		},
 		[]string{"group", "partition"},
 	)
+
+	// Delivery metrics
+	dispatcherActiveDeliveries = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "cronos_dispatcher_active_deliveries",
+			Help: "Number of active in-flight deliveries in dispatcher",
+		},
+		[]string{"partition"},
+	)
+	dispatcherCreditsInUse = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "cronos_dispatcher_credits_in_use",
+			Help: "Credits currently consumed by subscriptions",
+		},
+		[]string{"partition"},
+	)
+	workerQueueDepth = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "cronos_delivery_worker_queue_depth",
+			Help: "Number of events waiting in delivery worker queue",
+		},
+		[]string{"partition"},
+	)
 	consumerGroupMembers = promauto.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "cronos_consumer_group_members",
@@ -301,6 +324,13 @@ func SetClusterMetrics(totalNodes, aliveNodes, totalPartitions, leaderPartitions
 	clusterNodesAlive.Set(float64(aliveNodes))
 	clusterPartitionsTotal.Set(float64(totalPartitions))
 	clusterPartitionsLeader.Set(float64(leaderPartitions))
+}
+
+// SetDeliveryMetrics sets delivery subsystem gauges for a partition.
+func SetDeliveryMetrics(partitionID string, activeDeliveries int64, creditsInUse int64, queueDepth int64) {
+	dispatcherActiveDeliveries.WithLabelValues(partitionID).Set(float64(activeDeliveries))
+	dispatcherCreditsInUse.WithLabelValues(partitionID).Set(float64(creditsInUse))
+	workerQueueDepth.WithLabelValues(partitionID).Set(float64(queueDepth))
 }
 
 // ObserveWALAppend records WAL append latency
