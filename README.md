@@ -36,7 +36,7 @@ It combines the durability of a write-ahead log, the precision of a hierarchical
 
 ### Scheduling
 - **Hierarchical Timing Wheel** — O(1) timer add/remove/tick for millions of events
-- **Two-Tier Cold/Hot Scheduler** — PebbleDB cold store for far-future events (>1hr); hydrator loads into timing wheel every 60s. Keeps hot memory bounded.
+- **Two-Tier Cold/Hot Scheduler** — PebbleDB cold store for far-future events (>1hr); adaptive hydrator adjusts scan frequency based on load (5s–5min). Keeps hot memory bounded.
 - **Absolute Time Tracking** — No drift across overflow wheel cascades
 - **Batch Scheduling** — Single lock acquisition for entire batch
 - **Crash Recovery** — Incremental WAL replay with checkpointing
@@ -377,6 +377,8 @@ This demo publishes one JSON event with a 10-second schedule window and prints t
 | `-cluster-seeds` | *(empty)* | Comma-separated seed node addresses |
 | `-virtual-nodes` | `150` | Virtual nodes per physical node in hash ring |
 | `-hot-window-minutes` | `60` | Events beyond this window go to cold store (0 = disabled) |
+| `-hydrator-min-interval` | `5000` | Minimum adaptive hydrator scan interval in ms |
+| `-hydrator-max-interval` | `300000` | Maximum adaptive hydrator scan interval in ms |
 | `-max-ready-queue` | `1000000` | Max ready queue depth per partition |
 | `-max-timing-wheel-size` | `10000000` | Max active timers in hot timing wheel |
 | `-max-in-flight` | `500000` | Max in-flight deliveries per partition |
@@ -384,6 +386,11 @@ This demo publishes one JSON event with a 10-second schedule window and prints t
 | `-cb-min-attempts` | `10` | Min attempts before circuit breaker evaluates |
 | `-cb-open-duration-ms` | `30000` | Circuit breaker open duration in milliseconds |
 | `-use-memberlist` | `false` | Use HashiCorp Memberlist (SWIM) instead of custom TCP gossip |
+| `-tracing-enabled` | `false` | Enable OpenTelemetry tracing |
+| `-tracing-exporter` | `none` | Tracing exporter (`none`, `stdout`, `otlp`) |
+| `-tracing-otlp-endpoint` | `127.0.0.1:4317` | OTLP gRPC endpoint for trace export |
+| `-tracing-sample-ratio` | `0.01` | Sampling ratio (0.0-1.0); lower keeps overhead low |
+| `-tracing-insecure` | `true` | Disable TLS when exporting via OTLP |
 
 ### Environment Variables
 
@@ -392,8 +399,14 @@ This demo publishes one JSON event with a 10-second schedule window and prints t
 | `CRONOS_NODE_ID` | `-node-id` |
 | `CRONOS_DATA_DIR` | `-data-dir` |
 | `CRONOS_GRPC_ADDR` | `-grpc-addr` |
+| `CRONOS_HTTP_ADDR` | `-http-addr` |
 | `CRONOS_CLUSTER` | `-cluster` |
 | `CRONOS_CLUSTER_SEEDS` | `-cluster-seeds` |
+| `CRONOS_TRACING_ENABLED` | `-tracing-enabled` |
+| `CRONOS_TRACING_EXPORTER` | `-tracing-exporter` |
+| `CRONOS_TRACING_OTLP_ENDPOINT` | `-tracing-otlp-endpoint` |
+| `CRONOS_TRACING_SAMPLE_RATIO` | `-tracing-sample-ratio` |
+| `CRONOS_TRACING_INSECURE` | `-tracing-insecure` |
 
 ---
 
@@ -524,7 +537,7 @@ See [proto/events.proto](proto/events.proto) for the complete specification.
 - [x] Health checks in Docker
 - [x] Cross-platform Makefile (Windows/Linux/macOS)
 - [x] CI pipeline target (`make ci`)
-- [x] Two-tier scheduler (cold store + hot timing wheel)
+- [x] Two-tier scheduler with adaptive hydrator (cold store + hot timing wheel)
 - [x] Non-blocking retry heap (min-heap by retry deadline)
 - [x] Admission control (readyQueue / timingWheel / in-flight limits)
 - [x] Per-subscription circuit breaker (Closed→Open→HalfOpen)
@@ -534,7 +547,6 @@ See [proto/events.proto](proto/events.proto) for the complete specification.
 
 ### Remaining 🚧
 - [ ] Admin CLI & dashboard
-- [ ] OTLP exporter for distributed tracing (provider ready, exporter TBD)
 - [ ] TLS/mTLS between nodes
 - [ ] Topic-level ACLs
 

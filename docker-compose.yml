@@ -23,6 +23,11 @@ services:
       - CRONOS_GRPC_ADDR=0.0.0.0:9000
       - CRONOS_HTTP_ADDR=0.0.0.0:8080
       - CRONOS_CLUSTER=false
+      - CRONOS_TRACING_ENABLED=${CRONOS_TRACING_ENABLED:-false}
+      - CRONOS_TRACING_EXPORTER=${CRONOS_TRACING_EXPORTER:-otlp}
+      - CRONOS_TRACING_OTLP_ENDPOINT=${CRONOS_TRACING_OTLP_ENDPOINT:-otel-collector:4317}
+      - CRONOS_TRACING_SAMPLE_RATIO=${CRONOS_TRACING_SAMPLE_RATIO:-0.01}
+      - CRONOS_TRACING_INSECURE=${CRONOS_TRACING_INSECURE:-true}
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
       interval: 30s
@@ -56,6 +61,11 @@ services:
       - CRONOS_PARTITION_COUNT=8
       - CRONOS_TICK_MS=100
       - CRONOS_WHEEL_SIZE=60
+      - CRONOS_TRACING_ENABLED=${CRONOS_TRACING_ENABLED:-false}
+      - CRONOS_TRACING_EXPORTER=${CRONOS_TRACING_EXPORTER:-otlp}
+      - CRONOS_TRACING_OTLP_ENDPOINT=${CRONOS_TRACING_OTLP_ENDPOINT:-otel-collector:4317}
+      - CRONOS_TRACING_SAMPLE_RATIO=${CRONOS_TRACING_SAMPLE_RATIO:-0.01}
+      - CRONOS_TRACING_INSECURE=${CRONOS_TRACING_INSECURE:-true}
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
       interval: 30s
@@ -92,6 +102,11 @@ services:
       - CRONOS_PARTITION_COUNT=8
       - CRONOS_TICK_MS=100
       - CRONOS_WHEEL_SIZE=60
+      - CRONOS_TRACING_ENABLED=${CRONOS_TRACING_ENABLED:-false}
+      - CRONOS_TRACING_EXPORTER=${CRONOS_TRACING_EXPORTER:-otlp}
+      - CRONOS_TRACING_OTLP_ENDPOINT=${CRONOS_TRACING_OTLP_ENDPOINT:-otel-collector:4317}
+      - CRONOS_TRACING_SAMPLE_RATIO=${CRONOS_TRACING_SAMPLE_RATIO:-0.01}
+      - CRONOS_TRACING_INSECURE=${CRONOS_TRACING_INSECURE:-true}
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
       interval: 30s
@@ -125,11 +140,72 @@ services:
       - CRONOS_PARTITION_COUNT=8
       - CRONOS_TICK_MS=100
       - CRONOS_WHEEL_SIZE=60
+      - CRONOS_TRACING_ENABLED=${CRONOS_TRACING_ENABLED:-false}
+      - CRONOS_TRACING_EXPORTER=${CRONOS_TRACING_EXPORTER:-otlp}
+      - CRONOS_TRACING_OTLP_ENDPOINT=${CRONOS_TRACING_OTLP_ENDPOINT:-otel-collector:4317}
+      - CRONOS_TRACING_SAMPLE_RATIO=${CRONOS_TRACING_SAMPLE_RATIO:-0.01}
+      - CRONOS_TRACING_INSECURE=${CRONOS_TRACING_INSECURE:-true}
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
       interval: 30s
       timeout: 3s
       retries: 3
+
+  # ---------------------------------------------------------------------------
+  # Observability stack (optional profile)
+  # ---------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: cronos-prometheus
+    profiles: ["observability"]
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  tempo:
+    image: grafana/tempo:2.6.1
+    container_name: cronos-tempo
+    profiles: ["observability"]
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    ports:
+      - "3200:3200"
+    volumes:
+      - ./observability/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - tempo-data:/tmp/tempo
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.107.0
+    container_name: cronos-otel-collector
+    profiles: ["observability"]
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    ports:
+      - "4317:4317"   # OTLP gRPC (for host-based make node1/node2/node3)
+      - "4318:4318"   # OTLP HTTP
+    volumes:
+      - ./observability/otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    depends_on:
+      - tempo
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: cronos-grafana
+    profiles: ["observability"]
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./observability/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./observability/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+      - tempo
 
 # =============================================================================
 # Volumes - Named volumes for persistent data
@@ -145,4 +221,10 @@ volumes:
   node2-data:
     driver: local
   node3-data:
+    driver: local
+
+  # Observability volumes
+  grafana-data:
+    driver: local
+  tempo-data:
     driver: local

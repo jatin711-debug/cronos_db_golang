@@ -44,8 +44,19 @@ const (
 	// Checkpoint configuration
 	DefaultCheckpointInterval = 10 * time.Second
 
+	// Tracing configuration (kept conservative to protect throughput)
+	DefaultTracingEnabled      = false
+	DefaultTracingExporter     = "none"
+	DefaultTracingOTLPEndpoint = "127.0.0.1:4317"
+	DefaultTracingSampleRatio  = 0.01
+	DefaultTracingInsecure     = true
+
 	// Scheduler cold store configuration
 	DefaultHotWindowMinutes = 60 // 1 hour hot window
+
+	// Adaptive hydrator configuration
+	DefaultHydratorMinIntervalMs = 5000   // 5 seconds minimum
+	DefaultHydratorMaxIntervalMs = 300000 // 5 minutes maximum
 
 	// Admission control configuration (0 = disabled)
 	DefaultMaxReadyQueueSize       = 1_000_000
@@ -53,7 +64,7 @@ const (
 	DefaultMaxInFlightPerPartition = 500_000
 
 	// Circuit breaker configuration
-	DefaultCircuitBreakerFailureThreshold = 0.5  // 50% failure rate trips breaker
+	DefaultCircuitBreakerFailureThreshold = 0.5   // 50% failure rate trips breaker
 	DefaultCircuitBreakerOpenDurationMs   = 30000 // 30 seconds
 	DefaultCircuitBreakerMinAttempts      = 10
 

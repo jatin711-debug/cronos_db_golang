@@ -192,3 +192,8 @@ type BatchDedupStore interface {
 func (m *Manager) PruneExpired() (int, error) {
 	return m.store.PruneExpired()
 }
+
+// GetStats returns dedup store statistics.
+func (m *Manager) GetStats() (*DedupStats, error) {
+	return m.store.GetStats()
+}

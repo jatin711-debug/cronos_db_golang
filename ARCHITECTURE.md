@@ -511,8 +511,8 @@ flowchart TD
     B -->|No| D[Store offset in Cold Store]
     D --> E[PebbleDB key: [schedule_ts:be64][offset:be64]]
 
-    F[Hydrator Loop every 60s] --> G[Scan Cold Store range]
-    G --> H[now+hotWindow to now+hotWindow+60s]
+    F[Hydrator Loop adaptive interval] --> G[Scan Cold Store range]
+    G --> H[now+hotWindow to now+hotWindow+adaptiveLookahead]
     H --> I[Read full event from WAL via EventReader]
     I --> C
 ```
@@ -523,7 +523,8 @@ flowchart TD
 |----------|-----------|
 | **Offsets only in cold store** | WAL is single source of truth; avoids double-writing event data |
 | **Big-endian composite key `[ts][offset]`** | Enables efficient range scans by timestamp |
-| **Hydrator scans 60s lookahead every 60s** | Events transition to hot up to 60s before due time |
+| **Adaptive hydrator interval (5s–5min)** | Scans more frequently under load, backs off when idle; saves I/O |
+| **Adaptive lookahead window** | Lookahead equals current hydrator interval; naturally scans further ahead when running less frequently |
 | **EventReader interface decouples scheduler from WAL** | Clean dependency boundary; allows alternative storage backends |
 | **HotWindowMinutes = 0 disables cold store** | Full backward compatibility with legacy behavior |
 
@@ -1133,7 +1134,7 @@ flowchart TD
 |----------|-------------|
 | **API** | `cronos_api_grpc_requests_total{method, status}`, `cronos_api_grpc_request_duration_seconds{method}` |
 | **WAL** | `cronos_wal_append_latency_seconds{partition}`, `cronos_wal_segment_count{partition}`, `cronos_wal_high_watermark{partition}` |
-| **Scheduler** | `cronos_scheduler_ready_events{partition}`, `cronos_scheduler_active_timers{partition}`, `cronos_timing_wheel_overflow_level{partition}`, `cronos_scheduler_cold_store_entries{partition}`, `cronos_scheduler_hydrated_events_total{partition}` |
+| **Scheduler** | `cronos_scheduler_ready_events{partition}`, `cronos_scheduler_active_timers{partition}`, `cronos_timing_wheel_overflow_level{partition}`, `cronos_scheduler_cold_store_entries{partition}`, `cronos_scheduler_hydrated_events_total{partition}`, `cronos_scheduler_hydrator_interval_ms{partition}`, `cronos_scheduler_hydrator_scan_duration_seconds{partition}` |
 | **Dedup** | `cronos_dedup_check_latency_seconds{partition, path}`, `cronos_dedup_bloom_memory_bytes{partition}`, `cronos_dedup_bloom_false_positive_rate{partition}` |
 | **Delivery** | `cronos_dispatch_latency_seconds{partition}`, `cronos_consumer_group_lag{group, partition}` |
 | **Admission** | `cronos_admission_rejected_total{partition}` |
@@ -1297,6 +1298,7 @@ flowchart TD
 | Algorithmic | FNV-1a partition routing | ~5ns vs ~400ns SHA-256 |
 | Algorithmic | Bloom filter: O(k) checks, k=7 | Sub-microsecond dedup |
 | Memory | Cold store: offsets only (~16B/key) | Millions of far-future events without RAM bloat |
+| Scheduling | Adaptive hydrator interval | Scales I/O with workload; no fixed 60s polling tax |
 | Concurrency | Retry heap: non-blocking timeoutLoop | Responsive under retry storms |
 | Resilience | Circuit breaker: atomic state machine | Instant skip of dead subscribers |
 
@@ -1318,6 +1320,8 @@ flowchart TD
 | Scheduler | `-tick-ms` | `100` | Timing wheel tick duration |
 | Scheduler | `-wheel-size` | `60` | Slots per timing wheel level |
 | Scheduler | `-hot-window-minutes` | `60` | Events beyond this go to cold store (0 = disabled) |
+| Scheduler | `-hydrator-min-interval` | `5000` | Minimum adaptive hydrator scan interval in ms |
+| Scheduler | `-hydrator-max-interval` | `300000` | Maximum adaptive hydrator scan interval in ms |
 | Delivery | `-ack-timeout` | `30s` | Delivery ack timeout |
 | Delivery | `-max-retries` | `5` | Max delivery retry attempts |
 | Delivery | `-max-credits` | `1000` | Max credits per subscriber |

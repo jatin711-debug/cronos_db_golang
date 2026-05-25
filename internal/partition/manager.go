@@ -102,6 +102,10 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 	if err != nil {
 		return fmt.Errorf("create scheduler: %w", err)
 	}
+	// Configure adaptive hydrator intervals if specified
+	if pm.config.HydratorMinIntervalMs > 0 || pm.config.HydratorMaxIntervalMs > 0 {
+		sched.SetHydratorIntervals(pm.config.HydratorMinIntervalMs, pm.config.HydratorMaxIntervalMs)
+	}
 
 	// Create dedup store with bloom filter for high performance
 	// Expected items per partition with 1% false positive rate

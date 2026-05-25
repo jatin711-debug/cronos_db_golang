@@ -31,8 +31,19 @@ type Config struct {
 	StatsPrintInterval   time.Duration
 	CheckpointInterval   time.Duration
 
+	// Tracing/telemetry configuration
+	TracingEnabled      bool
+	TracingExporter     string  // "none", "stdout", "otlp"
+	TracingOTLPEndpoint string  // host:port
+	TracingSampleRatio  float64 // 0.0-1.0
+	TracingInsecure     bool
+
 	// Scheduler cold store configuration
 	HotWindowMinutes int // Events scheduled beyond this window go to cold store (0 = disable)
+
+	// Adaptive hydrator configuration (0 = use defaults)
+	HydratorMinIntervalMs int // Minimum hydrator scan interval in ms
+	HydratorMaxIntervalMs int // Maximum hydrator scan interval in ms
 
 	// Admission control configuration (0 = disabled)
 	MaxReadyQueueSize       int64 // Max events in ready queue before rejecting publishes
