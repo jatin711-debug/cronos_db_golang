@@ -14,15 +14,18 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/internal/api"
 	"github.com/jatin711-debug/cronos_db_golang/internal/audit"
 	"github.com/jatin711-debug/cronos_db_golang/internal/auth"
+	"github.com/jatin711-debug/cronos_db_golang/internal/cdc"
 	"github.com/jatin711-debug/cronos_db_golang/internal/cluster"
 	"github.com/jatin711-debug/cronos_db_golang/internal/compliance"
 	"github.com/jatin711-debug/cronos_db_golang/internal/config"
 	"github.com/jatin711-debug/cronos_db_golang/internal/partition"
+	"github.com/jatin711-debug/cronos_db_golang/internal/replication"
 	"github.com/jatin711-debug/cronos_db_golang/internal/schema"
 	"github.com/jatin711-debug/cronos_db_golang/internal/slo"
 	"github.com/jatin711-debug/cronos_db_golang/internal/storage"
 	"github.com/jatin711-debug/cronos_db_golang/internal/tenant"
 	"github.com/jatin711-debug/cronos_db_golang/internal/tracing"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 
 	"github.com/cockroachdb/pebble"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -64,7 +67,14 @@ func main() {
 
 	// Initialize tenant accountant
 	tenantAccountant := tenant.NewAccountant()
-	_ = tenantAccountant
+
+	// Initialize CDC manager
+	cdcManager := cdc.NewManager()
+	defer func() { _ = cdcManager.Close() }()
+
+	// Initialize cross-region replicator
+	crossRegionReplicator := replication.NewCrossRegionReplicator(replication.RegionID(cfg.NodeRegion))
+	defer func() { _ = crossRegionReplicator.Close() }()
 
 	// Initialize SLO recorder
 	sloRecorder := slo.NewRecorder(slo.Window{
@@ -210,6 +220,29 @@ func main() {
 		}
 	}
 
+	// Wire CDC and cross-region replication hooks into all partitions
+	for i := int32(0); i < int32(cfg.PartitionCount); i++ {
+		p, err := pm.GetInternalPartition(i)
+		if err != nil || p == nil || p.Wal == nil {
+			continue
+		}
+		p.Wal.SetAppendHook(func(event *types.Event) {
+			if cdcManager != nil {
+				cdcManager.Emit(context.Background(), &cdc.ChangeEvent{
+					Timestamp:   time.Now(),
+					Op:          "append",
+					PartitionID: event.PartitionId,
+					Topic:       event.Topic,
+					Offset:      event.Offset,
+					Event:       event,
+				})
+			}
+			if crossRegionReplicator != nil && cfg.NodeRegion != "" {
+				crossRegionReplicator.ReplicateAsync(event.PartitionId, event.Offset, event.Payload)
+			}
+		})
+	}
+
 	// Get any available partition for handler setup (dedup and consumer group are shared)
 	var part *partition.Partition
 	for i := int32(0); i < int32(cfg.PartitionCount); i++ {
@@ -252,6 +285,15 @@ func main() {
 		}
 	}
 
+	// Create version gate for zero-downtime upgrades
+	versionGate := api.NewVersionGate()
+
+	// Create topic rate limiter if configured
+	var topicRateLimiter *api.TopicRateLimiter
+	if cfg.TopicRateLimitPerSecond > 0 && cfg.TopicRateLimitBurst > 0 {
+		topicRateLimiter = api.NewTopicRateLimiter(cfg.TopicRateLimitPerSecond, cfg.TopicRateLimitBurst)
+	}
+
 	// Create gRPC server
 	grpcConfig := api.DefaultConfig()
 	grpcConfig.Address = cfg.GPRCAddress
@@ -265,6 +307,9 @@ func main() {
 		}
 	}
 	grpcConfig.Auth = authConfig
+	grpcConfig.AuditLogger = auditLogger
+	grpcConfig.VersionGate = versionGate
+	grpcConfig.TopicRateLimiter = topicRateLimiter
 
 	grpcServer := api.NewGRPCServer(grpcConfig)
 
@@ -281,8 +326,16 @@ func main() {
 		eventHandler = api.NewEventServiceHandler(pm, nil, nil)
 	}
 
-	// Wire audit logging into handlers
-	_ = auditLogger
+	// Wire framework components into event handler
+	if auditLogger != nil {
+		eventHandler.SetAuditLogger(auditLogger)
+	}
+	if schemaRegistry != nil {
+		eventHandler.SetSchemaRegistry(schemaRegistry)
+	}
+	if tenantAccountant != nil {
+		eventHandler.SetTenantAccountant(tenantAccountant)
+	}
 
 	// Wire cluster router for partition-aware request routing
 	if clusterMgr != nil {

@@ -128,3 +128,13 @@ func (rl *TopicRateLimiter) UnaryInterceptor() grpc.UnaryServerInterceptor {
 		return handler(ctx, req)
 	}
 }
+
+// TopicRateLimitInterceptor returns a topic rate limit interceptor, or a passthrough if rl is nil.
+func TopicRateLimitInterceptor(rl *TopicRateLimiter) grpc.UnaryServerInterceptor {
+	if rl == nil {
+		return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+			return handler(ctx, req)
+		}
+	}
+	return rl.UnaryInterceptor()
+}

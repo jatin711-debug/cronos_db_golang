@@ -82,7 +82,18 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 		FsyncMode:        pm.config.FsyncMode,
 		FlushIntervalMS:  pm.config.FlushIntervalMS,
 	}
-	wal, err := storage.NewWAL(dataDir, partitionID, walConfig)
+	var cipher *storage.SegmentCipher
+	if pm.config.EncryptionEnabled && pm.config.EncryptionKeyFile != "" {
+		key, err := storage.LoadMasterKey(pm.config.EncryptionKeyFile)
+		if err != nil {
+			return fmt.Errorf("load encryption key: %w", err)
+		}
+		cipher, err = storage.NewSegmentCipher(key)
+		if err != nil {
+			return fmt.Errorf("create cipher: %w", err)
+		}
+	}
+	wal, err := storage.NewWAL(dataDir, partitionID, walConfig, cipher)
 	if err != nil {
 		return fmt.Errorf("create WAL: %w", err)
 	}

@@ -10,10 +10,14 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jatin711-debug/cronos_db_golang/internal/audit"
+	"github.com/jatin711-debug/cronos_db_golang/internal/auth"
 	"github.com/jatin711-debug/cronos_db_golang/internal/consumer"
 	"github.com/jatin711-debug/cronos_db_golang/internal/delivery"
 	"github.com/jatin711-debug/cronos_db_golang/internal/partition"
 	"github.com/jatin711-debug/cronos_db_golang/internal/replay"
+	"github.com/jatin711-debug/cronos_db_golang/internal/schema"
+	"github.com/jatin711-debug/cronos_db_golang/internal/tenant"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 
 	"google.golang.org/grpc"
@@ -29,6 +33,9 @@ type EventServiceHandler struct {
 	dedupManager     DedupManager
 	consumerManager  ConsumerManager
 	clusterRouter    ClusterRouter // nil in standalone mode
+	schemaRegistry   *schema.Registry
+	tenantAccountant *tenant.Accountant
+	auditLogger      *audit.Logger
 }
 
 // DedupManager interface
@@ -98,6 +105,21 @@ func (h *EventServiceHandler) SetClusterRouter(router ClusterRouter) {
 	h.clusterRouter = router
 }
 
+// SetSchemaRegistry sets the schema registry for publish validation.
+func (h *EventServiceHandler) SetSchemaRegistry(r *schema.Registry) {
+	h.schemaRegistry = r
+}
+
+// SetTenantAccountant sets the tenant resource accountant.
+func (h *EventServiceHandler) SetTenantAccountant(a *tenant.Accountant) {
+	h.tenantAccountant = a
+}
+
+// SetAuditLogger sets the audit logger for handler-level events.
+func (h *EventServiceHandler) SetAuditLogger(l *audit.Logger) {
+	h.auditLogger = l
+}
+
 // ensureClusterPartitionWritable validates that this node should accept writes
 // for the target partition when running in cluster mode.
 func (h *EventServiceHandler) ensureClusterPartitionWritable(partitionID int32) error {
@@ -142,6 +164,16 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 			Success: false,
 			Error:   "payload is required",
 		}, nil
+	}
+
+	// Schema validation
+	if h.schemaRegistry != nil && event.Topic != "" {
+		if err := h.schemaRegistry.Validate(event.Topic, event.Payload); err != nil {
+			return &types.PublishResponse{
+				Success: false,
+				Error:   fmt.Sprintf("schema validation failed: %v", err),
+			}, nil
+		}
 	}
 
 	partitionKey := event.GetMessageId() // Default to message_id for distribution
@@ -205,6 +237,18 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 		}
 	}
 
+	// Tenant quota check
+	if h.tenantAccountant != nil {
+		tenantID := tenant.ID("default")
+		if claims, ok := auth.ClaimsFromContext(ctx); ok {
+			tenantID = tenant.ID(claims.Subject)
+		}
+		if !h.tenantAccountant.AllowPublish(tenantID) {
+			return nil, status.Errorf(codes.ResourceExhausted, "tenant quota exceeded")
+		}
+		h.tenantAccountant.RecordPublish(tenantID, int64(len(event.Payload)))
+	}
+
 	// Append to WAL (no sync on every write for performance - WAL handles periodic flush)
 	if err := partitionInternal.Wal.AppendEvent(event); err != nil {
 		return &types.PublishResponse{
@@ -260,6 +304,17 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 			continue
 		}
 
+		// Schema validation
+		if h.schemaRegistry != nil && event.Topic != "" {
+			if err := h.schemaRegistry.Validate(event.Topic, event.Payload); err != nil {
+				atomic.AddInt32(&errorCount, 1)
+				if lastError == "" {
+					lastError = fmt.Sprintf("schema validation failed for %s: %v", event.GetMessageId(), err)
+				}
+				continue
+			}
+		}
+
 		// Get partition
 		partitionKey := event.GetMessageId()
 		if pk, ok := event.Meta["partition_key"]; ok && pk != "" {
@@ -299,6 +354,22 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 				atomic.AddInt32(&duplicateCount, 1)
 				continue
 			}
+		}
+
+		// Tenant quota check
+		if h.tenantAccountant != nil {
+			tenantID := tenant.ID("default")
+			if claims, ok := auth.ClaimsFromContext(ctx); ok {
+				tenantID = tenant.ID(claims.Subject)
+			}
+			if !h.tenantAccountant.AllowPublish(tenantID) {
+				atomic.AddInt32(&errorCount, 1)
+				if lastError == "" {
+					lastError = "tenant quota exceeded"
+				}
+				continue
+			}
+			h.tenantAccountant.RecordPublish(tenantID, int64(len(event.Payload)))
 		}
 
 		partitionEvents[partitionID] = append(partitionEvents[partitionID], event)

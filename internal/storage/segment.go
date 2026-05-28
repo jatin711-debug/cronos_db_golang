@@ -38,10 +38,11 @@ type Segment struct {
 	indexFilename   string
 	index           *Index // sparse index for fast seeking
 	recordBuf       []byte // Reusable buffer for serialization
+	cipher          *SegmentCipher
 }
 
 // NewSegment creates a new segment
-func NewSegment(dataDir string, firstOffset int64, isActive bool) (*Segment, error) {
+func NewSegment(dataDir string, firstOffset int64, isActive bool, cipher *SegmentCipher) (*Segment, error) {
 	filename := fmt.Sprintf("%020d.log", firstOffset)
 	filePath := filepath.Join(dataDir, "segments", filename)
 
@@ -88,6 +89,7 @@ func NewSegment(dataDir string, firstOffset int64, isActive bool) (*Segment, err
 		indexEntries:    0,
 		index:           index,
 		recordBuf:       make([]byte, 0, 4096), // Pre-allocate 4KB
+		cipher:          cipher,
 	}
 
 	// Write header if new file
@@ -104,7 +106,7 @@ func NewSegment(dataDir string, firstOffset int64, isActive bool) (*Segment, err
 }
 
 // OpenSegment opens an existing segment
-func OpenSegment(dataDir string, filename string) (*Segment, error) {
+func OpenSegment(dataDir string, filename string, cipher *SegmentCipher) (*Segment, error) {
 	filePath := filepath.Join(dataDir, "segments", filename)
 	file, err := os.OpenFile(filePath, os.O_RDWR|os.O_APPEND, 0644)
 	if err != nil {
@@ -150,6 +152,7 @@ func OpenSegment(dataDir string, filename string) (*Segment, error) {
 		indexFilename: fmt.Sprintf("%020d.index", firstOffset),
 		index:         index,
 		recordBuf:     make([]byte, 0, 4096),
+		cipher:        cipher,
 	}
 
 	// Scan segment to get metadata
@@ -233,7 +236,8 @@ func (s *Segment) AppendPreparedBatchUnsafe(prepared []*PreparedRecord, indexInt
 
 	for _, prep := range prepared {
 		// Write record to buffer
-		if err := s.writeRecord(prep.Buf); err != nil {
+		written, err := s.writeRecord(prep.Buf)
+		if err != nil {
 			return fmt.Errorf("write record: %w", err)
 		}
 
@@ -245,8 +249,7 @@ func (s *Segment) AppendPreparedBatchUnsafe(prepared []*PreparedRecord, indexInt
 		}
 		s.nextOffset++
 
-		recordLen := int64(len(prep.Buf))
-		s.sizeBytes = filePos + recordLen
+		s.sizeBytes = filePos + written
 
 		// Write index entry if needed (using sparse indexing)
 		// Use AddEntryUnsafe to avoid nested locking
@@ -259,7 +262,7 @@ func (s *Segment) AppendPreparedBatchUnsafe(prepared []*PreparedRecord, indexInt
 		}
 
 		// Advance file pos for next event in batch
-		filePos += recordLen
+		filePos += written
 	}
 
 	return nil
@@ -282,7 +285,8 @@ func (s *Segment) appendBatchInternal(events []*types.Event, indexInterval int64
 		}
 
 		// Write record to buffer
-		if err := s.writeRecord(record); err != nil {
+		written, err := s.writeRecord(record)
+		if err != nil {
 			return fmt.Errorf("write record: %w", err)
 		}
 
@@ -294,8 +298,7 @@ func (s *Segment) appendBatchInternal(events []*types.Event, indexInterval int64
 		}
 		s.nextOffset++
 
-		recordLen := int64(len(record))
-		s.sizeBytes = filePos + recordLen
+		s.sizeBytes = filePos + written
 
 		// Write index entry if needed (using sparse indexing)
 		// Use AddEntryUnsafe to avoid triple-lock (WAL→Segment→Index)
@@ -308,7 +311,7 @@ func (s *Segment) appendBatchInternal(events []*types.Event, indexInterval int64
 		}
 
 		// Advance file pos for next event in batch
-		filePos += recordLen
+		filePos += written
 	}
 
 	return nil
@@ -326,7 +329,8 @@ func (s *Segment) appendEventActive(event *types.Event, indexInterval int64) err
 	}
 
 	// Write record to buffer (buffered I/O)
-	if err := s.writeRecord(record); err != nil {
+	written, err := s.writeRecord(record)
+	if err != nil {
 		return fmt.Errorf("write record: %w", err)
 	}
 
@@ -337,7 +341,7 @@ func (s *Segment) appendEventActive(event *types.Event, indexInterval int64) err
 		s.firstTS = event.GetScheduleTs()
 	}
 	s.nextOffset++
-	s.sizeBytes = filePos + int64(len(record))
+	s.sizeBytes = filePos + written
 
 	// Write index entry if needed (using sparse indexing)
 	// Use AddEntryUnsafe to avoid nested locking
@@ -560,12 +564,40 @@ func parseEventRecordWithoutLength(record []byte) (*types.Event, error) {
 	}, nil
 }
 
-// writeRecord writes record to segment
-func (s *Segment) writeRecord(record []byte) error {
-	if _, err := s.writer.Write(record); err != nil {
-		return err
+// writeRecord writes record to segment. If encryption is enabled, the record payload
+// (bytes after the 4-byte length prefix) is encrypted with AES-256-GCM.
+// Returns the actual number of bytes written to the segment file.
+func (s *Segment) writeRecord(record []byte) (int64, error) {
+	if s.cipher != nil {
+		// record includes 4-byte length prefix; encrypt payload after it
+		if len(record) < 4 {
+			return 0, fmt.Errorf("record too short for encryption")
+		}
+		plaintext := record[4:]
+		ciphertext, err := s.cipher.Encrypt(plaintext)
+		if err != nil {
+			return 0, fmt.Errorf("encrypt: %w", err)
+		}
+		// Write new length prefix for encrypted payload
+		length := make([]byte, 4)
+		binary.BigEndian.PutUint32(length, uint32(4+len(ciphertext)))
+		n1, err := s.writer.Write(length)
+		if err != nil {
+			return int64(n1), err
+		}
+		n2, err := s.writer.Write(ciphertext)
+		return int64(n1 + n2), err
 	}
-	return nil
+	n, err := s.writer.Write(record)
+	return int64(n), err
+}
+
+// decryptRecord decrypts record payload if encryption is enabled.
+func (s *Segment) decryptRecord(ciphertext []byte) ([]byte, error) {
+	if s.cipher == nil {
+		return ciphertext, nil
+	}
+	return s.cipher.Decrypt(ciphertext)
 }
 
 // ReadEvent reads event at offset using index for fast seeking
@@ -618,16 +650,13 @@ func (s *Segment) readEventMmap(targetOffset int64, startPos int64) (*types.Even
 		// recordData includes CRC + data.
 		recordData := data[pos+4 : pos+int(length)]
 
-		// Optimization: Check offset before parsing full event?
-		// Offset is at bytes 8-16 of recordData (after 4 byte CRC + 4 byte Length which is not in recordData)
-		// Wait, recordData here excludes the length prefix.
-		// Structure: [Length 4][CRC 4][Offset 8]...
-		// So in recordData (which is record[4:] from writer POV):
-		// [0-3] is CRC
-		// [4-11] is Offset
+		decrypted, err := s.decryptRecord(recordData)
+		if err != nil {
+			return nil, fmt.Errorf("decrypt: %w", err)
+		}
 
-		if len(recordData) > 12 {
-			offsetVal := int64(binary.BigEndian.Uint64(recordData[4:12]))
+		if len(decrypted) > 12 {
+			offsetVal := int64(binary.BigEndian.Uint64(decrypted[4:12]))
 			if offsetVal > targetOffset {
 				return nil, fmt.Errorf("event not found (passed target)")
 			}
@@ -637,7 +666,7 @@ func (s *Segment) readEventMmap(targetOffset int64, startPos int64) (*types.Even
 			}
 		}
 
-		event, err := parseEventRecordWithoutLength(recordData)
+		event, err := parseEventRecordWithoutLength(decrypted)
 		if err != nil {
 			return nil, fmt.Errorf("parse event: %w", err)
 		}
@@ -689,9 +718,15 @@ func (s *Segment) readEventFile(targetOffset int64, startPos int64) (*types.Even
 		}
 		currentPos += int64(recordLen)
 
+		// Decrypt if needed before parsing
+		decrypted, err := s.decryptRecord(record)
+		if err != nil {
+			return nil, fmt.Errorf("decrypt: %w", err)
+		}
+
 		// Early offset check: offset is at bytes 4-12 of record (after CRC)
-		if len(record) > 12 {
-			offsetVal := int64(binary.BigEndian.Uint64(record[4:12]))
+		if len(decrypted) > 12 {
+			offsetVal := int64(binary.BigEndian.Uint64(decrypted[4:12]))
 			if offsetVal > targetOffset {
 				break // Past target
 			}
@@ -701,7 +736,7 @@ func (s *Segment) readEventFile(targetOffset int64, startPos int64) (*types.Even
 		}
 
 		// Parse event - record doesn't include length prefix
-		event, err := parseEventRecordWithoutLength(record)
+		event, err := parseEventRecordWithoutLength(decrypted)
 		if err != nil {
 			return nil, fmt.Errorf("parse event: %w", err)
 		}
@@ -770,7 +805,12 @@ func (s *Segment) ReadEventsByTime(startTS, endTS int64) ([]*types.Event, error)
 		}
 		currentPos += int64(recordLen)
 
-		event, err := parseEventRecordWithoutLength(record)
+		decrypted, err := s.decryptRecord(record)
+		if err != nil {
+			return nil, fmt.Errorf("decrypt: %w", err)
+		}
+
+		event, err := parseEventRecordWithoutLength(decrypted)
 		if err != nil {
 			return nil, fmt.Errorf("parse event: %w", err)
 		}
@@ -837,11 +877,16 @@ func (s *Segment) ReadEventsByOffsetRange(startOffset, endOffset int64) ([]*type
 		}
 		currentPos += int64(recordLen)
 
+		decrypted, err := s.decryptRecord(record)
+		if err != nil {
+			return nil, fmt.Errorf("decrypt: %w", err)
+		}
+
 		// Early offset check before full event parsing.
 		// Offset is at bytes 4-12 of record (after 4-byte CRC).
 		// This avoids CRC check + string allocs for out-of-range records.
-		if len(record) > 12 {
-			eventOffset := int64(binary.BigEndian.Uint64(record[4:12]))
+		if len(decrypted) > 12 {
+			eventOffset := int64(binary.BigEndian.Uint64(decrypted[4:12]))
 			if eventOffset > endOffset {
 				break // Past range, done
 			}
@@ -850,7 +895,7 @@ func (s *Segment) ReadEventsByOffsetRange(startOffset, endOffset int64) ([]*type
 			}
 		}
 
-		event, err := parseEventRecordWithoutLength(record)
+		event, err := parseEventRecordWithoutLength(decrypted)
 		if err != nil {
 			return nil, fmt.Errorf("parse event: %w", err)
 		}
@@ -925,8 +970,13 @@ func (s *Segment) scan() error {
 			return fmt.Errorf("read record: %w", err)
 		}
 
-		// Parse event to get offset and timestamp (record doesn't include length prefix)
-		event, err := parseEventRecordWithoutLength(recordData)
+		// Decrypt if needed, then parse event to get offset and timestamp
+		decrypted, err := s.decryptRecord(recordData)
+		if err != nil {
+			log.Printf("[SEGMENT] Decrypt failed at position %d: %v, truncating file", lastGoodPos, err)
+			break
+		}
+		event, err := parseEventRecordWithoutLength(decrypted)
 		if err != nil {
 			// CRC mismatch or parse error - corrupt frame detected
 			log.Printf("[SEGMENT] Corrupt frame at position %d: %v, truncating file", lastGoodPos, err)

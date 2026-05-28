@@ -83,4 +83,12 @@ const (
 
 	// Gossip backend
 	DefaultUseMemberlist = false // Default to custom gossip for backward compatibility
+
+	// Encryption at rest
+	DefaultEncryptionEnabled = false
+	DefaultEncryptionKeyFile = ""
+
+	// Topic rate limiting (0 = disabled)
+	DefaultTopicRateLimitPerSecond = 0.0
+	DefaultTopicRateLimitBurst     = 0.0
 )

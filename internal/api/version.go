@@ -6,6 +6,9 @@ import (
 	"sync/atomic"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 )
 
 // WireVersion is the current protocol version for zero-downtime upgrades.
@@ -37,11 +40,22 @@ func (vg *VersionGate) SetMinVersion(v int32) {
 
 // VersionInterceptor adds wire version compatibility to gRPC metadata.
 // Clients send "x-cronos-version" header; servers validate.
-func VersionInterceptor() grpc.UnaryServerInterceptor {
-	vg := NewVersionGate()
+func VersionInterceptor(vg *VersionGate) grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
-		// Version check would extract metadata here
-		_ = vg
+		md, ok := metadata.FromIncomingContext(ctx)
+		if ok {
+			vals := md.Get("x-cronos-version")
+			if len(vals) > 0 {
+				var clientVer int32
+				if _, err := fmt.Sscanf(vals[0], "%d", &clientVer); err == nil {
+					if !vg.IsCompatible(clientVer) {
+						return nil, status.Errorf(codes.FailedPrecondition,
+							"client version %d incompatible with server (min=%d max=%d)",
+							clientVer, vg.minClientVersion.Load(), vg.maxClientVersion.Load())
+					}
+				}
+			}
+		}
 		return handler(ctx, req)
 	}
 }

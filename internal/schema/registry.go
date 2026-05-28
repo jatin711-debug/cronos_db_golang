@@ -13,18 +13,18 @@ import (
 type Type string
 
 const (
-	TypeJSON   Type = "json"
-	TypeAvro   Type = "avro"
-	TypeProtobuf Type = "protobuf"
+	TypeJSON       Type = "json"
+	TypeAvro      Type = "avro"
+	TypeProtobuf  Type = "protobuf"
 )
 
 // Schema represents a versioned schema for a topic.
 type Schema struct {
-	Topic     string `json:"topic"`
-	Version   int    `json:"version"`
-	Type      Type   `json:"type"`
-	Definition string `json:"definition"`
-	Hash      uint64 `json:"hash"`
+	Topic       string `json:"topic"`
+	Version     int    `json:"version"`
+	Type        Type   `json:"type"`
+	Definition  string `json:"definition"`
+	Hash        uint64 `json:"hash"`
 }
 
 // Registry manages topic schemas with versioning.
@@ -110,6 +110,8 @@ func (r *Registry) GetVersion(topic string, version int) (Schema, bool) {
 
 // Validate checks if a payload conforms to the latest schema.
 // For JSON schemas, performs basic structural validation.
+// For AVRO schemas, validates binary-encoded data against the schema.
+// For PROTOBUF schemas, validates well-known types or notes full validation requires descriptor.
 func (r *Registry) Validate(topic string, payload []byte) error {
 	schema, ok := r.Get(topic)
 	if !ok {
@@ -119,8 +121,12 @@ func (r *Registry) Validate(topic string, payload []byte) error {
 	switch schema.Type {
 	case TypeJSON:
 		return validateJSON(payload)
+	case TypeAvro:
+		return validateAvro(schema.Definition, payload)
+	case TypeProtobuf:
+		return validateProtobuf(schema.Definition, payload)
 	default:
-		return nil // TODO: avro/protobuf validation
+		return nil // Unknown schema type — allow by default
 	}
 }
 
