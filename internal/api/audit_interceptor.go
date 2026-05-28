@@ -10,7 +10,7 @@ import (
 
 // AuditUnaryInterceptor logs all unary RPC calls to the audit logger.
 func AuditUnaryInterceptor(logger *audit.Logger) grpc.UnaryServerInterceptor {
-	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 		if logger == nil {
 			return handler(ctx, req)
 		}
@@ -28,7 +28,7 @@ func AuditUnaryInterceptor(logger *audit.Logger) grpc.UnaryServerInterceptor {
 
 // AuditStreamInterceptor logs stream RPC calls to the audit logger.
 func AuditStreamInterceptor(logger *audit.Logger) grpc.StreamServerInterceptor {
-	return func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+	return func(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
 		if logger == nil {
 			return handler(srv, ss)
 		}

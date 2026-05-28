@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -25,6 +26,7 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/internal/storage"
 	"github.com/jatin711-debug/cronos_db_golang/internal/tenant"
 	"github.com/jatin711-debug/cronos_db_golang/internal/tracing"
+	"github.com/jatin711-debug/cronos_db_golang/internal/tx"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 
 	"github.com/cockroachdb/pebble"
@@ -71,6 +73,24 @@ func main() {
 	// Initialize CDC manager
 	cdcManager := cdc.NewManager()
 	defer func() { _ = cdcManager.Close() }()
+
+	// Register CDC sinks from environment
+	if kafkaBrokers := os.Getenv("CRONOS_CDC_KAFKA_BROKERS"); kafkaBrokers != "" {
+		kafkaTopic := os.Getenv("CRONOS_CDC_KAFKA_TOPIC")
+		if kafkaTopic == "" {
+			kafkaTopic = "cronos-cdc"
+		}
+		brokers := strings.Split(kafkaBrokers, ",")
+		for i := range brokers {
+			brokers[i] = strings.TrimSpace(brokers[i])
+		}
+		cdcManager.RegisterSink(cdc.NewKafkaSink(brokers, kafkaTopic))
+		slog.Info("CDC Kafka sink registered", "brokers", brokers, "topic", kafkaTopic)
+	}
+	if webhookURL := os.Getenv("CRONOS_CDC_WEBHOOK_URL"); webhookURL != "" {
+		cdcManager.RegisterSink(cdc.NewWebhookSink(webhookURL))
+		slog.Info("CDC webhook sink registered", "url", webhookURL)
+	}
 
 	// Initialize cross-region replicator
 	crossRegionReplicator := replication.NewCrossRegionReplicator(replication.RegionID(cfg.NodeRegion))
@@ -351,6 +371,27 @@ func main() {
 	// Create partition metadata service handler
 	partitionHandler := api.NewPartitionServiceHandler(pm, clusterMgr, cfg.NodeID)
 
+	// Create transaction service handler (2PC)
+	transactionHandler := tx.NewHandler(pm)
+	grpcServer.SetTransactionHandler(transactionHandler)
+
+	// Register cross-region replication server
+	crossRegionServer := api.NewCrossRegionServer(pm)
+	grpcServer.RegisterCrossRegionServer(crossRegionServer)
+
+	// Load remote regions from environment
+	if regions := os.Getenv("CRONOS_REGIONS"); regions != "" {
+		for _, r := range strings.Split(regions, ",") {
+			parts := strings.SplitN(strings.TrimSpace(r), "=", 2)
+			if len(parts) == 2 {
+				crossRegionReplicator.AddRegion(&replication.RegionConnection{
+					RegionID: replication.RegionID(parts[0]),
+					Endpoint: parts[1],
+				})
+			}
+		}
+	}
+
 	// Register services
 	grpcServer.RegisterServices(eventHandler, consumerHandler, partitionHandler)
 
@@ -382,8 +423,8 @@ func main() {
 		}
 	}()
 
-	// Start auto-scaler
-	autoScaler := cluster.NewAutoScaler(cluster.SimpleMetrics{})
+	// Start auto-scaler with real system metrics
+	autoScaler := cluster.NewAutoScaler(cluster.NewSystemMetrics(cfg.DataDir))
 	autoScaler.Start()
 	defer autoScaler.Stop()
 
