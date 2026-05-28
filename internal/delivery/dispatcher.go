@@ -32,6 +32,10 @@ type Dispatcher struct {
 
 	// Retry heap for non-blocking delayed retries.
 	retryHeap *RetryHeap
+
+	// OnDeliveryComplete is called when a delivery reaches final disposition
+	// (successful ack or DLQ). The tenantID is extracted from Event.Meta.
+	OnDeliveryComplete func(tenantID string)
 }
 
 // DispatcherShard represents a shard of the dispatcher.
@@ -130,13 +134,15 @@ func DefaultConfig() *Config {
 	}
 }
 
+const defaultShardCount = 32
+
 // NewDispatcher creates a new dispatcher with sharding.
 func NewDispatcher(config *Config) *Dispatcher {
 	if config == nil {
 		config = DefaultConfig()
 	}
 
-	shardCount := 32
+	shardCount := defaultShardCount
 	shards := make([]*DispatcherShard, shardCount)
 	for i := 0; i < shardCount; i++ {
 		shards[i] = &DispatcherShard{
@@ -269,7 +275,7 @@ func (d *Dispatcher) Unsubscribe(subscriptionID string) error {
 
 	for deliveryID, active := range shard.activeDeliveries {
 		if active.Subscription != nil && active.Subscription.ID == subscriptionID {
-			d.decInFlight(1)
+			if err := d.decInFlight(1); err != nil { log.Printf("[DISPATCHER] in-flight underflow: %v", err) }
 			delete(shard.activeDeliveries, deliveryID)
 		}
 	}
@@ -373,7 +379,7 @@ func (d *Dispatcher) Dispatch(event *types.Event) error {
 		}
 
 		if err := selectedSub.Stream.Send(delivery); err != nil {
-			d.decInFlight(1)
+			if err := d.decInFlight(1); err != nil { log.Printf("[DISPATCHER] in-flight underflow: %v", err) }
 			d.releaseCredit(selectedSub)
 			log.Printf("[DISPATCHER] Failed to send to subscriber %s: %v", selectedSub.ID, err)
 			continue
@@ -410,7 +416,7 @@ func (d *Dispatcher) dispatchToSub(sub *Subscription, event *types.Event) error 
 	}
 
 	if err := sub.Stream.Send(delivery); err != nil {
-		d.decInFlight(1)
+		if err := d.decInFlight(1); err != nil { log.Printf("[DISPATCHER] in-flight underflow: %v", err) }
 		d.releaseCredit(sub)
 		if sub.circuitBreaker != nil {
 			sub.circuitBreaker.RecordFailure(
@@ -507,7 +513,7 @@ func (d *Dispatcher) dispatchPartitionBatch(partitionID int32, events []*types.E
 		}
 
 		if err := sub.Stream.Send(delivery); err != nil {
-			d.decInFlight(1)
+			if err := d.decInFlight(1); err != nil { log.Printf("[DISPATCHER] in-flight underflow: %v", err) }
 			d.releaseCredits(sub, int32(len(batchEvents)))
 			if sub.circuitBreaker != nil {
 				sub.circuitBreaker.RecordFailure(
@@ -596,7 +602,7 @@ func (d *Dispatcher) scanExpiredDeliveries(now time.Time) {
 		for deliveryID, active := range shard.activeDeliveries {
 			if now.After(active.AckDeadline) {
 				delete(shard.activeDeliveries, deliveryID)
-				d.decInFlight(1)
+				if err := d.decInFlight(1); err != nil { log.Printf("[DISPATCHER] in-flight underflow: %v", err) }
 
 				if active.Attempt < d.config.MaxRetries {
 					// Non-blocking: push to retry heap instead of sleeping inline
@@ -627,8 +633,8 @@ func (d *Dispatcher) processRetries(now time.Time) {
 
 		// Check circuit breaker before retrying
 		if active.Subscription.circuitBreaker != nil && !active.Subscription.circuitBreaker.CanTry() {
-			// Circuit still open — re-queue with same backoff to try again later
-			d.retryHeap.PushEntry(NewRetryEntry(active, 0))
+			// Circuit still open — re-queue with a meaningful backoff (5s) to avoid busy-loop
+			d.retryHeap.PushEntry(NewRetryEntry(active, 5*time.Second))
 			continue
 		}
 
@@ -642,13 +648,13 @@ func (d *Dispatcher) processRetries(now time.Time) {
 		}
 
 		if !d.tryReserveInFlight(1) {
-			// Re-queue to try later
-			d.retryHeap.PushEntry(NewRetryEntry(active, 0))
+			// Re-queue with short backoff to try later
+			d.retryHeap.PushEntry(NewRetryEntry(active, time.Second))
 			continue
 		}
 
 		if err := active.Subscription.Stream.Send(retryDelivery); err != nil {
-			d.decInFlight(1)
+			if err := d.decInFlight(1); err != nil { log.Printf("[DISPATCHER] in-flight underflow: %v", err) }
 			if active.Subscription.circuitBreaker != nil {
 				active.Subscription.circuitBreaker.RecordFailure(
 					d.config.CircuitBreakerFailureThreshold,
@@ -688,15 +694,15 @@ func (d *Dispatcher) tryReserveInFlight(n int64) bool {
 	}
 }
 
-func (d *Dispatcher) decInFlight(n int64) {
+func (d *Dispatcher) decInFlight(n int64) error {
 	for {
 		current := d.inFlightCount.Load()
 		next := current - n
 		if next < 0 {
-			next = 0
+			return fmt.Errorf("in-flight underflow: attempted to decrement %d by %d", current, n)
 		}
 		if d.inFlightCount.CompareAndSwap(current, next) {
-			return
+			return nil
 		}
 	}
 }
@@ -758,7 +764,7 @@ func (d *Dispatcher) HandleAck(deliveryID string, success bool, nextOffset int64
 	delete(shard.activeDeliveries, deliveryID)
 	shard.mu.Unlock()
 
-	d.decInFlight(1)
+	if err := d.decInFlight(1); err != nil { log.Printf("[DISPATCHER] in-flight underflow: %v", err) }
 
 	if success {
 		active.Subscription.NextOffset = nextOffset
@@ -766,6 +772,7 @@ func (d *Dispatcher) HandleAck(deliveryID string, success bool, nextOffset int64
 		if active.Subscription.circuitBreaker != nil {
 			active.Subscription.circuitBreaker.RecordSuccess()
 		}
+		d.notifyDeliveryComplete(active)
 		return nil
 	}
 
@@ -791,8 +798,19 @@ func (d *Dispatcher) HandleAck(deliveryID string, success bool, nextOffset int64
 	return nil
 }
 
+// notifyDeliveryComplete invokes the OnDeliveryComplete callback with the tenant ID.
+func (d *Dispatcher) notifyDeliveryComplete(active *ActiveDelivery) {
+	if d.OnDeliveryComplete == nil || active == nil || active.Delivery == nil || active.Delivery.Event == nil {
+		return
+	}
+	if tenantID, ok := active.Delivery.Event.Meta["tenant_id"]; ok && tenantID != "" {
+		d.OnDeliveryComplete(tenantID)
+	}
+}
+
 // sendToDLQ sends a failed delivery to the dead-letter queue.
 func (d *Dispatcher) sendToDLQ(active *ActiveDelivery, reason string) {
+	d.notifyDeliveryComplete(active)
 	if d.dlq == nil {
 		log.Printf("[DISPATCHER] DLQ not configured, dropping failed delivery %s: %s",
 			active.Delivery.DeliveryID, reason)
@@ -840,13 +858,13 @@ func (d *Dispatcher) retryDelivery(active *ActiveDelivery) error {
 			timer.Stop()
 		case <-d.quit:
 			timer.Stop()
-			d.decInFlight(1)
+			if err := d.decInFlight(1); err != nil { log.Printf("[DISPATCHER] in-flight underflow: %v", err) }
 			return fmt.Errorf("dispatcher closing")
 		}
 	}
 
 	if err := active.Subscription.Stream.Send(retryDelivery); err != nil {
-		d.decInFlight(1)
+		if err := d.decInFlight(1); err != nil { log.Printf("[DISPATCHER] in-flight underflow: %v", err) }
 		return fmt.Errorf("resend failed: %w", err)
 	}
 
@@ -866,8 +884,15 @@ func (d *Dispatcher) GetStats() *DispatcherStats {
 			credits := atomic.LoadInt32(&sub.Credits)
 			stats.CreditsInUse += int64(sub.MaxCredits - credits)
 			stats.CreditsAvailable += int64(credits)
+			if sub.circuitBreaker != nil && !sub.circuitBreaker.CanTry() {
+				stats.OpenCircuitBreakers++
+			}
 		}
 		shard.mu.RUnlock()
+	}
+	stats.RetryQueueDepth = int64(d.retryHeap.Len())
+	if d.dlq != nil {
+		stats.DLQSize = int64(d.dlq.Count())
 	}
 	return stats
 }
@@ -878,6 +903,9 @@ type DispatcherStats struct {
 	ActiveDeliveries    int64
 	CreditsInUse        int64
 	CreditsAvailable    int64
+	RetryQueueDepth     int64
+	DLQSize             int64
+	OpenCircuitBreakers int64
 }
 
 // Drain waits for all active deliveries to complete or the timeout to expire.
@@ -901,7 +929,7 @@ func (d *Dispatcher) Close() {
 	for _, shard := range d.shards {
 		shard.mu.Lock()
 		for deliveryID := range shard.activeDeliveries {
-			d.decInFlight(1)
+			if err := d.decInFlight(1); err != nil { log.Printf("[DISPATCHER] in-flight underflow: %v", err) }
 			delete(shard.activeDeliveries, deliveryID)
 		}
 		shard.subscriptions = make(map[string]*Subscription)

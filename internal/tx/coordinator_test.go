@@ -2,20 +2,24 @@ package tx
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 )
 
 func TestCoordinator_NewCoordinator(t *testing.T) {
-	c := NewCoordinator(30 * time.Second)
+	c := NewCoordinator(30*time.Second, t.TempDir())
 	if c == nil {
 		t.Fatal("NewCoordinator should not return nil")
 	}
+	c.Stop()
 }
 
 func TestCoordinator_Begin(t *testing.T) {
-	c := NewCoordinator(30 * time.Second)
+	c := NewCoordinator(30*time.Second, t.TempDir())
+	defer c.Stop()
 
 	tx, err := c.Begin("tx-1", []Participant{
 		PartitionParticipant{PartitionID: 1},
@@ -37,7 +41,8 @@ func TestCoordinator_Begin(t *testing.T) {
 }
 
 func TestCoordinator_Begin_Duplicate(t *testing.T) {
-	c := NewCoordinator(30 * time.Second)
+	c := NewCoordinator(30*time.Second, t.TempDir())
+	defer c.Stop()
 
 	c.Begin("tx-1", []Participant{PartitionParticipant{PartitionID: 1}})
 
@@ -48,11 +53,12 @@ func TestCoordinator_Begin_Duplicate(t *testing.T) {
 }
 
 func TestCoordinator_Commit(t *testing.T) {
-	c := NewCoordinator(30 * time.Second)
+	c := NewCoordinator(30*time.Second, t.TempDir())
+	defer c.Stop()
 
 	var prepCalled, commitCalled int
 	participant := &mockParticipant{
-		onPrepare: func() error { prepCalled++ ; return nil },
+		onPrepare: func() error { prepCalled++; return nil },
 		onCommit:  func() error { commitCalled++; return nil },
 	}
 
@@ -78,7 +84,8 @@ func TestCoordinator_Commit(t *testing.T) {
 }
 
 func TestCoordinator_Commit_PrepareFailure(t *testing.T) {
-	c := NewCoordinator(30 * time.Second)
+	c := NewCoordinator(30*time.Second, t.TempDir())
+	defer c.Stop()
 
 	participant := &mockParticipant{
 		onPrepare: func() error { return context.DeadlineExceeded },
@@ -95,7 +102,8 @@ func TestCoordinator_Commit_PrepareFailure(t *testing.T) {
 }
 
 func TestCoordinator_Abort(t *testing.T) {
-	c := NewCoordinator(30 * time.Second)
+	c := NewCoordinator(30*time.Second, t.TempDir())
+	defer c.Stop()
 
 	var abortCalled int
 	participant := &mockParticipant{
@@ -121,7 +129,8 @@ func TestCoordinator_Abort(t *testing.T) {
 }
 
 func TestCoordinator_Abort_NonExistent(t *testing.T) {
-	c := NewCoordinator(30 * time.Second)
+	c := NewCoordinator(30*time.Second, t.TempDir())
+	defer c.Stop()
 
 	err := c.Abort(context.Background(), "nonexistent")
 	if err == nil {
@@ -130,7 +139,8 @@ func TestCoordinator_Abort_NonExistent(t *testing.T) {
 }
 
 func TestCoordinator_GetStatus(t *testing.T) {
-	c := NewCoordinator(30 * time.Second)
+	c := NewCoordinator(30*time.Second, t.TempDir())
+	defer c.Stop()
 
 	// Non-existent tx
 	_, err := c.GetStatus("nonexistent")
@@ -150,7 +160,8 @@ func TestCoordinator_GetStatus(t *testing.T) {
 }
 
 func TestCoordinator_MultiParticipantCommit(t *testing.T) {
-	c := NewCoordinator(30 * time.Second)
+	c := NewCoordinator(30*time.Second, t.TempDir())
+	defer c.Stop()
 
 	var prepCount, commitCount int
 	var mu sync.Mutex
@@ -200,7 +211,8 @@ func TestPartitionParticipant(t *testing.T) {
 
 func TestCoordinator_Timeout(t *testing.T) {
 	// Very short timeout
-	c := NewCoordinator(1 * time.Millisecond)
+	c := NewCoordinator(1*time.Millisecond, t.TempDir())
+	defer c.Stop()
 
 	participant := &mockParticipant{
 		onPrepare: func() error {
@@ -216,6 +228,45 @@ func TestCoordinator_Timeout(t *testing.T) {
 	_ = c.Commit(ctx, "tx-timeout")
 	// The mock doesn't actually sleep, so it won't timeout in prepare
 	// But the context will be cancelled
+}
+
+func TestCoordinator_TxLog(t *testing.T) {
+	tmpDir := t.TempDir()
+	c := NewCoordinator(30*time.Second, tmpDir)
+	defer c.Stop()
+
+	c.Begin("tx-log-test", []Participant{
+		PartitionParticipant{PartitionID: 1},
+	})
+
+	// Verify tx log file was created
+	if _, err := os.Stat(filepath.Join(tmpDir, "tx_log.json")); os.IsNotExist(err) {
+		t.Error("tx_log.json should exist after Begin")
+	}
+}
+
+func TestCoordinator_Recovery(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create coordinator, start a transaction, then "crash" (stop without commit)
+	c1 := NewCoordinator(30*time.Second, tmpDir)
+	c1.Begin("tx-recover", []Participant{
+		PartitionParticipant{PartitionID: 1},
+	})
+	c1.Stop()
+
+	// Create new coordinator pointing at same data dir — should recover
+	c2 := NewCoordinator(30*time.Second, tmpDir)
+	defer c2.Stop()
+
+	// The tx should be loaded from log
+	status, err := c2.GetStatus("tx-recover")
+	if err != nil {
+		t.Fatalf("GetStatus after recovery failed: %v", err)
+	}
+	if status != StatusPending {
+		t.Errorf("expected StatusPending after recovery, got %v", status)
+	}
 }
 
 func TestTransaction_Struct(t *testing.T) {
@@ -246,6 +297,21 @@ func TestStatus_Values(t *testing.T) {
 	}
 	if StatusAborted != 3 {
 		t.Errorf("expected StatusAborted=3, got %d", StatusAborted)
+	}
+}
+
+func TestStatus_String(t *testing.T) {
+	if StatusPending.String() != "pending" {
+		t.Errorf("expected pending, got %s", StatusPending.String())
+	}
+	if StatusPrepared.String() != "prepared" {
+		t.Errorf("expected prepared, got %s", StatusPrepared.String())
+	}
+	if StatusCommitted.String() != "committed" {
+		t.Errorf("expected committed, got %s", StatusCommitted.String())
+	}
+	if StatusAborted.String() != "aborted" {
+		t.Errorf("expected aborted, got %s", StatusAborted.String())
 	}
 }
 

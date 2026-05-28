@@ -29,6 +29,10 @@ type DeadLetterQueue struct {
 	dataDir string
 	maxSize int
 	writer  *DLQSegmentWriter
+
+	// Background retry worker
+	retryQuit chan struct{}
+	retryFn   func(entry *DLQEntry) // callback to re-queue for delivery
 }
 
 // NewDeadLetterQueue creates a new DLQ
@@ -192,8 +196,69 @@ type DLQStats struct {
 	NewestEntryAge int64 `json:"newest_entry_age_ms"`
 }
 
+// SetRetryCallback registers a function that will be called for each DLQ entry
+// during background retry. The function should attempt to re-deliver the event.
+func (d *DeadLetterQueue) SetRetryCallback(fn func(entry *DLQEntry)) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.retryFn = fn
+}
+
+// StartRetryWorker starts a background goroutine that retries DLQ entries
+// at the given interval. Call StopRetryWorker to shut it down.
+func (d *DeadLetterQueue) StartRetryWorker(interval time.Duration) {
+	d.mu.Lock()
+	if d.retryQuit != nil {
+		d.mu.Unlock()
+		return // Already running
+	}
+	d.retryQuit = make(chan struct{})
+	d.mu.Unlock()
+
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				d.retryAll()
+			case <-d.retryQuit:
+				return
+			}
+		}
+	}()
+}
+
+// StopRetryWorker stops the background retry worker.
+func (d *DeadLetterQueue) StopRetryWorker() {
+	d.mu.Lock()
+	if d.retryQuit != nil {
+		close(d.retryQuit)
+		d.retryQuit = nil
+	}
+	d.mu.Unlock()
+}
+
+func (d *DeadLetterQueue) retryAll() {
+	d.mu.RLock()
+	entries := make([]*DLQEntry, len(d.entries))
+	copy(entries, d.entries)
+	retryFn := d.retryFn
+	d.mu.RUnlock()
+
+	if retryFn == nil {
+		return
+	}
+
+	for _, entry := range entries {
+		retryFn(entry)
+	}
+}
+
 // Close closes the DLQ and releases file handles.
 func (d *DeadLetterQueue) Close() error {
+	d.StopRetryWorker()
 	if d.writer != nil {
 		return d.writer.Close()
 	}

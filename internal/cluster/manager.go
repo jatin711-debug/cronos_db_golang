@@ -139,9 +139,20 @@ func (m *Manager) Start() error {
 		// When a new node joins via gossip, add it to Raft if we're the leader
 		if m.raft != nil && m.raft.IsLeader() && node.RaftAddr != "" {
 			log.Printf("[CLUSTER] Adding node %s to Raft cluster at %s", node.ID, node.RaftAddr)
-			if err := m.raft.Join(node.ID, node.RaftAddr); err != nil {
-				log.Printf("[CLUSTER] Warning: Failed to add node %s to Raft: %v", node.ID, err)
+			// Retry with exponential backoff — the target node may still be booting
+			var lastErr error
+			for attempt := 1; attempt <= 3; attempt++ {
+				if err := m.raft.Join(node.ID, node.RaftAddr); err != nil {
+					lastErr = err
+					backoff := time.Duration(attempt) * time.Second
+					log.Printf("[CLUSTER] Raft join attempt %d/3 failed for %s: %v (retrying in %v)", attempt, node.ID, err, backoff)
+					time.Sleep(backoff)
+					continue
+				}
+				log.Printf("[CLUSTER] Successfully added node %s to Raft cluster", node.ID)
+				return
 			}
+			log.Printf("[CLUSTER] Warning: Failed to add node %s to Raft after 3 attempts: %v", node.ID, lastErr)
 		}
 	})
 
@@ -329,6 +340,36 @@ func (m *Manager) electNewLeader(partitionID int32, info *PartitionInfo) {
 		if err := m.raft.Apply(cmd); err != nil {
 			log.Printf("[CLUSTER] Failed to update partition leader: %v", err)
 			return
+		}
+	}
+
+	// If we are the new leader, promote the local partition
+	if newLeader == m.config.NodeID && m.partitionAccessor != nil {
+		if err := m.partitionAccessor.PromoteToLeader(partitionID, newInfo.Epoch); err != nil {
+			log.Printf("[CLUSTER] Failed to promote partition %d to leader: %v", partitionID, err)
+		}
+		// Register all alive replicas as followers
+		for _, replicaID := range info.Replicas {
+			if replicaID == newLeader {
+				continue
+			}
+			if !aliveNodeIDs[replicaID] {
+				continue
+			}
+			node, err := m.membership.GetNode(replicaID)
+			if err != nil || node == nil || node.Address == "" {
+				continue
+			}
+			if err := m.partitionAccessor.AddFollower(partitionID, replicaID, node.Address); err != nil {
+				log.Printf("[CLUSTER] Failed to add follower %s to partition %d: %v", replicaID, partitionID, err)
+			}
+		}
+	}
+
+	// If we were the old leader, demote
+	if info.LeaderID == m.config.NodeID && newLeader != m.config.NodeID && m.partitionAccessor != nil {
+		if err := m.partitionAccessor.DemoteFromLeader(partitionID); err != nil {
+			log.Printf("[CLUSTER] Failed to demote partition %d: %v", partitionID, err)
 		}
 	}
 
@@ -560,6 +601,11 @@ func (m *Manager) IsLocalPartition(partitionID int32) bool {
 // IsPartitionLeader returns true if this node is the partition leader
 func (m *Manager) IsPartitionLeader(partitionID int32) bool {
 	return m.router.IsPartitionLeader(partitionID)
+}
+
+// GetPartitionEpoch returns the cluster epoch for a partition.
+func (m *Manager) GetPartitionEpoch(partitionID int32) int64 {
+	return m.router.GetPartitionEpoch(partitionID)
 }
 
 // GetLocalPartitions returns partitions owned by this node

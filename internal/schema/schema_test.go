@@ -67,6 +67,27 @@ func TestRegistry_Register_Idempotent(t *testing.T) {
 	}
 }
 
+func TestRegistry_RegisterWithDescriptor(t *testing.T) {
+	tmpDir := t.TempDir()
+	r, _ := NewRegistry(tmpDir)
+
+	v, err := r.RegisterWithDescriptor("events", TypeProtobuf, "com.example.Event", []byte("fake_descriptor"))
+	if err != nil {
+		t.Fatalf("RegisterWithDescriptor failed: %v", err)
+	}
+	if v != 1 {
+		t.Errorf("expected version 1, got %d", v)
+	}
+
+	schema, ok := r.Get("events")
+	if !ok {
+		t.Fatal("should find registered topic")
+	}
+	if string(schema.Descriptor) != "fake_descriptor" {
+		t.Errorf("descriptor mismatch: got %q", schema.Descriptor)
+	}
+}
+
 func TestRegistry_Get(t *testing.T) {
 	tmpDir := t.TempDir()
 	r, _ := NewRegistry(tmpDir)
@@ -172,10 +193,7 @@ func TestRegistry_Validate_Protobuf_WellKnown(t *testing.T) {
 
 	r.Register("timestamps", TypeProtobuf, "google.protobuf.Timestamp")
 
-	// Valid Timestamp protobuf
-	// google.protobuf.Timestamp wire format: field 1 (varint seconds), field 2 (varint nanos)
-	// Empty timestamp = 0 seconds, 0 nanos = empty byte sequence, but let's try minimal valid
-	// Actually empty is valid for zero values in proto3
+	// Empty timestamp is valid for zero values in proto3
 	err := r.Validate("timestamps", []byte{})
 	if err != nil {
 		t.Errorf("unexpected error for empty timestamp: %v", err)
@@ -191,6 +209,23 @@ func TestRegistry_Validate_Protobuf_Unknown(t *testing.T) {
 	err := r.Validate("custom", []byte(`any payload`))
 	if err == nil {
 		t.Error("expected error for unknown protobuf type")
+	}
+}
+
+func TestRegistry_Validate_Protobuf_WithDescriptor(t *testing.T) {
+	tmpDir := t.TempDir()
+	r, _ := NewRegistry(tmpDir)
+
+	// Register with a descriptor — even fake bytes should change error path
+	r.RegisterWithDescriptor("custom", TypeProtobuf, "com.example.MyEvent", []byte("invalid_descriptor"))
+
+	err := r.Validate("custom", []byte(`any payload`))
+	if err == nil {
+		t.Error("expected error for invalid descriptor")
+	}
+	// Should mention descriptor unmarshal, not "requires FileDescriptorProto bytes"
+	if err.Error() == "protobuf validation for \"com.example.MyEvent\" requires the schema definition to contain the FileDescriptorProto bytes; use RegisterWithDescriptor to supply the descriptor" {
+		t.Error("expected descriptor unmarshal error, got generic missing descriptor error")
 	}
 }
 
@@ -271,6 +306,123 @@ func TestRegistry_Persist(t *testing.T) {
 	}
 }
 
+func TestRegistry_Load(t *testing.T) {
+	tmpDir := t.TempDir()
+	r1, _ := NewRegistry(tmpDir)
+
+	r1.Register("orders", TypeJSON, `{"type":"object"}`)
+	r1.Register("orders", TypeJSON, `{"type":"object","properties":{}}`)
+	r1.Register("users", TypeAvro, `{"type":"record","name":"User","fields":[]}`)
+
+	// Create a new registry pointing at the same dir — should load persisted schemas
+	r2, err := NewRegistry(tmpDir)
+	if err != nil {
+		t.Fatalf("NewRegistry failed: %v", err)
+	}
+
+	orders, ok := r2.Get("orders")
+	if !ok {
+		t.Fatal("should load orders schema")
+	}
+	if orders.Version != 2 {
+		t.Errorf("expected latest version 2, got %d", orders.Version)
+	}
+
+	users, ok := r2.Get("users")
+	if !ok {
+		t.Fatal("should load users schema")
+	}
+	if users.Type != TypeAvro {
+		t.Errorf("expected avro type, got %s", users.Type)
+	}
+}
+
+func TestRegistry_Compatibility_Backward(t *testing.T) {
+	tmpDir := t.TempDir()
+	r, _ := NewRegistry(tmpDir)
+
+	avroSchema1 := `{"type":"record","name":"User","fields":[{"name":"name","type":"string"}]}`
+	avroSchema2 := `{"type":"record","name":"User","fields":[{"name":"name","type":"string"},{"name":"age","type":"int","default":0}]}`
+
+	r.SetCompatibility("users", CompatBackward)
+	_, err := r.Register("users", TypeAvro, avroSchema1)
+	if err != nil {
+		t.Fatalf("register v1: %v", err)
+	}
+	_, err = r.Register("users", TypeAvro, avroSchema2)
+	if err != nil {
+		t.Fatalf("register v2: %v", err)
+	}
+}
+
+func TestRegistry_Compatibility_Backward_Fail(t *testing.T) {
+	tmpDir := t.TempDir()
+	r, _ := NewRegistry(tmpDir)
+
+	avroSchema1 := `{"type":"record","name":"User","fields":[{"name":"name","type":"string"},{"name":"age","type":"int"}]}`
+	avroSchema2 := `{"type":"record","name":"User","fields":[{"name":"name","type":"string"}]}`
+
+	r.SetCompatibility("users", CompatBackward)
+	_, err := r.Register("users", TypeAvro, avroSchema1)
+	if err != nil {
+		t.Fatalf("register v1: %v", err)
+	}
+	_, err = r.Register("users", TypeAvro, avroSchema2)
+	if err == nil {
+		t.Fatal("expected backward compatibility failure when removing field")
+	}
+}
+
+func TestRegistry_Compatibility_None(t *testing.T) {
+	tmpDir := t.TempDir()
+	r, _ := NewRegistry(tmpDir)
+
+	avroSchema1 := `{"type":"record","name":"User","fields":[{"name":"name","type":"string"}]}`
+	avroSchema2 := `{"type":"record","name":"User","fields":[]}`
+
+	r.SetCompatibility("users", CompatNone)
+	_, err := r.Register("users", TypeAvro, avroSchema1)
+	if err != nil {
+		t.Fatalf("register v1: %v", err)
+	}
+	_, err = r.Register("users", TypeAvro, avroSchema2)
+	if err != nil {
+		t.Fatalf("expected no error with NONE compatibility: %v", err)
+	}
+}
+
+func TestRegistry_Compatibility_DefaultBackward(t *testing.T) {
+	tmpDir := t.TempDir()
+	r, _ := NewRegistry(tmpDir)
+
+	avroSchema1 := `{"type":"record","name":"User","fields":[{"name":"name","type":"string"}]}`
+	avroSchema2 := `{"type":"record","name":"User","fields":[]}`
+
+	// No explicit compatibility set — should default to BACKWARD
+	_, err := r.Register("users", TypeAvro, avroSchema1)
+	if err != nil {
+		t.Fatalf("register v1: %v", err)
+	}
+	_, err = r.Register("users", TypeAvro, avroSchema2)
+	if err == nil {
+		t.Fatal("expected default backward compatibility to reject field removal")
+	}
+}
+
+func TestRegistry_Compatibility_TypeChange(t *testing.T) {
+	tmpDir := t.TempDir()
+	r, _ := NewRegistry(tmpDir)
+
+	_, err := r.Register("data", TypeJSON, `{"type":"object"}`)
+	if err != nil {
+		t.Fatalf("register v1: %v", err)
+	}
+	_, err = r.Register("data", TypeAvro, `{"type":"record","name":"X","fields":[]}`)
+	if err == nil {
+		t.Fatal("expected error when changing schema type")
+	}
+}
+
 func TestSchema_Hash(t *testing.T) {
 	s1 := Schema{Topic: "t", Version: 1, Type: TypeJSON, Definition: `{"a":1}`}
 	s2 := Schema{Topic: "t", Version: 1, Type: TypeJSON, Definition: `{"a":1}`}
@@ -294,5 +446,20 @@ func TestType_Constants(t *testing.T) {
 	}
 	if TypeProtobuf != "protobuf" {
 		t.Error("TypeProtobuf mismatch")
+	}
+}
+
+func TestCompatibilityMode_Values(t *testing.T) {
+	if CompatNone != "NONE" {
+		t.Error("CompatNone mismatch")
+	}
+	if CompatBackward != "BACKWARD" {
+		t.Error("CompatBackward mismatch")
+	}
+	if CompatForward != "FORWARD" {
+		t.Error("CompatForward mismatch")
+	}
+	if CompatFull != "FULL" {
+		t.Error("CompatFull mismatch")
 	}
 }

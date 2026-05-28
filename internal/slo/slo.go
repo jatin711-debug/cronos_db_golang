@@ -1,6 +1,7 @@
 package slo
 
 import (
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -8,9 +9,9 @@ import (
 
 // Window defines an SLO observation window.
 type Window struct {
-	Duration   time.Duration
-	TargetP99  time.Duration
-	TargetP95  time.Duration
+	Duration     time.Duration
+	TargetP99    time.Duration
+	TargetP95    time.Duration
 	MaxErrorRate float64 // 0.0-1.0
 }
 
@@ -18,13 +19,15 @@ type Window struct {
 type Recorder struct {
 	mu sync.RWMutex
 
-	totalRequests   atomic.Int64
-	errorRequests   atomic.Int64
-	latencyBuckets  []time.Duration // Sorted ascending
-	bucketMu        sync.Mutex
-	maxBuckets      int
+	totalRequests  atomic.Int64
+	errorRequests  atomic.Int64
+	latencyBuckets []time.Duration // Sorted ascending after copy
+	bucketMu       sync.Mutex
+	maxBuckets     int
 
-	window Window
+	window      Window
+	resetTicker *time.Ticker
+	quit        chan struct{}
 }
 
 // NewRecorder creates an SLO recorder.
@@ -33,6 +36,33 @@ func NewRecorder(window Window) *Recorder {
 		latencyBuckets: make([]time.Duration, 0, 10000),
 		maxBuckets:     10000,
 		window:         window,
+		quit:           make(chan struct{}),
+	}
+}
+
+// Start begins the periodic reset loop. Call once after construction.
+func (r *Recorder) Start() {
+	if r.window.Duration <= 0 {
+		return
+	}
+	r.resetTicker = time.NewTicker(r.window.Duration)
+	go func() {
+		for {
+			select {
+			case <-r.resetTicker.C:
+				r.Reset()
+			case <-r.quit:
+				return
+			}
+		}
+	}()
+}
+
+// Stop halts the periodic reset loop.
+func (r *Recorder) Stop() {
+	close(r.quit)
+	if r.resetTicker != nil {
+		r.resetTicker.Stop()
 	}
 }
 
@@ -61,24 +91,46 @@ func (r *Recorder) ErrorRate() float64 {
 	return float64(r.errorRequests.Load()) / float64(total)
 }
 
-// P99 returns approximate p99 latency.
-func (r *Recorder) P99() time.Duration {
+// sortedLatencies returns a sorted copy of latency buckets.
+func (r *Recorder) sortedLatencies() []time.Duration {
 	r.bucketMu.Lock()
 	buckets := make([]time.Duration, len(r.latencyBuckets))
 	copy(buckets, r.latencyBuckets)
 	r.bucketMu.Unlock()
 
 	if len(buckets) == 0 {
+		return nil
+	}
+	sort.Slice(buckets, func(i, j int) bool { return buckets[i] < buckets[j] })
+	return buckets
+}
+
+// percentile returns the p-th percentile (0.0-1.0) from sorted latencies.
+func percentile(sorted []time.Duration, p float64) time.Duration {
+	n := len(sorted)
+	if n == 0 {
 		return 0
 	}
-	// Simple selection sort for p99 — adequate for small buckets
-	// In production, use a streaming histogram (e.g.,HdrHistogram)
-	idx := int(float64(len(buckets)) * 0.99)
-	if idx >= len(buckets) {
-		idx = len(buckets) - 1
+	idx := int(p * float64(n-1))
+	if idx < 0 {
+		idx = 0
 	}
-	// Approximate: not a true percentile but good enough for SLO signaling
-	return buckets[idx]
+	if idx >= n {
+		idx = n - 1
+	}
+	return sorted[idx]
+}
+
+// P99 returns the 99th percentile latency.
+func (r *Recorder) P99() time.Duration {
+	sorted := r.sortedLatencies()
+	return percentile(sorted, 0.99)
+}
+
+// P95 returns the 95th percentile latency.
+func (r *Recorder) P95() time.Duration {
+	sorted := r.sortedLatencies()
+	return percentile(sorted, 0.95)
 }
 
 // Compliant returns true if current metrics meet SLO targets.

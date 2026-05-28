@@ -2,6 +2,7 @@ package tx
 
 import (
 	"context"
+	"time"
 
 	"github.com/jatin711-debug/cronos_db_golang/internal/partition"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
@@ -20,7 +21,7 @@ type Handler struct {
 // NewHandler creates a transaction handler.
 func NewHandler(pm *partition.PartitionManager) *Handler {
 	return &Handler{
-		coordinator: NewCoordinator(30),
+		coordinator: NewCoordinator(30*time.Second, ""),
 		pm:          pm,
 	}
 }

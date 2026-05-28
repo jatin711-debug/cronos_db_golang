@@ -422,7 +422,9 @@ func TestDispatcher_TryReserveInFlight(t *testing.T) {
 	}
 
 	// Release some
-	d.decInFlight(5)
+	if err := d.decInFlight(5); err != nil {
+		t.Errorf("unexpected error releasing in-flight: %v", err)
+	}
 	if !d.tryReserveInFlight(1) {
 		t.Error("should be able to reserve 1 after release")
 	}
@@ -445,16 +447,20 @@ func TestDispatcher_DecInFlight(t *testing.T) {
 
 	// Reserve then dec
 	d.tryReserveInFlight(5)
-	d.decInFlight(3)
+	if err := d.decInFlight(3); err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
 
 	if d.getInFlight() != 2 {
 		t.Errorf("expected in-flight=2, got %d", d.getInFlight())
 	}
 
-	// Dec more than current should clamp to 0
-	d.decInFlight(100)
-	if d.getInFlight() != 0 {
-		t.Errorf("expected in-flight=0, got %d", d.getInFlight())
+	// Dec more than current should return an error
+	if err := d.decInFlight(100); err == nil {
+		t.Error("expected underflow error when decrementing more than current")
+	}
+	if d.getInFlight() != 2 {
+		t.Errorf("expected in-flight to remain 2 after failed decrement, got %d", d.getInFlight())
 	}
 }
 

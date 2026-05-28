@@ -8,8 +8,18 @@ import (
 
 	"github.com/jatin711-debug/cronos_db_golang/internal/storage"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 
 	"net"
+)
+
+var replicationLag = promauto.NewGaugeVec(
+	prometheus.GaugeOpts{
+		Name: "cronos_replication_lag",
+		Help: "Replication lag per follower in events",
+	},
+	[]string{"follower", "partition"},
 )
 
 // Leader manages replication to followers
@@ -20,6 +30,7 @@ type Leader struct {
 	followers     map[string]*FollowerInfo
 	batchSize     int32
 	flushInterval time.Duration
+	replicateTimeout time.Duration
 	quit          chan struct{}
 	transports    map[string]*Transport
 	wal           *storage.WAL
@@ -42,14 +53,15 @@ type FollowerInfo struct {
 // NewLeader creates a new leader
 func NewLeader(partitionID int32, batchSize int32, flushInterval time.Duration, wal *storage.WAL) *Leader {
 	return &Leader{
-		partitionID:   partitionID,
-		epoch:         1,
-		followers:     make(map[string]*FollowerInfo),
-		batchSize:     batchSize,
-		flushInterval: flushInterval,
-		quit:          make(chan struct{}),
-		transports:    make(map[string]*Transport),
-		wal:           wal,
+		partitionID:      partitionID,
+		epoch:            1,
+		followers:        make(map[string]*FollowerInfo),
+		batchSize:        batchSize,
+		flushInterval:    flushInterval,
+		replicateTimeout: 10 * time.Second,
+		quit:             make(chan struct{}),
+		transports:       make(map[string]*Transport),
+		wal:              wal,
 	}
 }
 
@@ -144,6 +156,15 @@ func (l *Leader) handleAck(id string, ack *AppendAckMessage) {
 			}
 			follower.InSync = true
 		}
+		// Compute and expose replication lag using WAL high watermark
+		var lag int64
+		if l.wal != nil {
+			lag = l.wal.GetHighWatermark() - follower.HighWatermark
+		}
+		if lag < 0 {
+			lag = 0
+		}
+		replicationLag.WithLabelValues(id, fmt.Sprintf("%d", l.partitionID)).Set(float64(lag))
 	}
 }
 
@@ -166,7 +187,9 @@ func (l *Leader) RemoveFollower(id string) error {
 	return nil
 }
 
-// Replicate replicates an event batch to followers
+// Replicate replicates an event batch to followers and waits for quorum ACKs.
+// It buffers events, flushes all followers, then waits for a majority of followers
+// to acknowledge the last offset before returning.
 func (l *Leader) Replicate(events []*types.Event) error {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
@@ -187,7 +210,10 @@ func (l *Leader) Replicate(events []*types.Event) error {
 		return fmt.Errorf("replication quorum failed: only %d of %d followers connected", activeCount, len(l.followers))
 	}
 
-	ackChan := make(chan error, activeCount)
+	lastOffset := events[len(events)-1].Offset
+
+	// Phase 1: Buffer events to all active followers
+	sendChan := make(chan error, activeCount)
 	for _, follower := range l.followers {
 		if !follower.Connected {
 			continue
@@ -196,42 +222,88 @@ func (l *Leader) Replicate(events []*types.Event) error {
 		go func(f *FollowerInfo) {
 			f.mu.Lock()
 			err := l.sendBatchLocked(f, events)
+			f.mu.Unlock()
+			if err != nil {
+				log.Printf("[LEADER] Failed to buffer for %s: %v", f.ID, err)
+			}
+			sendChan <- err
+		}(follower)
+	}
+
+	for i := 0; i < activeCount; i++ {
+		if err := <-sendChan; err != nil {
+			return fmt.Errorf("replication buffer failed: %w", err)
+		}
+	}
+
+	// Phase 2: Flush all followers so data is on the wire
+	flushChan := make(chan error, activeCount)
+	for _, follower := range l.followers {
+		if !follower.Connected {
+			continue
+		}
+		go func(f *FollowerInfo) {
+			f.mu.Lock()
+			err := l.flushFollower(f)
 			if err != nil {
 				f.LastError = err
 				f.InSync = false
-				log.Printf("[LEADER] Failed to replicate to %s: %v", f.ID, err)
-				f.mu.Unlock()
-				ackChan <- err
 			} else {
 				f.LastError = nil
 				f.LastAckTS = time.Now().UnixMilli()
-				f.mu.Unlock()
-				ackChan <- nil
 			}
+			f.mu.Unlock()
+			flushChan <- err
 		}(follower)
 	}
 
 	successes := 0
 	failures := 0
 	maxFailures := activeCount - neededAcks
-
 	for i := 0; i < activeCount; i++ {
-		err := <-ackChan
+		err := <-flushChan
 		if err == nil {
 			successes++
 			if successes >= neededAcks {
-				return nil // Quorum achieved! Return early.
+				break // Enough followers flushed, wait for acks
 			}
 		} else {
 			failures++
 			if failures > maxFailures {
-				// We can no longer achieve quorum
-				return fmt.Errorf("replication quorum failed: too many follower replication errors: %w", err)
+				return fmt.Errorf("replication quorum failed: too many follower flush errors: %w", err)
 			}
 		}
 	}
 
-	return nil
+	// Phase 3: Wait for quorum of followers to ack the last offset
+	return l.waitForQuorumAcks(lastOffset, l.replicateTimeout)
+}
+
+// waitForQuorumAcks blocks until a majority of followers have acked an offset
+// >= targetOffset, or until timeout.
+func (l *Leader) waitForQuorumAcks(targetOffset int64, timeout time.Duration) error {
+	neededAcks := (len(l.followers) + 1) / 2
+	deadline := time.Now().Add(timeout)
+	pollInterval := 10 * time.Millisecond
+
+	for time.Now().Before(deadline) {
+		l.mu.RLock()
+		acks := 0
+		for _, f := range l.followers {
+			if f.Connected && f.HighWatermark >= targetOffset {
+				acks++
+			}
+		}
+		l.mu.RUnlock()
+
+		if acks >= neededAcks {
+			return nil
+		}
+
+		time.Sleep(pollInterval)
+	}
+
+	return fmt.Errorf("replication quorum timeout: not enough followers acked offset %d within %v", targetOffset, timeout)
 }
 
 // sendBatch sends a batch to a follower (public, acquires f.mu)
@@ -278,8 +350,7 @@ func (l *Leader) flushFollower(follower *FollowerInfo) error {
 
 	log.Printf("[LEADER] Replicating %d events to %s (binary)", len(follower.Buffer), follower.ID)
 
-	// Assume success for now, real ack comes async
-	// Update next offset
+	// Update next offset based on the flushed buffer
 	if len(follower.Buffer) > 0 {
 		lastEvent := follower.Buffer[len(follower.Buffer)-1]
 		follower.NextOffset = lastEvent.Offset + 1

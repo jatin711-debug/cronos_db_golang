@@ -14,6 +14,7 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/internal/replication"
 	"github.com/jatin711-debug/cronos_db_golang/internal/scheduler"
 	"github.com/jatin711-debug/cronos_db_golang/internal/storage"
+	"github.com/jatin711-debug/cronos_db_golang/internal/tenant"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 
@@ -33,8 +34,10 @@ type Partition struct {
 	DedupStore    *dedup.Manager
 	Dispatcher    *delivery.Dispatcher
 	Worker        *delivery.Worker
-	Follower      *replication.Follower // For receiving replicated data
+	Follower      *replication.Follower  // For receiving replicated data
+	ReplLeader    *replication.Leader    // For sending replication to followers
 	Leader        bool
+	Epoch         int64                 // Cluster-assigned epoch for split-brain fencing
 	CreatedTS     time.Time
 	UpdatedTS     time.Time
 	deliveryQuit  chan struct{} // Quit channel for delivery goroutine
@@ -42,11 +45,17 @@ type Partition struct {
 
 // PartitionManager manages all partitions
 type PartitionManager struct {
-	mu          sync.RWMutex
-	partitions  map[int32]*Partition
-	nodeID      string
-	config      *types.Config
-	pebbleCache *pebble.Cache
+	mu               sync.RWMutex
+	partitions       map[int32]*Partition
+	nodeID           string
+	config           *types.Config
+	pebbleCache      *pebble.Cache
+	tenantAccountant tenantAccountant
+}
+
+// tenantAccountant is the minimal interface needed for delivery callbacks.
+type tenantAccountant interface {
+	RecordDelivery(tenant tenant.ID)
 }
 
 // NewPartitionManager creates a new partition manager
@@ -55,6 +64,21 @@ func NewPartitionManager(nodeID string, config *types.Config) *PartitionManager 
 		partitions: make(map[int32]*Partition),
 		nodeID:     nodeID,
 		config:     config,
+	}
+}
+
+// SetTenantAccountant configures the tenant accountant for delivery tracking.
+// It also applies the callback to all existing partition dispatchers.
+func (pm *PartitionManager) SetTenantAccountant(ta tenantAccountant) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	pm.tenantAccountant = ta
+	for _, p := range pm.partitions {
+		if p.Dispatcher != nil {
+			p.Dispatcher.OnDeliveryComplete = func(tenantID string) {
+				ta.RecordDelivery(tenant.ID(tenantID))
+			}
+		}
 	}
 }
 
@@ -142,6 +166,13 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 
 	// Create worker
 	worker := delivery.NewWorker(dispatcher, 100)
+
+	// Wire tenant delivery callback if configured
+	if pm.tenantAccountant != nil {
+		dispatcher.OnDeliveryComplete = func(tenantID string) {
+			pm.tenantAccountant.RecordDelivery(tenant.ID(tenantID))
+		}
+	}
 
 	// Create partition
 	partition := &Partition{
@@ -379,7 +410,10 @@ func (pm *PartitionManager) CanAccept(partitionID int32) bool {
 	return true
 }
 
-// GetOrCreateInternalPartition gets or auto-creates and starts an internal partition by ID
+// GetOrCreateInternalPartition gets or auto-creates and starts an internal partition by ID.
+// If the partition does not exist locally, it is created with the given topic and its
+// background workers (scheduler, delivery, compaction, dedup pruning) are started.
+// This method is safe for concurrent use.
 func (pm *PartitionManager) GetOrCreateInternalPartition(partitionID int32, topic string) (*Partition, error) {
 	// Fast path: read lock for existing partition lookups.
 	pm.mu.RLock()
@@ -815,6 +849,121 @@ func (pm *PartitionManager) SyncPartitionFromLeader(partitionID int32, leaderAdd
 
 	log.Printf("[PARTITION] Partition %d synced from leader %s", partitionID, leaderAddr)
 	return nil
+}
+
+// PromoteToLeader promotes a local partition to leader and starts replication.
+func (pm *PartitionManager) PromoteToLeader(partitionID int32, epoch int64) error {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	partition, exists := pm.partitions[partitionID]
+	if !exists {
+		return fmt.Errorf("partition %d not found", partitionID)
+	}
+
+	if partition.ReplLeader != nil {
+		partition.Leader = true
+		partition.Epoch = epoch
+		return nil // Already leader, just update epoch
+	}
+
+	leader := replication.NewLeader(partitionID, int32(pm.config.ReplicationBatchSize), pm.config.ReplicationTimeout, partition.Wal)
+	leader.Start()
+	partition.ReplLeader = leader
+	partition.Leader = true
+	partition.Epoch = epoch
+
+	log.Printf("[PARTITION] Partition %d promoted to leader (epoch=%d)", partitionID, epoch)
+	return nil
+}
+
+// AddFollower adds a follower to a local leader partition.
+func (pm *PartitionManager) AddFollower(partitionID int32, followerID string, followerAddr string) error {
+	pm.mu.RLock()
+	partition, exists := pm.partitions[partitionID]
+	pm.mu.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("partition %d not found", partitionID)
+	}
+
+	if partition.ReplLeader == nil {
+		return fmt.Errorf("partition %d is not a leader", partitionID)
+	}
+
+	if err := partition.ReplLeader.AddFollower(followerID, followerAddr); err != nil {
+		return fmt.Errorf("add follower %s: %w", followerID, err)
+	}
+
+	log.Printf("[PARTITION] Follower %s added to partition %d", followerID, partitionID)
+	return nil
+}
+
+// DemoteFromLeader demotes a local partition from leader.
+func (pm *PartitionManager) DemoteFromLeader(partitionID int32) error {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	partition, exists := pm.partitions[partitionID]
+	if !exists {
+		return fmt.Errorf("partition %d not found", partitionID)
+	}
+
+	if partition.ReplLeader != nil {
+		partition.ReplLeader.Stop()
+		partition.ReplLeader = nil
+	}
+	partition.Leader = false
+
+	log.Printf("[PARTITION] Partition %d demoted from leader", partitionID)
+	return nil
+}
+
+// GetPartitionEpoch returns the cluster epoch for a partition.
+func (pm *PartitionManager) GetPartitionEpoch(partitionID int32) int64 {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+
+	if partition, exists := pm.partitions[partitionID]; exists {
+		return partition.Epoch
+	}
+	return 0
+}
+
+// PartitionLoadStatus exposes backpressure signals for a partition.
+type PartitionLoadStatus struct {
+	PartitionID        int32
+	ReadyQueueDepth    int64
+	TimingWheelDepth   int64
+	InFlightDeliveries int64
+	DLQSize            int64
+	CanAccept          bool
+}
+
+// GetLoadStatus returns backpressure metrics for a partition.
+func (pm *PartitionManager) GetLoadStatus(partitionID int32) (*PartitionLoadStatus, error) {
+	pm.mu.RLock()
+	partition, exists := pm.partitions[partitionID]
+	pm.mu.RUnlock()
+
+	if !exists {
+		return nil, fmt.Errorf("partition %d not found", partitionID)
+	}
+
+	status := &PartitionLoadStatus{
+		PartitionID:      partitionID,
+		ReadyQueueDepth:  partition.Scheduler.GetReadyQueueDepth(),
+		TimingWheelDepth: partition.Scheduler.GetTimingWheelDepth(),
+		CanAccept:        pm.CanAccept(partitionID),
+	}
+
+	if partition.Dispatcher != nil {
+		stats := partition.Dispatcher.GetStats()
+		status.InFlightDeliveries = stats.ActiveDeliveries
+		status.DLQSize = stats.DLQSize
+	}
+
+	return status, nil
 }
 
 // NewPartitionManagerWithAccessor creates a new partition manager that implements PartitionAccessor
