@@ -130,6 +130,11 @@ func (g *GRPCServer) RegisterServices(
 	}
 }
 
+// RegisterCrossRegionServer registers the cross-region replication service.
+func (g *GRPCServer) RegisterCrossRegionServer(srv types.CrossRegionServiceServer) {
+	types.RegisterCrossRegionServiceServer(g.server, srv)
+}
+
 // Start starts the gRPC server
 func (g *GRPCServer) Start() error {
 	lis, err := net.Listen("tcp", g.config.Address)

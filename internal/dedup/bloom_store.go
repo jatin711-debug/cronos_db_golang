@@ -30,8 +30,15 @@ type GoBloomFilter struct {
 
 // NewBloomFilter creates a bloom filter sized for expectedItems with targetFPR false positive rate
 func NewBloomFilter(expectedItems uint64, targetFPR float64) BloomFilter {
+	if runtime.GOOS == "windows" {
+		return NewGoBloomFilter(expectedItems, targetFPR)
+	}
 	// Using Rust implementation for 5-10x performance gain
-	return NewRustBloomFilter(expectedItems, targetFPR)
+	bf := NewRustBloomFilter(expectedItems, targetFPR)
+	if bf == nil {
+		return NewGoBloomFilter(expectedItems, targetFPR)
+	}
+	return bf
 }
 
 // NewGoBloomFilter creates a pure Go bloom filter

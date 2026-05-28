@@ -114,11 +114,13 @@ type regionClient struct {
 
 // newRegionClient dials the given endpoint and returns a CrossRegionService client.
 func newRegionClient(ctx context.Context, endpoint string, dialTimeout time.Duration) (*regionClient, error) {
-	conn, err := grpc.NewClient(
+	dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
+	defer cancel()
+	conn, err := grpc.DialContext(
+		dialCtx,
 		endpoint,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithBlock(),
-		grpc.WithTimeout(dialTimeout),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("dial cross-region endpoint %s: %w", endpoint, err)

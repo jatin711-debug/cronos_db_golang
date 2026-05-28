@@ -63,29 +63,53 @@ func (sm *SplitManager) SplitPartition(sourceID int32, newID int32, splitOffset 
 	slog.Info("Partition split: scanning WAL from split offset",
 		"source", sourceID, "new", newID, "split_offset", splitOffset)
 
-	// Scan source WAL from splitOffset and append to new partition WAL
-	events, err := source.Wal.ReadEvents(splitOffset, -1)
-	if err != nil {
-		slog.Warn("Partition split: WAL scan error, continuing with empty new partition",
-			"source", sourceID, "error", err)
-		events = nil
+	// Batch-copy events from source to new partition to keep memory bounded.
+	const batchSize int64 = 1000
+	var totalMoved int
+	var currentOffset = splitOffset
+	var sourceHW int64
+	if source.Wal != nil {
+		sourceHW = source.Wal.GetHighWatermark()
 	}
 
-	slog.Info("Partition split: moving events to new partition",
-		"source", sourceID, "new", newID, "event_count", len(events))
-
-	if len(events) > 0 {
-		// Try to append batch; if it fails, log but continue — new partition is still usable
-		if err := newPart.Wal.AppendBatch(events); err != nil {
-			slog.Warn("Partition split: failed to append batch to new partition, WAL may split async",
-				"source", sourceID, "new", newID, "error", err)
+	for currentOffset <= sourceHW {
+		endOffset := currentOffset + batchSize
+		if endOffset > sourceHW+1 {
+			endOffset = sourceHW + 1
 		}
+
+		events, err := source.Wal.ReadEvents(currentOffset, endOffset)
+		if err != nil {
+			slog.Warn("Partition split: WAL read error, stopping replay",
+				"source", sourceID, "offset", currentOffset, "error", err)
+			break
+		}
+		if len(events) == 0 {
+			break
+		}
+
+		if err := newPart.Wal.AppendBatch(events); err != nil {
+			slog.Warn("Partition split: WAL append error, stopping replay",
+				"source", sourceID, "new", newID, "error", err)
+			break
+		}
+
+		if newPart.Scheduler != nil {
+			if err := newPart.Scheduler.ScheduleBatch(events); err != nil {
+				slog.Warn("Partition split: scheduler error",
+					"source", sourceID, "new", newID, "error", err)
+			}
+		}
+
+		totalMoved += len(events)
+		currentOffset += int64(len(events))
 	}
 
 	slog.Info("Partition split completed",
 		"source", sourceID, "new", newID,
 		"split_offset", splitOffset,
-		"events_moved", len(events))
+		"events_moved", totalMoved,
+		"source_hw", sourceHW)
 
 	return nil
 }

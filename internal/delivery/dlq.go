@@ -192,6 +192,14 @@ type DLQStats struct {
 	NewestEntryAge int64 `json:"newest_entry_age_ms"`
 }
 
+// Close closes the DLQ and releases file handles.
+func (d *DeadLetterQueue) Close() error {
+	if d.writer != nil {
+		return d.writer.Close()
+	}
+	return nil
+}
+
 // GetStats returns DLQ statistics
 func (d *DeadLetterQueue) GetStats() *DLQStats {
 	d.mu.RLock()

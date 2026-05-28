@@ -170,7 +170,12 @@ func (sw *DLQSegmentWriter) Scan() ([][]byte, error) {
 	}
 	sw.mu.Unlock()
 
-	entries, err := os.ReadDir(sw.dataDir)
+	return scanEntries(sw.dataDir)
+}
+
+// scanEntries reads all valid entries from DLQ segment files (lock-free).
+func scanEntries(dataDir string) ([][]byte, error) {
+	entries, err := os.ReadDir(dataDir)
 	if err != nil {
 		return nil, fmt.Errorf("read dlq dir: %w", err)
 	}
@@ -181,7 +186,7 @@ func (sw *DLQSegmentWriter) Scan() ([][]byte, error) {
 			continue
 		}
 
-		path := filepath.Join(sw.dataDir, entry.Name())
+		path := filepath.Join(dataDir, entry.Name())
 		data, err := os.ReadFile(path)
 		if err != nil {
 			continue // Skip unreadable files
@@ -241,16 +246,18 @@ func (sw *DLQSegmentWriter) Compact(keep func(data []byte) bool) error {
 		sw.writer.Flush()
 	}
 
-	// Read all entries
-	allData, err := sw.Scan()
-	if err != nil {
-		return err
-	}
-
-	// Close active file
+	// Close active file BEFORE reading so Windows can read/delete it
 	if sw.activeFile != nil {
 		sw.activeFile.Close()
 		sw.activeFile = nil
+	}
+	// Reset writer so it won't be used while we rebuild
+	sw.writer = nil
+
+	// Read all entries (lock-free — we already hold the lock)
+	allData, err := scanEntries(sw.dataDir)
+	if err != nil {
+		return err
 	}
 
 	// Remove old segments

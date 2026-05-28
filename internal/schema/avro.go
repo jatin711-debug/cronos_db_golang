@@ -14,7 +14,8 @@ func validateAvro(schemaDef string, payload []byte) error {
 	}
 
 	// Unmarshal into a generic map — any decode error means payload doesn't match schema
-	err = avro.Unmarshal(schema, payload, nil)
+	var dummy map[string]interface{}
+	err = avro.Unmarshal(schema, payload, &dummy)
 	if err != nil {
 		return fmt.Errorf("avro decode mismatch: %w", err)
 	}
