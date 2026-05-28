@@ -66,8 +66,28 @@ func TestRecorder_P99(t *testing.T) {
 	}
 
 	p99 := r.P99()
-	if p99 == 0 {
-		t.Error("expected positive p99")
+	// With 100 samples sorted 0..99ms, P99 should be ~99ms
+	if p99 < 95*time.Millisecond || p99 > 99*time.Millisecond {
+		t.Errorf("expected p99 ~99ms, got %v", p99)
+	}
+}
+
+func TestRecorder_P95(t *testing.T) {
+	w := Window{Duration: time.Hour, MaxErrorRate: 0.01}
+	r := NewRecorder(w)
+
+	if r.P95() != 0 {
+		t.Error("expected 0 p95 with no data")
+	}
+
+	for i := 0; i < 100; i++ {
+		r.Record(time.Duration(i)*time.Millisecond, false)
+	}
+
+	p95 := r.P95()
+	// With 100 samples sorted 0..99ms, P95 should be ~95ms
+	if p95 < 93*time.Millisecond || p95 > 95*time.Millisecond {
+		t.Errorf("expected p95 ~95ms, got %v", p95)
 	}
 }
 
@@ -167,6 +187,25 @@ func TestRecorder_Concurrent(t *testing.T) {
 	}
 	if r.errorRequests.Load() != 100 {
 		t.Errorf("expected 100 errors, got %d", r.errorRequests.Load())
+	}
+}
+
+func TestRecorder_StartStop(t *testing.T) {
+	w := Window{Duration: 100 * time.Millisecond, MaxErrorRate: 0.01}
+	r := NewRecorder(w)
+
+	r.Record(10*time.Millisecond, false)
+	if r.totalRequests.Load() != 1 {
+		t.Fatal("expected 1 request before start")
+	}
+
+	r.Start()
+	time.Sleep(200 * time.Millisecond)
+	r.Stop()
+
+	// After auto-reset, should be cleared
+	if r.totalRequests.Load() != 0 {
+		t.Errorf("expected 0 requests after auto-reset, got %d", r.totalRequests.Load())
 	}
 }
 

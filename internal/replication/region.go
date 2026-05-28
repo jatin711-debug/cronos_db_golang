@@ -16,6 +16,11 @@ import (
 // RegionID identifies a geographic region.
 type RegionID string
 
+const (
+	crossRegionBatchSize     = 100
+	crossRegionFlushInterval = 100 * time.Millisecond
+)
+
 // CrossRegionReplicator handles async replication between regions.
 type CrossRegionReplicator struct {
 	mu          sync.RWMutex
@@ -23,6 +28,18 @@ type CrossRegionReplicator struct {
 	localRegion RegionID
 	quit        chan struct{}
 	clientMgr   *regionClientManager
+
+	// Per-region batching
+	batches map[RegionID]*regionBatch
+	batchMu sync.Mutex
+}
+
+// regionBatch holds pending events for a single remote region.
+type regionBatch struct {
+	regionID RegionID
+	endpoint string
+	events   []*types.Event
+	mu       sync.Mutex
 }
 
 // RegionConnection represents a connection to a remote region.
@@ -39,6 +56,7 @@ func NewCrossRegionReplicator(localRegion RegionID) *CrossRegionReplicator {
 		localRegion: localRegion,
 		quit:        make(chan struct{}),
 		clientMgr:   newRegionClientManager(5 * time.Second),
+		batches:     make(map[RegionID]*regionBatch),
 	}
 }
 
@@ -47,46 +65,122 @@ func (crr *CrossRegionReplicator) AddRegion(conn *RegionConnection) {
 	crr.mu.Lock()
 	defer crr.mu.Unlock()
 	crr.regions[conn.RegionID] = conn.Endpoint
+
+	// Initialize batch for this region
+	crr.batchMu.Lock()
+	crr.batches[conn.RegionID] = &regionBatch{
+		regionID: conn.RegionID,
+		endpoint: conn.Endpoint,
+		events:   make([]*types.Event, 0, crossRegionBatchSize),
+	}
+	crr.batchMu.Unlock()
+
 	slog.Info("Cross-region replication region registered", "region", conn.RegionID, "endpoint", conn.Endpoint)
+
+	// Start background flush goroutine for this region
+	go crr.flushLoop(conn.RegionID)
 }
 
-// ReplicateAsync sends an event to all remote regions asynchronously.
-func (crr *CrossRegionReplicator) ReplicateAsync(partitionID int32, offset int64, data []byte) {
+// ReplicateAsync queues an event for replication to all remote regions.
+func (crr *CrossRegionReplicator) ReplicateAsync(event *types.Event) {
+	if event == nil {
+		return
+	}
+
 	crr.mu.RLock()
 	regions := make([]RegionID, 0, len(crr.regions))
-	endpoints := make(map[RegionID]string)
-	for rid, ep := range crr.regions {
+	for rid := range crr.regions {
 		regions = append(regions, rid)
-		endpoints[rid] = ep
 	}
 	crr.mu.RUnlock()
 
 	for _, regionID := range regions {
-		go func(rid RegionID) {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			if err := crr.replicateToRegion(ctx, rid, endpoints[rid], partitionID, offset, data); err != nil {
-				slog.Warn("Cross-region replication failed", "region", rid, "error", err)
-			}
-		}(regionID)
+		crr.batchMu.Lock()
+		batch, ok := crr.batches[regionID]
+		crr.batchMu.Unlock()
+		if !ok {
+			continue
+		}
+
+		batch.mu.Lock()
+		batch.events = append(batch.events, event)
+		shouldFlush := len(batch.events) >= crossRegionBatchSize
+		batch.mu.Unlock()
+
+		if shouldFlush {
+			go crr.flushRegion(regionID)
+		}
 	}
 }
 
-func (crr *CrossRegionReplicator) replicateToRegion(ctx context.Context, regionID RegionID, endpoint string, partitionID int32, offset int64, data []byte) error {
+// flushLoop runs a background timer that periodically flushes the batch.
+func (crr *CrossRegionReplicator) flushLoop(regionID RegionID) {
+	ticker := time.NewTicker(crossRegionFlushInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			crr.flushRegion(regionID)
+		case <-crr.quit:
+			// Final flush before exit
+			crr.flushRegion(regionID)
+			return
+		}
+	}
+}
+
+// flushRegion sends the current batch to the remote region.
+func (crr *CrossRegionReplicator) flushRegion(regionID RegionID) {
+	crr.batchMu.Lock()
+	batch, ok := crr.batches[regionID]
+	crr.batchMu.Unlock()
+	if !ok {
+		return
+	}
+
+	batch.mu.Lock()
+	if len(batch.events) == 0 {
+		batch.mu.Unlock()
+		return
+	}
+	events := make([]*types.Event, len(batch.events))
+	copy(events, batch.events)
+	batch.events = batch.events[:0]
+	batch.mu.Unlock()
+
+	crr.mu.RLock()
+	endpoint := crr.regions[regionID]
+	crr.mu.RUnlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := crr.replicateToRegion(ctx, regionID, endpoint, events); err != nil {
+		slog.Warn("Cross-region replication batch failed", "region", regionID, "count", len(events), "error", err)
+	} else {
+		slog.Debug("Cross-region replication batch success", "region", regionID, "count", len(events))
+	}
+}
+
+func (crr *CrossRegionReplicator) replicateToRegion(ctx context.Context, regionID RegionID, endpoint string, events []*types.Event) error {
 	rc, err := crr.clientMgr.GetClient(ctx, regionID, endpoint)
 	if err != nil {
 		return fmt.Errorf("get region client for %s: %w", regionID, err)
 	}
 
+	var firstOffset int64
+	var partitionID int32
+	if len(events) > 0 {
+		firstOffset = events[0].Offset
+		partitionID = events[0].PartitionId
+	}
+
 	req := &types.RegionReplicateRequest{
-		RegionId:    string(regionID),
+		RegionId:    string(crr.localRegion),
 		PartitionId: partitionID,
-		FirstOffset: offset,
-		Events: []*types.Event{{
-			PartitionId: partitionID,
-			Offset:      offset,
-			Payload:     data,
-		}},
+		FirstOffset: firstOffset,
+		Events:      events,
 	}
 
 	resp, err := rc.Replicate(ctx, req)
@@ -96,7 +190,6 @@ func (crr *CrossRegionReplicator) replicateToRegion(ctx context.Context, regionI
 	if !resp.Success {
 		return fmt.Errorf("replicate to %s: %s", regionID, resp.Error)
 	}
-	slog.Debug("Cross-region replication success", "region", regionID, "offset", resp.LastOffset)
 	return nil
 }
 

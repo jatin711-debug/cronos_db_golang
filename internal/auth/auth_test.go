@@ -361,18 +361,72 @@ func TestClaimsFromContext_Missing(t *testing.T) {
 }
 
 func TestCheckTopicPermission_NoClaims(t *testing.T) {
-	err := CheckTopicPermission(context.Background(), "topic", "publish")
+	err := CheckTopicPermission(context.Background(), "topic", "publish", nil)
 	if err == nil {
 		t.Error("expected error without claims")
 	}
 }
 
-func TestCheckTopicPermission_WithClaims(t *testing.T) {
+func TestCheckTopicPermission_WithClaims_NoPolicy(t *testing.T) {
 	claims := ClaimsWithSubject("user")
 	ctx := WithClaims(context.Background(), claims)
-	err := CheckTopicPermission(ctx, "topic", "publish")
+	err := CheckTopicPermission(ctx, "topic", "publish", nil)
+	if err != nil {
+		t.Fatalf("unexpected error with nil policy: %v", err)
+	}
+}
+
+func TestCheckTopicPermission_WithClaims_Allowed(t *testing.T) {
+	claims := ClaimsWithSubject("user")
+	ctx := WithClaims(context.Background(), claims)
+	policy := &Policy{
+		Subjects: map[string]*Subject{
+			"user": {
+				Topics: map[string]TopicPerms{
+					"topic": {Publish: true, Subscribe: true, Admin: true},
+				},
+			},
+		},
+	}
+	err := CheckTopicPermission(ctx, "topic", "publish", policy)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestCheckTopicPermission_WithClaims_Denied(t *testing.T) {
+	claims := ClaimsWithSubject("user")
+	ctx := WithClaims(context.Background(), claims)
+	policy := &Policy{
+		Subjects: map[string]*Subject{
+			"user": {
+				Topics: map[string]TopicPerms{
+					"topic": {Publish: false, Subscribe: true, Admin: false},
+				},
+			},
+		},
+	}
+	err := CheckTopicPermission(ctx, "topic", "publish", policy)
+	if err == nil {
+		t.Fatal("expected permission denied error")
+	}
+}
+
+func TestCheckTopicPermission_UnknownSubject(t *testing.T) {
+	claims := ClaimsWithSubject("unknown")
+	ctx := WithClaims(context.Background(), claims)
+	policy := &Policy{
+		Subjects: map[string]*Subject{
+			"user": {
+				Topics: map[string]TopicPerms{
+					"topic": {Publish: true},
+				},
+			},
+		},
+	}
+	err := CheckTopicPermission(ctx, "topic", "publish", policy)
+	if err == nil {
+		t.Fatal("expected permission denied error for unknown subject")
 	}
 }
 

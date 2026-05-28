@@ -41,7 +41,7 @@ func TestCrossRegionReplicator_AddRegion(t *testing.T) {
 func TestCrossRegionReplicator_ReplicateAsync_NoRegions(t *testing.T) {
 	crr := NewCrossRegionReplicator("us-east-1")
 	// Should not panic with no regions
-	crr.ReplicateAsync(0, 1, []byte("data"))
+	crr.ReplicateAsync(&types.Event{PartitionId: 0, Offset: 1, Payload: []byte("data")})
 	time.Sleep(50 * time.Millisecond)
 }
 
@@ -54,8 +54,34 @@ func TestCrossRegionReplicator_ReplicateAsync_WithRegion(t *testing.T) {
 	})
 
 	// Should not panic even if replication fails
-	crr.ReplicateAsync(0, 1, []byte("data"))
-	time.Sleep(100 * time.Millisecond)
+	crr.ReplicateAsync(&types.Event{PartitionId: 0, Offset: 1, Payload: []byte("data")})
+	time.Sleep(150 * time.Millisecond) // Wait for batch flush
+}
+
+func TestCrossRegionReplicator_ReplicateAsync_NilEvent(t *testing.T) {
+	crr := NewCrossRegionReplicator("us-east-1")
+	crr.AddRegion(&RegionConnection{
+		RegionID: "us-west-2",
+		Endpoint: "127.0.0.1:1",
+	})
+
+	// Should not panic with nil event
+	crr.ReplicateAsync(nil)
+	time.Sleep(50 * time.Millisecond)
+}
+
+func TestCrossRegionReplicator_ReplicateAsync_BatchFlush(t *testing.T) {
+	crr := NewCrossRegionReplicator("us-east-1")
+	crr.AddRegion(&RegionConnection{
+		RegionID: "us-west-2",
+		Endpoint: "127.0.0.1:1",
+	})
+
+	// Send batchSize events to trigger immediate flush
+	for i := 0; i < crossRegionBatchSize; i++ {
+		crr.ReplicateAsync(&types.Event{PartitionId: 0, Offset: int64(i), Payload: []byte("data")})
+	}
+	time.Sleep(150 * time.Millisecond)
 }
 
 func TestCrossRegionReplicator_Close(t *testing.T) {
@@ -176,9 +202,9 @@ func TestRegionReplicateRequest_Fields(t *testing.T) {
 
 func TestRegionReplicateResponse_Fields(t *testing.T) {
 	resp := &types.RegionReplicateResponse{
-		Success:   true,
+		Success:    true,
 		LastOffset: 200,
-		Error:     "",
+		Error:      "",
 	}
 	if !resp.Success {
 		t.Error("expected success")
@@ -193,7 +219,8 @@ func TestCrossRegionReplicator_replicateToRegion_Error(t *testing.T) {
 	ctx := context.Background()
 
 	// No client manager client available for region
-	err := crr.replicateToRegion(ctx, "us-west-2", "127.0.0.1:1", 0, 1, []byte("data"))
+	events := []*types.Event{{PartitionId: 0, Offset: 1, Payload: []byte("data")}}
+	err := crr.replicateToRegion(ctx, "us-west-2", "127.0.0.1:1", events)
 	if err == nil {
 		t.Error("expected error for unreachable endpoint")
 	}

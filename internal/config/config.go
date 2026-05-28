@@ -342,5 +342,8 @@ func ValidateConfig(c *types.Config) error {
 	if c.TracingSampleRatio < 0 || c.TracingSampleRatio > 1 {
 		return fmt.Errorf("tracing-sample-ratio must be between 0.0 and 1.0")
 	}
+	if c.FlushIntervalMS <= 0 {
+		return fmt.Errorf("flush-interval must be > 0")
+	}
 	return nil
 }

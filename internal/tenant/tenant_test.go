@@ -2,6 +2,7 @@ package tenant
 
 import (
 	"testing"
+	"time"
 )
 
 func TestNewAccountant(t *testing.T) {
@@ -14,6 +15,9 @@ func TestNewAccountant(t *testing.T) {
 	}
 	if a.usage == nil {
 		t.Fatal("usage map should be initialized")
+	}
+	if a.buckets == nil {
+		t.Fatal("buckets map should be initialized")
 	}
 }
 
@@ -69,17 +73,25 @@ func TestAccountant_AllowPublish_WithinLimits(t *testing.T) {
 	}
 }
 
-func TestAccountant_AllowPublish_EventsPerSecondExceeded(t *testing.T) {
+func TestAccountant_AllowPublish_RateExceeded(t *testing.T) {
 	a := NewAccountant()
-	a.SetLimits("tenant-1", Limits{MaxEventsPerSecond: 5})
+	a.SetLimits("tenant-1", Limits{MaxEventsPerSecond: 2})
 
-	// Simulate 5 events already recorded
-	for i := 0; i < 5; i++ {
-		a.RecordPublish("tenant-1", 100)
+	// Consume both tokens immediately
+	if !a.AllowPublish("tenant-1") {
+		t.Error("should allow first publish")
+	}
+	if !a.AllowPublish("tenant-1") {
+		t.Error("should allow second publish")
+	}
+	if a.AllowPublish("tenant-1") {
+		t.Error("should deny publish when rate exceeded")
 	}
 
-	if a.AllowPublish("tenant-1") {
-		t.Error("should deny publish when events per second exceeded")
+	// Wait for token refill
+	time.Sleep(600 * time.Millisecond)
+	if !a.AllowPublish("tenant-1") {
+		t.Error("should allow after token refill")
 	}
 }
 
@@ -97,6 +109,17 @@ func TestAccountant_AllowPublish_InFlightExceeded(t *testing.T) {
 	}
 }
 
+func TestAccountant_AllowPublish_StorageExceeded(t *testing.T) {
+	a := NewAccountant()
+	a.SetLimits("tenant-1", Limits{MaxStorageBytes: 100})
+
+	a.RecordPublish("tenant-1", 200)
+
+	if a.AllowPublish("tenant-1") {
+		t.Error("should deny publish when storage exceeded")
+	}
+}
+
 func TestAccountant_RecordPublish(t *testing.T) {
 	a := NewAccountant()
 	a.RecordPublish("tenant-1", 1024)
@@ -104,9 +127,6 @@ func TestAccountant_RecordPublish(t *testing.T) {
 	usage := a.usage["tenant-1"]
 	if usage == nil {
 		t.Fatal("usage should be created")
-	}
-	if usage.EventsPerSecond.Load() != 1 {
-		t.Errorf("expected 1 event, got %d", usage.EventsPerSecond.Load())
 	}
 	if usage.InFlight.Load() != 1 {
 		t.Errorf("expected 1 in-flight, got %d", usage.InFlight.Load())
@@ -176,11 +196,49 @@ func TestAccountant_Concurrent(t *testing.T) {
 		<-done
 	}
 
-	if a.usage["tenant-1"].EventsPerSecond.Load() != 1000 {
-		t.Errorf("expected 1000 events, got %d", a.usage["tenant-1"].EventsPerSecond.Load())
-	}
 	if a.usage["tenant-1"].InFlight.Load() != 1000 {
 		t.Errorf("expected 1000 in-flight, got %d", a.usage["tenant-1"].InFlight.Load())
+	}
+}
+
+func TestTokenBucket_Refill(t *testing.T) {
+	tb := newTokenBucket(10, 10) // 10/sec, capacity 10
+
+	// Consume all 10 tokens
+	for i := 0; i < 10; i++ {
+		if !tb.tryConsume(1) {
+			t.Fatalf("should consume token %d", i)
+		}
+	}
+	if tb.tryConsume(1) {
+		t.Error("should deny when empty")
+	}
+
+	// Wait for 0.5 seconds = 5 tokens
+	time.Sleep(550 * time.Millisecond)
+	for i := 0; i < 5; i++ {
+		if !tb.tryConsume(1) {
+			t.Fatalf("should consume refilled token %d", i)
+		}
+	}
+	if tb.tryConsume(1) {
+		t.Error("should deny after refilled tokens consumed")
+	}
+}
+
+func TestTokenBucket_Capacity(t *testing.T) {
+	tb := newTokenBucket(1, 2) // 1/sec, capacity 2
+
+	// Wait 10 seconds — should cap at 2, not accumulate 10+
+	time.Sleep(2 * time.Second)
+	if !tb.tryConsume(1) {
+		t.Error("should have 1 token after cap")
+	}
+	if !tb.tryConsume(1) {
+		t.Error("should have 2nd token after cap")
+	}
+	if tb.tryConsume(1) {
+		t.Error("should be empty after 2 consumes")
 	}
 }
 
@@ -205,22 +263,5 @@ func TestLimits_Fields(t *testing.T) {
 	}
 	if l.MaxStorageBytes != 1024 {
 		t.Error("MaxStorageBytes mismatch")
-	}
-}
-
-func TestUsage_Fields(t *testing.T) {
-	u := &Usage{}
-	u.EventsPerSecond.Store(10)
-	u.InFlight.Store(5)
-	u.StorageBytes.Store(1024)
-
-	if u.EventsPerSecond.Load() != 10 {
-		t.Error("EventsPerSecond mismatch")
-	}
-	if u.InFlight.Load() != 5 {
-		t.Error("InFlight mismatch")
-	}
-	if u.StorageBytes.Load() != 1024 {
-		t.Error("StorageBytes mismatch")
 	}
 }

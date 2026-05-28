@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"time"
@@ -40,6 +41,12 @@ type Config struct {
 	TopicRateLimiter      *TopicRateLimiter
 	AuditLogger           *audit.Logger
 	VersionGate           *VersionGate
+	SLORecorder           SLORecorder
+}
+
+// SLORecorder is the minimal interface for SLO latency tracking.
+type SLORecorder interface {
+	Record(latency time.Duration, err bool)
 }
 
 // DefaultConfig returns default gRPC server configuration
@@ -66,6 +73,7 @@ func NewGRPCServer(config *Config) *GRPCServer {
 		grpc.InitialConnWindowSize(32 * 1024 * 1024),
 		grpc.WriteBufferSize(4 * 1024 * 1024),
 		grpc.ReadBufferSize(4 * 1024 * 1024),
+		grpc.ConnectionTimeout(30 * time.Second),
 		grpc.KeepaliveParams(keepalive.ServerParameters{
 			Time:    config.KeepaliveMinTime,
 			Timeout: config.KeepaliveTimeout,
@@ -76,6 +84,7 @@ func NewGRPCServer(config *Config) *GRPCServer {
 		}),
 		grpc.ChainUnaryInterceptor(
 			tracing.GRPCServerInterceptor(),
+			SLOUnaryInterceptor(config.SLORecorder),
 			VersionInterceptor(config.VersionGate),
 			auth.Interceptor(config.Auth),
 			TopicRateLimitInterceptor(config.TopicRateLimiter),
@@ -104,6 +113,19 @@ func NewGRPCServer(config *Config) *GRPCServer {
 	return &GRPCServer{
 		server: server,
 		config: config,
+	}
+}
+
+// SLOUnaryInterceptor records request latency and error status for SLO tracking.
+func SLOUnaryInterceptor(recorder SLORecorder) grpc.UnaryServerInterceptor {
+	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp interface{}, err error) {
+		if recorder == nil {
+			return handler(ctx, req)
+		}
+		start := time.Now()
+		resp, err = handler(ctx, req)
+		recorder.Record(time.Since(start), err != nil)
+		return resp, err
 	}
 }
 

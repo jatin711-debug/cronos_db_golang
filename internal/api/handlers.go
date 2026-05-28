@@ -18,6 +18,7 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/internal/replay"
 	"github.com/jatin711-debug/cronos_db_golang/internal/schema"
 	"github.com/jatin711-debug/cronos_db_golang/internal/tenant"
+	"github.com/jatin711-debug/cronos_db_golang/internal/tracing"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 
 	"google.golang.org/grpc"
@@ -57,6 +58,7 @@ type ConsumerManager interface {
 type ClusterRouter interface {
 	IsLocalPartition(partitionID int32) bool
 	IsPartitionLeader(partitionID int32) bool
+	GetPartitionEpoch(partitionID int32) int64
 }
 
 // GRPCStream wraps gRPC stream to implement delivery.Stream interface
@@ -76,9 +78,11 @@ func (s *GRPCStream) Send(delivery *delivery.DeliveryMessage) error {
 	})
 }
 
-// Recv receives a control message (not used in current implementation)
+// Recv receives a control message from the subscriber.
+// Currently not implemented — control messages (flow-control credits, etc.)
+// are handled via the separate Ack streaming endpoint.
 func (s *GRPCStream) Recv() (*delivery.Control, error) {
-	return nil, fmt.Errorf("not implemented")
+	return nil, fmt.Errorf("control message streaming not implemented: use the Ack endpoint for credits and flow control")
 }
 
 // Context returns the stream context
@@ -137,11 +141,26 @@ func (h *EventServiceHandler) ensureClusterPartitionWritable(partitionID int32) 
 			"partition %d is local but this node is not the leader; retry against the partition leader", partitionID)
 	}
 
+	// Epoch fencing: reject writes if local partition epoch is behind cluster epoch.
+	// This prevents a split-brain scenario where an old leader hasn't realized
+	// it was demoted and continues accepting writes.
+	clusterEpoch := h.clusterRouter.GetPartitionEpoch(partitionID)
+	localEpoch := h.partitionManager.GetPartitionEpoch(partitionID)
+	if localEpoch < clusterEpoch {
+		return status.Errorf(codes.FailedPrecondition,
+			"partition %d epoch mismatch: local=%d cluster=%d; possible stale leader, retry", partitionID, localEpoch, clusterEpoch)
+	}
+
 	return nil
 }
 
 // Publish handles publish requests
 func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishRequest) (*types.PublishResponse, error) {
+	ctx, span := tracing.StartSpan(ctx, "Publish")
+	if span != nil {
+		defer span.End()
+	}
+
 	event := req.Event
 
 	// Validate event
@@ -149,6 +168,24 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 		return &types.PublishResponse{
 			Success: false,
 			Error:   "message_id is required",
+		}, nil
+	}
+	if len(event.GetMessageId()) > 128 {
+		return &types.PublishResponse{
+			Success: false,
+			Error:   "message_id exceeds 128 characters",
+		}, nil
+	}
+	if len(event.Topic) > 255 {
+		return &types.PublishResponse{
+			Success: false,
+			Error:   "topic exceeds 255 characters",
+		}, nil
+	}
+	if len(event.Payload) > 4*1024*1024 {
+		return &types.PublishResponse{
+			Success: false,
+			Error:   "payload exceeds 4MB limit",
 		}, nil
 	}
 
@@ -247,6 +284,10 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 			return nil, status.Errorf(codes.ResourceExhausted, "tenant quota exceeded")
 		}
 		h.tenantAccountant.RecordPublish(tenantID, int64(len(event.Payload)))
+		if event.Meta == nil {
+			event.Meta = make(map[string]string)
+		}
+		event.Meta["tenant_id"] = string(tenantID)
 	}
 
 	// Append to WAL (no sync on every write for performance - WAL handles periodic flush)
@@ -370,6 +411,10 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 				continue
 			}
 			h.tenantAccountant.RecordPublish(tenantID, int64(len(event.Payload)))
+			if event.Meta == nil {
+				event.Meta = make(map[string]string)
+			}
+			event.Meta["tenant_id"] = string(tenantID)
 		}
 
 		partitionEvents[partitionID] = append(partitionEvents[partitionID], event)
@@ -466,6 +511,12 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 
 // Subscribe handles streaming subscription
 func (h *EventServiceHandler) Subscribe(stream grpc.BidiStreamingServer[types.SubscribeRequest, types.Delivery]) error {
+	ctx, span := tracing.StartSpan(stream.Context(), "Subscribe")
+	if span != nil {
+		defer span.End()
+	}
+	_ = ctx
+
 	if h.consumerManager == nil {
 		return status.Error(codes.Unavailable, "consumer manager not initialized on this node")
 	}
@@ -562,6 +613,12 @@ func (h *EventServiceHandler) Subscribe(stream grpc.BidiStreamingServer[types.Su
 
 // Ack handles streaming ack requests
 func (h *EventServiceHandler) Ack(stream types.EventService_AckServer) error {
+	ctx, span := tracing.StartSpan(stream.Context(), "Ack")
+	if span != nil {
+		defer span.End()
+	}
+	_ = ctx
+
 	if h.consumerManager == nil {
 		return status.Error(codes.Unavailable, "consumer manager not initialized on this node")
 	}

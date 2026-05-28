@@ -12,6 +12,12 @@ type PartitionAccessor interface {
 	SyncPartitionFromLeader(partitionID int32, leaderAddr string) error
 	// GetOrCreatePartition gets or creates a local partition
 	GetOrCreatePartition(partitionID int32) error
+	// PromoteToLeader promotes a local partition to leader and starts replication
+	PromoteToLeader(partitionID int32, epoch int64) error
+	// AddFollower adds a follower to a local leader partition
+	AddFollower(partitionID int32, followerID string, followerAddr string) error
+	// DemoteFromLeader demotes a local partition from leader
+	DemoteFromLeader(partitionID int32) error
 }
 
 // Router handles routing requests to the correct node/partition
@@ -336,6 +342,18 @@ func (r *Router) GetPartitionInfo(partitionID int32) (*PartitionInfo, error) {
 		return nil, fmt.Errorf("partition %d not found", partitionID)
 	}
 	return info, nil
+}
+
+// GetPartitionEpoch returns the cluster epoch for a partition.
+func (r *Router) GetPartitionEpoch(partitionID int32) int64 {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	info, exists := r.assignments[partitionID]
+	if !exists {
+		return 0
+	}
+	return info.Epoch
 }
 
 // GetAllPartitions returns all partition information

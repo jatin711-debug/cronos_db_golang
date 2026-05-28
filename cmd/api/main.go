@@ -102,7 +102,8 @@ func main() {
 		TargetP99:    500 * time.Millisecond,
 		MaxErrorRate: 0.001,
 	})
-	_ = sloRecorder
+	sloRecorder.Start()
+	defer sloRecorder.Stop()
 
 	if err := tracing.InitTracing(&tracing.Config{
 		ServiceName:  "cronos-api-" + cfg.NodeID,
@@ -258,7 +259,7 @@ func main() {
 				})
 			}
 			if crossRegionReplicator != nil && cfg.NodeRegion != "" {
-				crossRegionReplicator.ReplicateAsync(event.PartitionId, event.Offset, event.Payload)
+				crossRegionReplicator.ReplicateAsync(event)
 			}
 		})
 	}
@@ -330,6 +331,7 @@ func main() {
 	grpcConfig.AuditLogger = auditLogger
 	grpcConfig.VersionGate = versionGate
 	grpcConfig.TopicRateLimiter = topicRateLimiter
+	grpcConfig.SLORecorder = sloRecorder
 
 	grpcServer := api.NewGRPCServer(grpcConfig)
 
@@ -355,6 +357,7 @@ func main() {
 	}
 	if tenantAccountant != nil {
 		eventHandler.SetTenantAccountant(tenantAccountant)
+		pm.SetTenantAccountant(tenantAccountant)
 	}
 
 	// Wire cluster router for partition-aware request routing

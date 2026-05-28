@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"os"
@@ -57,8 +58,11 @@ func NewPolicyFromFile(path string) (*Policy, error) {
 		return nil, fmt.Errorf("read policy file: %w", err)
 	}
 	p := &Policy{Subjects: make(map[string]*Subject)}
-	_ = data
-	// Minimal: in a full implementation, unmarshal JSON into p.Subjects
+	if len(data) > 0 {
+		if err := json.Unmarshal(data, &p.Subjects); err != nil {
+			return nil, fmt.Errorf("parse policy file: %w", err)
+		}
+	}
 	return p, nil
 }
 
@@ -226,14 +230,46 @@ func ClaimsFromContext(ctx context.Context) (*Claims, bool) {
 	return c, ok
 }
 
-// CheckTopicPermission verifies if the authenticated subject has permission.
-func CheckTopicPermission(ctx context.Context, topic string, op string) error {
-	_, ok := ClaimsFromContext(ctx)
+// CheckTopicPermission verifies if the authenticated subject has permission
+// for the given topic and operation ("publish", "subscribe", or "admin").
+func CheckTopicPermission(ctx context.Context, topic string, op string, policy *Policy) error {
+	claims, ok := ClaimsFromContext(ctx)
 	if !ok {
 		return status.Error(codes.Unauthenticated, "missing auth context")
 	}
-	_ = topic
-	_ = op
+
+	if policy == nil || len(policy.Subjects) == 0 {
+		// No policy configured = allow all (backward compatible)
+		return nil
+	}
+
+	subject, ok := policy.Subjects[claims.Subject]
+	if !ok {
+		return status.Errorf(codes.PermissionDenied, "subject %q not found in policy", claims.Subject)
+	}
+
+	topicPerms, ok := subject.Topics[topic]
+	if !ok {
+		return status.Errorf(codes.PermissionDenied, "topic %q not authorized for subject %q", topic, claims.Subject)
+	}
+
+	switch op {
+	case "publish":
+		if !topicPerms.Publish {
+			return status.Errorf(codes.PermissionDenied, "subject %q not allowed to publish to %q", claims.Subject, topic)
+		}
+	case "subscribe":
+		if !topicPerms.Subscribe {
+			return status.Errorf(codes.PermissionDenied, "subject %q not allowed to subscribe to %q", claims.Subject, topic)
+		}
+	case "admin":
+		if !topicPerms.Admin {
+			return status.Errorf(codes.PermissionDenied, "subject %q not allowed admin access to %q", claims.Subject, topic)
+		}
+	default:
+		return status.Errorf(codes.InvalidArgument, "unknown operation %q", op)
+	}
+
 	return nil
 }
 

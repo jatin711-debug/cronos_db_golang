@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/shirou/gopsutil/v3/disk"
 )
 
 // DiskMonitor watches disk usage and triggers emergency compaction.
@@ -63,26 +65,11 @@ func (dm *DiskMonitor) loop() {
 }
 
 func (dm *DiskMonitor) usage() (float64, error) {
-	// Cross-platform disk usage check
-	// On Unix: syscall.Statfs. On Windows: GetDiskFreeSpaceEx.
-	// For portability, we use a simple heuristic based on file sizes in the data dir.
-	var total int64
-	var count int
-	_ = filepath.Walk(dm.dataDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
-			return nil
-		}
-		total += info.Size()
-		count++
-		return nil
-	})
-	if count == 0 {
-		return 0, fmt.Errorf("empty data dir")
+	usageStat, err := disk.Usage(dm.dataDir)
+	if err != nil {
+		return 0, fmt.Errorf("disk usage check: %w", err)
 	}
-	// Approximate usage based on segment sizes vs a configurable max
-	// Real implementation would use platform-specific syscalls
-	maxBytes := int64(100 << 30) // 100GB default placeholder
-	return float64(total) / float64(maxBytes), nil
+	return usageStat.UsedPercent / 100.0, nil
 }
 
 // WalDiskSize returns the total size of WAL files in bytes.

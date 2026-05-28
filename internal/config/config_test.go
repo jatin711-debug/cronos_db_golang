@@ -369,6 +369,12 @@ func TestValidateConfig(t *testing.T) {
 			},
 			expectError: false,
 		},
+		{
+			name:        "zero flush interval",
+			config:      &configTestHelper{NodeID: "node", PartitionCount: 1, ReplicationFactor: 1, DataDir: "/data", GPRCAddress: ":9000"},
+			expectError: true,
+			errorMsg:    "flush-interval must be > 0",
+		},
 	}
 
 	for _, tc := range tests {
@@ -380,6 +386,10 @@ func TestValidateConfig(t *testing.T) {
 				DataDir:            tc.config.DataDir,
 				GPRCAddress:        tc.config.GPRCAddress,
 				TracingSampleRatio: tc.config.TracingSampleRatio,
+				FlushIntervalMS:    100,
+			}
+			if tc.errorMsg == "flush-interval must be > 0" {
+				cfg.FlushIntervalMS = 0
 			}
 			err := ValidateConfig(cfg)
 			if tc.expectError {

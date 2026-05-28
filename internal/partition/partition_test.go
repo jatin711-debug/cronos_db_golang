@@ -328,29 +328,16 @@ func TestDiskMonitor_StartStop(t *testing.T) {
 	// Just verify no panic
 }
 
-func TestDiskMonitor_usage_EmptyDir(t *testing.T) {
+func TestDiskMonitor_usage_RealFilesystem(t *testing.T) {
 	tmpDir := t.TempDir()
-	dm := NewDiskMonitor(tmpDir, 0.85, nil)
-	usage, err := dm.usage()
-	if err == nil {
-		t.Error("expected error for empty data dir")
-	}
-	if usage != 0 {
-		t.Errorf("expected 0 usage, got %f", usage)
-	}
-}
-
-func TestDiskMonitor_usage_WithFiles(t *testing.T) {
-	tmpDir := t.TempDir()
-	os.WriteFile(filepath.Join(tmpDir, "1.dat"), make([]byte, 1000), 0644)
-
 	dm := NewDiskMonitor(tmpDir, 0.85, nil)
 	usage, err := dm.usage()
 	if err != nil {
 		t.Fatalf("usage failed: %v", err)
 	}
-	if usage <= 0 {
-		t.Error("usage should be positive")
+	// Real filesystem usage is always > 0 (filesystem has metadata)
+	if usage < 0 || usage > 1 {
+		t.Errorf("usage should be in [0,1], got %f", usage)
 	}
 }
 
