@@ -9,6 +9,8 @@ import (
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
@@ -47,7 +49,6 @@ func InitTracing(cfg *Config) error {
 		exporterType = "none"
 	}
 
-	// Create exporter based on config
 	var exporter sdktrace.SpanExporter
 	var err error
 
@@ -59,8 +60,13 @@ func InitTracing(cfg *Config) error {
 		}
 		exporter = exp
 	case "otlp":
-		log.Printf("[TRACING] OTLP exporter is not enabled in this build; using no-op tracing")
-		exporterType = "none"
+		exp, err := newOTLPExporter(cfg)
+		if err != nil {
+			log.Printf("[TRACING] OTLP exporter failed to initialize: %v; falling back to no-op", err)
+			exporterType = "none"
+		} else {
+			exporter = exp
+		}
 	case "none":
 		log.Printf("[TRACING] Using no-op tracing")
 	default:
@@ -78,7 +84,6 @@ func InitTracing(cfg *Config) error {
 		serviceName = "cronos-api"
 	}
 
-	// Create resource with service info
 	res, err := resource.New(context.Background(),
 		resource.WithAttributes(
 			semconv.ServiceName(serviceName),
@@ -102,33 +107,41 @@ func InitTracing(cfg *Config) error {
 		sampler = sdktrace.ParentBased(sdktrace.TraceIDRatioBased(sampleRatio))
 	}
 
-	// Create tracer provider.
 	TracerProvider = sdktrace.NewTracerProvider(
 		sdktrace.WithBatcher(exporter,
 			sdktrace.WithBatchTimeout(2*time.Second),
-			sdktrace.WithMaxExportBatchSize(256),
+			sdktrace.WithMaxExportBatchSize(512),
 			sdktrace.WithMaxQueueSize(2048),
 		),
 		sdktrace.WithResource(res),
 		sdktrace.WithSampler(sampler),
 	)
 
-	// Set global tracer provider
 	otel.SetTracerProvider(TracerProvider)
-
-	// Set global propagator (W3C TraceContext)
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
 		propagation.TraceContext{},
 		propagation.Baggage{},
 	))
 
-	// Create tracer
 	Tracer = TracerProvider.Tracer(serviceName,
 		trace.WithInstrumentationVersion("1.0.0"),
 	)
 
 	log.Printf("[TRACING] Initialized exporter=%s sample_ratio=%.4f", exporterType, sampleRatio)
 	return nil
+}
+
+func newOTLPExporter(cfg *Config) (sdktrace.SpanExporter, error) {
+	opts := []otlptracegrpc.Option{
+		otlptracegrpc.WithEndpoint(cfg.OTLPEndpoint),
+		otlptracegrpc.WithTimeout(5 * time.Second),
+	}
+	if cfg.OTLPInsecure {
+		opts = append(opts, otlptracegrpc.WithInsecure())
+	}
+
+	client := otlptracegrpc.NewClient(opts...)
+	return otlptrace.New(context.Background(), client)
 }
 
 // Shutdown gracefully shuts down the tracer provider

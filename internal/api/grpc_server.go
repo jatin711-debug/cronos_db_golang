@@ -5,10 +5,12 @@ import (
 	"net"
 	"time"
 
+	"github.com/jatin711-debug/cronos_db_golang/internal/auth"
 	"github.com/jatin711-debug/cronos_db_golang/internal/tracing"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/reflection"
 )
@@ -30,6 +32,8 @@ type Config struct {
 	MaxConnectionIdle     time.Duration
 	MaxConnectionAge      time.Duration
 	MaxConnectionAgeGrace time.Duration
+	TLS                   *TLSConfig
+	Auth                  *auth.Config
 }
 
 // DefaultConfig returns default gRPC server configuration
@@ -48,14 +52,14 @@ func DefaultConfig() *Config {
 
 // NewGRPCServer creates a new gRPC server
 func NewGRPCServer(config *Config) *GRPCServer {
-	server := grpc.NewServer(
+	opts := []grpc.ServerOption{
 		grpc.MaxRecvMsgSize(config.MaxRecvMsgSize),
 		grpc.MaxSendMsgSize(config.MaxSendMsgSize),
-		grpc.MaxConcurrentStreams(10000),         // Prevent OOM from too many concurrent streams
-		grpc.InitialWindowSize(16*1024*1024),     // 16MB stream flow control window
-		grpc.InitialConnWindowSize(32*1024*1024), // 32MB connection flow control window
-		grpc.WriteBufferSize(4*1024*1024),        // 4MB write buffer
-		grpc.ReadBufferSize(4*1024*1024),         // 4MB read buffer
+		grpc.MaxConcurrentStreams(10000),
+		grpc.InitialWindowSize(16 * 1024 * 1024),
+		grpc.InitialConnWindowSize(32 * 1024 * 1024),
+		grpc.WriteBufferSize(4 * 1024 * 1024),
+		grpc.ReadBufferSize(4 * 1024 * 1024),
 		grpc.KeepaliveParams(keepalive.ServerParameters{
 			Time:    config.KeepaliveMinTime,
 			Timeout: config.KeepaliveTimeout,
@@ -66,10 +70,27 @@ func NewGRPCServer(config *Config) *GRPCServer {
 		}),
 		grpc.ChainUnaryInterceptor(
 			tracing.GRPCServerInterceptor(),
+			VersionInterceptor(),
+			auth.Interceptor(config.Auth),
 			MetricsInterceptor(),
-			RateLimitInterceptor(1000000.0, 2000000.0), // 1M req/s, burst of 2M per IP for load testing
+			RateLimitInterceptor(1000000.0, 2000000.0),
 		),
-	)
+		grpc.ChainStreamInterceptor(
+			auth.StreamInterceptor(config.Auth),
+		),
+	}
+
+	if config.TLS != nil && config.TLS.Enabled {
+		tlsCfg, err := BuildServerTLSConfig(config.TLS)
+		if err != nil {
+			// Log and continue without TLS rather than panic
+			fmt.Printf("[GRPC] TLS config error: %v; starting without TLS\n", err)
+		} else if tlsCfg != nil {
+			opts = append(opts, grpc.Creds(credentials.NewTLS(tlsCfg)))
+		}
+	}
+
+	server := grpc.NewServer(opts...)
 
 	return &GRPCServer{
 		server: server,

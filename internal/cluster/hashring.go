@@ -18,6 +18,16 @@ type HashRing struct {
 	nodes        map[string]int    // Node ID -> virtual node count
 	virtualNodes int               // Default virtual nodes per physical node
 	replicas     int               // Replication factor
+
+	// Topology-aware placement
+	topology map[string]NodeTopology // node ID -> rack/zone/region
+}
+
+// NodeTopology holds topology labels for a node.
+type NodeTopology struct {
+	Rack   string
+	Zone   string
+	Region string
 }
 
 // NewHashRing creates a new consistent hash ring
@@ -35,7 +45,15 @@ func NewHashRing(virtualNodes, replicas int) *HashRing {
 		nodes:        make(map[string]int),
 		virtualNodes: virtualNodes,
 		replicas:     replicas,
+		topology:     make(map[string]NodeTopology),
 	}
+}
+
+// SetNodeTopology sets topology labels for a node.
+func (h *HashRing) SetNodeTopology(nodeID string, topo NodeTopology) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.topology[nodeID] = topo
 }
 
 // AddNode adds a node to the ring
@@ -136,6 +154,7 @@ func (h *HashRing) getNodesLocked(key string, n int) []string {
 	// For typical replication factors (n=3), linear scan is ~20x faster
 	// than map allocation + lookup.
 	nodes := make([]string, 0, n)
+	usedRacks := make(map[string]struct{})
 
 	for i := 0; i < len(h.ring) && len(nodes) < n; i++ {
 		nodeIdx := (idx + i) % len(h.ring)
@@ -148,9 +167,23 @@ func (h *HashRing) getNodesLocked(key string, n int) []string {
 				break
 			}
 		}
-		if !found {
-			nodes = append(nodes, nodeID)
+		if found {
+			continue
 		}
+
+		// Topology-aware placement: avoid same rack if possible
+		if topo, ok := h.topology[nodeID]; ok && topo.Rack != "" {
+			if _, used := usedRacks[topo.Rack]; used {
+				// Only skip same-rack if we have enough candidates left
+				remaining := len(h.nodes) - len(nodes)
+				if remaining > n-len(nodes) {
+					continue
+				}
+			}
+			usedRacks[topo.Rack] = struct{}{}
+		}
+
+		nodes = append(nodes, nodeID)
 	}
 
 	return nodes

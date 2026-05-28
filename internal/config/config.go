@@ -64,6 +64,27 @@ func LoadConfig() (*types.Config, error) {
 	// Gossip backend defaults
 	config.UseMemberlist = DefaultUseMemberlist
 
+	// TLS defaults (all disabled by default)
+	config.TLSEnabled = false
+	config.TLSClientAuth = false
+
+	// Auth defaults (all disabled by default)
+	config.AuthEnabled = false
+
+	// Node topology defaults
+	config.NodeRack = ""
+	config.NodeZone = ""
+	config.NodeRegion = ""
+
+	// Exactly-once commits default
+	config.ExactlyOnceCommits = false
+
+	// Load shedding default (disabled)
+	config.LoadSheddingThreshold = 0.0
+
+	// Follower reads default
+	config.FollowerReadsEnabled = false
+
 	// Cluster defaults
 	config.ClusterEnabled = DefaultClusterEnabled
 	config.ClusterGossipAddr = DefaultClusterGossipAddr
@@ -134,6 +155,33 @@ func LoadConfig() (*types.Config, error) {
 	flag.BoolVar(&config.UseMemberlist, "use-memberlist", DefaultUseMemberlist, "Use HashiCorp Memberlist (SWIM) instead of custom TCP gossip")
 	flag.Int64Var(&config.ClockSkewThresholdMs, "clock-skew-threshold-ms", DefaultClockSkewThresholdMs, "Max allowed clock skew from leader in ms (0 = disabled)")
 
+	// TLS flags
+	flag.BoolVar(&config.TLSEnabled, "tls-enabled", false, "Enable TLS for gRPC")
+	flag.StringVar(&config.TLSCAFile, "tls-ca-file", "", "Path to CA certificate file")
+	flag.StringVar(&config.TLSCertFile, "tls-cert-file", "", "Path to TLS certificate file")
+	flag.StringVar(&config.TLSKeyFile, "tls-key-file", "", "Path to TLS private key file")
+	flag.BoolVar(&config.TLSClientAuth, "tls-client-auth", false, "Require client certificates (mTLS)")
+
+	// Auth flags
+	flag.BoolVar(&config.AuthEnabled, "auth-enabled", false, "Enable JWT authentication")
+	flag.StringVar(&config.AuthJWTSecret, "auth-jwt-secret", "", "HMAC secret for JWT verification")
+	flag.StringVar(&config.AuthJWTPublicKey, "auth-jwt-public-key", "", "Path to Ed25519/RSA public key file for JWT verification")
+	flag.StringVar(&config.AuthPolicyFile, "auth-policy-file", "", "Path to RBAC policy JSON file")
+
+	// Node topology flags
+	flag.StringVar(&config.NodeRack, "node-rack", "", "Rack / AZ label for topology-aware placement")
+	flag.StringVar(&config.NodeZone, "node-zone", "", "Zone label for topology-aware placement")
+	flag.StringVar(&config.NodeRegion, "node-region", "", "Region label for topology-aware placement")
+
+	// Exactly-once commits
+	flag.BoolVar(&config.ExactlyOnceCommits, "exactly-once-commits", false, "Enable exactly-once consumer offset commits")
+
+	// Load shedding
+	flag.Float64Var(&config.LoadSheddingThreshold, "load-shedding-threshold", 0.0, "Load shedding threshold (0.0-1.0, 0 = disabled)")
+
+	// Follower reads
+	flag.BoolVar(&config.FollowerReadsEnabled, "follower-reads", false, "Allow follower nodes to serve replay reads")
+
 	var clusterSeeds string
 	flag.StringVar(&clusterSeeds, "cluster-seeds", "", "Comma-separated list of seed node addresses")
 
@@ -199,9 +247,60 @@ func LoadConfig() (*types.Config, error) {
 		}
 	}
 
+	// TLS environment overrides
+	if tlsEnabled := os.Getenv("CRONOS_TLS_ENABLED"); tlsEnabled != "" {
+		if parsed, err := strconv.ParseBool(tlsEnabled); err == nil {
+			config.TLSEnabled = parsed
+		}
+	}
+	if caFile := os.Getenv("CRONOS_TLS_CA_FILE"); caFile != "" {
+		config.TLSCAFile = caFile
+	}
+	if certFile := os.Getenv("CRONOS_TLS_CERT_FILE"); certFile != "" {
+		config.TLSCertFile = certFile
+	}
+	if keyFile := os.Getenv("CRONOS_TLS_KEY_FILE"); keyFile != "" {
+		config.TLSKeyFile = keyFile
+	}
+
+	// Auth environment overrides
+	if authEnabled := os.Getenv("CRONOS_AUTH_ENABLED"); authEnabled != "" {
+		if parsed, err := strconv.ParseBool(authEnabled); err == nil {
+			config.AuthEnabled = parsed
+		}
+	}
+	if jwtSecret := os.Getenv("CRONOS_AUTH_JWT_SECRET"); jwtSecret != "" {
+		config.AuthJWTSecret = jwtSecret
+	}
+
+	// Topology environment overrides
+	if rack := os.Getenv("CRONOS_NODE_RACK"); rack != "" {
+		config.NodeRack = rack
+	}
+	if zone := os.Getenv("CRONOS_NODE_ZONE"); zone != "" {
+		config.NodeZone = zone
+	}
+	if region := os.Getenv("CRONOS_NODE_REGION"); region != "" {
+		config.NodeRegion = region
+	}
+
 	// Validate required configuration
 	if err := ValidateConfig(&config); err != nil {
 		return nil, err
+	}
+
+	// Validate TLS config if enabled
+	if config.TLSEnabled {
+		if config.TLSCertFile == "" || config.TLSKeyFile == "" {
+			return nil, fmt.Errorf("tls-enabled requires tls-cert-file and tls-key-file")
+		}
+	}
+
+	// Validate auth config if enabled
+	if config.AuthEnabled {
+		if config.AuthJWTSecret == "" && config.AuthJWTPublicKey == "" {
+			return nil, fmt.Errorf("auth-enabled requires auth-jwt-secret or auth-jwt-public-key")
+		}
 	}
 
 	return &config, nil

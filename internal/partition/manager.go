@@ -343,8 +343,16 @@ func (pm *PartitionManager) CanAccept(partitionID int32) bool {
 
 	// Check admission control limits
 	if pm.config.MaxReadyQueueSize > 0 {
-		if partition.Scheduler.GetReadyQueueDepth() >= pm.config.MaxReadyQueueSize {
+		depth := partition.Scheduler.GetReadyQueueDepth()
+		if depth >= pm.config.MaxReadyQueueSize {
 			return false
+		}
+		// Load shedding: reject if above threshold percentage of max
+		if pm.config.LoadSheddingThreshold > 0 {
+			threshold := int64(float64(pm.config.MaxReadyQueueSize) * pm.config.LoadSheddingThreshold)
+			if depth >= threshold {
+				return false
+			}
 		}
 	}
 	if pm.config.MaxTimingWheelSize > 0 {
@@ -576,6 +584,11 @@ func (pm *PartitionManager) writeTimerCheckpoint(partition *Partition, lastOffse
 
 // runCompaction calculates the minimum consumed offset across all consumer groups
 // and safely removes obsolete WAL segments.
+// RunCompaction triggers compaction on this partition (exported for external callers).
+func (p *Partition) RunCompaction() {
+	p.runCompaction()
+}
+
 func (p *Partition) runCompaction() {
 	groups := p.ConsumerGroup.ListGroups()
 

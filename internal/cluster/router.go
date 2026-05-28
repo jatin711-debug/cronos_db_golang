@@ -57,6 +57,11 @@ func (r *Router) initializePartitions() {
 	// Add existing nodes to hash ring
 	for _, node := range r.membership.GetAliveNodes() {
 		r.hashRing.AddNode(node.ID)
+		r.hashRing.SetNodeTopology(node.ID, NodeTopology{
+			Rack:   node.Rack,
+			Zone:   node.Zone,
+			Region: node.Region,
+		})
 	}
 
 	// Compute partition assignments
@@ -100,6 +105,11 @@ func (r *Router) onNodeJoin(node *Node) {
 
 	// Add node to hash ring
 	r.hashRing.AddNode(node.ID)
+	r.hashRing.SetNodeTopology(node.ID, NodeTopology{
+		Rack:   node.Rack,
+		Zone:   node.Zone,
+		Region: node.Region,
+	})
 
 	// Compute moves
 	moves := r.hashRing.Rebalance(oldAssignments, r.numPartitions)

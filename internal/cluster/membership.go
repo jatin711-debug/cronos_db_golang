@@ -91,6 +91,9 @@ func NewMembership(config *ClusterConfig) (*Membership, error) {
 		Meta:       make(map[string]string),
 		JoinedAt:   time.Now(),
 		UpdatedAt:  time.Now(),
+		Rack:       config.Rack,
+		Zone:       config.Zone,
+		Region:     config.Region,
 	}
 
 	m := &Membership{

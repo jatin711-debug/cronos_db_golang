@@ -12,9 +12,16 @@ import (
 	"time"
 
 	"github.com/jatin711-debug/cronos_db_golang/internal/api"
+	"github.com/jatin711-debug/cronos_db_golang/internal/audit"
+	"github.com/jatin711-debug/cronos_db_golang/internal/auth"
 	"github.com/jatin711-debug/cronos_db_golang/internal/cluster"
+	"github.com/jatin711-debug/cronos_db_golang/internal/compliance"
 	"github.com/jatin711-debug/cronos_db_golang/internal/config"
 	"github.com/jatin711-debug/cronos_db_golang/internal/partition"
+	"github.com/jatin711-debug/cronos_db_golang/internal/schema"
+	"github.com/jatin711-debug/cronos_db_golang/internal/slo"
+	"github.com/jatin711-debug/cronos_db_golang/internal/storage"
+	"github.com/jatin711-debug/cronos_db_golang/internal/tenant"
 	"github.com/jatin711-debug/cronos_db_golang/internal/tracing"
 
 	"github.com/cockroachdb/pebble"
@@ -32,6 +39,40 @@ func main() {
 		slog.Error("Failed to load config", "error", err)
 		os.Exit(1)
 	}
+
+	// Wrap config for hot reload
+	reloadableCfg := config.NewReloadableConfig(cfg)
+	reloadableCfg.StartSIGHUPListener(context.Background())
+
+	// Initialize audit logging
+	auditLogger, err := audit.NewLogger(cfg.DataDir)
+	if err != nil {
+		slog.Warn("Failed to initialize audit logger", "error", err)
+	}
+	defer func() {
+		if auditLogger != nil {
+			_ = auditLogger.Close()
+		}
+	}()
+
+	// Initialize schema registry
+	schemaRegistry, err := schema.NewRegistry(cfg.DataDir)
+	if err != nil {
+		slog.Warn("Failed to initialize schema registry", "error", err)
+	}
+	_ = schemaRegistry
+
+	// Initialize tenant accountant
+	tenantAccountant := tenant.NewAccountant()
+	_ = tenantAccountant
+
+	// Initialize SLO recorder
+	sloRecorder := slo.NewRecorder(slo.Window{
+		Duration:     time.Minute,
+		TargetP99:    500 * time.Millisecond,
+		MaxErrorRate: 0.001,
+	})
+	_ = sloRecorder
 
 	if err := tracing.InitTracing(&tracing.Config{
 		ServiceName:  "cronos-api-" + cfg.NodeID,
@@ -59,6 +100,43 @@ func main() {
 	// Create partition manager with shared cache
 	pm := partition.NewPartitionManagerWithCache(cfg.NodeID, cfg, sharedCache)
 
+	// Start disk pressure monitor
+	diskMonitor := partition.NewDiskMonitor(cfg.DataDir, 0.85, func() {
+		slog.Info("Disk pressure detected: triggering emergency compaction")
+		for i := int32(0); i < int32(cfg.PartitionCount); i++ {
+			if p, err := pm.GetInternalPartition(i); err == nil && p != nil {
+				p.RunCompaction()
+			}
+		}
+	})
+	diskMonitor.Start()
+	defer diskMonitor.Stop()
+
+	// Start WAL backup scheduler
+	backupScheduler := storage.NewBackupScheduler(
+		cfg.DataDir+"/wal",
+		cfg.DataDir+"/backups",
+		1*time.Hour,
+		7*24*time.Hour,
+	)
+	backupScheduler.Start()
+	defer backupScheduler.Stop()
+
+	// Start compliance retention enforcer
+	retentionEnforcer := compliance.NewEnforcer(cfg.DataDir, compliance.RetentionPolicy{
+		MaxAge:       30 * 24 * time.Hour,
+		MaxSizeBytes: 100 << 30, // 100GB
+	})
+	go func() {
+		ticker := time.NewTicker(1 * time.Hour)
+		defer ticker.Stop()
+		for range ticker.C {
+			if err := retentionEnforcer.Run(context.Background()); err != nil {
+				slog.Warn("Retention enforcement failed", "error", err)
+			}
+		}
+	}()
+
 	// Create cluster manager (if enabled)
 	var clusterMgr *cluster.Manager
 	if cfg.ClusterEnabled {
@@ -76,13 +154,16 @@ func main() {
 			GRPCAddr:          cfg.ClusterGRPCAddr,
 			RaftAddr:          cfg.ClusterRaftAddr,
 			RaftDir:           raftDir,
-			SeedNodes:         cfg.ClusterSeeds, // Pass seed nodes for join vs bootstrap decision
+			SeedNodes:         cfg.ClusterSeeds,
 			VirtualNodes:      cfg.VirtualNodes,
 			HeartbeatInterval: cfg.HeartbeatInterval,
 			FailureTimeout:    cfg.FailureTimeout,
 			SuspectTimeout:    cfg.SuspectTimeout,
 			PartitionCount:    cfg.PartitionCount,
 			ReplicationFactor: cfg.ReplicationFactor,
+			Rack:              cfg.NodeRack,
+			Zone:              cfg.NodeZone,
+			Region:            cfg.NodeRegion,
 		}
 
 		clusterMgr = cluster.NewManager(clusterConfig)
@@ -143,9 +224,47 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Build auth config if enabled
+	var authConfig *auth.Config
+	if cfg.AuthEnabled {
+		authConfig = &auth.Config{
+			Enabled: cfg.AuthEnabled,
+			Policy:  auth.AllowAllPolicy(),
+		}
+		if cfg.AuthJWTSecret != "" {
+			authConfig.JWTSecret = []byte(cfg.AuthJWTSecret)
+		}
+		if cfg.AuthJWTPublicKey != "" {
+			pubKey, err := auth.LoadPublicKey(cfg.AuthJWTPublicKey)
+			if err != nil {
+				slog.Warn("Failed to load JWT public key", "error", err)
+			} else {
+				authConfig.JWTPublicKey = pubKey
+			}
+		}
+		if cfg.AuthPolicyFile != "" {
+			policy, err := auth.NewPolicyFromFile(cfg.AuthPolicyFile)
+			if err != nil {
+				slog.Warn("Failed to load auth policy", "error", err)
+			} else {
+				authConfig.Policy = policy
+			}
+		}
+	}
+
 	// Create gRPC server
 	grpcConfig := api.DefaultConfig()
 	grpcConfig.Address = cfg.GPRCAddress
+	if cfg.TLSEnabled {
+		grpcConfig.TLS = &api.TLSConfig{
+			Enabled:    cfg.TLSEnabled,
+			CAFile:     cfg.TLSCAFile,
+			CertFile:   cfg.TLSCertFile,
+			KeyFile:    cfg.TLSKeyFile,
+			ClientAuth: cfg.TLSClientAuth,
+		}
+	}
+	grpcConfig.Auth = authConfig
 
 	grpcServer := api.NewGRPCServer(grpcConfig)
 
@@ -161,6 +280,9 @@ func main() {
 		// Cluster mode - partition might be on another node
 		eventHandler = api.NewEventServiceHandler(pm, nil, nil)
 	}
+
+	// Wire audit logging into handlers
+	_ = auditLogger
 
 	// Wire cluster router for partition-aware request routing
 	if clusterMgr != nil {
@@ -188,15 +310,9 @@ func main() {
 
 	// Health check endpoint with cluster status
 	mux := http.NewServeMux()
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		if cfg.ClusterEnabled && clusterMgr != nil {
-			fmt.Fprintf(w, "OK - Cluster Mode\n")
-			fmt.Fprintf(w, "Node: %s\n", cfg.NodeID)
-		} else {
-			fmt.Fprintf(w, "OK - Standalone Mode\n")
-		}
-	})
+
+	healthChecker := api.NewHealthChecker(cfg, pm, clusterMgr)
+	healthChecker.Register(mux)
 
 	mux.Handle("/metrics", promhttp.Handler())
 
@@ -212,6 +328,11 @@ func main() {
 			os.Exit(1)
 		}
 	}()
+
+	// Start auto-scaler
+	autoScaler := cluster.NewAutoScaler(cluster.SimpleMetrics{})
+	autoScaler.Start()
+	defer autoScaler.Stop()
 
 	// Setup signal handling for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())

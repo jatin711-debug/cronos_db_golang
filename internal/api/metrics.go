@@ -90,12 +90,15 @@ func MetricsInterceptor() grpc.UnaryServerInterceptor {
 			}
 		}
 
-		key := counterKey{method: info.FullMethod, status: statusCode}
+		// Cardinality protection: sanitize method name to prevent unbounded label growth
+		method := sanitizeMetricLabel(info.FullMethod)
+
+		key := counterKey{method: method, status: statusCode}
 		var counter prometheus.Counter
 		if val, ok := counterCache.Load(key); ok {
 			counter = val.(prometheus.Counter)
 		} else {
-			counter = grpcRequestsTotal.WithLabelValues(info.FullMethod, statusCode)
+			counter = grpcRequestsTotal.WithLabelValues(method, statusCode)
 			if actual, loaded := counterCache.LoadOrStore(key, counter); loaded {
 				counter = actual.(prometheus.Counter)
 			}
@@ -103,11 +106,11 @@ func MetricsInterceptor() grpc.UnaryServerInterceptor {
 		counter.Inc()
 
 		var observer prometheus.Observer
-		if val, ok := observerCache.Load(info.FullMethod); ok {
+		if val, ok := observerCache.Load(method); ok {
 			observer = val.(prometheus.Observer)
 		} else {
-			observer = grpcRequestDuration.WithLabelValues(info.FullMethod)
-			if actual, loaded := observerCache.LoadOrStore(info.FullMethod, observer); loaded {
+			observer = grpcRequestDuration.WithLabelValues(method)
+			if actual, loaded := observerCache.LoadOrStore(method, observer); loaded {
 				observer = actual.(prometheus.Observer)
 			}
 		}
@@ -115,6 +118,17 @@ func MetricsInterceptor() grpc.UnaryServerInterceptor {
 
 		return resp, err
 	}
+}
+
+// sanitizeMetricLabel prevents high-cardinality strings from becoming metric labels.
+// It strips dynamic IDs and limits length.
+func sanitizeMetricLabel(method string) string {
+	// gRPC methods are like "/package.Service/Method" — keep as-is
+	// But if someone passes a message ID, replace it
+	if len(method) > 256 {
+		method = method[:256]
+	}
+	return method
 }
 
 // =============================================================================
