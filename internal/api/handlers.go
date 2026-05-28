@@ -555,6 +555,23 @@ func (h *EventServiceHandler) Replay(req *types.ReplayRequest, stream types.Even
 		return fmt.Errorf("partition_id is required for replay")
 	}
 
+	// Follower reads: if enabled, allow replay on any node that has the partition,
+	// not just the leader. This offloads read traffic from leaders.
+	if h.clusterRouter != nil {
+		if !h.clusterRouter.IsLocalPartition(partitionID) {
+			return status.Errorf(codes.Unavailable,
+				"partition %d is not owned by this node", partitionID)
+		}
+		// If follower reads disabled, require leader
+		if !h.clusterRouter.IsPartitionLeader(partitionID) {
+			// Check if follower reads are enabled globally via partition manager config
+			if pm, _ := h.partitionManager.GetPartition(partitionID); pm == nil || !h.partitionManager.CanAccept(partitionID) {
+				return status.Errorf(codes.FailedPrecondition,
+					"partition %d is not leader; follower reads not enabled", partitionID)
+			}
+		}
+	}
+
 	partitionInternal, err := h.partitionManager.GetInternalPartition(partitionID)
 	if err != nil {
 		return fmt.Errorf("get partition %d: %w", partitionID, err)

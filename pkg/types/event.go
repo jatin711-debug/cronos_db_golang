@@ -71,6 +71,33 @@ type Config struct {
 
 	// Gossip backend selection
 	UseMemberlist bool // true = HashiCorp Memberlist, false = custom TCP gossip
+
+	// TLS configuration
+	TLSEnabled     bool
+	TLSCAFile      string
+	TLSCertFile    string
+	TLSKeyFile     string
+	TLSClientAuth  bool // require client certs (mTLS)
+
+	// Auth configuration
+	AuthEnabled       bool
+	AuthJWTSecret     string // HMAC secret for JWT verification
+	AuthJWTPublicKey  string // Ed25519/RSA public key file for JWT verification
+	AuthPolicyFile    string // Path to RBAC policy JSON file
+
+	// Node topology for rack-aware placement
+	NodeRack   string
+	NodeZone   string
+	NodeRegion string
+
+	// Exactly-once delivery option
+	ExactlyOnceCommits bool
+
+	// Load shedding thresholds (0.0-1.0, 0 = disabled)
+	LoadSheddingThreshold float64
+
+	// Follower reads for replay/offload
+	FollowerReadsEnabled bool
 }
 
 // Partition represents a data partition

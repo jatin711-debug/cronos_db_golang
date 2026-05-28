@@ -37,12 +37,15 @@ func NewManager(cfg *Config) *Manager {
 		RaftDataDir:       cfg.RaftDir,
 		SeedNodes:         cfg.SeedNodes,
 		HeartbeatInterval: cfg.HeartbeatInterval,
-		ElectionTimeout:   cfg.HeartbeatInterval * 5, // Election timeout should be > heartbeat
+		ElectionTimeout:   cfg.HeartbeatInterval * 5,
 		FailureTimeout:    cfg.FailureTimeout,
 		SuspectTimeout:    cfg.SuspectTimeout,
 		ReplicationFactor: cfg.ReplicationFactor,
 		NumPartitions:     cfg.PartitionCount,
 		VirtualNodes:      cfg.VirtualNodes,
+		Rack:              cfg.Rack,
+		Zone:              cfg.Zone,
+		Region:            cfg.Region,
 	}
 
 	if config.HeartbeatInterval == 0 {
