@@ -5,8 +5,10 @@ import (
 	"net"
 	"time"
 
+	"github.com/jatin711-debug/cronos_db_golang/internal/audit"
 	"github.com/jatin711-debug/cronos_db_golang/internal/auth"
 	"github.com/jatin711-debug/cronos_db_golang/internal/tracing"
+	"github.com/jatin711-debug/cronos_db_golang/internal/tx"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 
 	"google.golang.org/grpc"
@@ -17,9 +19,10 @@ import (
 
 // GRPCServer represents the gRPC server
 type GRPCServer struct {
-	server   *grpc.Server
-	listener net.Listener
-	config   *Config
+	server    *grpc.Server
+	listener  net.Listener
+	config    *Config
+	txHandler *tx.Handler
 }
 
 // Config represents gRPC server configuration
@@ -34,6 +37,9 @@ type Config struct {
 	MaxConnectionAgeGrace time.Duration
 	TLS                   *TLSConfig
 	Auth                  *auth.Config
+	TopicRateLimiter      *TopicRateLimiter
+	AuditLogger           *audit.Logger
+	VersionGate           *VersionGate
 }
 
 // DefaultConfig returns default gRPC server configuration
@@ -70,13 +76,16 @@ func NewGRPCServer(config *Config) *GRPCServer {
 		}),
 		grpc.ChainUnaryInterceptor(
 			tracing.GRPCServerInterceptor(),
-			VersionInterceptor(),
+			VersionInterceptor(config.VersionGate),
 			auth.Interceptor(config.Auth),
+			TopicRateLimitInterceptor(config.TopicRateLimiter),
+			AuditUnaryInterceptor(config.AuditLogger),
 			MetricsInterceptor(),
 			RateLimitInterceptor(1000000.0, 2000000.0),
 		),
 		grpc.ChainStreamInterceptor(
 			auth.StreamInterceptor(config.Auth),
+			AuditStreamInterceptor(config.AuditLogger),
 		),
 	}
 
@@ -98,6 +107,11 @@ func NewGRPCServer(config *Config) *GRPCServer {
 	}
 }
 
+// SetTransactionHandler sets the transaction service handler.
+func (g *GRPCServer) SetTransactionHandler(h *tx.Handler) {
+	g.txHandler = h
+}
+
 // RegisterServices registers all gRPC services
 func (g *GRPCServer) RegisterServices(
 	eventHandler *EventServiceHandler,
@@ -110,6 +124,9 @@ func (g *GRPCServer) RegisterServices(
 	}
 	if partitionHandler != nil {
 		types.RegisterPartitionServiceServer(g.server, partitionHandler)
+	}
+	if g.txHandler != nil {
+		types.RegisterTransactionServiceServer(g.server, g.txHandler)
 	}
 }
 

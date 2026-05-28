@@ -98,6 +98,14 @@ type Config struct {
 
 	// Follower reads for replay/offload
 	FollowerReadsEnabled bool
+
+	// Encryption at rest
+	EncryptionEnabled bool
+	EncryptionKeyFile string
+
+	// Topic rate limiting (0 = disabled)
+	TopicRateLimitPerSecond float64
+	TopicRateLimitBurst     float64
 }
 
 // Partition represents a data partition

@@ -20,6 +20,7 @@ type PartitionServiceHandler struct {
 	partitionManager *partition.PartitionManager
 	clusterManager   *cluster.Manager // nil in standalone mode
 	localNodeID      string
+	splitManager     *partition.SplitManager
 }
 
 // NewPartitionServiceHandler creates a new partition service handler.
@@ -32,6 +33,7 @@ func NewPartitionServiceHandler(
 		partitionManager: pm,
 		clusterManager:   clusterMgr,
 		localNodeID:      localNodeID,
+		splitManager:     partition.NewSplitManager(pm),
 	}
 }
 
@@ -229,4 +231,50 @@ func (h *PartitionServiceHandler) RunRetention(ctx context.Context, req *types.R
 	_ = ctx
 	_ = req
 	return nil, status.Error(codes.Unimplemented, "run retention is not implemented in partition service")
+}
+
+// SplitPartition splits a partition into two at a given offset.
+func (h *PartitionServiceHandler) SplitPartition(ctx context.Context, req *types.SplitPartitionRequest) (*types.SplitPartitionResponse, error) {
+	_ = ctx
+
+	if req == nil {
+		return nil, status.Error(codes.InvalidArgument, "request is required")
+	}
+	if req.GetSourcePartitionId() < 0 {
+		return nil, status.Error(codes.InvalidArgument, "source_partition_id must be >= 0")
+	}
+	if req.GetNewPartitionId() < 0 {
+		return nil, status.Error(codes.InvalidArgument, "new_partition_id must be >= 0")
+	}
+	if req.GetSplitOffset() < 0 {
+		return nil, status.Error(codes.InvalidArgument, "split_offset must be >= 0")
+	}
+
+	if h.splitManager == nil {
+		return nil, status.Error(codes.Internal, "split manager not initialized")
+	}
+
+	err := h.splitManager.SplitPartition(req.GetSourcePartitionId(), req.GetNewPartitionId(), req.GetSplitOffset())
+	if err != nil {
+		return &types.SplitPartitionResponse{
+			Success: false,
+			Error:   err.Error(),
+		}, nil
+	}
+
+	// Get updated high watermark for source partition
+	p, err := h.partitionManager.GetInternalPartition(req.GetSourcePartitionId())
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to get source partition: %v", err)
+	}
+	sourceHW := int64(0)
+	if p.Wal != nil {
+		sourceHW = p.Wal.GetHighWatermark()
+	}
+
+	return &types.SplitPartitionResponse{
+		Success:            true,
+		SourceHighWatermark: sourceHW,
+		NewFirstOffset:     req.GetSplitOffset(),
+	}, nil
 }

@@ -2419,6 +2419,134 @@ func (x *RetentionResponse) GetBytesFreed() int64 {
 	return 0
 }
 
+type SplitPartitionRequest struct {
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	SourcePartitionId int32                  `protobuf:"varint,1,opt,name=source_partition_id,json=sourcePartitionId,proto3" json:"source_partition_id,omitempty"`
+	NewPartitionId    int32                  `protobuf:"varint,2,opt,name=new_partition_id,json=newPartitionId,proto3" json:"new_partition_id,omitempty"`
+	SplitOffset       int64                  `protobuf:"varint,3,opt,name=split_offset,json=splitOffset,proto3" json:"split_offset,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *SplitPartitionRequest) Reset() {
+	*x = SplitPartitionRequest{}
+	mi := &file_proto_events_proto_msgTypes[35]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SplitPartitionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SplitPartitionRequest) ProtoMessage() {}
+
+func (x *SplitPartitionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_events_proto_msgTypes[35]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SplitPartitionRequest.ProtoReflect.Descriptor instead.
+func (*SplitPartitionRequest) Descriptor() ([]byte, []int) {
+	return file_proto_events_proto_rawDescGZIP(), []int{35}
+}
+
+func (x *SplitPartitionRequest) GetSourcePartitionId() int32 {
+	if x != nil {
+		return x.SourcePartitionId
+	}
+	return 0
+}
+
+func (x *SplitPartitionRequest) GetNewPartitionId() int32 {
+	if x != nil {
+		return x.NewPartitionId
+	}
+	return 0
+}
+
+func (x *SplitPartitionRequest) GetSplitOffset() int64 {
+	if x != nil {
+		return x.SplitOffset
+	}
+	return 0
+}
+
+type SplitPartitionResponse struct {
+	state               protoimpl.MessageState `protogen:"open.v1"`
+	Success             bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	Error               string                 `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
+	SourceHighWatermark int64                  `protobuf:"varint,3,opt,name=source_high_watermark,json=sourceHighWatermark,proto3" json:"source_high_watermark,omitempty"`
+	NewFirstOffset      int64                  `protobuf:"varint,4,opt,name=new_first_offset,json=newFirstOffset,proto3" json:"new_first_offset,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
+}
+
+func (x *SplitPartitionResponse) Reset() {
+	*x = SplitPartitionResponse{}
+	mi := &file_proto_events_proto_msgTypes[36]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SplitPartitionResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SplitPartitionResponse) ProtoMessage() {}
+
+func (x *SplitPartitionResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_events_proto_msgTypes[36]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SplitPartitionResponse.ProtoReflect.Descriptor instead.
+func (*SplitPartitionResponse) Descriptor() ([]byte, []int) {
+	return file_proto_events_proto_rawDescGZIP(), []int{36}
+}
+
+func (x *SplitPartitionResponse) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *SplitPartitionResponse) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+func (x *SplitPartitionResponse) GetSourceHighWatermark() int64 {
+	if x != nil {
+		return x.SourceHighWatermark
+	}
+	return 0
+}
+
+func (x *SplitPartitionResponse) GetNewFirstOffset() int64 {
+	if x != nil {
+		return x.NewFirstOffset
+	}
+	return 0
+}
+
 type RaftJoinRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	NodeId        string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
@@ -2429,7 +2557,7 @@ type RaftJoinRequest struct {
 
 func (x *RaftJoinRequest) Reset() {
 	*x = RaftJoinRequest{}
-	mi := &file_proto_events_proto_msgTypes[35]
+	mi := &file_proto_events_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2441,7 +2569,7 @@ func (x *RaftJoinRequest) String() string {
 func (*RaftJoinRequest) ProtoMessage() {}
 
 func (x *RaftJoinRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_events_proto_msgTypes[35]
+	mi := &file_proto_events_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2454,7 +2582,7 @@ func (x *RaftJoinRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RaftJoinRequest.ProtoReflect.Descriptor instead.
 func (*RaftJoinRequest) Descriptor() ([]byte, []int) {
-	return file_proto_events_proto_rawDescGZIP(), []int{35}
+	return file_proto_events_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *RaftJoinRequest) GetNodeId() string {
@@ -2482,7 +2610,7 @@ type RaftJoinResponse struct {
 
 func (x *RaftJoinResponse) Reset() {
 	*x = RaftJoinResponse{}
-	mi := &file_proto_events_proto_msgTypes[36]
+	mi := &file_proto_events_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2494,7 +2622,7 @@ func (x *RaftJoinResponse) String() string {
 func (*RaftJoinResponse) ProtoMessage() {}
 
 func (x *RaftJoinResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_events_proto_msgTypes[36]
+	mi := &file_proto_events_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2507,7 +2635,7 @@ func (x *RaftJoinResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RaftJoinResponse.ProtoReflect.Descriptor instead.
 func (*RaftJoinResponse) Descriptor() ([]byte, []int) {
-	return file_proto_events_proto_rawDescGZIP(), []int{36}
+	return file_proto_events_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *RaftJoinResponse) GetSuccess() bool {
@@ -2540,7 +2668,7 @@ type RaftLeaveRequest struct {
 
 func (x *RaftLeaveRequest) Reset() {
 	*x = RaftLeaveRequest{}
-	mi := &file_proto_events_proto_msgTypes[37]
+	mi := &file_proto_events_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2552,7 +2680,7 @@ func (x *RaftLeaveRequest) String() string {
 func (*RaftLeaveRequest) ProtoMessage() {}
 
 func (x *RaftLeaveRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_events_proto_msgTypes[37]
+	mi := &file_proto_events_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2565,7 +2693,7 @@ func (x *RaftLeaveRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RaftLeaveRequest.ProtoReflect.Descriptor instead.
 func (*RaftLeaveRequest) Descriptor() ([]byte, []int) {
-	return file_proto_events_proto_rawDescGZIP(), []int{37}
+	return file_proto_events_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *RaftLeaveRequest) GetNodeId() string {
@@ -2585,7 +2713,7 @@ type RaftLeaveResponse struct {
 
 func (x *RaftLeaveResponse) Reset() {
 	*x = RaftLeaveResponse{}
-	mi := &file_proto_events_proto_msgTypes[38]
+	mi := &file_proto_events_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2597,7 +2725,7 @@ func (x *RaftLeaveResponse) String() string {
 func (*RaftLeaveResponse) ProtoMessage() {}
 
 func (x *RaftLeaveResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_events_proto_msgTypes[38]
+	mi := &file_proto_events_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2610,7 +2738,7 @@ func (x *RaftLeaveResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RaftLeaveResponse.ProtoReflect.Descriptor instead.
 func (*RaftLeaveResponse) Descriptor() ([]byte, []int) {
-	return file_proto_events_proto_rawDescGZIP(), []int{38}
+	return file_proto_events_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *RaftLeaveResponse) GetSuccess() bool {
@@ -2635,7 +2763,7 @@ type RaftStatusRequest struct {
 
 func (x *RaftStatusRequest) Reset() {
 	*x = RaftStatusRequest{}
-	mi := &file_proto_events_proto_msgTypes[39]
+	mi := &file_proto_events_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2647,7 +2775,7 @@ func (x *RaftStatusRequest) String() string {
 func (*RaftStatusRequest) ProtoMessage() {}
 
 func (x *RaftStatusRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_events_proto_msgTypes[39]
+	mi := &file_proto_events_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2660,7 +2788,7 @@ func (x *RaftStatusRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RaftStatusRequest.ProtoReflect.Descriptor instead.
 func (*RaftStatusRequest) Descriptor() ([]byte, []int) {
-	return file_proto_events_proto_rawDescGZIP(), []int{39}
+	return file_proto_events_proto_rawDescGZIP(), []int{41}
 }
 
 type RaftStatusResponse struct {
@@ -2677,7 +2805,7 @@ type RaftStatusResponse struct {
 
 func (x *RaftStatusResponse) Reset() {
 	*x = RaftStatusResponse{}
-	mi := &file_proto_events_proto_msgTypes[40]
+	mi := &file_proto_events_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2689,7 +2817,7 @@ func (x *RaftStatusResponse) String() string {
 func (*RaftStatusResponse) ProtoMessage() {}
 
 func (x *RaftStatusResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_events_proto_msgTypes[40]
+	mi := &file_proto_events_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2702,7 +2830,7 @@ func (x *RaftStatusResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RaftStatusResponse.ProtoReflect.Descriptor instead.
 func (*RaftStatusResponse) Descriptor() ([]byte, []int) {
-	return file_proto_events_proto_rawDescGZIP(), []int{40}
+	return file_proto_events_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *RaftStatusResponse) GetNodeId() string {
@@ -2745,6 +2873,682 @@ func (x *RaftStatusResponse) GetLastApplied() int64 {
 		return x.LastApplied
 	}
 	return 0
+}
+
+// Request to replicate events to a remote region.
+type RegionReplicateRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	RegionId      string                 `protobuf:"bytes,1,opt,name=region_id,json=regionId,proto3" json:"region_id,omitempty"`
+	PartitionId   int32                  `protobuf:"varint,2,opt,name=partition_id,json=partitionId,proto3" json:"partition_id,omitempty"`
+	Events        []*Event               `protobuf:"bytes,3,rep,name=events,proto3" json:"events,omitempty"`
+	FirstOffset   int64                  `protobuf:"varint,4,opt,name=first_offset,json=firstOffset,proto3" json:"first_offset,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RegionReplicateRequest) Reset() {
+	*x = RegionReplicateRequest{}
+	mi := &file_proto_events_proto_msgTypes[43]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RegionReplicateRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RegionReplicateRequest) ProtoMessage() {}
+
+func (x *RegionReplicateRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_events_proto_msgTypes[43]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RegionReplicateRequest.ProtoReflect.Descriptor instead.
+func (*RegionReplicateRequest) Descriptor() ([]byte, []int) {
+	return file_proto_events_proto_rawDescGZIP(), []int{43}
+}
+
+func (x *RegionReplicateRequest) GetRegionId() string {
+	if x != nil {
+		return x.RegionId
+	}
+	return ""
+}
+
+func (x *RegionReplicateRequest) GetPartitionId() int32 {
+	if x != nil {
+		return x.PartitionId
+	}
+	return 0
+}
+
+func (x *RegionReplicateRequest) GetEvents() []*Event {
+	if x != nil {
+		return x.Events
+	}
+	return nil
+}
+
+func (x *RegionReplicateRequest) GetFirstOffset() int64 {
+	if x != nil {
+		return x.FirstOffset
+	}
+	return 0
+}
+
+// Response from a replicate call.
+type RegionReplicateResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Success       bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	Error         string                 `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
+	LastOffset    int64                  `protobuf:"varint,3,opt,name=last_offset,json=lastOffset,proto3" json:"last_offset,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RegionReplicateResponse) Reset() {
+	*x = RegionReplicateResponse{}
+	mi := &file_proto_events_proto_msgTypes[44]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RegionReplicateResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RegionReplicateResponse) ProtoMessage() {}
+
+func (x *RegionReplicateResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_events_proto_msgTypes[44]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RegionReplicateResponse.ProtoReflect.Descriptor instead.
+func (*RegionReplicateResponse) Descriptor() ([]byte, []int) {
+	return file_proto_events_proto_rawDescGZIP(), []int{44}
+}
+
+func (x *RegionReplicateResponse) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *RegionReplicateResponse) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+func (x *RegionReplicateResponse) GetLastOffset() int64 {
+	if x != nil {
+		return x.LastOffset
+	}
+	return 0
+}
+
+// Request to fetch events from a remote region.
+type RegionFetchRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	RegionId      string                 `protobuf:"bytes,1,opt,name=region_id,json=regionId,proto3" json:"region_id,omitempty"`
+	PartitionId   int32                  `protobuf:"varint,2,opt,name=partition_id,json=partitionId,proto3" json:"partition_id,omitempty"`
+	StartOffset   int64                  `protobuf:"varint,3,opt,name=start_offset,json=startOffset,proto3" json:"start_offset,omitempty"`
+	MaxBytes      int64                  `protobuf:"varint,4,opt,name=max_bytes,json=maxBytes,proto3" json:"max_bytes,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RegionFetchRequest) Reset() {
+	*x = RegionFetchRequest{}
+	mi := &file_proto_events_proto_msgTypes[45]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RegionFetchRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RegionFetchRequest) ProtoMessage() {}
+
+func (x *RegionFetchRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_events_proto_msgTypes[45]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RegionFetchRequest.ProtoReflect.Descriptor instead.
+func (*RegionFetchRequest) Descriptor() ([]byte, []int) {
+	return file_proto_events_proto_rawDescGZIP(), []int{45}
+}
+
+func (x *RegionFetchRequest) GetRegionId() string {
+	if x != nil {
+		return x.RegionId
+	}
+	return ""
+}
+
+func (x *RegionFetchRequest) GetPartitionId() int32 {
+	if x != nil {
+		return x.PartitionId
+	}
+	return 0
+}
+
+func (x *RegionFetchRequest) GetStartOffset() int64 {
+	if x != nil {
+		return x.StartOffset
+	}
+	return 0
+}
+
+func (x *RegionFetchRequest) GetMaxBytes() int64 {
+	if x != nil {
+		return x.MaxBytes
+	}
+	return 0
+}
+
+// Response stream from a fetch call.
+type RegionFetchResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Success       bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	Error         string                 `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
+	Events        []*Event               `protobuf:"bytes,3,rep,name=events,proto3" json:"events,omitempty"`
+	HasMore       bool                   `protobuf:"varint,4,opt,name=has_more,json=hasMore,proto3" json:"has_more,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RegionFetchResponse) Reset() {
+	*x = RegionFetchResponse{}
+	mi := &file_proto_events_proto_msgTypes[46]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RegionFetchResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RegionFetchResponse) ProtoMessage() {}
+
+func (x *RegionFetchResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_events_proto_msgTypes[46]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RegionFetchResponse.ProtoReflect.Descriptor instead.
+func (*RegionFetchResponse) Descriptor() ([]byte, []int) {
+	return file_proto_events_proto_rawDescGZIP(), []int{46}
+}
+
+func (x *RegionFetchResponse) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *RegionFetchResponse) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+func (x *RegionFetchResponse) GetEvents() []*Event {
+	if x != nil {
+		return x.Events
+	}
+	return nil
+}
+
+func (x *RegionFetchResponse) GetHasMore() bool {
+	if x != nil {
+		return x.HasMore
+	}
+	return false
+}
+
+type BeginTransactionRequest struct {
+	state                   protoimpl.MessageState `protogen:"open.v1"`
+	TransactionId           string                 `protobuf:"bytes,1,opt,name=transaction_id,json=transactionId,proto3" json:"transaction_id,omitempty"`
+	ParticipantPartitionIds []int32                `protobuf:"varint,2,rep,packed,name=participant_partition_ids,json=participantPartitionIds,proto3" json:"participant_partition_ids,omitempty"`
+	unknownFields           protoimpl.UnknownFields
+	sizeCache               protoimpl.SizeCache
+}
+
+func (x *BeginTransactionRequest) Reset() {
+	*x = BeginTransactionRequest{}
+	mi := &file_proto_events_proto_msgTypes[47]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BeginTransactionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BeginTransactionRequest) ProtoMessage() {}
+
+func (x *BeginTransactionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_events_proto_msgTypes[47]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BeginTransactionRequest.ProtoReflect.Descriptor instead.
+func (*BeginTransactionRequest) Descriptor() ([]byte, []int) {
+	return file_proto_events_proto_rawDescGZIP(), []int{47}
+}
+
+func (x *BeginTransactionRequest) GetTransactionId() string {
+	if x != nil {
+		return x.TransactionId
+	}
+	return ""
+}
+
+func (x *BeginTransactionRequest) GetParticipantPartitionIds() []int32 {
+	if x != nil {
+		return x.ParticipantPartitionIds
+	}
+	return nil
+}
+
+type BeginTransactionResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Success       bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	Error         string                 `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
+	CreatedTs     int64                  `protobuf:"varint,3,opt,name=created_ts,json=createdTs,proto3" json:"created_ts,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BeginTransactionResponse) Reset() {
+	*x = BeginTransactionResponse{}
+	mi := &file_proto_events_proto_msgTypes[48]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BeginTransactionResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BeginTransactionResponse) ProtoMessage() {}
+
+func (x *BeginTransactionResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_events_proto_msgTypes[48]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BeginTransactionResponse.ProtoReflect.Descriptor instead.
+func (*BeginTransactionResponse) Descriptor() ([]byte, []int) {
+	return file_proto_events_proto_rawDescGZIP(), []int{48}
+}
+
+func (x *BeginTransactionResponse) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *BeginTransactionResponse) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+func (x *BeginTransactionResponse) GetCreatedTs() int64 {
+	if x != nil {
+		return x.CreatedTs
+	}
+	return 0
+}
+
+type PrepareTransactionRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	TransactionId string                 `protobuf:"bytes,1,opt,name=transaction_id,json=transactionId,proto3" json:"transaction_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PrepareTransactionRequest) Reset() {
+	*x = PrepareTransactionRequest{}
+	mi := &file_proto_events_proto_msgTypes[49]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PrepareTransactionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PrepareTransactionRequest) ProtoMessage() {}
+
+func (x *PrepareTransactionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_events_proto_msgTypes[49]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PrepareTransactionRequest.ProtoReflect.Descriptor instead.
+func (*PrepareTransactionRequest) Descriptor() ([]byte, []int) {
+	return file_proto_events_proto_rawDescGZIP(), []int{49}
+}
+
+func (x *PrepareTransactionRequest) GetTransactionId() string {
+	if x != nil {
+		return x.TransactionId
+	}
+	return ""
+}
+
+type PrepareTransactionResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Success       bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	Error         string                 `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
+	Vote          bool                   `protobuf:"varint,3,opt,name=vote,proto3" json:"vote,omitempty"` // true = prepared, false = rollback
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PrepareTransactionResponse) Reset() {
+	*x = PrepareTransactionResponse{}
+	mi := &file_proto_events_proto_msgTypes[50]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PrepareTransactionResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PrepareTransactionResponse) ProtoMessage() {}
+
+func (x *PrepareTransactionResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_events_proto_msgTypes[50]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PrepareTransactionResponse.ProtoReflect.Descriptor instead.
+func (*PrepareTransactionResponse) Descriptor() ([]byte, []int) {
+	return file_proto_events_proto_rawDescGZIP(), []int{50}
+}
+
+func (x *PrepareTransactionResponse) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *PrepareTransactionResponse) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+func (x *PrepareTransactionResponse) GetVote() bool {
+	if x != nil {
+		return x.Vote
+	}
+	return false
+}
+
+type CommitTransactionRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	TransactionId string                 `protobuf:"bytes,1,opt,name=transaction_id,json=transactionId,proto3" json:"transaction_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CommitTransactionRequest) Reset() {
+	*x = CommitTransactionRequest{}
+	mi := &file_proto_events_proto_msgTypes[51]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CommitTransactionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CommitTransactionRequest) ProtoMessage() {}
+
+func (x *CommitTransactionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_events_proto_msgTypes[51]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CommitTransactionRequest.ProtoReflect.Descriptor instead.
+func (*CommitTransactionRequest) Descriptor() ([]byte, []int) {
+	return file_proto_events_proto_rawDescGZIP(), []int{51}
+}
+
+func (x *CommitTransactionRequest) GetTransactionId() string {
+	if x != nil {
+		return x.TransactionId
+	}
+	return ""
+}
+
+type CommitTransactionResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Success       bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	Error         string                 `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CommitTransactionResponse) Reset() {
+	*x = CommitTransactionResponse{}
+	mi := &file_proto_events_proto_msgTypes[52]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CommitTransactionResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CommitTransactionResponse) ProtoMessage() {}
+
+func (x *CommitTransactionResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_events_proto_msgTypes[52]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CommitTransactionResponse.ProtoReflect.Descriptor instead.
+func (*CommitTransactionResponse) Descriptor() ([]byte, []int) {
+	return file_proto_events_proto_rawDescGZIP(), []int{52}
+}
+
+func (x *CommitTransactionResponse) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *CommitTransactionResponse) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+type AbortTransactionRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	TransactionId string                 `protobuf:"bytes,1,opt,name=transaction_id,json=transactionId,proto3" json:"transaction_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AbortTransactionRequest) Reset() {
+	*x = AbortTransactionRequest{}
+	mi := &file_proto_events_proto_msgTypes[53]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AbortTransactionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AbortTransactionRequest) ProtoMessage() {}
+
+func (x *AbortTransactionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_events_proto_msgTypes[53]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AbortTransactionRequest.ProtoReflect.Descriptor instead.
+func (*AbortTransactionRequest) Descriptor() ([]byte, []int) {
+	return file_proto_events_proto_rawDescGZIP(), []int{53}
+}
+
+func (x *AbortTransactionRequest) GetTransactionId() string {
+	if x != nil {
+		return x.TransactionId
+	}
+	return ""
+}
+
+type AbortTransactionResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Success       bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	Error         string                 `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AbortTransactionResponse) Reset() {
+	*x = AbortTransactionResponse{}
+	mi := &file_proto_events_proto_msgTypes[54]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AbortTransactionResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AbortTransactionResponse) ProtoMessage() {}
+
+func (x *AbortTransactionResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_events_proto_msgTypes[54]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AbortTransactionResponse.ProtoReflect.Descriptor instead.
+func (*AbortTransactionResponse) Descriptor() ([]byte, []int) {
+	return file_proto_events_proto_rawDescGZIP(), []int{54}
+}
+
+func (x *AbortTransactionResponse) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *AbortTransactionResponse) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
 }
 
 var File_proto_events_proto protoreflect.FileDescriptor
@@ -2958,7 +3762,16 @@ const file_proto_events_proto_rawDesc = "" +
 	"\x05error\x18\x02 \x01(\tR\x05error\x12)\n" +
 	"\x10segments_deleted\x18\x03 \x01(\x05R\x0fsegmentsDeleted\x12\x1f\n" +
 	"\vbytes_freed\x18\x04 \x01(\x03R\n" +
-	"bytesFreed\"D\n" +
+	"bytesFreed\"\x94\x01\n" +
+	"\x15SplitPartitionRequest\x12.\n" +
+	"\x13source_partition_id\x18\x01 \x01(\x05R\x11sourcePartitionId\x12(\n" +
+	"\x10new_partition_id\x18\x02 \x01(\x05R\x0enewPartitionId\x12!\n" +
+	"\fsplit_offset\x18\x03 \x01(\x03R\vsplitOffset\"\xa6\x01\n" +
+	"\x16SplitPartitionResponse\x12\x18\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x14\n" +
+	"\x05error\x18\x02 \x01(\tR\x05error\x122\n" +
+	"\x15source_high_watermark\x18\x03 \x01(\x03R\x13sourceHighWatermark\x12(\n" +
+	"\x10new_first_offset\x18\x04 \x01(\x03R\x0enewFirstOffset\"D\n" +
 	"\x0fRaftJoinRequest\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12\x18\n" +
 	"\aaddress\x18\x02 \x01(\tR\aaddress\"V\n" +
@@ -2978,20 +3791,65 @@ const file_proto_events_proto_rawDesc = "" +
 	"\x04term\x18\x03 \x01(\x03R\x04term\x12\x14\n" +
 	"\x05peers\x18\x04 \x03(\tR\x05peers\x12!\n" +
 	"\fcommit_index\x18\x05 \x01(\x03R\vcommitIndex\x12!\n" +
-	"\flast_applied\x18\x06 \x01(\x03R\vlastApplied2\xdc\x02\n" +
+	"\flast_applied\x18\x06 \x01(\x03R\vlastApplied\"\xa5\x01\n" +
+	"\x16RegionReplicateRequest\x12\x1b\n" +
+	"\tregion_id\x18\x01 \x01(\tR\bregionId\x12!\n" +
+	"\fpartition_id\x18\x02 \x01(\x05R\vpartitionId\x12(\n" +
+	"\x06events\x18\x03 \x03(\v2\x10.cronos_db.EventR\x06events\x12!\n" +
+	"\ffirst_offset\x18\x04 \x01(\x03R\vfirstOffset\"j\n" +
+	"\x17RegionReplicateResponse\x12\x18\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x14\n" +
+	"\x05error\x18\x02 \x01(\tR\x05error\x12\x1f\n" +
+	"\vlast_offset\x18\x03 \x01(\x03R\n" +
+	"lastOffset\"\x94\x01\n" +
+	"\x12RegionFetchRequest\x12\x1b\n" +
+	"\tregion_id\x18\x01 \x01(\tR\bregionId\x12!\n" +
+	"\fpartition_id\x18\x02 \x01(\x05R\vpartitionId\x12!\n" +
+	"\fstart_offset\x18\x03 \x01(\x03R\vstartOffset\x12\x1b\n" +
+	"\tmax_bytes\x18\x04 \x01(\x03R\bmaxBytes\"\x8a\x01\n" +
+	"\x13RegionFetchResponse\x12\x18\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x14\n" +
+	"\x05error\x18\x02 \x01(\tR\x05error\x12(\n" +
+	"\x06events\x18\x03 \x03(\v2\x10.cronos_db.EventR\x06events\x12\x19\n" +
+	"\bhas_more\x18\x04 \x01(\bR\ahasMore\"|\n" +
+	"\x17BeginTransactionRequest\x12%\n" +
+	"\x0etransaction_id\x18\x01 \x01(\tR\rtransactionId\x12:\n" +
+	"\x19participant_partition_ids\x18\x02 \x03(\x05R\x17participantPartitionIds\"i\n" +
+	"\x18BeginTransactionResponse\x12\x18\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x14\n" +
+	"\x05error\x18\x02 \x01(\tR\x05error\x12\x1d\n" +
+	"\n" +
+	"created_ts\x18\x03 \x01(\x03R\tcreatedTs\"B\n" +
+	"\x19PrepareTransactionRequest\x12%\n" +
+	"\x0etransaction_id\x18\x01 \x01(\tR\rtransactionId\"`\n" +
+	"\x1aPrepareTransactionResponse\x12\x18\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x14\n" +
+	"\x05error\x18\x02 \x01(\tR\x05error\x12\x12\n" +
+	"\x04vote\x18\x03 \x01(\bR\x04vote\"A\n" +
+	"\x18CommitTransactionRequest\x12%\n" +
+	"\x0etransaction_id\x18\x01 \x01(\tR\rtransactionId\"K\n" +
+	"\x19CommitTransactionResponse\x12\x18\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x14\n" +
+	"\x05error\x18\x02 \x01(\tR\x05error\"@\n" +
+	"\x17AbortTransactionRequest\x12%\n" +
+	"\x0etransaction_id\x18\x01 \x01(\tR\rtransactionId\"J\n" +
+	"\x18AbortTransactionResponse\x12\x18\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x14\n" +
+	"\x05error\x18\x02 \x01(\tR\x05error2\xdc\x02\n" +
 	"\fEventService\x12@\n" +
 	"\aPublish\x12\x19.cronos_db.PublishRequest\x1a\x1a.cronos_db.PublishResponse\x12O\n" +
 	"\fPublishBatch\x12\x1e.cronos_db.PublishBatchRequest\x1a\x1f.cronos_db.PublishBatchResponse\x12A\n" +
 	"\tSubscribe\x12\x1b.cronos_db.SubscribeRequest\x1a\x13.cronos_db.Delivery(\x010\x01\x128\n" +
 	"\x03Ack\x12\x15.cronos_db.AckRequest\x1a\x16.cronos_db.AckResponse(\x010\x01\x12<\n" +
-	"\x06Replay\x12\x18.cronos_db.ReplayRequest\x1a\x16.cronos_db.ReplayEvent0\x012\xde\x03\n" +
+	"\x06Replay\x12\x18.cronos_db.ReplayRequest\x1a\x16.cronos_db.ReplayEvent0\x012\xb5\x04\n" +
 	"\x10PartitionService\x12H\n" +
 	"\fGetPartition\x12\x1e.cronos_db.GetPartitionRequest\x1a\x18.cronos_db.PartitionInfo\x12U\n" +
 	"\x0eListPartitions\x12 .cronos_db.ListPartitionsRequest\x1a!.cronos_db.ListPartitionsResponse\x12D\n" +
 	"\fGetWALStatus\x12\x1e.cronos_db.GetWALStatusRequest\x1a\x14.cronos_db.WALStatus\x12V\n" +
 	"\x12GetSchedulerStatus\x12$.cronos_db.GetSchedulerStatusRequest\x1a\x1a.cronos_db.SchedulerStatus\x12@\n" +
 	"\aCompact\x12\x19.cronos_db.CompactRequest\x1a\x1a.cronos_db.CompactResponse\x12I\n" +
-	"\fRunRetention\x12\x1b.cronos_db.RetentionRequest\x1a\x1c.cronos_db.RetentionResponse2\xa8\x03\n" +
+	"\fRunRetention\x12\x1b.cronos_db.RetentionRequest\x1a\x1c.cronos_db.RetentionResponse\x12U\n" +
+	"\x0eSplitPartition\x12 .cronos_db.SplitPartitionRequest\x1a!.cronos_db.SplitPartitionResponse2\xa8\x03\n" +
 	"\x14ConsumerGroupService\x12d\n" +
 	"\x13CreateConsumerGroup\x12%.cronos_db.CreateConsumerGroupRequest\x1a&.cronos_db.CreateConsumerGroupResponse\x12X\n" +
 	"\x10GetConsumerGroup\x12\".cronos_db.GetConsumerGroupRequest\x1a .cronos_db.ConsumerGroupMetadata\x12a\n" +
@@ -3003,7 +3861,15 @@ const file_proto_events_proto_rawDesc = "" +
 	"\vRaftService\x12?\n" +
 	"\x04Join\x12\x1a.cronos_db.RaftJoinRequest\x1a\x1b.cronos_db.RaftJoinResponse\x12B\n" +
 	"\x05Leave\x12\x1b.cronos_db.RaftLeaveRequest\x1a\x1c.cronos_db.RaftLeaveResponse\x12E\n" +
-	"\x06Status\x12\x1c.cronos_db.RaftStatusRequest\x1a\x1d.cronos_db.RaftStatusResponseB<Z:github.com/jatin711-debug/cronos_db_golang/pkg/types;typesb\x06proto3"
+	"\x06Status\x12\x1c.cronos_db.RaftStatusRequest\x1a\x1d.cronos_db.RaftStatusResponse2\xbe\x01\n" +
+	"\x12CrossRegionService\x12X\n" +
+	"\x0fReplicateEvents\x12!.cronos_db.RegionReplicateRequest\x1a\".cronos_db.RegionReplicateResponse\x12N\n" +
+	"\vFetchEvents\x12\x1d.cronos_db.RegionFetchRequest\x1a\x1e.cronos_db.RegionFetchResponse0\x012\x91\x03\n" +
+	"\x12TransactionService\x12[\n" +
+	"\x10BeginTransaction\x12\".cronos_db.BeginTransactionRequest\x1a#.cronos_db.BeginTransactionResponse\x12a\n" +
+	"\x12PrepareTransaction\x12$.cronos_db.PrepareTransactionRequest\x1a%.cronos_db.PrepareTransactionResponse\x12^\n" +
+	"\x11CommitTransaction\x12#.cronos_db.CommitTransactionRequest\x1a$.cronos_db.CommitTransactionResponse\x12[\n" +
+	"\x10AbortTransaction\x12\".cronos_db.AbortTransactionRequest\x1a#.cronos_db.AbortTransactionResponseB<Z:github.com/jatin711-debug/cronos_db_golang/pkg/types;typesb\x06proto3"
 
 var (
 	file_proto_events_proto_rawDescOnce sync.Once
@@ -3017,7 +3883,7 @@ func file_proto_events_proto_rawDescGZIP() []byte {
 	return file_proto_events_proto_rawDescData
 }
 
-var file_proto_events_proto_msgTypes = make([]protoimpl.MessageInfo, 45)
+var file_proto_events_proto_msgTypes = make([]protoimpl.MessageInfo, 59)
 var file_proto_events_proto_goTypes = []any{
 	(*Event)(nil),                          // 0: cronos_db.Event
 	(*PublishRequest)(nil),                 // 1: cronos_db.PublishRequest
@@ -3054,76 +3920,106 @@ var file_proto_events_proto_goTypes = []any{
 	(*CompactResponse)(nil),                // 32: cronos_db.CompactResponse
 	(*RetentionRequest)(nil),               // 33: cronos_db.RetentionRequest
 	(*RetentionResponse)(nil),              // 34: cronos_db.RetentionResponse
-	(*RaftJoinRequest)(nil),                // 35: cronos_db.RaftJoinRequest
-	(*RaftJoinResponse)(nil),               // 36: cronos_db.RaftJoinResponse
-	(*RaftLeaveRequest)(nil),               // 37: cronos_db.RaftLeaveRequest
-	(*RaftLeaveResponse)(nil),              // 38: cronos_db.RaftLeaveResponse
-	(*RaftStatusRequest)(nil),              // 39: cronos_db.RaftStatusRequest
-	(*RaftStatusResponse)(nil),             // 40: cronos_db.RaftStatusResponse
-	nil,                                    // 41: cronos_db.Event.MetaEntry
-	nil,                                    // 42: cronos_db.ConsumerGroupMetadata.CommittedOffsetsEntry
-	nil,                                    // 43: cronos_db.ConsumerGroupMetadata.MemberOffsetsEntry
-	nil,                                    // 44: cronos_db.RebalanceConsumerGroupResponse.PartitionAssignmentsEntry
+	(*SplitPartitionRequest)(nil),          // 35: cronos_db.SplitPartitionRequest
+	(*SplitPartitionResponse)(nil),         // 36: cronos_db.SplitPartitionResponse
+	(*RaftJoinRequest)(nil),                // 37: cronos_db.RaftJoinRequest
+	(*RaftJoinResponse)(nil),               // 38: cronos_db.RaftJoinResponse
+	(*RaftLeaveRequest)(nil),               // 39: cronos_db.RaftLeaveRequest
+	(*RaftLeaveResponse)(nil),              // 40: cronos_db.RaftLeaveResponse
+	(*RaftStatusRequest)(nil),              // 41: cronos_db.RaftStatusRequest
+	(*RaftStatusResponse)(nil),             // 42: cronos_db.RaftStatusResponse
+	(*RegionReplicateRequest)(nil),         // 43: cronos_db.RegionReplicateRequest
+	(*RegionReplicateResponse)(nil),        // 44: cronos_db.RegionReplicateResponse
+	(*RegionFetchRequest)(nil),             // 45: cronos_db.RegionFetchRequest
+	(*RegionFetchResponse)(nil),            // 46: cronos_db.RegionFetchResponse
+	(*BeginTransactionRequest)(nil),        // 47: cronos_db.BeginTransactionRequest
+	(*BeginTransactionResponse)(nil),       // 48: cronos_db.BeginTransactionResponse
+	(*PrepareTransactionRequest)(nil),      // 49: cronos_db.PrepareTransactionRequest
+	(*PrepareTransactionResponse)(nil),     // 50: cronos_db.PrepareTransactionResponse
+	(*CommitTransactionRequest)(nil),       // 51: cronos_db.CommitTransactionRequest
+	(*CommitTransactionResponse)(nil),      // 52: cronos_db.CommitTransactionResponse
+	(*AbortTransactionRequest)(nil),        // 53: cronos_db.AbortTransactionRequest
+	(*AbortTransactionResponse)(nil),       // 54: cronos_db.AbortTransactionResponse
+	nil,                                    // 55: cronos_db.Event.MetaEntry
+	nil,                                    // 56: cronos_db.ConsumerGroupMetadata.CommittedOffsetsEntry
+	nil,                                    // 57: cronos_db.ConsumerGroupMetadata.MemberOffsetsEntry
+	nil,                                    // 58: cronos_db.RebalanceConsumerGroupResponse.PartitionAssignmentsEntry
 }
 var file_proto_events_proto_depIdxs = []int32{
-	41, // 0: cronos_db.Event.meta:type_name -> cronos_db.Event.MetaEntry
+	55, // 0: cronos_db.Event.meta:type_name -> cronos_db.Event.MetaEntry
 	0,  // 1: cronos_db.PublishRequest.event:type_name -> cronos_db.Event
 	0,  // 2: cronos_db.PublishBatchRequest.events:type_name -> cronos_db.Event
 	0,  // 3: cronos_db.Delivery.event:type_name -> cronos_db.Event
 	0,  // 4: cronos_db.Delivery.batch:type_name -> cronos_db.Event
 	0,  // 5: cronos_db.ReplayEvent.event:type_name -> cronos_db.Event
-	42, // 6: cronos_db.ConsumerGroupMetadata.committed_offsets:type_name -> cronos_db.ConsumerGroupMetadata.CommittedOffsetsEntry
-	43, // 7: cronos_db.ConsumerGroupMetadata.member_offsets:type_name -> cronos_db.ConsumerGroupMetadata.MemberOffsetsEntry
+	56, // 6: cronos_db.ConsumerGroupMetadata.committed_offsets:type_name -> cronos_db.ConsumerGroupMetadata.CommittedOffsetsEntry
+	57, // 7: cronos_db.ConsumerGroupMetadata.member_offsets:type_name -> cronos_db.ConsumerGroupMetadata.MemberOffsetsEntry
 	11, // 8: cronos_db.ListConsumerGroupsResponse.groups:type_name -> cronos_db.ConsumerGroupMetadata
-	44, // 9: cronos_db.RebalanceConsumerGroupResponse.partition_assignments:type_name -> cronos_db.RebalanceConsumerGroupResponse.PartitionAssignmentsEntry
+	58, // 9: cronos_db.RebalanceConsumerGroupResponse.partition_assignments:type_name -> cronos_db.RebalanceConsumerGroupResponse.PartitionAssignmentsEntry
 	0,  // 10: cronos_db.ReplicationAppendRequest.events:type_name -> cronos_db.Event
 	0,  // 11: cronos_db.ReplicationSyncResponse.events:type_name -> cronos_db.Event
 	23, // 12: cronos_db.ListPartitionsResponse.partitions:type_name -> cronos_db.PartitionInfo
-	1,  // 13: cronos_db.EventService.Publish:input_type -> cronos_db.PublishRequest
-	3,  // 14: cronos_db.EventService.PublishBatch:input_type -> cronos_db.PublishBatchRequest
-	5,  // 15: cronos_db.EventService.Subscribe:input_type -> cronos_db.SubscribeRequest
-	7,  // 16: cronos_db.EventService.Ack:input_type -> cronos_db.AckRequest
-	9,  // 17: cronos_db.EventService.Replay:input_type -> cronos_db.ReplayRequest
-	24, // 18: cronos_db.PartitionService.GetPartition:input_type -> cronos_db.GetPartitionRequest
-	25, // 19: cronos_db.PartitionService.ListPartitions:input_type -> cronos_db.ListPartitionsRequest
-	27, // 20: cronos_db.PartitionService.GetWALStatus:input_type -> cronos_db.GetWALStatusRequest
-	29, // 21: cronos_db.PartitionService.GetSchedulerStatus:input_type -> cronos_db.GetSchedulerStatusRequest
-	31, // 22: cronos_db.PartitionService.Compact:input_type -> cronos_db.CompactRequest
-	33, // 23: cronos_db.PartitionService.RunRetention:input_type -> cronos_db.RetentionRequest
-	12, // 24: cronos_db.ConsumerGroupService.CreateConsumerGroup:input_type -> cronos_db.CreateConsumerGroupRequest
-	14, // 25: cronos_db.ConsumerGroupService.GetConsumerGroup:input_type -> cronos_db.GetConsumerGroupRequest
-	15, // 26: cronos_db.ConsumerGroupService.ListConsumerGroups:input_type -> cronos_db.ListConsumerGroupsRequest
-	17, // 27: cronos_db.ConsumerGroupService.RebalanceConsumerGroup:input_type -> cronos_db.RebalanceConsumerGroupRequest
-	19, // 28: cronos_db.ReplicationService.Append:input_type -> cronos_db.ReplicationAppendRequest
-	21, // 29: cronos_db.ReplicationService.Sync:input_type -> cronos_db.ReplicationSyncRequest
-	35, // 30: cronos_db.RaftService.Join:input_type -> cronos_db.RaftJoinRequest
-	37, // 31: cronos_db.RaftService.Leave:input_type -> cronos_db.RaftLeaveRequest
-	39, // 32: cronos_db.RaftService.Status:input_type -> cronos_db.RaftStatusRequest
-	2,  // 33: cronos_db.EventService.Publish:output_type -> cronos_db.PublishResponse
-	4,  // 34: cronos_db.EventService.PublishBatch:output_type -> cronos_db.PublishBatchResponse
-	6,  // 35: cronos_db.EventService.Subscribe:output_type -> cronos_db.Delivery
-	8,  // 36: cronos_db.EventService.Ack:output_type -> cronos_db.AckResponse
-	10, // 37: cronos_db.EventService.Replay:output_type -> cronos_db.ReplayEvent
-	23, // 38: cronos_db.PartitionService.GetPartition:output_type -> cronos_db.PartitionInfo
-	26, // 39: cronos_db.PartitionService.ListPartitions:output_type -> cronos_db.ListPartitionsResponse
-	28, // 40: cronos_db.PartitionService.GetWALStatus:output_type -> cronos_db.WALStatus
-	30, // 41: cronos_db.PartitionService.GetSchedulerStatus:output_type -> cronos_db.SchedulerStatus
-	32, // 42: cronos_db.PartitionService.Compact:output_type -> cronos_db.CompactResponse
-	34, // 43: cronos_db.PartitionService.RunRetention:output_type -> cronos_db.RetentionResponse
-	13, // 44: cronos_db.ConsumerGroupService.CreateConsumerGroup:output_type -> cronos_db.CreateConsumerGroupResponse
-	11, // 45: cronos_db.ConsumerGroupService.GetConsumerGroup:output_type -> cronos_db.ConsumerGroupMetadata
-	16, // 46: cronos_db.ConsumerGroupService.ListConsumerGroups:output_type -> cronos_db.ListConsumerGroupsResponse
-	18, // 47: cronos_db.ConsumerGroupService.RebalanceConsumerGroup:output_type -> cronos_db.RebalanceConsumerGroupResponse
-	20, // 48: cronos_db.ReplicationService.Append:output_type -> cronos_db.ReplicationAppendResponse
-	22, // 49: cronos_db.ReplicationService.Sync:output_type -> cronos_db.ReplicationSyncResponse
-	36, // 50: cronos_db.RaftService.Join:output_type -> cronos_db.RaftJoinResponse
-	38, // 51: cronos_db.RaftService.Leave:output_type -> cronos_db.RaftLeaveResponse
-	40, // 52: cronos_db.RaftService.Status:output_type -> cronos_db.RaftStatusResponse
-	33, // [33:53] is the sub-list for method output_type
-	13, // [13:33] is the sub-list for method input_type
-	13, // [13:13] is the sub-list for extension type_name
-	13, // [13:13] is the sub-list for extension extendee
-	0,  // [0:13] is the sub-list for field type_name
+	0,  // 13: cronos_db.RegionReplicateRequest.events:type_name -> cronos_db.Event
+	0,  // 14: cronos_db.RegionFetchResponse.events:type_name -> cronos_db.Event
+	1,  // 15: cronos_db.EventService.Publish:input_type -> cronos_db.PublishRequest
+	3,  // 16: cronos_db.EventService.PublishBatch:input_type -> cronos_db.PublishBatchRequest
+	5,  // 17: cronos_db.EventService.Subscribe:input_type -> cronos_db.SubscribeRequest
+	7,  // 18: cronos_db.EventService.Ack:input_type -> cronos_db.AckRequest
+	9,  // 19: cronos_db.EventService.Replay:input_type -> cronos_db.ReplayRequest
+	24, // 20: cronos_db.PartitionService.GetPartition:input_type -> cronos_db.GetPartitionRequest
+	25, // 21: cronos_db.PartitionService.ListPartitions:input_type -> cronos_db.ListPartitionsRequest
+	27, // 22: cronos_db.PartitionService.GetWALStatus:input_type -> cronos_db.GetWALStatusRequest
+	29, // 23: cronos_db.PartitionService.GetSchedulerStatus:input_type -> cronos_db.GetSchedulerStatusRequest
+	31, // 24: cronos_db.PartitionService.Compact:input_type -> cronos_db.CompactRequest
+	33, // 25: cronos_db.PartitionService.RunRetention:input_type -> cronos_db.RetentionRequest
+	35, // 26: cronos_db.PartitionService.SplitPartition:input_type -> cronos_db.SplitPartitionRequest
+	12, // 27: cronos_db.ConsumerGroupService.CreateConsumerGroup:input_type -> cronos_db.CreateConsumerGroupRequest
+	14, // 28: cronos_db.ConsumerGroupService.GetConsumerGroup:input_type -> cronos_db.GetConsumerGroupRequest
+	15, // 29: cronos_db.ConsumerGroupService.ListConsumerGroups:input_type -> cronos_db.ListConsumerGroupsRequest
+	17, // 30: cronos_db.ConsumerGroupService.RebalanceConsumerGroup:input_type -> cronos_db.RebalanceConsumerGroupRequest
+	19, // 31: cronos_db.ReplicationService.Append:input_type -> cronos_db.ReplicationAppendRequest
+	21, // 32: cronos_db.ReplicationService.Sync:input_type -> cronos_db.ReplicationSyncRequest
+	37, // 33: cronos_db.RaftService.Join:input_type -> cronos_db.RaftJoinRequest
+	39, // 34: cronos_db.RaftService.Leave:input_type -> cronos_db.RaftLeaveRequest
+	41, // 35: cronos_db.RaftService.Status:input_type -> cronos_db.RaftStatusRequest
+	43, // 36: cronos_db.CrossRegionService.ReplicateEvents:input_type -> cronos_db.RegionReplicateRequest
+	45, // 37: cronos_db.CrossRegionService.FetchEvents:input_type -> cronos_db.RegionFetchRequest
+	47, // 38: cronos_db.TransactionService.BeginTransaction:input_type -> cronos_db.BeginTransactionRequest
+	49, // 39: cronos_db.TransactionService.PrepareTransaction:input_type -> cronos_db.PrepareTransactionRequest
+	51, // 40: cronos_db.TransactionService.CommitTransaction:input_type -> cronos_db.CommitTransactionRequest
+	53, // 41: cronos_db.TransactionService.AbortTransaction:input_type -> cronos_db.AbortTransactionRequest
+	2,  // 42: cronos_db.EventService.Publish:output_type -> cronos_db.PublishResponse
+	4,  // 43: cronos_db.EventService.PublishBatch:output_type -> cronos_db.PublishBatchResponse
+	6,  // 44: cronos_db.EventService.Subscribe:output_type -> cronos_db.Delivery
+	8,  // 45: cronos_db.EventService.Ack:output_type -> cronos_db.AckResponse
+	10, // 46: cronos_db.EventService.Replay:output_type -> cronos_db.ReplayEvent
+	23, // 47: cronos_db.PartitionService.GetPartition:output_type -> cronos_db.PartitionInfo
+	26, // 48: cronos_db.PartitionService.ListPartitions:output_type -> cronos_db.ListPartitionsResponse
+	28, // 49: cronos_db.PartitionService.GetWALStatus:output_type -> cronos_db.WALStatus
+	30, // 50: cronos_db.PartitionService.GetSchedulerStatus:output_type -> cronos_db.SchedulerStatus
+	32, // 51: cronos_db.PartitionService.Compact:output_type -> cronos_db.CompactResponse
+	34, // 52: cronos_db.PartitionService.RunRetention:output_type -> cronos_db.RetentionResponse
+	36, // 53: cronos_db.PartitionService.SplitPartition:output_type -> cronos_db.SplitPartitionResponse
+	13, // 54: cronos_db.ConsumerGroupService.CreateConsumerGroup:output_type -> cronos_db.CreateConsumerGroupResponse
+	11, // 55: cronos_db.ConsumerGroupService.GetConsumerGroup:output_type -> cronos_db.ConsumerGroupMetadata
+	16, // 56: cronos_db.ConsumerGroupService.ListConsumerGroups:output_type -> cronos_db.ListConsumerGroupsResponse
+	18, // 57: cronos_db.ConsumerGroupService.RebalanceConsumerGroup:output_type -> cronos_db.RebalanceConsumerGroupResponse
+	20, // 58: cronos_db.ReplicationService.Append:output_type -> cronos_db.ReplicationAppendResponse
+	22, // 59: cronos_db.ReplicationService.Sync:output_type -> cronos_db.ReplicationSyncResponse
+	38, // 60: cronos_db.RaftService.Join:output_type -> cronos_db.RaftJoinResponse
+	40, // 61: cronos_db.RaftService.Leave:output_type -> cronos_db.RaftLeaveResponse
+	42, // 62: cronos_db.RaftService.Status:output_type -> cronos_db.RaftStatusResponse
+	44, // 63: cronos_db.CrossRegionService.ReplicateEvents:output_type -> cronos_db.RegionReplicateResponse
+	46, // 64: cronos_db.CrossRegionService.FetchEvents:output_type -> cronos_db.RegionFetchResponse
+	48, // 65: cronos_db.TransactionService.BeginTransaction:output_type -> cronos_db.BeginTransactionResponse
+	50, // 66: cronos_db.TransactionService.PrepareTransaction:output_type -> cronos_db.PrepareTransactionResponse
+	52, // 67: cronos_db.TransactionService.CommitTransaction:output_type -> cronos_db.CommitTransactionResponse
+	54, // 68: cronos_db.TransactionService.AbortTransaction:output_type -> cronos_db.AbortTransactionResponse
+	42, // [42:69] is the sub-list for method output_type
+	15, // [15:42] is the sub-list for method input_type
+	15, // [15:15] is the sub-list for extension type_name
+	15, // [15:15] is the sub-list for extension extendee
+	0,  // [0:15] is the sub-list for field type_name
 }
 
 func init() { file_proto_events_proto_init() }
@@ -3137,9 +4033,9 @@ func file_proto_events_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_events_proto_rawDesc), len(file_proto_events_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   45,
+			NumMessages:   59,
 			NumExtensions: 0,
-			NumServices:   5,
+			NumServices:   7,
 		},
 		GoTypes:           file_proto_events_proto_goTypes,
 		DependencyIndexes: file_proto_events_proto_depIdxs,

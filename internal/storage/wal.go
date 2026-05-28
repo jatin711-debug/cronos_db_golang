@@ -54,6 +54,8 @@ type WAL struct {
 	dirty              atomic.Bool // Set on write, cleared on flush
 	quit               chan struct{}
 	wg                 sync.WaitGroup
+	cipher             *SegmentCipher
+	appendHook         func(event *types.Event) // Called after successful append (e.g. CDC)
 }
 
 // WALConfig represents WAL configuration
@@ -65,7 +67,7 @@ type WALConfig struct {
 }
 
 // NewWAL creates a new WAL
-func NewWAL(dataDir string, partitionID int32, config *WALConfig) (*WAL, error) {
+func NewWAL(dataDir string, partitionID int32, config *WALConfig, cipher *SegmentCipher) (*WAL, error) {
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		return nil, fmt.Errorf("create data dir: %w", err)
 	}
@@ -79,6 +81,7 @@ func NewWAL(dataDir string, partitionID int32, config *WALConfig) (*WAL, error) 
 		config:        config,
 		fsyncMode:     ParseFsyncMode(config.FsyncMode),
 		quit:          make(chan struct{}),
+		cipher:        cipher,
 	}
 
 	// Load existing segments
@@ -98,6 +101,11 @@ func NewWAL(dataDir string, partitionID int32, config *WALConfig) (*WAL, error) 
 	}
 
 	return wal, nil
+}
+
+// SetAppendHook registers a callback invoked after each successful event append.
+func (w *WAL) SetAppendHook(hook func(event *types.Event)) {
+	w.appendHook = hook
 }
 
 // loadSegments loads existing segments
@@ -128,7 +136,7 @@ func (w *WAL) loadSegments() error {
 
 	// Load each segment
 	for _, filename := range segmentFiles {
-		segment, err := OpenSegment(w.dataDir, filename)
+		segment, err := OpenSegment(w.dataDir, filename, w.cipher)
 		if err != nil {
 			return fmt.Errorf("open segment %s: %w", filename, err)
 		}
@@ -286,6 +294,13 @@ func (w *WAL) AppendBatch(events []*types.Event) error {
 	w.highWatermark = events[len(events)-1].Offset
 	w.dirty.Store(true)
 
+	// Emit CDC events if hook is registered
+	if w.appendHook != nil {
+		for _, event := range events {
+			w.appendHook(event)
+		}
+	}
+
 	// Sync inline only for every_event mode.
 	if w.fsyncMode == FsyncEveryEvent {
 		if err := w.activeSegment.FlushBuffer(); err != nil {
@@ -341,7 +356,7 @@ func (w *WAL) maybePreCreateNextSegment(nextOffset int64) {
 	}
 	w.nextSegMu.Unlock()
 
-	seg, err := NewSegment(w.dataDir, nextOffset, true)
+	seg, err := NewSegment(w.dataDir, nextOffset, true, w.cipher)
 	if err != nil {
 		log.Printf("[WAL-%d] failed to pre-create next segment: %v", w.partitionID, err)
 		w.preCreateTriggered.Store(false)
@@ -368,7 +383,7 @@ func (w *WAL) openActiveSegment() error {
 	}
 
 	// Create new active segment
-	segment, err := NewSegment(w.dataDir, w.nextOffset, true)
+	segment, err := NewSegment(w.dataDir, w.nextOffset, true, w.cipher)
 	if err != nil {
 		return fmt.Errorf("create new segment: %w", err)
 	}
@@ -411,6 +426,11 @@ func (w *WAL) AppendEvent(event *types.Event) error {
 
 	w.highWatermark = event.Offset
 	w.dirty.Store(true)
+
+	// Emit CDC event if hook is registered
+	if w.appendHook != nil {
+		w.appendHook(event)
+	}
 
 	// Sync inline for every_event mode
 	if w.fsyncMode == FsyncEveryEvent {
@@ -469,7 +489,7 @@ func (w *WAL) rotateSegment() error {
 	w.nextSegMu.Unlock()
 
 	// Fallback: create synchronously
-	newSegment, err := NewSegment(w.dataDir, w.nextOffset, true)
+	newSegment, err := NewSegment(w.dataDir, w.nextOffset, true, w.cipher)
 	if err != nil {
 		return fmt.Errorf("create new active segment: %w", err)
 	}

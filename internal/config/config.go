@@ -85,6 +85,14 @@ func LoadConfig() (*types.Config, error) {
 	// Follower reads default
 	config.FollowerReadsEnabled = false
 
+	// Encryption defaults
+	config.EncryptionEnabled = DefaultEncryptionEnabled
+	config.EncryptionKeyFile = DefaultEncryptionKeyFile
+
+	// Topic rate limit defaults
+	config.TopicRateLimitPerSecond = DefaultTopicRateLimitPerSecond
+	config.TopicRateLimitBurst = DefaultTopicRateLimitBurst
+
 	// Cluster defaults
 	config.ClusterEnabled = DefaultClusterEnabled
 	config.ClusterGossipAddr = DefaultClusterGossipAddr
@@ -181,6 +189,14 @@ func LoadConfig() (*types.Config, error) {
 
 	// Follower reads
 	flag.BoolVar(&config.FollowerReadsEnabled, "follower-reads", false, "Allow follower nodes to serve replay reads")
+
+	// Encryption flags
+	flag.BoolVar(&config.EncryptionEnabled, "encryption-enabled", DefaultEncryptionEnabled, "Enable AES-256-GCM encryption at rest for WAL segments")
+	flag.StringVar(&config.EncryptionKeyFile, "encryption-key-file", DefaultEncryptionKeyFile, "Path to 32-byte encryption key file")
+
+	// Topic rate limit flags
+	flag.Float64Var(&config.TopicRateLimitPerSecond, "topic-rate-limit", DefaultTopicRateLimitPerSecond, "Per-subject per-topic rate limit (events/sec, 0 = disabled)")
+	flag.Float64Var(&config.TopicRateLimitBurst, "topic-rate-burst", DefaultTopicRateLimitBurst, "Per-subject per-topic rate limit burst (0 = disabled)")
 
 	var clusterSeeds string
 	flag.StringVar(&clusterSeeds, "cluster-seeds", "", "Comma-separated list of seed node addresses")
