@@ -1081,11 +1081,12 @@ func (s *Segment) Close() error {
 	}
 	s.closed = true
 
+	var firstErr error
 	if err := s.writer.Flush(); err != nil {
-		return err
+		firstErr = fmt.Errorf("flush writer: %w", err)
 	}
-	if err := s.segmentFile.Sync(); err != nil {
-		return err
+	if err := s.segmentFile.Sync(); err != nil && firstErr == nil {
+		firstErr = fmt.Errorf("sync file: %w", err)
 	}
 
 	// Unmap memory
@@ -1095,11 +1096,14 @@ func (s *Segment) Close() error {
 	}
 
 	if s.index != nil {
-		if err := s.index.Close(); err != nil {
-			return err
+		if err := s.index.Close(); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("close index: %w", err)
 		}
 	}
-	return s.segmentFile.Close()
+	if err := s.segmentFile.Close(); err != nil && firstErr == nil {
+		firstErr = fmt.Errorf("close segment file: %w", err)
+	}
+	return firstErr
 }
 
 // Delete permanently removes the segment and its index files from disk

@@ -125,8 +125,13 @@ func (h *EventServiceHandler) SetAuditLogger(l *audit.Logger) {
 }
 
 // ensureClusterPartitionWritable validates that this node should accept writes
-// for the target partition when running in cluster mode.
+// for the target partition when running in cluster mode or under active splits.
 func (h *EventServiceHandler) ensureClusterPartitionWritable(partitionID int32) error {
+	if h.partitionManager.IsSplitting(partitionID) {
+		return status.Errorf(codes.Unavailable,
+			"partition %d is undergoing split, retry later", partitionID)
+	}
+
 	if h.clusterRouter == nil {
 		return nil
 	}
@@ -251,6 +256,13 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 				Error:   fmt.Sprintf("get partition: %v", err),
 			}, nil
 		}
+	}
+
+	if !partitionInternal.IsKeyInBounds(partitionKey) {
+		return &types.PublishResponse{
+			Success: false,
+			Error:   fmt.Sprintf("key %s is out of partition bounds [%s, %s)", partitionKey, partitionInternal.MinKey, partitionInternal.MaxKey),
+		}, nil
 	}
 
 	// Check if duplicate (unless explicitly allowed)
@@ -453,6 +465,29 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 					return
 				}
 			}
+
+			// Filter and validate keys bounds for each event in the batch
+			validEvts := make([]*types.Event, 0, len(evts))
+			for _, event := range evts {
+				partitionKey := event.GetMessageId()
+				if pk, ok := event.Meta["partition_key"]; ok && pk != "" {
+					partitionKey = pk
+				}
+				if !partitionInternal.IsKeyInBounds(partitionKey) {
+					atomic.AddInt32(&errorCount, 1)
+					mu.Lock()
+					if lastError == "" {
+						lastError = fmt.Sprintf("key %s is out of partition bounds [%s, %s)", partitionKey, partitionInternal.MinKey, partitionInternal.MaxKey)
+					}
+					mu.Unlock()
+					continue
+				}
+				validEvts = append(validEvts, event)
+			}
+			if len(validEvts) == 0 {
+				return
+			}
+			evts = validEvts
 
 			// Batch append to WAL (single syscall for all events)
 			if err := partitionInternal.Wal.AppendBatch(evts); err != nil {

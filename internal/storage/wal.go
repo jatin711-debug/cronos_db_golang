@@ -471,31 +471,41 @@ func (w *WAL) AppendEvent(event *types.Event) error {
 // rotateSegment swaps to the pre-created next segment if available,
 // otherwise falls back to synchronous creation.
 func (w *WAL) rotateSegment() error {
-	// Close current active segment
-	if err := w.activeSegment.Close(); err != nil {
-		return fmt.Errorf("close active segment: %w", err)
-	}
+	var nextSeg *Segment
 
 	// Try to use pre-created segment
 	w.nextSegMu.Lock()
 	if w.nextSegment != nil {
-		w.segments = append(w.segments, w.nextSegment)
-		w.activeSegment = w.nextSegment
+		nextSeg = w.nextSegment
 		w.nextSegment = nil
-		w.nextSegMu.Unlock()
-		w.preCreateTriggered.Store(false)
-		return nil
 	}
 	w.nextSegMu.Unlock()
 
-	// Fallback: create synchronously
-	newSegment, err := NewSegment(w.dataDir, w.nextOffset, true, w.cipher)
-	if err != nil {
-		return fmt.Errorf("create new active segment: %w", err)
+	if nextSeg == nil {
+		// Fallback: create synchronously
+		var err error
+		nextSeg, err = NewSegment(w.dataDir, w.nextOffset, true, w.cipher)
+		if err != nil {
+			return fmt.Errorf("create new active segment: %w", err)
+		}
 	}
-	w.segments = append(w.segments, newSegment)
-	w.activeSegment = newSegment
+
+	// Now we have the new segment ready!
+	oldActive := w.activeSegment
+	w.segments = append(w.segments, nextSeg)
+	w.activeSegment = nextSeg
 	w.preCreateTriggered.Store(false)
+
+	// Now close the old active segment safely
+	if oldActive != nil {
+		oldActive.mu.Lock()
+		oldActive.isActive = false // mark old segment as inactive
+		oldActive.mu.Unlock()
+		if err := oldActive.Close(); err != nil {
+			log.Printf("Failed to close rotated WAL segment: %v", err)
+			// Don't fail the rotation because the new active segment is already open and active!
+		}
+	}
 
 	return nil
 }
@@ -660,10 +670,18 @@ func (w *WAL) Close() error {
 
 	if w.activeSegment != nil {
 		// Final flush + sync before close
-		_ = w.activeSegment.FlushBuffer()
-		_ = w.activeSegment.Sync()
-		if err := w.activeSegment.Close(); err != nil {
-			return err
+		var closeErr error
+		if err := w.activeSegment.FlushBuffer(); err != nil {
+			closeErr = fmt.Errorf("flush active segment: %w", err)
+		}
+		if err := w.activeSegment.Sync(); err != nil && closeErr == nil {
+			closeErr = fmt.Errorf("sync active segment: %w", err)
+		}
+		if err := w.activeSegment.Close(); err != nil && closeErr == nil {
+			closeErr = fmt.Errorf("close active segment: %w", err)
+		}
+		if closeErr != nil {
+			return closeErr
 		}
 	}
 

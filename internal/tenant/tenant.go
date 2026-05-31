@@ -51,6 +51,19 @@ func (tb *tokenBucket) tryConsume(n float64) bool {
 	return false
 }
 
+// refund restores n tokens back to the bucket, ensuring it doesn't exceed capacity.
+func (tb *tokenBucket) refund(n float64) {
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+
+	now := time.Now()
+	elapsed := now.Sub(tb.last).Seconds()
+	tb.tokens = min(tb.capacity, tb.tokens+elapsed*tb.rate)
+	tb.last = now
+
+	tb.tokens = min(tb.capacity, tb.tokens+n)
+}
+
 // Accountant tracks per-tenant resource usage.
 type Accountant struct {
 	mu      sync.RWMutex
@@ -113,7 +126,7 @@ func (a *Accountant) AllowPublish(tenant ID) bool {
 		if usage.InFlight.Load() >= limits.MaxInFlight {
 			// Refund the token since we're rejecting
 			if hasBucket {
-				bucket.tryConsume(-1) // refund
+				bucket.refund(1) // refund
 			}
 			return false
 		}
@@ -122,7 +135,7 @@ func (a *Accountant) AllowPublish(tenant ID) bool {
 		if usage.StorageBytes.Load() >= limits.MaxStorageBytes {
 			// Refund the token since we're rejecting
 			if hasBucket {
-				bucket.tryConsume(-1) // refund
+				bucket.refund(1) // refund
 			}
 			return false
 		}

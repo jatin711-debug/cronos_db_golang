@@ -38,9 +38,23 @@ type Partition struct {
 	ReplLeader    *replication.Leader    // For sending replication to followers
 	Leader        bool
 	Epoch         int64                 // Cluster-assigned epoch for split-brain fencing
+	MinKey        string                // Minimum key boundary (inclusive)
+	MaxKey        string                // Maximum key boundary (exclusive)
 	CreatedTS     time.Time
 	UpdatedTS     time.Time
 	deliveryQuit  chan struct{} // Quit channel for delivery goroutine
+}
+
+// IsKeyInBounds returns true if key falls within the partition bounds [MinKey, MaxKey).
+// If boundaries are empty, all keys are considered in bounds.
+func (p *Partition) IsKeyInBounds(key string) bool {
+	if p.MinKey != "" && key < p.MinKey {
+		return false
+	}
+	if p.MaxKey != "" && key >= p.MaxKey {
+		return false
+	}
+	return true
 }
 
 // PartitionManager manages all partitions
@@ -51,6 +65,8 @@ type PartitionManager struct {
 	config           *types.Config
 	pebbleCache      *pebble.Cache
 	tenantAccountant tenantAccountant
+	splitting        map[int32]bool  // tracks partitions currently undergoing split
+	splittingMu      sync.RWMutex
 }
 
 // tenantAccountant is the minimal interface needed for delivery callbacks.
@@ -64,6 +80,7 @@ func NewPartitionManager(nodeID string, config *types.Config) *PartitionManager 
 		partitions: make(map[int32]*Partition),
 		nodeID:     nodeID,
 		config:     config,
+		splitting:  make(map[int32]bool),
 	}
 }
 
@@ -969,4 +986,55 @@ func (pm *PartitionManager) GetLoadStatus(partitionID int32) (*PartitionLoadStat
 // NewPartitionManagerWithAccessor creates a new partition manager that implements PartitionAccessor
 func NewPartitionManagerWithAccessor(nodeID string, config *types.Config) *PartitionManager {
 	return NewPartitionManager(nodeID, config)
+}
+
+// GetDataDir returns the configured data directory
+func (pm *PartitionManager) GetDataDir() string {
+	if pm.config != nil {
+		return pm.config.DataDir
+	}
+	return ""
+}
+
+// SetSplitting marks a partition as actively undergoing a split.
+func (pm *PartitionManager) SetSplitting(partitionID int32, active bool) {
+	pm.splittingMu.Lock()
+	defer pm.splittingMu.Unlock()
+	if active {
+		pm.splitting[partitionID] = true
+	} else {
+		delete(pm.splitting, partitionID)
+	}
+}
+
+// IsSplitting returns whether a partition is undergoing a split.
+func (pm *PartitionManager) IsSplitting(partitionID int32) bool {
+	pm.splittingMu.RLock()
+	defer pm.splittingMu.RUnlock()
+	return pm.splitting[partitionID]
+}
+
+// SetPartitionBounds updates a partition's key range boundaries.
+func (pm *PartitionManager) SetPartitionBounds(partitionID int32, minKey, maxKey string) error {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	p, exists := pm.partitions[partitionID]
+	if !exists {
+		return fmt.Errorf("partition %d not found", partitionID)
+	}
+	p.MinKey = minKey
+	p.MaxKey = maxKey
+	p.UpdatedTS = time.Now()
+	return nil
+}
+
+// GetPartitionBounds returns the boundaries for a partition.
+func (pm *PartitionManager) GetPartitionBounds(partitionID int32) (string, string, error) {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	p, exists := pm.partitions[partitionID]
+	if !exists {
+		return "", "", fmt.Errorf("partition %d not found", partitionID)
+	}
+	return p.MinKey, p.MaxKey, nil
 }

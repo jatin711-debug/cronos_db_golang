@@ -1,10 +1,11 @@
 package slo
 
 import (
-	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // Window defines an SLO observation window.
@@ -21,7 +22,7 @@ type Recorder struct {
 
 	totalRequests  atomic.Int64
 	errorRequests  atomic.Int64
-	latencyBuckets []time.Duration // Sorted ascending after copy
+	latencyBuckets []time.Duration // Copied before calculation
 	bucketMu       sync.Mutex
 	maxBuckets     int
 
@@ -91,46 +92,76 @@ func (r *Recorder) ErrorRate() float64 {
 	return float64(r.errorRequests.Load()) / float64(total)
 }
 
-// sortedLatencies returns a sorted copy of latency buckets.
-func (r *Recorder) sortedLatencies() []time.Duration {
+// copyBuckets returns an unsorted copy of latency buckets.
+func (r *Recorder) copyBuckets() []time.Duration {
 	r.bucketMu.Lock()
+	defer r.bucketMu.Unlock()
 	buckets := make([]time.Duration, len(r.latencyBuckets))
 	copy(buckets, r.latencyBuckets)
-	r.bucketMu.Unlock()
-
-	if len(buckets) == 0 {
-		return nil
-	}
-	sort.Slice(buckets, func(i, j int) bool { return buckets[i] < buckets[j] })
 	return buckets
 }
 
-// percentile returns the p-th percentile (0.0-1.0) from sorted latencies.
-func percentile(sorted []time.Duration, p float64) time.Duration {
-	n := len(sorted)
+// percentile returns the p-th percentile (0.0-1.0) using Quickselect.
+func percentile(buckets []time.Duration, p float64) time.Duration {
+	n := len(buckets)
 	if n == 0 {
 		return 0
 	}
-	idx := int(p * float64(n-1))
-	if idx < 0 {
-		idx = 0
+	k := int(p * float64(n-1))
+	if k < 0 {
+		k = 0
 	}
-	if idx >= n {
-		idx = n - 1
+	if k >= n {
+		k = n - 1
 	}
-	return sorted[idx]
+	return quickselect(buckets, k)
+}
+
+// quickselect finds the k-th smallest element in slice s (0-indexed).
+// It mutates s in-place. Average time complexity is O(n).
+func quickselect(s []time.Duration, k int) time.Duration {
+	if len(s) == 0 || k < 0 || k >= len(s) {
+		return 0
+	}
+	left, right := 0, len(s)-1
+	for left < right {
+		pivotIndex := partition(s, left, right)
+		if pivotIndex == k {
+			return s[k]
+		} else if pivotIndex < k {
+			left = pivotIndex + 1
+		} else {
+			right = pivotIndex - 1
+		}
+	}
+	return s[left]
+}
+
+func partition(s []time.Duration, left, right int) int {
+	mid := left + (right-left)/2
+	pivotVal := s[mid]
+	s[mid], s[right] = s[right], s[mid]
+	storeIndex := left
+	for i := left; i < right; i++ {
+		if s[i] < pivotVal {
+			s[i], s[storeIndex] = s[storeIndex], s[i]
+			storeIndex++
+		}
+	}
+	s[storeIndex], s[right] = s[right], s[storeIndex]
+	return storeIndex
 }
 
 // P99 returns the 99th percentile latency.
 func (r *Recorder) P99() time.Duration {
-	sorted := r.sortedLatencies()
-	return percentile(sorted, 0.99)
+	buckets := r.copyBuckets()
+	return percentile(buckets, 0.99)
 }
 
 // P95 returns the 95th percentile latency.
 func (r *Recorder) P95() time.Duration {
-	sorted := r.sortedLatencies()
-	return percentile(sorted, 0.95)
+	buckets := r.copyBuckets()
+	return percentile(buckets, 0.95)
 }
 
 // Compliant returns true if current metrics meet SLO targets.
@@ -151,4 +182,45 @@ func (r *Recorder) Reset() {
 	r.bucketMu.Lock()
 	r.latencyBuckets = r.latencyBuckets[:0]
 	r.bucketMu.Unlock()
+}
+
+type sloCollector struct {
+	recorder *Recorder
+	p99Desc  *prometheus.Desc
+	p95Desc  *prometheus.Desc
+	errDesc  *prometheus.Desc
+	compDesc *prometheus.Desc
+}
+
+// PrometheusCollector returns a prometheus.Collector for this SLO recorder.
+func (r *Recorder) PrometheusCollector() prometheus.Collector {
+	return &sloCollector{
+		recorder: r,
+		p99Desc:  prometheus.NewDesc("cronos_slo_p99_latency_ms", "99th percentile latency in milliseconds", nil, nil),
+		p95Desc:  prometheus.NewDesc("cronos_slo_p95_latency_ms", "95th percentile latency in milliseconds", nil, nil),
+		errDesc:  prometheus.NewDesc("cronos_slo_error_rate", "Current request error rate", nil, nil),
+		compDesc: prometheus.NewDesc("cronos_slo_compliant", "SLO compliance status (1 = compliant, 0 = non-compliant)", nil, nil),
+	}
+}
+
+func (c *sloCollector) Describe(ch chan<- *prometheus.Desc) {
+	ch <- c.p99Desc
+	ch <- c.p95Desc
+	ch <- c.errDesc
+	ch <- c.compDesc
+}
+
+func (c *sloCollector) Collect(ch chan<- prometheus.Metric) {
+	p99 := float64(c.recorder.P99().Milliseconds())
+	p95 := float64(c.recorder.P95().Milliseconds())
+	errRate := c.recorder.ErrorRate()
+	compliant := 0.0
+	if c.recorder.Compliant() {
+		compliant = 1.0
+	}
+
+	ch <- prometheus.MustNewConstMetric(c.p99Desc, prometheus.GaugeValue, p99)
+	ch <- prometheus.MustNewConstMetric(c.p95Desc, prometheus.GaugeValue, p95)
+	ch <- prometheus.MustNewConstMetric(c.errDesc, prometheus.GaugeValue, errRate)
+	ch <- prometheus.MustNewConstMetric(c.compDesc, prometheus.GaugeValue, compliant)
 }

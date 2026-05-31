@@ -229,8 +229,13 @@ import client "github.com/jatin711-debug/cronos_db_golang/pkg/client"
 ```go
 ctx := context.Background()
 
-cfg := client.DefaultConfig("127.0.0.1:9000")
+cfg := client.DefaultConfig("127.0.0.1:9000", "127.0.0.1:9001", "127.0.0.1:9002")
 cfg.Security.Insecure = true
+cfg.NodeIDToAddress = map[string]string{
+    "node1": "127.0.0.1:9000",
+    "node2": "127.0.0.1:9001",
+    "node3": "127.0.0.1:9002",
+}
 
 c, err := client.Dial(ctx, cfg)
 if err != nil {
@@ -291,6 +296,7 @@ go run ./examples/pubsub_demo
 ```
 
 This demo publishes one JSON event with a 10-second schedule window and prints the received delivery metadata/payload.
+By default it bootstraps local cluster ports `9000,9001,9002`; use `-addr` to force a single node.
 
 ---
 

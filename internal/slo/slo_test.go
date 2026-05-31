@@ -3,6 +3,8 @@ package slo
 import (
 	"testing"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 func TestNewRecorder(t *testing.T) {
@@ -221,5 +223,58 @@ func TestWindow_Fields(t *testing.T) {
 	}
 	if w.MaxErrorRate != 0.05 {
 		t.Error("maxErrorRate mismatch")
+	}
+}
+
+func TestRecorder_PrometheusCollector(t *testing.T) {
+	w := Window{
+		Duration:     time.Hour,
+		TargetP99:    10 * time.Millisecond,
+		MaxErrorRate: 0.01,
+	}
+	r := NewRecorder(w)
+
+	// Record a couple of requests
+	r.Record(5*time.Millisecond, false)
+	r.Record(15*time.Millisecond, true)
+
+	collector := r.PrometheusCollector()
+	if collector == nil {
+		t.Fatal("PrometheusCollector returned nil")
+	}
+
+	// Create registry and register
+	reg := prometheus.NewRegistry()
+	if err := reg.Register(collector); err != nil {
+		t.Fatalf("failed to register collector: %v", err)
+	}
+
+	// Gather metrics
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("failed to gather metrics: %v", err)
+	}
+
+	expectedNames := map[string]bool{
+		"cronos_slo_p99_latency_ms": false,
+		"cronos_slo_p95_latency_ms": false,
+		"cronos_slo_error_rate":     false,
+		"cronos_slo_compliant":      false,
+	}
+
+	for _, mf := range mfs {
+		name := mf.GetName()
+		if _, ok := expectedNames[name]; ok {
+			expectedNames[name] = true
+			if len(mf.GetMetric()) != 1 {
+				t.Errorf("expected 1 metric for %s, got %d", name, len(mf.GetMetric()))
+			}
+		}
+	}
+
+	for name, found := range expectedNames {
+		if !found {
+			t.Errorf("expected metric %s not gathered", name)
+		}
 	}
 }

@@ -4,12 +4,25 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/jatin711-debug/cronos_db_golang/internal/partition"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+)
+
+var (
+	conflictResolutionCounter = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "cronos_crossregion_conflicts_total",
+			Help: "Total number of cross-region conflict resolution events",
+		},
+		[]string{"resolution"},
+	)
 )
 
 // CrossRegionServer implements the CrossRegionService gRPC server.
@@ -64,15 +77,45 @@ func (s *CrossRegionServer) ReplicateEvents(ctx context.Context, req *types.Regi
 			isDup, dupErr := p.DedupStore.IsDuplicate(event.MessageId, event.Offset)
 			if dupErr != nil {
 				slog.Warn("Cross-region dedup check failed", "message_id", event.MessageId, "error", dupErr)
+				conflictResolutionCounter.WithLabelValues("no_conflict").Inc()
 				// On dedup error, proceed with append (safer than dropping)
 			} else if isDup {
 				// Event exists — apply LWW: keep the one with higher created_ts
-				// Since we can't easily retrieve the old event's timestamp from the dedup store,
-				// we conservatively skip duplicates. In a full implementation, the dedup store
-				// would store (message_id -> created_ts) for LWW resolution.
-				slog.Debug("Cross-region LWW: skipping duplicate", "message_id", event.MessageId, "region", req.RegionId)
-				continue
+				storedTS, exists, tsErr := p.DedupStore.GetTimestamp(event.MessageId)
+				if tsErr != nil {
+					slog.Warn("Cross-region LWW: failed to get stored timestamp", "message_id", event.MessageId, "error", tsErr)
+					conflictResolutionCounter.WithLabelValues("no_conflict").Inc()
+					continue
+				}
+				if exists {
+					var incomingTime time.Time
+					if event.CreatedTs > 1e16 { // nanoseconds
+						incomingTime = time.Unix(0, event.CreatedTs)
+					} else { // milliseconds
+						incomingTime = time.Unix(0, event.CreatedTs*1_000_000)
+					}
+
+					if incomingTime.After(storedTS) {
+						// Incoming is newer! Keep it and replace
+						slog.Info("Cross-region LWW: replacing duplicate with newer event", "message_id", event.MessageId, "incoming_ts", incomingTime, "stored_ts", storedTS)
+						conflictResolutionCounter.WithLabelValues("lww_replaced").Inc()
+						accepted = append(accepted, event)
+					} else {
+						// Incoming is older or equal — skip it
+						slog.Debug("Cross-region LWW: skipping duplicate (stored is newer/equal)", "message_id", event.MessageId, "incoming_ts", incomingTime, "stored_ts", storedTS)
+						conflictResolutionCounter.WithLabelValues("lww_kept").Inc()
+					}
+					continue
+				} else {
+					// Duplicate according to bloom filter but not in PebbleDB
+					conflictResolutionCounter.WithLabelValues("no_conflict").Inc()
+				}
+			} else {
+				// Not a duplicate
+				conflictResolutionCounter.WithLabelValues("no_conflict").Inc()
 			}
+		} else {
+			conflictResolutionCounter.WithLabelValues("no_conflict").Inc()
 		}
 
 		accepted = append(accepted, event)
@@ -89,6 +132,21 @@ func (s *CrossRegionServer) ReplicateEvents(ctx context.Context, req *types.Regi
 			Success: false,
 			Error:   fmt.Sprintf("append batch: %v", err),
 		}, nil
+	}
+
+	// Update the DedupStore with the assigned local offsets and timestamps
+	if p.DedupStore != nil {
+		for _, event := range accepted {
+			var incomingTS int64
+			if event.CreatedTs > 1e16 {
+				incomingTS = event.CreatedTs
+			} else {
+				incomingTS = event.CreatedTs * 1_000_000
+			}
+			if err := p.DedupStore.Put(event.MessageId, event.Offset, incomingTS); err != nil {
+				slog.Warn("Failed to update dedup store after append", "message_id", event.MessageId, "error", err)
+			}
+		}
 	}
 
 	// Schedule events so they become deliverable

@@ -265,3 +265,69 @@ func TestLimits_Fields(t *testing.T) {
 		t.Error("MaxStorageBytes mismatch")
 	}
 }
+
+func TestTokenBucket_RefundCapacity(t *testing.T) {
+	tb := newTokenBucket(10, 5) // 10/sec, capacity 5
+	// Initial state: pre-filled to 5
+
+	// Refund when already full - should stay at 5
+	tb.refund(1)
+	tb.mu.Lock()
+	tokens := tb.tokens
+	tb.mu.Unlock()
+	if tokens > 5 {
+		t.Errorf("expected tokens capped at 5, got %f", tokens)
+	}
+
+	// Consume 3 tokens -> now 2
+	if !tb.tryConsume(3) {
+		t.Fatal("should consume 3 tokens")
+	}
+
+	// Refund 2 tokens -> now 4
+	tb.refund(2)
+	tb.mu.Lock()
+	tokens = tb.tokens
+	tb.mu.Unlock()
+	if tokens > 4.0001 || tokens < 3.9999 {
+		t.Errorf("expected tokens close to 4, got %f", tokens)
+	}
+
+	// Refund another 3 tokens -> should cap at 5, not go to 7
+	tb.refund(3)
+	tb.mu.Lock()
+	tokens = tb.tokens
+	tb.mu.Unlock()
+	if tokens > 5 {
+		t.Errorf("expected tokens capped at 5 after over-refund, got %f", tokens)
+	}
+}
+
+func TestAccountant_AllowPublish_Refund(t *testing.T) {
+	a := NewAccountant()
+	a.SetLimits("tenant-1", Limits{
+		MaxEventsPerSecond: 10,
+		MaxInFlight:        2,
+	})
+
+	// Fill in-flight to max (2)
+	a.RecordPublish("tenant-1", 100)
+	a.RecordPublish("tenant-1", 100)
+
+	// Next AllowPublish should be rejected due to in-flight limits,
+	// but the rate-limiting token must be refunded so that rate-limiting capacity remains at capacity
+	if a.AllowPublish("tenant-1") {
+		t.Fatal("should deny publish when in-flight exceeded")
+	}
+
+	// Wait a tiny bit, and verify the bucket has not lost a token (or that we can still consume up to capacity once in-flight drops)
+	a.RecordDelivery("tenant-1") // drop in-flight to 1
+	a.RecordDelivery("tenant-1") // drop in-flight to 0
+
+	// We should be able to consume up to 10 publishes immediately if no tokens were lost due to rejected publishes!
+	for i := 0; i < 10; i++ {
+		if !a.AllowPublish("tenant-1") {
+			t.Fatalf("should allow publish %d", i)
+		}
+	}
+}

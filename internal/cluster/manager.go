@@ -646,3 +646,49 @@ type ClusterStats struct {
 	LocalPartitions  int    `json:"local_partitions"`
 	LeaderPartitions int    `json:"leader_partitions"`
 }
+
+// AssignPartition proposes a partition assignment to the Raft cluster
+func (m *Manager) AssignPartition(info *PartitionInfo) error {
+	m.mu.RLock()
+	raftNode := m.raft
+	m.mu.RUnlock()
+
+	if raftNode == nil {
+		return fmt.Errorf("raft node not initialized")
+	}
+
+	payload, err := json.Marshal(info)
+	if err != nil {
+		return fmt.Errorf("marshal partition info: %w", err)
+	}
+
+	cmd := &Command{
+		Type:    CommandTypeAssignPartition,
+		Payload: payload,
+	}
+
+	return raftNode.Apply(cmd)
+}
+
+// UpdatePartition proposes a partition metadata update to the Raft cluster
+func (m *Manager) UpdatePartition(info *PartitionInfo) error {
+	m.mu.RLock()
+	raftNode := m.raft
+	m.mu.RUnlock()
+
+	if raftNode == nil {
+		return fmt.Errorf("raft node not initialized")
+	}
+
+	payload, err := json.Marshal(info)
+	if err != nil {
+		return fmt.Errorf("marshal partition info: %w", err)
+	}
+
+	cmd := &Command{
+		Type:    CommandTypeUpdatePartition,
+		Payload: payload,
+	}
+
+	return raftNode.Apply(cmd)
+}

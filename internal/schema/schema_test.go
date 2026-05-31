@@ -4,6 +4,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/descriptorpb"
 )
 
 func TestNewRegistry(t *testing.T) {
@@ -461,5 +464,143 @@ func TestCompatibilityMode_Values(t *testing.T) {
 	}
 	if CompatFull != "FULL" {
 		t.Error("CompatFull mismatch")
+	}
+}
+
+func TestRegistry_JSONSchemaCompatibility(t *testing.T) {
+	tmpDir := t.TempDir()
+	r, _ := NewRegistry(tmpDir)
+
+	oldDef := `{"type":"object","required":["name"],"properties":{"name":{"type":"string"}}}`
+	newDefBackwardOk := `{"type":"object","required":["name"],"properties":{"name":{"type":"string"},"age":{"type":"integer"}}}`
+	newDefBackwardFailRequired := `{"type":"object","required":["name","age"],"properties":{"name":{"type":"string"},"age":{"type":"integer"}}}`
+	newDefTypeChange := `{"type":"object","required":["name"],"properties":{"name":{"type":"integer"}}}`
+
+	r.SetCompatibility("json-compat", CompatBackward)
+	_, err := r.Register("json-compat", TypeJSON, oldDef)
+	if err != nil {
+		t.Fatalf("v1 register: %v", err)
+	}
+
+	// Adding optional field in backward mode should succeed
+	_, err = r.Register("json-compat", TypeJSON, newDefBackwardOk)
+	if err != nil {
+		t.Errorf("expected backward ok, got: %v", err)
+	}
+
+	// Reset to old schema for testing backward failure
+	r.mu.Lock()
+	r.schemas["json-compat"] = r.schemas["json-compat"][:1] // keep only v1
+	r.mu.Unlock()
+
+	// Adding new required field in backward mode should fail
+	_, err = r.Register("json-compat", TypeJSON, newDefBackwardFailRequired)
+	if err == nil {
+		t.Error("expected backward compatibility error for new required field")
+	}
+
+	// Reset to old schema for testing type change failure
+	r.mu.Lock()
+	r.schemas["json-compat"] = r.schemas["json-compat"][:1] // keep only v1
+	r.mu.Unlock()
+
+	// Changing field type in backward mode should fail
+	_, err = r.Register("json-compat", TypeJSON, newDefTypeChange)
+	if err == nil {
+		t.Error("expected backward compatibility error for type change")
+	}
+}
+
+func TestRegistry_ProtobufCompatibility_TagsAndTypes(t *testing.T) {
+	tmpDir := t.TempDir()
+	r, _ := NewRegistry(tmpDir)
+
+	// We use descriptorpb.FileDescriptorProto to construct binary descriptors for compatibility testing.
+	fdpOld := &descriptorpb.FileDescriptorProto{
+		Name:    proto.String("old.proto"),
+		Package: proto.String("test"),
+		MessageType: []*descriptorpb.DescriptorProto{
+			{
+				Name: proto.String("MyMessage"),
+				Field: []*descriptorpb.FieldDescriptorProto{
+					{
+						Name:   proto.String("id"),
+						Number: proto.Int32(1),
+						Type:   descriptorpb.FieldDescriptorProto_TYPE_INT64.Enum(),
+						Label:  descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL.Enum(),
+					},
+				},
+			},
+		},
+	}
+	oldDesc, _ := proto.Marshal(fdpOld)
+
+	// 1. Compatible update: add new optional field
+	fdpNewCompatible := &descriptorpb.FileDescriptorProto{
+		Name:    proto.String("old.proto"),
+		Package: proto.String("test"),
+		MessageType: []*descriptorpb.DescriptorProto{
+			{
+				Name: proto.String("MyMessage"),
+				Field: []*descriptorpb.FieldDescriptorProto{
+					{
+						Name:   proto.String("id"),
+						Number: proto.Int32(1),
+						Type:   descriptorpb.FieldDescriptorProto_TYPE_INT64.Enum(),
+						Label:  descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL.Enum(),
+					},
+					{
+						Name:   proto.String("name"),
+						Number: proto.Int32(2),
+						Type:   descriptorpb.FieldDescriptorProto_TYPE_STRING.Enum(),
+						Label:  descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL.Enum(),
+					},
+				},
+			},
+		},
+	}
+	newDescCompatible, _ := proto.Marshal(fdpNewCompatible)
+
+	// 2. Incompatible update: change field type for tag 1
+	fdpNewTypeChange := &descriptorpb.FileDescriptorProto{
+		Name:    proto.String("old.proto"),
+		Package: proto.String("test"),
+		MessageType: []*descriptorpb.DescriptorProto{
+			{
+				Name: proto.String("MyMessage"),
+				Field: []*descriptorpb.FieldDescriptorProto{
+					{
+						Name:   proto.String("id"),
+						Number: proto.Int32(1),
+						Type:   descriptorpb.FieldDescriptorProto_TYPE_STRING.Enum(),
+						Label:  descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL.Enum(),
+					},
+				},
+			},
+		},
+	}
+	newDescTypeChange, _ := proto.Marshal(fdpNewTypeChange)
+
+	r.SetCompatibility("proto-compat", CompatBackward)
+	_, err := r.RegisterWithDescriptor("proto-compat", TypeProtobuf, "test.MyMessage", oldDesc)
+	if err != nil {
+		t.Fatalf("v1 register: %v", err)
+	}
+
+	// Compatible update
+	_, err = r.RegisterWithDescriptor("proto-compat", TypeProtobuf, "test.MyMessage", newDescCompatible)
+	if err != nil {
+		t.Errorf("expected compatible register to succeed, got: %v", err)
+	}
+
+	// Reset
+	r.mu.Lock()
+	r.schemas["proto-compat"] = r.schemas["proto-compat"][:1]
+	r.mu.Unlock()
+
+	// Incompatible type change
+	_, err = r.RegisterWithDescriptor("proto-compat", TypeProtobuf, "test.MyMessage", newDescTypeChange)
+	if err == nil {
+		t.Error("expected protobuf registration to fail on field type change")
 	}
 }

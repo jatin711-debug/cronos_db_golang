@@ -2,11 +2,16 @@ package tx
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/jatin711-debug/cronos_db_golang/internal/partition"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 )
 
 func TestCoordinator_NewCoordinator(t *testing.T) {
@@ -342,3 +347,148 @@ func (m *mockParticipant) Abort(ctx context.Context, txID TxID) error {
 	}
 	return nil
 }
+
+func skipWindows(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Skipping on Windows due to PebbleDB file locking in partition cleanup")
+	}
+}
+
+func TestCoordinator_RecoverPreparedLocks(t *testing.T) {
+	skipWindows(t)
+
+	tmpDir := t.TempDir()
+
+	cfg := &types.Config{
+		DataDir:          tmpDir,
+		PartitionCount:   8,
+		TickMS:           100,
+		WheelSize:        60,
+		SegmentSizeBytes: 10 * 1024 * 1024,
+	}
+
+	pm := partition.NewPartitionManager("node-1", cfg)
+	defer pm.StopAllPartitions()
+
+	err := pm.CreatePartition(0, "test-topic")
+	if err != nil {
+		t.Fatalf("CreatePartition failed: %v", err)
+	}
+
+	part, err := pm.GetInternalPartition(0)
+	if err != nil {
+		t.Fatalf("GetInternalPartition failed: %v", err)
+	}
+	part.Leader = true // Make it leader so WAL is active
+
+	// Create coordinator
+	c := NewCoordinator(30*time.Second, t.TempDir())
+	defer c.Stop()
+
+	// Write an active prepare marker to the partition's WAL directly
+	event := &types.Event{
+		MessageId: "tx:tx-100:prepare",
+		Topic:     "__transaction_log",
+		Payload:   []byte("prepare"),
+		CreatedTs: time.Now().UnixNano(),
+		Meta: map[string]string{
+			"tx_id":     "tx-100",
+			"tx_action": "prepare",
+		},
+	}
+	err = part.Wal.AppendEvent(event)
+	if err != nil {
+		t.Fatalf("AppendEvent failed: %v", err)
+	}
+
+	// Now register the PM on the coordinator which will run RecoverPreparedLocks
+	c.SetPartitionManager(pm)
+
+	// Since it's prepared, the lock should be held on the coordinator
+	// Try to acquire lock in a non-blocking or timed way, but since it is locked, it should block.
+	// We can verify that the lock exists in coordinator's txLocks map
+	c.locksMu.Lock()
+	lock, exists := c.txLocks[0]
+	c.locksMu.Unlock()
+
+	if !exists {
+		t.Fatal("Expected partition lock to exist")
+	}
+
+	// Lock should be locked. In Go, sync.Mutex doesn't expose a TryLock or IsLocked method.
+	// But we can check if we can acquire it with a channel timeout, confirming it is indeed locked!
+	lockAcquired := make(chan bool)
+	go func() {
+		lock.Lock()
+		lockAcquired <- true
+		lock.Unlock()
+	}()
+
+	select {
+	case <-lockAcquired:
+		t.Error("Expected partition lock to be held, but was able to acquire it")
+	case <-time.After(100 * time.Millisecond):
+		// Lock is held, success!
+	}
+}
+
+func TestCoordinator_RecoveryBackoff(t *testing.T) {
+	c := NewCoordinator(30*time.Second, t.TempDir())
+	defer c.Stop()
+
+	txID := TxID("tx-backoff")
+	
+	// Create a mock participant that always fails commits
+	prepCount := 0
+	commitCount := 0
+	participant := &mockParticipant{
+		onPrepare: func() error {
+			prepCount++
+			return nil
+		},
+		onCommit: func() error {
+			commitCount++
+			return fmt.Errorf("persistent database write error")
+		},
+	}
+
+	// Begin the transaction
+	_, err := c.Begin(txID, []Participant{participant})
+	if err != nil {
+		t.Fatalf("Begin failed: %v", err)
+	}
+
+	// Try committing — it will fail because the participant's Commit fails
+	ctx := context.Background()
+	err = c.Commit(ctx, txID)
+	if err == nil {
+		t.Fatal("Expected commit to fail")
+	}
+
+	// The initial Commit failed (commitCount = 1).
+	// Call recover() manually. This is the first recovery attempt, so it will run and schedule a backoff.
+	c.recover()
+	if commitCount != 2 {
+		t.Errorf("Expected commitCount to be 2 after first recovery attempt, got %d", commitCount)
+	}
+
+	// Call recover() again. The backoff is active, so it should skip the attempt.
+	c.recover()
+	if commitCount != 2 {
+		t.Errorf("Expected commitCount to still be 2 (skipped via backoff), got %d", commitCount)
+	}
+
+	// Manually clear nextRetryTime to force a retry
+	c.attemptsMu.Lock()
+	delete(c.nextRetryTime, txID)
+	c.attemptsMu.Unlock()
+
+	// Call recover again — this time it will run
+	c.recover()
+
+	// Commit count should now be 3
+	if commitCount != 3 {
+		t.Errorf("Expected commitCount to be 3 after forcing retry, got %d", commitCount)
+	}
+}
+
