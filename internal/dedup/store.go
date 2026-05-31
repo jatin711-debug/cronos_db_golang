@@ -17,6 +17,12 @@ type DedupStore interface {
 	// Exists checks if message ID exists
 	Exists(messageID string) (bool, error)
 
+	// GetTimestamp returns stored timestamp for message ID
+	GetTimestamp(messageID string) (time.Time, bool, error)
+
+	// Put inserts or overwrites an entry directly with a given created timestamp
+	Put(messageID string, offset int64, createdTS int64) error
+
 	// PruneExpired removes expired entries
 	PruneExpired() (int, error)
 
@@ -71,10 +77,36 @@ func (m *MemoryStore) CheckAndStore(messageID string, offset int64) (bool, error
 	// Store the entry so future lookups detect duplicates
 	m.entries[messageID] = Entry{
 		Offset:       offset,
-		CreatedTS:    now.UnixMilli(),
+		CreatedTS:    now.UnixNano(),
 		ExpirationTS: now.Add(time.Duration(ttlMs) * time.Millisecond).UnixMilli(),
 	}
 	return false, nil
+}
+
+// GetTimestamp returns stored timestamp for message ID
+func (m *MemoryStore) GetTimestamp(messageID string) (time.Time, bool, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	entry, exists := m.entries[messageID]
+	if !exists {
+		return time.Time{}, false, nil
+	}
+	return time.Unix(0, entry.CreatedTS), true, nil
+}
+
+// Put inserts or overwrites an entry directly with a given created timestamp
+func (m *MemoryStore) Put(messageID string, offset int64, createdTS int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	ttlMs := int64(m.ttlHours) * 60 * 60 * 1000
+	m.entries[messageID] = Entry{
+		Offset:       offset,
+		CreatedTS:    createdTS,
+		ExpirationTS: time.Now().Add(time.Duration(ttlMs) * time.Millisecond).UnixMilli(),
+	}
+	return nil
 }
 
 // GetOffset returns stored offset
@@ -161,6 +193,16 @@ func NewManager(store DedupStore) *Manager {
 func (m *Manager) IsDuplicate(messageID string, offset int64) (bool, error) {
 	exists, err := m.store.CheckAndStore(messageID, offset)
 	return exists, err
+}
+
+// GetTimestamp returns stored timestamp for message ID
+func (m *Manager) GetTimestamp(messageID string) (time.Time, bool, error) {
+	return m.store.GetTimestamp(messageID)
+}
+
+// Put inserts or overwrites an entry directly with a given created timestamp
+func (m *Manager) Put(messageID string, offset int64, createdTS int64) error {
+	return m.store.Put(messageID, offset, createdTS)
 }
 
 // IsDuplicateBatch checks multiple messages for duplicates in a single pass.

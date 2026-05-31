@@ -30,6 +30,7 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -104,6 +105,9 @@ func main() {
 	})
 	sloRecorder.Start()
 	defer sloRecorder.Stop()
+
+	// Register SLO collector with Prometheus
+	prometheus.MustRegister(sloRecorder.PrometheusCollector())
 
 	if err := tracing.InitTracing(&tracing.Config{
 		ServiceName:  "cronos-api-" + cfg.NodeID,

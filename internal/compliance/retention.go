@@ -44,6 +44,17 @@ func (e *Enforcer) Run(ctx context.Context) error {
 	return nil
 }
 
+func isProtectedDir(name string) bool {
+	return name == "raft" || name == "pebble" || name == "dedup" || name == "offsets" || name == "scheduler" || name == "cold_store" || name == "index" || name == "backups"
+}
+
+func isWALSegment(path string) bool {
+	if filepath.Ext(path) != ".log" {
+		return false
+	}
+	return filepath.Base(filepath.Dir(path)) == "segments"
+}
+
 func (e *Enforcer) enforceAge(ctx context.Context) error {
 	cutoff := time.Now().Add(-e.policy.MaxAge)
 	return filepath.Walk(e.dataDir, func(path string, info os.FileInfo, err error) error {
@@ -51,6 +62,12 @@ func (e *Enforcer) enforceAge(ctx context.Context) error {
 			return nil
 		}
 		if info.IsDir() {
+			if isProtectedDir(info.Name()) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !isWALSegment(path) {
 			return nil
 		}
 		if info.ModTime().Before(cutoff) {
@@ -77,7 +94,16 @@ func (e *Enforcer) enforceSize(ctx context.Context) error {
 	}
 
 	_ = filepath.Walk(e.dataDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() {
+			if isProtectedDir(info.Name()) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !isWALSegment(path) {
 			return nil
 		}
 		total += info.Size()

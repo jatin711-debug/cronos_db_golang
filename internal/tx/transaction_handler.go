@@ -20,8 +20,10 @@ type Handler struct {
 
 // NewHandler creates a transaction handler.
 func NewHandler(pm *partition.PartitionManager) *Handler {
+	c := NewCoordinator(30*time.Second, pm.GetDataDir())
+	c.SetPartitionManager(pm)
 	return &Handler{
-		coordinator: NewCoordinator(30*time.Second, ""),
+		coordinator: c,
 		pm:          pm,
 	}
 }

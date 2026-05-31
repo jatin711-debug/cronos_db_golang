@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"sort"
 
 	"github.com/jatin711-debug/cronos_db_golang/internal/cluster"
@@ -29,12 +30,55 @@ func NewPartitionServiceHandler(
 	clusterMgr *cluster.Manager,
 	localNodeID string,
 ) *PartitionServiceHandler {
-	return &PartitionServiceHandler{
+	sm := partition.NewSplitManager(pm)
+	h := &PartitionServiceHandler{
 		partitionManager: pm,
 		clusterManager:   clusterMgr,
 		localNodeID:      localNodeID,
-		splitManager:     partition.NewSplitManager(pm),
+		splitManager:     sm,
 	}
+
+	if clusterMgr != nil {
+		sm.OnSplitComplete = func(sourceID, newID int32, sourceEpoch, newEpoch int64) error {
+			// Get source partition info from cluster manager
+			sourceInfo, err := clusterMgr.GetPartitionInfo(sourceID)
+			if err != nil {
+				return fmt.Errorf("get source partition info from cluster: %w", err)
+			}
+
+			// 1. Propose source partition update with new epoch
+			updatedSource := &cluster.PartitionInfo{
+				ID:       sourceID,
+				Topic:    sourceInfo.Topic,
+				LeaderID: sourceInfo.LeaderID,
+				Replicas: sourceInfo.Replicas,
+				ISR:      sourceInfo.ISR,
+				Epoch:    sourceEpoch,
+				State:    sourceInfo.State,
+			}
+			if err := clusterMgr.UpdatePartition(updatedSource); err != nil {
+				return fmt.Errorf("update source partition epoch in cluster: %w", err)
+			}
+
+			// 2. Propose new partition assignment with new epoch
+			newInfo := &cluster.PartitionInfo{
+				ID:       newID,
+				Topic:    sourceInfo.Topic, // split partition shares the same topic
+				LeaderID: localNodeID,
+				Replicas: []string{localNodeID},
+				ISR:      []string{localNodeID},
+				Epoch:    newEpoch,
+				State:    cluster.PartitionStateOnline,
+			}
+			if err := clusterMgr.AssignPartition(newInfo); err != nil {
+				return fmt.Errorf("assign new partition in cluster: %w", err)
+			}
+
+			return nil
+		}
+	}
+
+	return h
 }
 
 func (h *PartitionServiceHandler) buildPartitionInfo(partitionID int32, includeStorageStats bool) (*types.PartitionInfo, error) {
@@ -254,7 +298,7 @@ func (h *PartitionServiceHandler) SplitPartition(ctx context.Context, req *types
 		return nil, status.Error(codes.Internal, "split manager not initialized")
 	}
 
-	err := h.splitManager.SplitPartition(req.GetSourcePartitionId(), req.GetNewPartitionId(), req.GetSplitOffset())
+	err := h.splitManager.SplitPartition(req.GetSourcePartitionId(), req.GetNewPartitionId(), req.GetSplitOffset(), "")
 	if err != nil {
 		return &types.SplitPartitionResponse{
 			Success: false,
