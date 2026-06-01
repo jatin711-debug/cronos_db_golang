@@ -1,0 +1,10 @@
+flowchart TB
+    Start[Incoming message_id] --> FastCheck[Bloom check]
+    FastCheck --> MaybeDup{Possible duplicate?}
+    MaybeDup -- no --> StoreFast[Store and continue]
+    MaybeDup -- yes --> PersistentCheck[Persistent store lookup]
+    PersistentCheck --> Exists{Exists in store?}
+    Exists -- yes --> Reject[Reject as duplicate]
+    Exists -- no --> StoreConfirmed[Store and continue]
+    StoreFast --> Accept[Publish continues]
+    StoreConfirmed --> Accept

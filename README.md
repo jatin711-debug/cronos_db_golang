@@ -115,6 +115,8 @@ graph TB
 ```
 
 > For the full architecture with 30+ Mermaid diagrams, sequence diagrams, and deep-dive explanations, see **[ARCHITECTURE.md](ARCHITECTURE.md)**.
+>
+> For per-feature architecture docs and standalone Mermaid source files, see **[docs/architecture/README.md](docs/architecture/README.md)** and **[docs/mermaid](docs/mermaid)**.
 
 ---
 
@@ -570,6 +572,9 @@ See [proto/events.proto](proto/events.proto) for the complete specification.
 | Document | Description |
 |----------|-------------|
 | **[ARCHITECTURE.md](ARCHITECTURE.md)** | Deep-dive with 30+ Mermaid diagrams — data flows, sequence diagrams, state machines |
+| **[docs/architecture/README.md](docs/architecture/README.md)** | Architecture split by feature (cluster, compliance, dedup, delivery, schema, slo, storage, and more) |
+| **[docs/mermaid](docs/mermaid)** | Standalone Mermaid diagram source files (.mmd) for architecture and runtime flows |
+| [docs/DEVELOPER_ARCHITECTURE_GUIDE.md](docs/DEVELOPER_ARCHITECTURE_GUIDE.md) | Comprehensive developer-oriented architecture and navigation guide |
 | [proto/events.proto](proto/events.proto) | Complete gRPC API specification (5 services, 30+ message types) |
 | [pkg/client](pkg/client) | Production Go SDK (producer/consumer/replay/metadata routing) |
 | [pkg.go.dev/client page](https://pkg.go.dev/github.com/jatin711-debug/cronos_db_golang/pkg/client) | Generated API reference and package docs |

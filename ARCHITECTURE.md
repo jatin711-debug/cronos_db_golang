@@ -2,6 +2,12 @@
 
 > A distributed, timestamp-triggered event database with built-in scheduling, pub/sub messaging, and WAL-based persistence.
 
+Quick navigation:
+
+- Feature-by-feature architecture docs: [docs/architecture/README.md](docs/architecture/README.md)
+- Standalone Mermaid source files: [docs/mermaid](docs/mermaid)
+- Comprehensive developer walkthrough: [docs/DEVELOPER_ARCHITECTURE_GUIDE.md](docs/DEVELOPER_ARCHITECTURE_GUIDE.md)
+
 ---
 
 ## Table of Contents

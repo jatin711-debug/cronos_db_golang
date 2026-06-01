@@ -1,0 +1,9 @@
+flowchart LR
+    Propose[New schema version] --> Parse[Parse schema]
+    Parse --> Compat[Compatibility check]
+    Compat --> Result{Compatible?}
+    Result -- yes --> Register[Register next version]
+    Result -- no --> Reject[Reject schema update]
+    Register --> PublishValidate[Validate publish payloads]
+    PublishValidate --> Accept[Accept request]
+    Reject --> Fix[Revise schema]

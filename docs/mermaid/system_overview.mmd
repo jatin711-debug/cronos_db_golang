@@ -1,0 +1,68 @@
+flowchart TB
+    subgraph Client_Side[Clients]
+      Producer[Producer SDK]
+      Consumer[Consumer SDK]
+      Admin[Ops and Admin]
+    end
+
+    subgraph Data_Plane[Data Plane]
+      APIGW[gRPC API Layer]
+      EventH[Event Handlers]
+      PM[Partition Manager]
+      Partition[Per Partition Runtime]
+      WAL[WAL and Segments]
+      Sched[Scheduler Timing Wheel]
+      Worker[Delivery Worker]
+      Disp[Dispatcher and Credits]
+      Group[Consumer Groups and Offsets]
+      DLQ[Dead Letter Queue]
+    end
+
+    subgraph Control_Plane[Control Plane]
+      ClusterM[Cluster Manager]
+      Router[Hash Ring Router]
+      Membership[Membership Gossip]
+      Raft[Raft Metadata]
+      Replication[Leader Follower Replication]
+      CrossRegion[Cross Region Replicator]
+    end
+
+    subgraph Guardrails[Reliability Guardrails]
+      Dedup[Dedup Bloom and Pebble]
+      Auth[Auth RBAC]
+      Audit[Audit Logger]
+      Schema[Schema Registry]
+      Tenant[Tenant Accountant]
+      SLO[SLO Recorder and Metrics]
+      Compliance[Retention and Backup]
+    end
+
+    Producer --> APIGW
+    Consumer --> APIGW
+    Admin --> APIGW
+
+    APIGW --> EventH
+    EventH --> PM
+    PM --> Partition
+    Partition --> WAL
+    Partition --> Sched
+    Sched --> Worker
+    Worker --> Disp
+    Disp --> Consumer
+    Disp --> Group
+    Disp --> DLQ
+
+    EventH --> Dedup
+    EventH --> Auth
+    EventH --> Schema
+    EventH --> Tenant
+    APIGW --> Audit
+    APIGW --> SLO
+
+    PM --> Router
+    Router --> ClusterM
+    ClusterM --> Membership
+    ClusterM --> Raft
+    Partition --> Replication
+    Partition --> CrossRegion
+    Compliance --> WAL
