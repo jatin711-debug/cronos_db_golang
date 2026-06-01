@@ -1,0 +1,11 @@
+flowchart TB
+    Requests[API requests] --> Metrics[Prometheus metrics]
+    Requests --> Traces[OpenTelemetry traces]
+    Requests --> Audit[Audit logs]
+    Metrics --> SLO[SLO recorder]
+    SLO --> Alerts[Alerts and SLO breaches]
+    Traces --> Debug[Distributed debugging]
+    Audit --> Compliance[Compliance review]
+    Alerts --> Ops[Operational actions]
+    Debug --> Ops
+    Compliance --> Ops

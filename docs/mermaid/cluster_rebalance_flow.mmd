@@ -1,0 +1,13 @@
+flowchart LR
+    NodeJoin[Node joins or leaves]
+    Membership[Membership service emits event]
+    Router[Router updates hash ring assignments]
+    Moves[Compute partition moves]
+    Sync[State transfer from current leader]
+    Promote[Promote local partition leader if assigned]
+    Follower[Register followers and ISR]
+    RaftSync[Persist partition metadata in Raft]
+    Healthy[Cluster converged]
+
+    NodeJoin --> Membership --> Router --> Moves
+    Moves --> Sync --> Promote --> Follower --> RaftSync --> Healthy

@@ -1,0 +1,9 @@
+flowchart LR
+    Publish[Publish event] --> Decision{Within hot window?}
+    Decision -- yes --> HotWheel[Hot timing wheel]
+    Decision -- no --> ColdStore[Cold store]
+    ColdStore --> Hydrator[Hydrator scan]
+    Hydrator --> HotWheel
+    HotWheel --> Tick[Scheduler tick]
+    Tick --> Ready[Ready queue]
+    Ready --> Worker[Delivery worker]
