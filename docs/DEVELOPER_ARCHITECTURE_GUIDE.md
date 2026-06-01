@@ -213,19 +213,23 @@ sequenceDiagram
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Pending
-    Pending --> Delivered: stream send ok
-    Pending --> RetryQueued: send failed or ack timeout
-    Delivered --> Acked: ack success
-    Delivered --> RetryQueued: nack or timeout
-    RetryQueued --> Pending: retry_at reached
-    RetryQueued --> OpenCircuit: subscriber failure threshold reached
-    OpenCircuit --> HalfOpen: open_duration elapsed
-    HalfOpen --> Pending: probe delivery succeeds
-    HalfOpen --> OpenCircuit: probe fails
-    RetryQueued --> DLQ: max_retries exceeded
-    DLQ --> [*]
-    Acked --> [*]
+  direction LR
+
+  [*] --> Pending
+  Pending --> Delivered: stream send ok
+  Delivered --> Acked: ack success
+  Acked --> [*]
+
+  Pending --> RetryQueued: send failed
+  Delivered --> RetryQueued: nack or ack timeout
+  RetryQueued --> Pending: retry_at reached
+  RetryQueued --> DLQ: max retries exceeded
+  DLQ --> [*]
+
+  RetryQueued --> OpenCircuit: failure threshold reached
+  OpenCircuit --> HalfOpen: open duration elapsed
+  HalfOpen --> Pending: probe delivery succeeds
+  HalfOpen --> OpenCircuit: probe fails
 ```
 
 ## 6. Feature Deep Dive by Module
