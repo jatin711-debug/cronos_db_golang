@@ -379,8 +379,33 @@ func (m *Manager) electNewLeader(partitionID int32, info *PartitionInfo) {
 
 // syncClusterState syncs cluster state to Raft
 func (m *Manager) syncClusterState() {
-	// This would sync any local state changes to Raft
-	// For now, just log
+	m.mu.RLock()
+	raftNode := m.raft
+	router := m.router
+	m.mu.RUnlock()
+
+	if raftNode == nil || router == nil {
+		return
+	}
+
+	state := raftNode.GetState()
+	if state == nil {
+		return
+	}
+
+	assignments := router.GetAllPartitions()
+	for partitionID, info := range assignments {
+		if info == nil {
+			continue
+		}
+		if _, exists := state.Partitions[partitionID]; exists {
+			continue
+		}
+
+		if err := m.AssignPartition(info); err != nil {
+			log.Printf("[CLUSTER] Failed to sync partition %d metadata to Raft: %v", partitionID, err)
+		}
+	}
 }
 
 // SetPartitionAccessor sets the partition accessor for state transfer operations

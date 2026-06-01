@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
@@ -184,6 +185,50 @@ func (n *RaftNode) IsLeader() bool {
 func (n *RaftNode) GetLeader() string {
 	addr, _ := n.raft.LeaderWithID()
 	return string(addr)
+}
+
+func parseRaftIntStat(stats map[string]string, key string) int64 {
+	if stats == nil {
+		return 0
+	}
+	raw, ok := stats[key]
+	if !ok || raw == "" {
+		return 0
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return value
+}
+
+// GetCurrentTerm returns the current Raft term.
+func (n *RaftNode) GetCurrentTerm() int64 {
+	return parseRaftIntStat(n.raft.Stats(), "term")
+}
+
+// GetCommitIndex returns the current committed log index.
+func (n *RaftNode) GetCommitIndex() int64 {
+	return parseRaftIntStat(n.raft.Stats(), "commit_index")
+}
+
+// GetLastApplied returns the last applied log index.
+func (n *RaftNode) GetLastApplied() int64 {
+	return parseRaftIntStat(n.raft.Stats(), "last_applied")
+}
+
+// GetPeers returns all configured raft peer addresses.
+func (n *RaftNode) GetPeers() ([]string, error) {
+	future := n.raft.GetConfiguration()
+	if err := future.Error(); err != nil {
+		return nil, fmt.Errorf("get raft configuration: %w", err)
+	}
+
+	peers := make([]string, 0, len(future.Configuration().Servers))
+	for _, srv := range future.Configuration().Servers {
+		peers = append(peers, string(srv.Address))
+	}
+	return peers, nil
 }
 
 // Apply applies a command to the FSM

@@ -157,6 +157,16 @@ func (g *GRPCServer) RegisterCrossRegionServer(srv types.CrossRegionServiceServe
 	types.RegisterCrossRegionServiceServer(g.server, srv)
 }
 
+// RegisterReplicationServer registers the internal replication service.
+func (g *GRPCServer) RegisterReplicationServer(srv types.ReplicationServiceServer) {
+	types.RegisterReplicationServiceServer(g.server, srv)
+}
+
+// RegisterRaftServer registers the internal raft metadata service.
+func (g *GRPCServer) RegisterRaftServer(srv types.RaftServiceServer) {
+	types.RegisterRaftServiceServer(g.server, srv)
+}
+
 // Start starts the gRPC server
 func (g *GRPCServer) Start() error {
 	lis, err := net.Listen("tcp", g.config.Address)

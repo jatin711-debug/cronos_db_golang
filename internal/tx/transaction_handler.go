@@ -65,11 +65,7 @@ func (h *Handler) PrepareTransaction(ctx context.Context, req *types.PrepareTran
 		return nil, status.Error(codes.InvalidArgument, "transaction_id is required")
 	}
 
-	// Prepare is executed as part of Commit flow in the coordinator.
-	// A separate Prepare RPC would not normally be exposed — the coordinator
-	// runs prepare+commit atomically. We expose it here for transparency.
-	// Calling Commit runs Phase 1 (Prepare) first, then Phase 2.
-	err := h.coordinator.Commit(ctx, TxID(req.TransactionId))
+	err := h.coordinator.Prepare(ctx, TxID(req.TransactionId))
 	if err != nil {
 		return &types.PrepareTransactionResponse{
 			Success: false,

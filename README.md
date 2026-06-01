@@ -15,10 +15,10 @@ It combines the durability of a write-ahead log, the precision of a hierarchical
 
 | Metric | Value |
 |--------|-------|
-| **Cluster Throughput** | **1,010,933 events/sec** |
-| **Publish Latency P50** | **105µs** |
-| **Publish Latency P99** | **468µs** |
-| **Success Rate** | **100%** (zero errors, 96M events) |
+| **Cluster Throughput** | **Up to ~1.0M events/sec** (max profile, single machine) |
+| **Publish Latency P50** | **~100-150µs** (batch mode) |
+| **Publish Latency P99** | **<1ms** (batch mode) |
+| **Success Rate** | **99.9-100%** in batch benchmark profiles |
 | **Timer Precision** | 100ms tick (configurable) |
 | **Dedup False Positive Rate** | <1% (Rust bloom filter) |
 
@@ -58,7 +58,7 @@ It combines the durability of a write-ahead log, the precision of a hierarchical
 - **Multi-Node Clustering** — 3+ nodes with automatic partition distribution
 - **Raft Consensus** — Metadata consistency (HashiCorp Raft)
 - **Pluggable Gossip** — Choose custom TCP heartbeats or HashiCorp Memberlist (SWIM protocol) via config
-- **Consistent Hashing** — SHA-256 ring with 150 virtual nodes per physical node
+- **Consistent Hashing** — SHA-256 ring with configurable virtual nodes (`-virtual-nodes`, default 150)
 - **Binary Replication Protocol** — Custom wire format (0xCAFEBABE magic)
 - **Bulk File Sync** — Segment-level transfer for new node bootstrap
 - **Clock Skew Detection** — Cross-node heartbeat timestamp comparison; warns if |skew| > 5s
@@ -163,14 +163,14 @@ make health
 ### Load Test
 
 ```bash
-# Batch mode — ~1M events/sec (3 nodes on same machine)
-make loadtest-batch PUBLISHERS=32 EVENTS=1000000 BATCH_SIZE=4000
+# Max-throughput profile from Makefile presets
+make loadtest-max
 
 # Standard benchmark
 make loadtest-batch PUBLISHERS=20 EVENTS=50000 BATCH_SIZE=1000
 
-# Max throughput profile
-make loadtest-max
+# Custom profile (example)
+make loadtest-batch PUBLISHERS=32 EVENTS=100000 BATCH_SIZE=4000
 ```
 
 ### Docker
@@ -304,27 +304,16 @@ By default it bootstraps local cluster ports `9000,9001,9002`; use `-addr` to fo
 
 ### Benchmarks (3-Node Cluster on Single Machine)
 
-| Metric | Value | Notes |
-|--------|-------|-------|
-| **Cluster Throughput** | **1,010,933 events/sec** | 96M events, batch 4000, 32 publishers/node |
-| **Per-Node Throughput** | **336,978 events/sec** | 3 nodes on same machine |
-| **Publish Latency P50** | **105µs** | Batch publish |
-| **Publish Latency P95** | **337µs** | Batch publish |
-| **Publish Latency P99** | **468µs** | Batch publish |
-| **Latency Min** | **5µs** | Best case |
-| **Latency Max** | **900µs** | Worst case |
-| **Success Rate** | **100.00%** | Zero errors across 96 million events |
-| **Duration** | **1m 35s** | For 96M events total |
+| Profile | Throughput | Notes |
+|--------|------------|-------|
+| `make loadtest-max` | Up to ~1.0M events/sec | Batch 4000, 32 publishers/node, 9.6M events total |
+| Standard batch profile | ~550K events/sec | Batch 1000, 20 publishers/node |
+| Single-node batch | ~180K events/sec | One node, batch mode |
+| Single-event mode | ~10K events/sec | One event per RPC |
 
-> All 3 nodes running on the **same physical machine** — sharing CPU, memory, and disk I/O.
+Representative latency in batch mode is typically P50 ~100-150µs and P99 under 1ms on a single-machine 3-node setup.
 
-### Previous Benchmark (smaller batch)
-
-| Metric | Value | Notes |
-|--------|-------|-------|
-| Cluster Throughput | 550K events/sec | Batch 1000, 20 publishers/node |
-| Single Node Throughput | ~180K events/sec | Batch mode |
-| Single Event Throughput | ~10K events/sec | One event per RPC |
+> Throughput varies by CPU, disk, scheduler settings, and payload size. Re-run the provided load tests in your environment for production sizing.
 
 ### What Makes It Fast
 
@@ -467,9 +456,11 @@ cronos_db/
 | Service | Methods | Purpose |
 |---------|---------|---------|
 | **EventService** | `Publish`, `PublishBatch`, `Subscribe`, `Ack`, `Replay` | Core pub/sub |
+| **PartitionService** | `GetPartition`, `ListPartitions`, `GetWALStatus`, `GetSchedulerStatus`, `Compact`, `RunRetention`, `SplitPartition` | Partition metadata and admin |
 | **ConsumerGroupService** | `Create`, `Get`, `List`, `Rebalance` | Group management |
 | **ReplicationService** | `Append`, `Sync` | Internal replication |
 | **RaftService** | `Join`, `Leave`, `Status` | Internal cluster |
+| **CrossRegionService** | `ReplicateEvents`, `FetchEvents` | Cross-region replication |
 
 ### Key RPCs
 

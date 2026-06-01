@@ -113,6 +113,34 @@ func (m *ClusterMetrics) recordLatency(shardID int, nodeID string, latency time.
 	shard.mu.Unlock()
 }
 
+func (m *ClusterMetrics) recordPartition(partitionID int32, count int64) {
+	m.mu.Lock()
+	m.PartitionCounts[partitionID] += count
+	m.mu.Unlock()
+}
+
+func (m *ClusterMetrics) recordPartitionBatch(partitionCounts map[int32]int64) {
+	if len(partitionCounts) == 0 {
+		return
+	}
+	m.mu.Lock()
+	for partitionID, count := range partitionCounts {
+		m.PartitionCounts[partitionID] += count
+	}
+	m.mu.Unlock()
+}
+
+func (m *ClusterMetrics) snapshotPartitionCounts() map[int32]int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	copyCounts := make(map[int32]int64, len(m.PartitionCounts))
+	for partitionID, count := range m.PartitionCounts {
+		copyCounts[partitionID] = count
+	}
+	return copyCounts
+}
+
 // collectLatencies gathers all latencies from shards (call after test completes)
 func (m *ClusterMetrics) collectLatencies() (map[string][]time.Duration, []time.Duration) {
 	nodeLatencies := make(map[string][]time.Duration)
@@ -430,6 +458,7 @@ func runBatchPublisher(config ClusterLoadTestConfig, metrics *ClusterMetrics, pu
 		}
 
 		eventsByNode := make(map[int][]*types.Event)
+		partitionBatchCounts := make(map[int32]int64)
 		scheduleTime := time.Now().Add(config.ScheduleDelay)
 		scheduleMs := scheduleTime.UnixMilli()
 		nowNano := time.Now().UnixNano()
@@ -454,6 +483,7 @@ func runBatchPublisher(config ClusterLoadTestConfig, metrics *ClusterMetrics, pu
 				},
 			}
 			eventsByNode[nodeIdx] = append(eventsByNode[nodeIdx], event)
+			partitionBatchCounts[partitionID]++
 		}
 
 		eventsInBatch := int64(batchEnd - batchStart)
@@ -495,6 +525,7 @@ func runBatchPublisher(config ClusterLoadTestConfig, metrics *ClusterMetrics, pu
 			}(nodeIdx, events)
 		}
 		batchWg.Wait()
+		metrics.recordPartitionBatch(partitionBatchCounts)
 
 		_ = eventsInBatch // Progress tracked via TotalPublished
 	}
@@ -549,6 +580,7 @@ func runRoundRobinPublisher(config ClusterLoadTestConfig, metrics *ClusterMetric
 		} else {
 			metrics.NodePublished[node.ID].Add(1)
 			metrics.TotalPublished.Add(1)
+			metrics.recordPartition(partitionID, 1)
 			metrics.recordLatency(publisherID, node.ID, latency, 1)
 		}
 	}
@@ -564,6 +596,7 @@ func runNodePublisher(config ClusterLoadTestConfig, metrics *ClusterMetrics, nod
 
 	for i := 0; i < config.EventsPerPub; i++ {
 		eventKey := fmt.Sprintf("%s-pub-%d-event-%d", node.ID, publisherID, i)
+		partitionID := utils.HashToPartitionID(eventKey, config.PartitionCount)
 		scheduleTime := time.Now().Add(config.ScheduleDelay)
 
 		event := &types.Event{
@@ -595,6 +628,7 @@ func runNodePublisher(config ClusterLoadTestConfig, metrics *ClusterMetrics, nod
 		} else {
 			metrics.NodePublished[node.ID].Add(1)
 			metrics.TotalPublished.Add(1)
+			metrics.recordPartition(partitionID, 1)
 			metrics.recordLatency(publisherID, node.ID, latency, 1)
 		}
 	}
@@ -654,9 +688,20 @@ func printClusterResults(config ClusterLoadTestConfig, metrics *ClusterMetrics) 
 	fmt.Println("║                   PARTITION DISTRIBUTION                      ║")
 	fmt.Println("╠═══════════════════════════════════════════════════════════════╣")
 
-	for partID, count := range metrics.PartitionCounts {
-		pct := float64(count) / float64(totalPublished) * 100
-		fmt.Printf("║ Partition %-3d:      %-30d (%.1f%%) ║\n", partID, count, pct)
+	partitionCounts := metrics.snapshotPartitionCounts()
+	partitionIDs := make([]int32, 0, len(partitionCounts))
+	for partitionID := range partitionCounts {
+		partitionIDs = append(partitionIDs, partitionID)
+	}
+	sort.Slice(partitionIDs, func(i, j int) bool { return partitionIDs[i] < partitionIDs[j] })
+
+	for _, partitionID := range partitionIDs {
+		count := partitionCounts[partitionID]
+		pct := 0.0
+		if totalPublished > 0 {
+			pct = float64(count) / float64(totalPublished) * 100
+		}
+		fmt.Printf("║ Partition %-3d:      %-30d (%.1f%%) ║\n", partitionID, count, pct)
 	}
 
 	// Overall latency stats

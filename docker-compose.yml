@@ -169,6 +169,9 @@ services:
     image: grafana/tempo:2.6.1
     container_name: cronos-tempo
     profiles: ["observability"]
+    # Local dev: named volume may be root-owned; run Tempo as root to avoid
+    # /tmp/tempo permission errors on startup.
+    user: "0:0"
     command: ["-config.file=/etc/tempo/tempo.yaml"]
     ports:
       - "3200:3200"

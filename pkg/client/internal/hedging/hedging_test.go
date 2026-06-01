@@ -3,6 +3,7 @@ package hedging
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -40,9 +41,9 @@ func TestDo_Success(t *testing.T) {
 	ctx := context.Background()
 	policy := Policy{Enabled: true, Delay: 10 * time.Millisecond, MaxHedges: 1}
 
-	callCount := 0
+	var callCount atomic.Int32
 	result, err := Do(ctx, policy, func(ctx context.Context) (string, error) {
-		callCount++
+		callCount.Add(1)
 		return "success", nil
 	})
 
@@ -52,8 +53,8 @@ func TestDo_Success(t *testing.T) {
 	if result != "success" {
 		t.Errorf("expected success, got %s", result)
 	}
-	if callCount != 1 {
-		t.Errorf("expected 1 call, got %d", callCount)
+	if callCount.Load() != 1 {
+		t.Errorf("expected 1 call, got %d", callCount.Load())
 	}
 }
 
@@ -92,10 +93,10 @@ func TestDo_Hedges(t *testing.T) {
 	ctx := context.Background()
 	policy := Policy{Enabled: true, Delay: 5 * time.Millisecond, MaxHedges: 2}
 
-	callCount := 0
+	var callCount atomic.Int32
 	_, err := Do(ctx, policy, func(ctx context.Context) (string, error) {
-		callCount++
-		if callCount == 1 {
+		currentCall := callCount.Add(1)
+		if currentCall == 1 {
 			// First call sleeps longer than hedge delay
 			time.Sleep(50 * time.Millisecond)
 		}
@@ -106,7 +107,7 @@ func TestDo_Hedges(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	// Should have launched hedges
-	if callCount < 1 {
-		t.Errorf("expected at least 1 call, got %d", callCount)
+	if callCount.Load() < 1 {
+		t.Errorf("expected at least 1 call, got %d", callCount.Load())
 	}
 }

@@ -386,6 +386,14 @@ func main() {
 	crossRegionServer := api.NewCrossRegionServer(pm)
 	grpcServer.RegisterCrossRegionServer(crossRegionServer)
 
+	// Register internal replication and raft metadata services
+	replicationServer := api.NewReplicationServiceHandler(pm)
+	grpcServer.RegisterReplicationServer(replicationServer)
+	if clusterMgr != nil {
+		raftServer := api.NewRaftServiceHandler(clusterMgr, cfg.NodeID)
+		grpcServer.RegisterRaftServer(raftServer)
+	}
+
 	// Load remote regions from environment
 	if regions := os.Getenv("CRONOS_REGIONS"); regions != "" {
 		for _, r := range strings.Split(regions, ",") {

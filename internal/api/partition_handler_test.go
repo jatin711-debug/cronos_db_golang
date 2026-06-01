@@ -2,7 +2,9 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/jatin711-debug/cronos_db_golang/internal/partition"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
@@ -67,5 +69,63 @@ func TestPartitionServiceHandler_Standalone(t *testing.T) {
 	}
 	if schedStatus.PartitionId != 0 {
 		t.Errorf("Expected partition 0, got %d", schedStatus.PartitionId)
+	}
+}
+
+func TestPartitionServiceHandler_CompactAndRetentionImplemented(t *testing.T) {
+	skipWindows(t)
+
+	cfg := &types.Config{
+		DataDir:          t.TempDir(),
+		PartitionCount:   1,
+		TickMS:           10,
+		WheelSize:        100,
+		SegmentSizeBytes: 512,
+		IndexInterval:    1,
+		FsyncMode:        "periodic",
+		FlushIntervalMS:  100,
+	}
+
+	pm := partition.NewPartitionManager("node-1", cfg)
+	defer pm.StopAllPartitions()
+
+	if err := pm.CreatePartition(0, "topic-test"); err != nil {
+		t.Fatalf("CreatePartition failed: %v", err)
+	}
+
+	p, err := pm.GetInternalPartition(0)
+	if err != nil {
+		t.Fatalf("GetInternalPartition failed: %v", err)
+	}
+
+	for i := 0; i < 40; i++ {
+		err := p.Wal.AppendEvent(&types.Event{
+			MessageId:  fmt.Sprintf("compact-test-%d", i),
+			ScheduleTs: time.Now().UnixMilli(),
+			Payload:    make([]byte, 64),
+			Topic:      "topic-test",
+		})
+		if err != nil {
+			t.Fatalf("AppendEvent failed: %v", err)
+		}
+	}
+
+	h := NewPartitionServiceHandler(pm, nil, "node-1")
+	ctx := context.Background()
+
+	compactResp, err := h.Compact(ctx, &types.CompactRequest{PartitionId: 0, Force: true})
+	if err != nil {
+		t.Fatalf("Compact returned gRPC error: %v", err)
+	}
+	if !compactResp.GetSuccess() {
+		t.Fatalf("Compact failed: %s", compactResp.GetError())
+	}
+
+	retResp, err := h.RunRetention(ctx, &types.RetentionRequest{PartitionId: 0, MaxSizeBytes: 1024})
+	if err != nil {
+		t.Fatalf("RunRetention returned gRPC error: %v", err)
+	}
+	if !retResp.GetSuccess() {
+		t.Fatalf("RunRetention failed: %s", retResp.GetError())
 	}
 }
