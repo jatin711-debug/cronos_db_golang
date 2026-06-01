@@ -88,6 +88,48 @@ func TestCoordinator_Commit(t *testing.T) {
 	}
 }
 
+func TestCoordinator_PrepareThenCommit(t *testing.T) {
+	c := NewCoordinator(30*time.Second, t.TempDir())
+	defer c.Stop()
+
+	var prepCalled, commitCalled int
+	participant := &mockParticipant{
+		onPrepare: func() error { prepCalled++; return nil },
+		onCommit:  func() error { commitCalled++; return nil },
+	}
+
+	tx, _ := c.Begin("tx-prepare-commit", []Participant{participant})
+	ctx := context.Background()
+
+	if err := c.Prepare(ctx, tx.ID); err != nil {
+		t.Fatalf("Prepare failed: %v", err)
+	}
+	if prepCalled != 1 {
+		t.Fatalf("expected 1 prepare call, got %d", prepCalled)
+	}
+	if commitCalled != 0 {
+		t.Fatalf("expected 0 commit calls during prepare, got %d", commitCalled)
+	}
+
+	status, err := c.GetStatus(tx.ID)
+	if err != nil {
+		t.Fatalf("GetStatus failed: %v", err)
+	}
+	if status != StatusPrepared {
+		t.Fatalf("expected StatusPrepared, got %v", status)
+	}
+
+	if err := c.Commit(ctx, tx.ID); err != nil {
+		t.Fatalf("Commit failed after prepare: %v", err)
+	}
+	if prepCalled != 1 {
+		t.Fatalf("expected commit on prepared tx to skip prepare, got prepare calls=%d", prepCalled)
+	}
+	if commitCalled != 1 {
+		t.Fatalf("expected 1 commit call, got %d", commitCalled)
+	}
+}
+
 func TestCoordinator_Commit_PrepareFailure(t *testing.T) {
 	c := NewCoordinator(30*time.Second, t.TempDir())
 	defer c.Stop()
@@ -437,7 +479,7 @@ func TestCoordinator_RecoveryBackoff(t *testing.T) {
 	defer c.Stop()
 
 	txID := TxID("tx-backoff")
-	
+
 	// Create a mock participant that always fails commits
 	prepCount := 0
 	commitCount := 0
@@ -491,4 +533,3 @@ func TestCoordinator_RecoveryBackoff(t *testing.T) {
 		t.Errorf("Expected commitCount to be 3 after forcing retry, got %d", commitCount)
 	}
 }
-

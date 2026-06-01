@@ -15,6 +15,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -31,10 +32,11 @@ import (
 )
 
 const (
-	topic         = "demo-topic"
-	consumerGroup = "demo-group"
-	demoTimeout   = 60 * time.Second
-	scheduleDelay = 10 * time.Second
+	topic               = "demo-topic"
+	consumerGroup       = "demo-group"
+	demoTimeout         = 60 * time.Second
+	scheduleDelay       = 10 * time.Second
+	replayFallbackAfter = scheduleDelay + 20*time.Second
 )
 
 // DemoPayload is the JSON event body published in the demo.
@@ -107,12 +109,22 @@ func main() {
 	}
 
 	consumerDone := make(chan error, 1)
+	deliverySeen := make(chan struct{}, 1)
 	var received atomic.Bool
 	go func() {
 		logger.Printf("subscribing to topic=%s group=%s subscription=%s …", topic, runConsumerGroup, consCfg.SubscriptionID)
 		consumerDone <- c.Subscribe(ctx, consCfg, func(ctx context.Context, d client.Delivery) error {
+			err := handleDelivery(logger, codec, d)
+			if err != nil {
+				return err
+			}
+
 			received.Store(true)
-			return handleDelivery(logger, codec, d)
+			select {
+			case deliverySeen <- struct{}{}:
+			default:
+			}
+			return nil
 		})
 	}()
 
@@ -157,15 +169,45 @@ func main() {
 
 	// ── Wait ─────────────────────────────────────────────────────────────────
 	logger.Printf("waiting for delivery (up to %s) …", demoTimeout)
-	select {
-	case <-ctx.Done():
-		if !received.Load() {
-			logger.Printf("⚠  no delivery observed before timeout; check scheduler/dispatcher logs for partition=%d", topicPartitionID)
-		}
-		logger.Println("demo complete – shutting down")
-	case err := <-consumerDone:
-		if err != nil && ctx.Err() == nil {
-			logger.Printf("consumer exited with error: %v", err)
+	fallbackTimer := time.NewTimer(replayFallbackAfter)
+	defer fallbackTimer.Stop()
+
+	for {
+		select {
+		case <-deliverySeen:
+			logger.Println("delivery observed – demo complete")
+			return
+		case <-fallbackTimer.C:
+			if received.Load() || result == nil {
+				continue
+			}
+
+			logger.Printf("⚠  no live delivery after %s; trying replay fallback for partition=%d offset=%d",
+				replayFallbackAfter, result.PartitionID, result.Offset)
+
+			replayed, replayErr := replayPublishedEvent(ctx, c, logger, codec, result)
+			if replayErr != nil {
+				logger.Printf("⚠  replay fallback failed: %v", replayErr)
+				continue
+			}
+			if replayed {
+				received.Store(true)
+				logger.Println("replay fallback delivered message – demo complete")
+				return
+			}
+
+			logger.Printf("⚠  replay fallback did not find message_id=%s", result.MessageID)
+		case <-ctx.Done():
+			if !received.Load() {
+				logger.Printf("⚠  no delivery observed before timeout; check scheduler/dispatcher logs for partition=%d", topicPartitionID)
+			}
+			logger.Println("demo complete – shutting down")
+			return
+		case err := <-consumerDone:
+			if err != nil && ctx.Err() == nil {
+				logger.Printf("consumer exited with error: %v", err)
+			}
+			return
 		}
 	}
 }
@@ -218,6 +260,44 @@ func sendWithMetadataRefresh(
 	_ = c.ForceMetadataRefresh(refreshCtx)
 
 	return producer.Send(ctx, msg)
+}
+
+func replayPublishedEvent(
+	ctx context.Context,
+	c *client.Client,
+	logger *log.Logger,
+	codec client.Codec,
+	result *client.SendResult,
+) (bool, error) {
+	if result == nil {
+		return false, nil
+	}
+
+	replayCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	found := false
+	err := c.ReplayByOffsetRange(replayCtx, topic, result.PartitionID, result.Offset, result.Offset,
+		func(ctx context.Context, ev client.ReplayEvent) error {
+			if ev.Event == nil {
+				return nil
+			}
+			if ev.Event.GetMessageId() != result.MessageID {
+				return nil
+			}
+
+			found = true
+			return handleDelivery(logger, codec, client.Delivery{
+				Event:      ev.Event,
+				DeliveryID: fmt.Sprintf("replay-%d", ev.ReplayOffset),
+				Attempt:    1,
+			})
+		})
+	if err != nil && !errors.Is(err, context.Canceled) {
+		return false, err
+	}
+
+	return found, nil
 }
 
 func isLeaderRedirect(err error) bool {

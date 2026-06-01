@@ -344,6 +344,56 @@ func (c *Coordinator) Begin(txID TxID, participants []Participant) (*Transaction
 	return tx, nil
 }
 
+// Prepare runs phase 1 (prepare) only and persists prepared state.
+func (c *Coordinator) Prepare(ctx context.Context, txID TxID) error {
+	c.mu.Lock()
+	tx, ok := c.transactions[txID]
+	c.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("transaction %s not found", txID)
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+
+	// Acquire locks for all participant partitions.
+	locks, err := c.acquireLocks(tx.Participants)
+	if err != nil {
+		return fmt.Errorf("acquire locks: %w", err)
+	}
+	defer releaseLocks(locks)
+
+	c.mu.RLock()
+	status := tx.Status
+	c.mu.RUnlock()
+
+	if status == StatusPrepared {
+		return nil
+	}
+	if status == StatusCommitted {
+		return fmt.Errorf("transaction %s already committed", txID)
+	}
+	if status == StatusAborted {
+		return fmt.Errorf("transaction %s already aborted", txID)
+	}
+
+	for _, p := range tx.Participants {
+		if err := p.Prepare(ctx, txID); err != nil {
+			_ = c.abortInternal(ctx, tx)
+			return fmt.Errorf("prepare failed: %w", err)
+		}
+	}
+
+	c.mu.Lock()
+	tx.Status = StatusPrepared
+	c.mu.Unlock()
+
+	partitionIDs := extractPartitionIDs(tx.Participants)
+	_ = c.txLog.write(txID, StatusPrepared, partitionIDs, tx.CreatedAt)
+
+	return nil
+}
+
 // Commit runs two-phase commit.
 func (c *Coordinator) Commit(ctx context.Context, txID TxID) error {
 	c.mu.Lock()

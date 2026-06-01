@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -58,8 +59,8 @@ func TestManager_Emit_SingleSink(t *testing.T) {
 	// Give goroutine time to execute
 	time.Sleep(100 * time.Millisecond)
 
-	if sink.writeCount != 1 {
-		t.Errorf("expected 1 write, got %d", sink.writeCount)
+	if sink.writeCount.Load() != 1 {
+		t.Errorf("expected 1 write, got %d", sink.writeCount.Load())
 	}
 }
 
@@ -79,11 +80,11 @@ func TestManager_Emit_MultipleSinks(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 
-	if sink1.writeCount != 1 {
-		t.Errorf("expected sink1 to receive 1 write, got %d", sink1.writeCount)
+	if sink1.writeCount.Load() != 1 {
+		t.Errorf("expected sink1 to receive 1 write, got %d", sink1.writeCount.Load())
 	}
-	if sink2.writeCount != 1 {
-		t.Errorf("expected sink2 to receive 1 write, got %d", sink2.writeCount)
+	if sink2.writeCount.Load() != 1 {
+		t.Errorf("expected sink2 to receive 1 write, got %d", sink2.writeCount.Load())
 	}
 }
 
@@ -101,8 +102,8 @@ func TestManager_Emit_SinkError(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 	// Should not panic even if sink errors
-	if sink.writeCount != 1 {
-		t.Errorf("expected 1 write attempt, got %d", sink.writeCount)
+	if sink.writeCount.Load() != 1 {
+		t.Errorf("expected 1 write attempt, got %d", sink.writeCount.Load())
 	}
 }
 
@@ -115,7 +116,7 @@ func TestManager_Close(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Close failed: %v", err)
 	}
-	if !sink.closed {
+	if !sink.closed.Load() {
 		t.Error("sink should be closed")
 	}
 }
@@ -184,19 +185,19 @@ type mockSink struct {
 	name       string
 	err        error
 	closeErr   error
-	writeCount int
-	closed     bool
+	writeCount atomic.Int64
+	closed     atomic.Bool
 }
 
 func (m *mockSink) Name() string { return m.name }
 
 func (m *mockSink) Write(ctx context.Context, event *ChangeEvent) error {
-	m.writeCount++
+	m.writeCount.Add(1)
 	return m.err
 }
 
 func (m *mockSink) Close() error {
-	m.closed = true
+	m.closed.Store(true)
 	return m.closeErr
 }
 

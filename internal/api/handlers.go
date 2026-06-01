@@ -669,8 +669,10 @@ func (h *EventServiceHandler) Ack(stream types.EventService_AckServer) error {
 		// or batch format: "consumerGroup:partitionID:memberID-batch-offset-count"
 		var targetPartitionID int32 = -1
 		deliveryID := req.GetDeliveryId()
-		parts := strings.Split(deliveryID, ":")
+		parts := strings.SplitN(deliveryID, ":", 3)
+		groupID := ""
 		if len(parts) >= 2 {
+			groupID = parts[0]
 			if pid, err := strconv.ParseInt(parts[1], 10, 32); err == nil {
 				targetPartitionID = int32(pid)
 			}
@@ -686,6 +688,20 @@ func (h *EventServiceHandler) Ack(stream types.EventService_AckServer) error {
 			// Skip dispatcher routing for malformed/legacy IDs to avoid O(partitions)
 			// scans on the ack hot path. Consumer offset commit below will validate
 			// delivery_id format and return a proper error when invalid.
+		}
+
+		if h.partitionManager.ExactlyOnceCommitsEnabled() && targetPartitionID >= 0 && groupID != "" {
+			committedOffset, commitErr := h.consumerManager.GetCommittedOffset(groupID, targetPartitionID)
+			if commitErr == nil && req.GetNextOffset() <= committedOffset {
+				resp := &types.AckResponse{
+					Success: false,
+					Error:   fmt.Sprintf("next_offset %d must be greater than committed offset %d", req.GetNextOffset(), committedOffset),
+				}
+				if err := stream.Send(resp); err != nil {
+					return err
+				}
+				continue
+			}
 		}
 
 		err = h.consumerManager.Ack(req)
@@ -727,8 +743,7 @@ func (h *EventServiceHandler) Replay(req *types.ReplayRequest, stream types.Even
 		}
 		// If follower reads disabled, require leader
 		if !h.clusterRouter.IsPartitionLeader(partitionID) {
-			// Check if follower reads are enabled globally via partition manager config
-			if pm, _ := h.partitionManager.GetPartition(partitionID); pm == nil || !h.partitionManager.CanAccept(partitionID) {
+			if !h.partitionManager.FollowerReadsEnabled() {
 				return status.Errorf(codes.FailedPrecondition,
 					"partition %d is not leader; follower reads not enabled", partitionID)
 			}

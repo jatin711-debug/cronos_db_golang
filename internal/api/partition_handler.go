@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/jatin711-debug/cronos_db_golang/internal/cluster"
 	"github.com/jatin711-debug/cronos_db_golang/internal/partition"
@@ -12,6 +13,108 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+func summarizeSegmentUsage(p *partition.Partition) (count int32, totalBytes int64) {
+	if p == nil || p.Wal == nil {
+		return 0, 0
+	}
+	segments := p.Wal.GetSegments()
+	count = int32(len(segments))
+	for _, seg := range segments {
+		totalBytes += seg.GetSize()
+	}
+	return count, totalBytes
+}
+
+func minConsumedOffsetForPartition(p *partition.Partition) (int64, bool) {
+	if p == nil || p.Wal == nil || p.ConsumerGroup == nil {
+		return 0, false
+	}
+
+	groups := p.ConsumerGroup.ListGroups()
+	hasActiveConsumers := false
+	minConsumedOffset := p.Wal.GetHighWatermark()
+
+	for _, group := range groups {
+		hasPartition := false
+		for _, partID := range group.Partitions {
+			if partID == p.ID {
+				hasPartition = true
+				break
+			}
+		}
+
+		if !hasPartition {
+			continue
+		}
+
+		hasActiveConsumers = true
+
+		offset, ok := group.CommittedOffsets[p.ID]
+		if ok {
+			if offset == -1 {
+				minConsumedOffset = 0
+			} else if offset < minConsumedOffset {
+				minConsumedOffset = offset
+			}
+		} else {
+			minConsumedOffset = 0
+		}
+	}
+
+	if !hasActiveConsumers {
+		return 0, false
+	}
+
+	return minConsumedOffset, true
+}
+
+func compactByMaxSize(p *partition.Partition, maxSizeBytes int64) (int, error) {
+	if p == nil || p.Wal == nil || maxSizeBytes <= 0 {
+		return 0, nil
+	}
+
+	deletedTotal := 0
+
+	for {
+		segments := p.Wal.GetSegments()
+		if len(segments) <= 1 {
+			return deletedTotal, nil
+		}
+
+		var totalSize int64
+		for _, seg := range segments {
+			totalSize += seg.GetSize()
+		}
+		if totalSize <= maxSizeBytes {
+			return deletedTotal, nil
+		}
+
+		active := p.Wal.GetActiveSegment()
+		var oldestNonActiveOffset int64 = -1
+		for _, seg := range segments {
+			if seg == active {
+				continue
+			}
+			if oldestNonActiveOffset < 0 || seg.GetFirstOffset() < oldestNonActiveOffset {
+				oldestNonActiveOffset = seg.GetLastOffset()
+			}
+		}
+
+		if oldestNonActiveOffset < 0 {
+			return deletedTotal, nil
+		}
+
+		deleted, err := p.Wal.CompactByOffset(oldestNonActiveOffset + 1)
+		if err != nil {
+			return deletedTotal, err
+		}
+		if deleted == 0 {
+			return deletedTotal, nil
+		}
+		deletedTotal += deleted
+	}
+}
 
 // PartitionServiceHandler implements metadata-focused partition APIs.
 // It is intentionally read-only on the hot path used by clients for routing.
@@ -263,18 +366,101 @@ func (h *PartitionServiceHandler) GetSchedulerStatus(ctx context.Context, req *t
 	}, nil
 }
 
-// Compact is not exposed through this handler yet.
 func (h *PartitionServiceHandler) Compact(ctx context.Context, req *types.CompactRequest) (*types.CompactResponse, error) {
 	_ = ctx
-	_ = req
-	return nil, status.Error(codes.Unimplemented, "compact is not implemented in partition service")
+
+	if req == nil || req.GetPartitionId() < 0 {
+		return nil, status.Error(codes.InvalidArgument, "valid partition_id is required")
+	}
+
+	p, err := h.partitionManager.GetInternalPartition(req.GetPartitionId())
+	if err != nil || p.Wal == nil {
+		return nil, status.Errorf(codes.NotFound, "local WAL for partition %d not found", req.GetPartitionId())
+	}
+
+	beforeCount, beforeSize := summarizeSegmentUsage(p)
+
+	if req.GetBeforeTs() > 0 {
+		if _, err := p.Wal.CompactByTimestamp(req.GetBeforeTs()); err != nil {
+			return &types.CompactResponse{Success: false, Error: err.Error()}, nil
+		}
+	} else if req.GetForce() {
+		if _, err := p.Wal.CompactByOffset(p.Wal.GetHighWatermark()); err != nil {
+			return &types.CompactResponse{Success: false, Error: err.Error()}, nil
+		}
+	} else {
+		if minOffset, ok := minConsumedOffsetForPartition(p); ok && minOffset > 0 {
+			if _, err := p.Wal.CompactByOffset(minOffset); err != nil {
+				return &types.CompactResponse{Success: false, Error: err.Error()}, nil
+			}
+		}
+	}
+
+	afterCount, afterSize := summarizeSegmentUsage(p)
+	segmentsCompacted := int32(0)
+	bytesReclaimed := int64(0)
+	if beforeCount > afterCount {
+		segmentsCompacted = beforeCount - afterCount
+	}
+	if beforeSize > afterSize {
+		bytesReclaimed = beforeSize - afterSize
+	}
+
+	return &types.CompactResponse{
+		Success:           true,
+		SegmentsCompacted: segmentsCompacted,
+		BytesReclaimed:    bytesReclaimed,
+	}, nil
 }
 
-// RunRetention is not exposed through this handler yet.
 func (h *PartitionServiceHandler) RunRetention(ctx context.Context, req *types.RetentionRequest) (*types.RetentionResponse, error) {
 	_ = ctx
-	_ = req
-	return nil, status.Error(codes.Unimplemented, "run retention is not implemented in partition service")
+
+	if req == nil || req.GetPartitionId() < 0 {
+		return nil, status.Error(codes.InvalidArgument, "valid partition_id is required")
+	}
+
+	p, err := h.partitionManager.GetInternalPartition(req.GetPartitionId())
+	if err != nil || p.Wal == nil {
+		return nil, status.Errorf(codes.NotFound, "local WAL for partition %d not found", req.GetPartitionId())
+	}
+
+	beforeCount, beforeSize := summarizeSegmentUsage(p)
+
+	if req.GetMinOffset() > 0 {
+		if _, err := p.Wal.CompactByOffset(req.GetMinOffset()); err != nil {
+			return &types.RetentionResponse{Success: false, Error: err.Error()}, nil
+		}
+	}
+
+	if req.GetMaxAgeHours() > 0 {
+		cutoffTS := time.Now().Add(-time.Duration(req.GetMaxAgeHours()) * time.Hour).UnixMilli()
+		if _, err := p.Wal.CompactByTimestamp(cutoffTS); err != nil {
+			return &types.RetentionResponse{Success: false, Error: err.Error()}, nil
+		}
+	}
+
+	if req.GetMaxSizeBytes() > 0 {
+		if _, err := compactByMaxSize(p, req.GetMaxSizeBytes()); err != nil {
+			return &types.RetentionResponse{Success: false, Error: err.Error()}, nil
+		}
+	}
+
+	afterCount, afterSize := summarizeSegmentUsage(p)
+	segmentsDeleted := int32(0)
+	bytesFreed := int64(0)
+	if beforeCount > afterCount {
+		segmentsDeleted = beforeCount - afterCount
+	}
+	if beforeSize > afterSize {
+		bytesFreed = beforeSize - afterSize
+	}
+
+	return &types.RetentionResponse{
+		Success:         true,
+		SegmentsDeleted: segmentsDeleted,
+		BytesFreed:      bytesFreed,
+	}, nil
 }
 
 // SplitPartition splits a partition into two at a given offset.
@@ -317,8 +503,8 @@ func (h *PartitionServiceHandler) SplitPartition(ctx context.Context, req *types
 	}
 
 	return &types.SplitPartitionResponse{
-		Success:            true,
+		Success:             true,
 		SourceHighWatermark: sourceHW,
-		NewFirstOffset:     req.GetSplitOffset(),
+		NewFirstOffset:      req.GetSplitOffset(),
 	}, nil
 }

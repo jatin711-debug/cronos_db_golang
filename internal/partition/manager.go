@@ -34,12 +34,12 @@ type Partition struct {
 	DedupStore    *dedup.Manager
 	Dispatcher    *delivery.Dispatcher
 	Worker        *delivery.Worker
-	Follower      *replication.Follower  // For receiving replicated data
-	ReplLeader    *replication.Leader    // For sending replication to followers
+	Follower      *replication.Follower // For receiving replicated data
+	ReplLeader    *replication.Leader   // For sending replication to followers
 	Leader        bool
-	Epoch         int64                 // Cluster-assigned epoch for split-brain fencing
-	MinKey        string                // Minimum key boundary (inclusive)
-	MaxKey        string                // Maximum key boundary (exclusive)
+	Epoch         int64  // Cluster-assigned epoch for split-brain fencing
+	MinKey        string // Minimum key boundary (inclusive)
+	MaxKey        string // Maximum key boundary (exclusive)
 	CreatedTS     time.Time
 	UpdatedTS     time.Time
 	deliveryQuit  chan struct{} // Quit channel for delivery goroutine
@@ -65,7 +65,7 @@ type PartitionManager struct {
 	config           *types.Config
 	pebbleCache      *pebble.Cache
 	tenantAccountant tenantAccountant
-	splitting        map[int32]bool  // tracks partitions currently undergoing split
+	splitting        map[int32]bool // tracks partitions currently undergoing split
 	splittingMu      sync.RWMutex
 }
 
@@ -425,6 +425,20 @@ func (pm *PartitionManager) CanAccept(partitionID int32) bool {
 		}
 	}
 	return true
+}
+
+// ExactlyOnceCommitsEnabled reports whether strict monotonic consumer commits are enabled.
+func (pm *PartitionManager) ExactlyOnceCommitsEnabled() bool {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	return pm.config != nil && pm.config.ExactlyOnceCommits
+}
+
+// FollowerReadsEnabled reports whether follower nodes may serve replay reads.
+func (pm *PartitionManager) FollowerReadsEnabled() bool {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	return pm.config != nil && pm.config.FollowerReadsEnabled
 }
 
 // GetOrCreateInternalPartition gets or auto-creates and starts an internal partition by ID.
