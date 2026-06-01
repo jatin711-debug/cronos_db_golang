@@ -976,10 +976,10 @@ Cross-node heartbeats include timestamps for clock skew monitoring:
 flowchart TD
     A[Local heartbeat tick] --> B[Send heartbeat with local timestamp]
     B --> C[Remote node receives]
-    C --> D[Compute skew = remote_ts - local_ts]
-    D --> E{|skew| > 5s?}
-    E -->|Yes| F[Log WARNING + emit `cronos_clock_skew_ms` metric]
-    E -->|No| G[Silent / metric only]
+    C --> D[Compute skew as remote_ts minus local_ts]
+    D --> E{Absolute skew over 5 seconds}
+    E -->|Yes| F[Log warning and emit cronos_clock_skew_ms metric]
+    E -->|No| G[Silent metric only]
 ```
 
 - Compares remote node timestamp against local time on every heartbeat
