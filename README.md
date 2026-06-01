@@ -61,7 +61,7 @@ It combines the durability of a write-ahead log, the precision of a hierarchical
 - **Consistent Hashing** — SHA-256 ring with configurable virtual nodes (`-virtual-nodes`, default 150)
 - **Binary Replication Protocol** — Custom wire format (0xCAFEBABE magic)
 - **Bulk File Sync** — Segment-level transfer for new node bootstrap
-- **Clock Skew Detection** — Cross-node heartbeat timestamp comparison; warns if |skew| > 5s
+- **Clock Skew Detection** — Cross-node heartbeat timestamp comparison; warns if absolute skew exceeds 5 seconds
 
 ### API
 - **gRPC Streaming** — Bidirectional subscribe, streaming replay
