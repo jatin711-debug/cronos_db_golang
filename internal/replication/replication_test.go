@@ -92,7 +92,7 @@ func TestCrossRegionReplicator_Close(t *testing.T) {
 }
 
 func TestNewRegionClientManager(t *testing.T) {
-	mgr := newRegionClientManager(5 * time.Second)
+	mgr := newRegionClientManager(5 * time.Second, nil)
 	if mgr == nil {
 		t.Fatal("newRegionClientManager should not return nil")
 	}
@@ -102,7 +102,7 @@ func TestNewRegionClientManager(t *testing.T) {
 }
 
 func TestRegionClientManager_GetClient_Cached(t *testing.T) {
-	mgr := newRegionClientManager(5 * time.Second)
+	mgr := newRegionClientManager(5 * time.Second, nil)
 
 	// First call with a real endpoint would dial, but we can't rely on that in tests
 	// So we inject a fake client manually
@@ -120,7 +120,7 @@ func TestRegionClientManager_GetClient_Cached(t *testing.T) {
 }
 
 func TestRegionClientManager_CloseAll(t *testing.T) {
-	mgr := newRegionClientManager(5 * time.Second)
+	mgr := newRegionClientManager(5 * time.Second, nil)
 	mgr.clients["region-1"] = &regionClient{}
 
 	if err := mgr.CloseAll(); err != nil {
@@ -177,7 +177,7 @@ func TestNewRegionClient_DialFail(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
-	_, err := newRegionClient(ctx, "127.0.0.1:1", 50*time.Millisecond)
+	_, err := newRegionClient(ctx, "127.0.0.1:1", 50*time.Millisecond, nil)
 	if err == nil {
 		t.Error("expected dial error for unreachable endpoint")
 	}
@@ -227,7 +227,7 @@ func TestCrossRegionReplicator_replicateToRegion_Error(t *testing.T) {
 }
 
 func TestRegionClientManager_GetClient_DoubleCheck(t *testing.T) {
-	mgr := newRegionClientManager(5 * time.Second)
+	mgr := newRegionClientManager(5 * time.Second, nil)
 
 	// Simulate concurrent access: first read misses, then write succeeds
 	// We test the double-check logic by having one goroutine set it
@@ -249,7 +249,7 @@ func TestRegionClientManager_GetClient_DoubleCheck(t *testing.T) {
 }
 
 func TestRegionClientManager_CloseAll_Empty(t *testing.T) {
-	mgr := newRegionClientManager(5 * time.Second)
+	mgr := newRegionClientManager(5 * time.Second, nil)
 	if err := mgr.CloseAll(); err != nil {
 		t.Fatalf("CloseAll on empty failed: %v", err)
 	}
