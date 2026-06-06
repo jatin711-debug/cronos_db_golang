@@ -2,6 +2,7 @@ package replication
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -10,6 +11,7 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
@@ -28,6 +30,7 @@ type CrossRegionReplicator struct {
 	localRegion RegionID
 	quit        chan struct{}
 	clientMgr   *regionClientManager
+	tlsConfig   *tls.Config
 
 	// Per-region batching
 	batches map[RegionID]*regionBatch
@@ -50,12 +53,18 @@ type RegionConnection struct {
 }
 
 // NewCrossRegionReplicator creates a cross-region replicator.
-func NewCrossRegionReplicator(localRegion RegionID) *CrossRegionReplicator {
+// If tlsConfig is non-nil, all outbound cross-region connections will use TLS.
+func NewCrossRegionReplicator(localRegion RegionID, tlsConfig ...*tls.Config) *CrossRegionReplicator {
+	var tc *tls.Config
+	if len(tlsConfig) > 0 {
+		tc = tlsConfig[0]
+	}
 	return &CrossRegionReplicator{
 		regions:     make(map[RegionID]string),
 		localRegion: localRegion,
 		quit:        make(chan struct{}),
-		clientMgr:   newRegionClientManager(5 * time.Second),
+		clientMgr:   newRegionClientManager(5*time.Second, tc),
+		tlsConfig:   tc,
 		batches:     make(map[RegionID]*regionBatch),
 	}
 }
@@ -206,13 +215,19 @@ type regionClient struct {
 }
 
 // newRegionClient dials the given endpoint and returns a CrossRegionService client.
-func newRegionClient(ctx context.Context, endpoint string, dialTimeout time.Duration) (*regionClient, error) {
+func newRegionClient(ctx context.Context, endpoint string, dialTimeout time.Duration, tlsConfig *tls.Config) (*regionClient, error) {
+	var creds credentials.TransportCredentials
+	if tlsConfig != nil {
+		creds = credentials.NewTLS(tlsConfig)
+	} else {
+		creds = insecure.NewCredentials()
+	}
 	dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
 	defer cancel()
 	conn, err := grpc.DialContext(
 		dialCtx,
 		endpoint,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithTransportCredentials(creds),
 		grpc.WithBlock(),
 	)
 	if err != nil {
@@ -242,12 +257,14 @@ type regionClientManager struct {
 	mu          sync.RWMutex
 	clients     map[RegionID]*regionClient
 	dialTimeout time.Duration
+	tlsConfig   *tls.Config
 }
 
-func newRegionClientManager(dialTimeout time.Duration) *regionClientManager {
+func newRegionClientManager(dialTimeout time.Duration, tlsConfig *tls.Config) *regionClientManager {
 	return &regionClientManager{
 		clients:     make(map[RegionID]*regionClient),
 		dialTimeout: dialTimeout,
+		tlsConfig:   tlsConfig,
 	}
 }
 
@@ -268,7 +285,7 @@ func (m *regionClientManager) GetClient(ctx context.Context, regionID RegionID, 
 		return rc, nil
 	}
 
-	client, err := newRegionClient(ctx, endpoint, m.dialTimeout)
+	client, err := newRegionClient(ctx, endpoint, m.dialTimeout, m.tlsConfig)
 	if err != nil {
 		return nil, err
 	}

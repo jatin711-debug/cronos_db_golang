@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log"
 	"net"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
@@ -54,16 +56,19 @@ func (s *ClusterService) Stop() {
 
 // ClusterClient is a client for cluster communication
 type ClusterClient struct {
-	mu      sync.RWMutex
-	conns   map[string]*grpc.ClientConn
-	timeout time.Duration
+	mu        sync.RWMutex
+	conns     map[string]*grpc.ClientConn
+	timeout   time.Duration
+	tlsConfig *tls.Config
 }
 
-// NewClusterClient creates a new cluster client
-func NewClusterClient(timeout time.Duration) *ClusterClient {
+// NewClusterClient creates a new cluster client.
+// If tlsConfig is non-nil, all outbound connections will use TLS.
+func NewClusterClient(timeout time.Duration, tlsConfig *tls.Config) *ClusterClient {
 	return &ClusterClient{
-		conns:   make(map[string]*grpc.ClientConn),
-		timeout: timeout,
+		conns:     make(map[string]*grpc.ClientConn),
+		timeout:   timeout,
+		tlsConfig: tlsConfig,
 	}
 }
 
@@ -90,8 +95,14 @@ func (c *ClusterClient) GetConnection(addr string) (*grpc.ClientConn, error) {
 	// timeout duration if the target is unreachable. Without WithBlock(),
 	// the connection is established lazily on the first RPC call, and
 	// the context timeout on the RPC itself handles unreachable nodes.
+	var creds credentials.TransportCredentials
+	if c.tlsConfig != nil {
+		creds = credentials.NewTLS(c.tlsConfig)
+	} else {
+		creds = insecure.NewCredentials()
+	}
 	conn, err := grpc.DialContext(context.Background(), addr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithTransportCredentials(creds),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("dial %s: %w", addr, err)
