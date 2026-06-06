@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -13,14 +15,20 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
 var (
-	serverAddr string
-	client     types.EventServiceClient
-	partClient types.PartitionServiceClient
-	cgClient   types.ConsumerGroupServiceClient
+	serverAddr    string
+	tlsEnabled    bool
+	tlsCAFile     string
+	tlsCertFile   string
+	tlsKeyFile    string
+	tlsSkipVerify bool
+	client        types.EventServiceClient
+	partClient    types.PartitionServiceClient
+	cgClient      types.ConsumerGroupServiceClient
 )
 
 func main() {
@@ -35,6 +43,11 @@ func main() {
 		},
 	}
 	rootCmd.PersistentFlags().StringVarP(&serverAddr, "server", "s", "localhost:9000", "CronosDB server gRPC address")
+	rootCmd.PersistentFlags().BoolVar(&tlsEnabled, "tls", false, "Enable TLS for gRPC connection")
+	rootCmd.PersistentFlags().StringVar(&tlsCAFile, "tls-ca", "", "Path to CA certificate file")
+	rootCmd.PersistentFlags().StringVar(&tlsCertFile, "tls-cert", "", "Path to client TLS certificate file (mTLS)")
+	rootCmd.PersistentFlags().StringVar(&tlsKeyFile, "tls-key", "", "Path to client TLS private key file (mTLS)")
+	rootCmd.PersistentFlags().BoolVar(&tlsSkipVerify, "tls-skip-verify", false, "Skip server certificate verification (development only)")
 
 	rootCmd.AddCommand(
 		partitionCmd(),
@@ -50,7 +63,36 @@ func main() {
 }
 
 func dial() error {
-	conn, err := grpc.NewClient(serverAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	var creds credentials.TransportCredentials
+	if tlsEnabled {
+		tlsCfg := &tls.Config{
+			InsecureSkipVerify: tlsSkipVerify,
+			MinVersion:         tls.VersionTLS12,
+		}
+		if tlsCAFile != "" {
+			caPEM, err := os.ReadFile(tlsCAFile)
+			if err != nil {
+				return fmt.Errorf("read CA cert: %w", err)
+			}
+			roots := x509.NewCertPool()
+			if !roots.AppendCertsFromPEM(caPEM) {
+				return fmt.Errorf("parse CA cert: no certificates loaded")
+			}
+			tlsCfg.RootCAs = roots
+		}
+		if tlsCertFile != "" && tlsKeyFile != "" {
+			cert, err := tls.LoadX509KeyPair(tlsCertFile, tlsKeyFile)
+			if err != nil {
+				return fmt.Errorf("load client cert/key: %w", err)
+			}
+			tlsCfg.Certificates = []tls.Certificate{cert}
+		}
+		creds = credentials.NewTLS(tlsCfg)
+	} else {
+		creds = insecure.NewCredentials()
+	}
+
+	conn, err := grpc.NewClient(serverAddr, grpc.WithTransportCredentials(creds))
 	if err != nil {
 		return fmt.Errorf("dial %s: %w", serverAddr, err)
 	}
