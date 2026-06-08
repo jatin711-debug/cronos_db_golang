@@ -396,7 +396,7 @@ func main() {
 
 	// Load remote regions from environment
 	if regions := os.Getenv("CRONOS_REGIONS"); regions != "" {
-		for _, r := range strings.Split(regions, ",") {
+		for r := range strings.SplitSeq(regions, ",") {
 			parts := strings.SplitN(strings.TrimSpace(r), "=", 2)
 			if len(parts) == 2 {
 				crossRegionReplicator.AddRegion(&replication.RegionConnection{
