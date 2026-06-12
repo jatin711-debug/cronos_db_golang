@@ -10,10 +10,15 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jatin711-debug/cronos_db_golang/internal/audit"
+	"github.com/jatin711-debug/cronos_db_golang/internal/auth"
 	"github.com/jatin711-debug/cronos_db_golang/internal/consumer"
 	"github.com/jatin711-debug/cronos_db_golang/internal/delivery"
 	"github.com/jatin711-debug/cronos_db_golang/internal/partition"
 	"github.com/jatin711-debug/cronos_db_golang/internal/replay"
+	"github.com/jatin711-debug/cronos_db_golang/internal/schema"
+	"github.com/jatin711-debug/cronos_db_golang/internal/tenant"
+	"github.com/jatin711-debug/cronos_db_golang/internal/tracing"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 
 	"google.golang.org/grpc"
@@ -29,6 +34,9 @@ type EventServiceHandler struct {
 	dedupManager     DedupManager
 	consumerManager  ConsumerManager
 	clusterRouter    ClusterRouter // nil in standalone mode
+	schemaRegistry   *schema.Registry
+	tenantAccountant *tenant.Accountant
+	auditLogger      *audit.Logger
 }
 
 // DedupManager interface
@@ -50,6 +58,7 @@ type ConsumerManager interface {
 type ClusterRouter interface {
 	IsLocalPartition(partitionID int32) bool
 	IsPartitionLeader(partitionID int32) bool
+	GetPartitionEpoch(partitionID int32) int64
 }
 
 // GRPCStream wraps gRPC stream to implement delivery.Stream interface
@@ -69,9 +78,11 @@ func (s *GRPCStream) Send(delivery *delivery.DeliveryMessage) error {
 	})
 }
 
-// Recv receives a control message (not used in current implementation)
+// Recv receives a control message from the subscriber.
+// Currently not implemented — control messages (flow-control credits, etc.)
+// are handled via the separate Ack streaming endpoint.
 func (s *GRPCStream) Recv() (*delivery.Control, error) {
-	return nil, fmt.Errorf("not implemented")
+	return nil, fmt.Errorf("control message streaming not implemented: use the Ack endpoint for credits and flow control")
 }
 
 // Context returns the stream context
@@ -98,9 +109,29 @@ func (h *EventServiceHandler) SetClusterRouter(router ClusterRouter) {
 	h.clusterRouter = router
 }
 
+// SetSchemaRegistry sets the schema registry for publish validation.
+func (h *EventServiceHandler) SetSchemaRegistry(r *schema.Registry) {
+	h.schemaRegistry = r
+}
+
+// SetTenantAccountant sets the tenant resource accountant.
+func (h *EventServiceHandler) SetTenantAccountant(a *tenant.Accountant) {
+	h.tenantAccountant = a
+}
+
+// SetAuditLogger sets the audit logger for handler-level events.
+func (h *EventServiceHandler) SetAuditLogger(l *audit.Logger) {
+	h.auditLogger = l
+}
+
 // ensureClusterPartitionWritable validates that this node should accept writes
-// for the target partition when running in cluster mode.
+// for the target partition when running in cluster mode or under active splits.
 func (h *EventServiceHandler) ensureClusterPartitionWritable(partitionID int32) error {
+	if h.partitionManager.IsSplitting(partitionID) {
+		return status.Errorf(codes.Unavailable,
+			"partition %d is undergoing split, retry later", partitionID)
+	}
+
 	if h.clusterRouter == nil {
 		return nil
 	}
@@ -115,11 +146,26 @@ func (h *EventServiceHandler) ensureClusterPartitionWritable(partitionID int32) 
 			"partition %d is local but this node is not the leader; retry against the partition leader", partitionID)
 	}
 
+	// Epoch fencing: reject writes if local partition epoch is behind cluster epoch.
+	// This prevents a split-brain scenario where an old leader hasn't realized
+	// it was demoted and continues accepting writes.
+	clusterEpoch := h.clusterRouter.GetPartitionEpoch(partitionID)
+	localEpoch := h.partitionManager.GetPartitionEpoch(partitionID)
+	if localEpoch < clusterEpoch {
+		return status.Errorf(codes.FailedPrecondition,
+			"partition %d epoch mismatch: local=%d cluster=%d; possible stale leader, retry", partitionID, localEpoch, clusterEpoch)
+	}
+
 	return nil
 }
 
 // Publish handles publish requests
 func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishRequest) (*types.PublishResponse, error) {
+	ctx, span := tracing.StartSpan(ctx, "Publish")
+	if span != nil {
+		defer span.End()
+	}
+
 	event := req.Event
 
 	// Validate event
@@ -127,6 +173,24 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 		return &types.PublishResponse{
 			Success: false,
 			Error:   "message_id is required",
+		}, nil
+	}
+	if len(event.GetMessageId()) > 128 {
+		return &types.PublishResponse{
+			Success: false,
+			Error:   "message_id exceeds 128 characters",
+		}, nil
+	}
+	if len(event.Topic) > 255 {
+		return &types.PublishResponse{
+			Success: false,
+			Error:   "topic exceeds 255 characters",
+		}, nil
+	}
+	if len(event.Payload) > 4*1024*1024 {
+		return &types.PublishResponse{
+			Success: false,
+			Error:   "payload exceeds 4MB limit",
 		}, nil
 	}
 
@@ -144,6 +208,16 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 		}, nil
 	}
 
+	// Schema validation
+	if h.schemaRegistry != nil && event.Topic != "" {
+		if err := h.schemaRegistry.Validate(event.Topic, event.Payload); err != nil {
+			return &types.PublishResponse{
+				Success: false,
+				Error:   fmt.Sprintf("schema validation failed: %v", err),
+			}, nil
+		}
+	}
+
 	partitionKey := event.GetMessageId() // Default to message_id for distribution
 	if pk, ok := event.Meta["partition_key"]; ok && pk != "" {
 		partitionKey = pk
@@ -151,6 +225,13 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 	partitionID := h.partitionManager.GetPartitionIDForKey(partitionKey)
 	if err := h.ensureClusterPartitionWritable(partitionID); err != nil {
 		return nil, err
+	}
+
+	// Admission control: reject if partition is overloaded
+	if !h.partitionManager.CanAccept(partitionID) {
+		IncAdmissionRejected()
+		return nil, status.Errorf(codes.ResourceExhausted,
+			"partition %d is at capacity; retry with backoff", partitionID)
 	}
 
 	partitionInternal, err := h.partitionManager.GetOrCreateInternalPartition(partitionID, partitionKey)
@@ -161,6 +242,13 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 			return nil, ownerErr
 		}
 
+		// Check admission on fallback partition too
+		if !h.partitionManager.CanAccept(topicPartitionID) {
+			IncAdmissionRejected()
+			return nil, status.Errorf(codes.ResourceExhausted,
+				"partition %d is at capacity; retry with backoff", topicPartitionID)
+		}
+
 		partitionInternal, err = h.partitionManager.GetOrCreateInternalPartition(topicPartitionID, event.Topic)
 		if err != nil {
 			return &types.PublishResponse{
@@ -168,6 +256,13 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 				Error:   fmt.Sprintf("get partition: %v", err),
 			}, nil
 		}
+	}
+
+	if !partitionInternal.IsKeyInBounds(partitionKey) {
+		return &types.PublishResponse{
+			Success: false,
+			Error:   fmt.Sprintf("key %s is out of partition bounds [%s, %s)", partitionKey, partitionInternal.MinKey, partitionInternal.MaxKey),
+		}, nil
 	}
 
 	// Check if duplicate (unless explicitly allowed)
@@ -189,6 +284,22 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 				Error:   "duplicate message_id",
 			}, nil
 		}
+	}
+
+	// Tenant quota check
+	if h.tenantAccountant != nil {
+		tenantID := tenant.ID("default")
+		if claims, ok := auth.ClaimsFromContext(ctx); ok {
+			tenantID = tenant.ID(claims.Subject)
+		}
+		if !h.tenantAccountant.AllowPublish(tenantID) {
+			return nil, status.Errorf(codes.ResourceExhausted, "tenant quota exceeded")
+		}
+		h.tenantAccountant.RecordPublish(tenantID, int64(len(event.Payload)))
+		if event.Meta == nil {
+			event.Meta = make(map[string]string)
+		}
+		event.Meta["tenant_id"] = string(tenantID)
 	}
 
 	// Append to WAL (no sync on every write for performance - WAL handles periodic flush)
@@ -246,6 +357,17 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 			continue
 		}
 
+		// Schema validation
+		if h.schemaRegistry != nil && event.Topic != "" {
+			if err := h.schemaRegistry.Validate(event.Topic, event.Payload); err != nil {
+				atomic.AddInt32(&errorCount, 1)
+				if lastError == "" {
+					lastError = fmt.Sprintf("schema validation failed for %s: %v", event.GetMessageId(), err)
+				}
+				continue
+			}
+		}
+
 		// Get partition
 		partitionKey := event.GetMessageId()
 		if pk, ok := event.Meta["partition_key"]; ok && pk != "" {
@@ -257,6 +379,16 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 			atomic.AddInt32(&errorCount, 1)
 			if lastError == "" {
 				lastError = ownerErr.Error()
+			}
+			continue
+		}
+
+		// Admission control
+		if !h.partitionManager.CanAccept(partitionID) {
+			IncAdmissionRejected()
+			atomic.AddInt32(&errorCount, 1)
+			if lastError == "" {
+				lastError = fmt.Sprintf("partition %d is at capacity", partitionID)
 			}
 			continue
 		}
@@ -275,6 +407,26 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 				atomic.AddInt32(&duplicateCount, 1)
 				continue
 			}
+		}
+
+		// Tenant quota check
+		if h.tenantAccountant != nil {
+			tenantID := tenant.ID("default")
+			if claims, ok := auth.ClaimsFromContext(ctx); ok {
+				tenantID = tenant.ID(claims.Subject)
+			}
+			if !h.tenantAccountant.AllowPublish(tenantID) {
+				atomic.AddInt32(&errorCount, 1)
+				if lastError == "" {
+					lastError = "tenant quota exceeded"
+				}
+				continue
+			}
+			h.tenantAccountant.RecordPublish(tenantID, int64(len(event.Payload)))
+			if event.Meta == nil {
+				event.Meta = make(map[string]string)
+			}
+			event.Meta["tenant_id"] = string(tenantID)
 		}
 
 		partitionEvents[partitionID] = append(partitionEvents[partitionID], event)
@@ -313,6 +465,29 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 					return
 				}
 			}
+
+			// Filter and validate keys bounds for each event in the batch
+			validEvts := make([]*types.Event, 0, len(evts))
+			for _, event := range evts {
+				partitionKey := event.GetMessageId()
+				if pk, ok := event.Meta["partition_key"]; ok && pk != "" {
+					partitionKey = pk
+				}
+				if !partitionInternal.IsKeyInBounds(partitionKey) {
+					atomic.AddInt32(&errorCount, 1)
+					mu.Lock()
+					if lastError == "" {
+						lastError = fmt.Sprintf("key %s is out of partition bounds [%s, %s)", partitionKey, partitionInternal.MinKey, partitionInternal.MaxKey)
+					}
+					mu.Unlock()
+					continue
+				}
+				validEvts = append(validEvts, event)
+			}
+			if len(validEvts) == 0 {
+				return
+			}
+			evts = validEvts
 
 			// Batch append to WAL (single syscall for all events)
 			if err := partitionInternal.Wal.AppendBatch(evts); err != nil {
@@ -371,6 +546,12 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 
 // Subscribe handles streaming subscription
 func (h *EventServiceHandler) Subscribe(stream grpc.BidiStreamingServer[types.SubscribeRequest, types.Delivery]) error {
+	ctx, span := tracing.StartSpan(stream.Context(), "Subscribe")
+	if span != nil {
+		defer span.End()
+	}
+	_ = ctx
+
 	if h.consumerManager == nil {
 		return status.Error(codes.Unavailable, "consumer manager not initialized on this node")
 	}
@@ -467,6 +648,12 @@ func (h *EventServiceHandler) Subscribe(stream grpc.BidiStreamingServer[types.Su
 
 // Ack handles streaming ack requests
 func (h *EventServiceHandler) Ack(stream types.EventService_AckServer) error {
+	ctx, span := tracing.StartSpan(stream.Context(), "Ack")
+	if span != nil {
+		defer span.End()
+	}
+	_ = ctx
+
 	if h.consumerManager == nil {
 		return status.Error(codes.Unavailable, "consumer manager not initialized on this node")
 	}
@@ -482,8 +669,10 @@ func (h *EventServiceHandler) Ack(stream types.EventService_AckServer) error {
 		// or batch format: "consumerGroup:partitionID:memberID-batch-offset-count"
 		var targetPartitionID int32 = -1
 		deliveryID := req.GetDeliveryId()
-		parts := strings.Split(deliveryID, ":")
+		parts := strings.SplitN(deliveryID, ":", 3)
+		groupID := ""
 		if len(parts) >= 2 {
+			groupID = parts[0]
 			if pid, err := strconv.ParseInt(parts[1], 10, 32); err == nil {
 				targetPartitionID = int32(pid)
 			}
@@ -499,6 +688,20 @@ func (h *EventServiceHandler) Ack(stream types.EventService_AckServer) error {
 			// Skip dispatcher routing for malformed/legacy IDs to avoid O(partitions)
 			// scans on the ack hot path. Consumer offset commit below will validate
 			// delivery_id format and return a proper error when invalid.
+		}
+
+		if h.partitionManager.ExactlyOnceCommitsEnabled() && targetPartitionID >= 0 && groupID != "" {
+			committedOffset, commitErr := h.consumerManager.GetCommittedOffset(groupID, targetPartitionID)
+			if commitErr == nil && req.GetNextOffset() <= committedOffset {
+				resp := &types.AckResponse{
+					Success: false,
+					Error:   fmt.Sprintf("next_offset %d must be greater than committed offset %d", req.GetNextOffset(), committedOffset),
+				}
+				if err := stream.Send(resp); err != nil {
+					return err
+				}
+				continue
+			}
 		}
 
 		err = h.consumerManager.Ack(req)
@@ -529,6 +732,22 @@ func (h *EventServiceHandler) Replay(req *types.ReplayRequest, stream types.Even
 	partitionID := req.GetPartitionId()
 	if partitionID < 0 {
 		return fmt.Errorf("partition_id is required for replay")
+	}
+
+	// Follower reads: if enabled, allow replay on any node that has the partition,
+	// not just the leader. This offloads read traffic from leaders.
+	if h.clusterRouter != nil {
+		if !h.clusterRouter.IsLocalPartition(partitionID) {
+			return status.Errorf(codes.Unavailable,
+				"partition %d is not owned by this node", partitionID)
+		}
+		// If follower reads disabled, require leader
+		if !h.clusterRouter.IsPartitionLeader(partitionID) {
+			if !h.partitionManager.FollowerReadsEnabled() {
+				return status.Errorf(codes.FailedPrecondition,
+					"partition %d is not leader; follower reads not enabled", partitionID)
+			}
+		}
 	}
 
 	partitionInternal, err := h.partitionManager.GetInternalPartition(partitionID)

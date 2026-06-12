@@ -70,7 +70,7 @@ func (p *PebbleStore) CheckAndStore(messageID string, offset int64) (bool, error
 
 	// Store new entry - use NoSync for performance (WAL provides durability)
 	expirationTS := time.Now().UnixMilli() + int64(p.ttlHours)*60*60*1000
-	value := p.buildValue(offset, expirationTS)
+	value := p.buildValue(offset, expirationTS, time.Now().UnixNano())
 
 	if err := p.db.Set(key, value, pebble.NoSync); err != nil {
 		return false, fmt.Errorf("set key: %w", err)
@@ -84,7 +84,7 @@ func (p *PebbleStore) CheckAndStore(messageID string, offset int64) (bool, error
 func (p *PebbleStore) StoreOnly(messageID string, offset int64) error {
 	key := []byte(messageID)
 	expirationTS := time.Now().UnixMilli() + int64(p.ttlHours)*60*60*1000
-	value := p.buildValue(offset, expirationTS)
+	value := p.buildValue(offset, expirationTS, time.Now().UnixNano())
 
 	if err := p.db.Set(key, value, pebble.NoSync); err != nil {
 		return fmt.Errorf("set key: %w", err)
@@ -101,10 +101,11 @@ func (p *PebbleStore) StoreBatch(messageIDs []string, offsets []int64, indices [
 	defer batch.Close()
 
 	expirationTS := time.Now().UnixMilli() + int64(p.ttlHours)*60*60*1000
+	nowNano := time.Now().UnixNano()
 
 	for _, idx := range indices {
 		key := []byte(messageIDs[idx])
-		value := p.buildValue(offsets[idx], expirationTS)
+		value := p.buildValue(offsets[idx], expirationTS, nowNano)
 		if err := batch.Set(key, value, nil); err != nil {
 			return fmt.Errorf("batch set key: %w", err)
 		}
@@ -128,7 +129,7 @@ func (p *PebbleStore) GetOffset(messageID string) (int64, bool, error) {
 	}
 	defer closer.Close()
 
-	offset, _, err := p.parseValue(value)
+	offset, _, _, err := p.parseValue(value)
 	return offset, true, err
 }
 
@@ -159,7 +160,7 @@ func (p *PebbleStore) PruneExpired() (int, error) {
 
 	for iter.First(); iter.Valid(); iter.Next() {
 		value := iter.Value()
-		_, expirationTS, err := p.parseValue(value)
+		_, expirationTS, _, err := p.parseValue(value)
 		if err != nil {
 			log.Printf("Failed to parse dedup value: %v", err)
 			continue
@@ -174,6 +175,37 @@ func (p *PebbleStore) PruneExpired() (int, error) {
 	}
 
 	return pruned, nil
+}
+
+// GetTimestamp returns stored timestamp for message ID
+func (p *PebbleStore) GetTimestamp(messageID string) (time.Time, bool, error) {
+	key := []byte(messageID)
+	value, closer, err := p.db.Get(key)
+	if err == pebble.ErrNotFound {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("get key: %w", err)
+	}
+	defer closer.Close()
+
+	_, _, createdTS, err := p.parseValue(value)
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("parse value: %w", err)
+	}
+	return time.Unix(0, createdTS), true, nil
+}
+
+// Put inserts or overwrites an entry directly with a given created timestamp
+func (p *PebbleStore) Put(messageID string, offset int64, createdTS int64) error {
+	key := []byte(messageID)
+	expirationTS := time.Now().UnixMilli() + int64(p.ttlHours)*60*60*1000
+	value := p.buildValue(offset, expirationTS, createdTS)
+
+	if err := p.db.Set(key, value, pebble.NoSync); err != nil {
+		return fmt.Errorf("set key: %w", err)
+	}
+	return nil
 }
 
 // GetStats returns store statistics.
@@ -210,21 +242,29 @@ func (p *PebbleStore) Close() error {
 }
 
 // buildValue builds storage value
-func (p *PebbleStore) buildValue(offset int64, expirationTS int64) []byte {
-	value := make([]byte, 16)
+func (p *PebbleStore) buildValue(offset int64, expirationTS int64, createdTS int64) []byte {
+	value := make([]byte, 24)
 	// Offset (8 bytes)
 	binary.BigEndian.PutUint64(value[0:8], uint64(offset))
 	// Expiration timestamp (8 bytes)
 	binary.BigEndian.PutUint64(value[8:16], uint64(expirationTS))
+	// Created timestamp (8 bytes)
+	binary.BigEndian.PutUint64(value[16:24], uint64(createdTS))
 	return value
 }
 
 // parseValue parses storage value
-func (p *PebbleStore) parseValue(value []byte) (int64, int64, error) {
-	if len(value) < 16 {
-		return 0, 0, fmt.Errorf("invalid value size")
+func (p *PebbleStore) parseValue(value []byte) (int64, int64, int64, error) {
+	if len(value) < 24 {
+		if len(value) >= 16 {
+			offset := int64(binary.BigEndian.Uint64(value[0:8]))
+			expirationTS := int64(binary.BigEndian.Uint64(value[8:16]))
+			return offset, expirationTS, 0, nil
+		}
+		return 0, 0, 0, fmt.Errorf("invalid value size")
 	}
 	offset := int64(binary.BigEndian.Uint64(value[0:8]))
 	expirationTS := int64(binary.BigEndian.Uint64(value[8:16]))
-	return offset, expirationTS, nil
+	createdTS := int64(binary.BigEndian.Uint64(value[16:24]))
+	return offset, expirationTS, createdTS, nil
 }

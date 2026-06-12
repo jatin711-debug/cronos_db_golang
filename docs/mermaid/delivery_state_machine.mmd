@@ -1,0 +1,18 @@
+stateDiagram-v2
+    direction LR
+
+    [*] --> Pending
+    Pending --> Delivered: stream send ok
+    Delivered --> Acked: ack success
+    Acked --> [*]
+
+    Pending --> RetryQueued: send failed
+    Delivered --> RetryQueued: nack or ack timeout
+    RetryQueued --> Pending: retry_at reached
+    RetryQueued --> DLQ: max retries exceeded
+    DLQ --> [*]
+
+    RetryQueued --> OpenCircuit: failure threshold reached
+    OpenCircuit --> HalfOpen: open duration elapsed
+    HalfOpen --> Pending: probe delivery succeeds
+    HalfOpen --> OpenCircuit: probe fails

@@ -281,6 +281,7 @@ const (
 	PartitionService_GetSchedulerStatus_FullMethodName = "/cronos_db.PartitionService/GetSchedulerStatus"
 	PartitionService_Compact_FullMethodName            = "/cronos_db.PartitionService/Compact"
 	PartitionService_RunRetention_FullMethodName       = "/cronos_db.PartitionService/RunRetention"
+	PartitionService_SplitPartition_FullMethodName     = "/cronos_db.PartitionService/SplitPartition"
 )
 
 // PartitionServiceClient is the client API for PartitionService service.
@@ -299,6 +300,8 @@ type PartitionServiceClient interface {
 	Compact(ctx context.Context, in *CompactRequest, opts ...grpc.CallOption) (*CompactResponse, error)
 	// Run retention policy
 	RunRetention(ctx context.Context, in *RetentionRequest, opts ...grpc.CallOption) (*RetentionResponse, error)
+	// Split a partition into two at a given offset
+	SplitPartition(ctx context.Context, in *SplitPartitionRequest, opts ...grpc.CallOption) (*SplitPartitionResponse, error)
 }
 
 type partitionServiceClient struct {
@@ -369,6 +372,16 @@ func (c *partitionServiceClient) RunRetention(ctx context.Context, in *Retention
 	return out, nil
 }
 
+func (c *partitionServiceClient) SplitPartition(ctx context.Context, in *SplitPartitionRequest, opts ...grpc.CallOption) (*SplitPartitionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SplitPartitionResponse)
+	err := c.cc.Invoke(ctx, PartitionService_SplitPartition_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // PartitionServiceServer is the server API for PartitionService service.
 // All implementations must embed UnimplementedPartitionServiceServer
 // for forward compatibility.
@@ -385,6 +398,8 @@ type PartitionServiceServer interface {
 	Compact(context.Context, *CompactRequest) (*CompactResponse, error)
 	// Run retention policy
 	RunRetention(context.Context, *RetentionRequest) (*RetentionResponse, error)
+	// Split a partition into two at a given offset
+	SplitPartition(context.Context, *SplitPartitionRequest) (*SplitPartitionResponse, error)
 	mustEmbedUnimplementedPartitionServiceServer()
 }
 
@@ -412,6 +427,9 @@ func (UnimplementedPartitionServiceServer) Compact(context.Context, *CompactRequ
 }
 func (UnimplementedPartitionServiceServer) RunRetention(context.Context, *RetentionRequest) (*RetentionResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method RunRetention not implemented")
+}
+func (UnimplementedPartitionServiceServer) SplitPartition(context.Context, *SplitPartitionRequest) (*SplitPartitionResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SplitPartition not implemented")
 }
 func (UnimplementedPartitionServiceServer) mustEmbedUnimplementedPartitionServiceServer() {}
 func (UnimplementedPartitionServiceServer) testEmbeddedByValue()                          {}
@@ -542,6 +560,24 @@ func _PartitionService_RunRetention_Handler(srv interface{}, ctx context.Context
 	return interceptor(ctx, in, info, handler)
 }
 
+func _PartitionService_SplitPartition_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SplitPartitionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PartitionServiceServer).SplitPartition(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PartitionService_SplitPartition_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PartitionServiceServer).SplitPartition(ctx, req.(*SplitPartitionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // PartitionService_ServiceDesc is the grpc.ServiceDesc for PartitionService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -572,6 +608,10 @@ var PartitionService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RunRetention",
 			Handler:    _PartitionService_RunRetention_Handler,
+		},
+		{
+			MethodName: "SplitPartition",
+			Handler:    _PartitionService_SplitPartition_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
@@ -1128,6 +1168,386 @@ var RaftService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Status",
 			Handler:    _RaftService_Status_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "proto/events.proto",
+}
+
+const (
+	CrossRegionService_ReplicateEvents_FullMethodName = "/cronos_db.CrossRegionService/ReplicateEvents"
+	CrossRegionService_FetchEvents_FullMethodName     = "/cronos_db.CrossRegionService/FetchEvents"
+)
+
+// CrossRegionServiceClient is the client API for CrossRegionService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// CrossRegionService handles async replication between geographic regions.
+type CrossRegionServiceClient interface {
+	// Replicate events to a remote region
+	ReplicateEvents(ctx context.Context, in *RegionReplicateRequest, opts ...grpc.CallOption) (*RegionReplicateResponse, error)
+	// Fetch events from a remote region (for catch-up sync)
+	FetchEvents(ctx context.Context, in *RegionFetchRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[RegionFetchResponse], error)
+}
+
+type crossRegionServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewCrossRegionServiceClient(cc grpc.ClientConnInterface) CrossRegionServiceClient {
+	return &crossRegionServiceClient{cc}
+}
+
+func (c *crossRegionServiceClient) ReplicateEvents(ctx context.Context, in *RegionReplicateRequest, opts ...grpc.CallOption) (*RegionReplicateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RegionReplicateResponse)
+	err := c.cc.Invoke(ctx, CrossRegionService_ReplicateEvents_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *crossRegionServiceClient) FetchEvents(ctx context.Context, in *RegionFetchRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[RegionFetchResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &CrossRegionService_ServiceDesc.Streams[0], CrossRegionService_FetchEvents_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[RegionFetchRequest, RegionFetchResponse]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type CrossRegionService_FetchEventsClient = grpc.ServerStreamingClient[RegionFetchResponse]
+
+// CrossRegionServiceServer is the server API for CrossRegionService service.
+// All implementations must embed UnimplementedCrossRegionServiceServer
+// for forward compatibility.
+//
+// CrossRegionService handles async replication between geographic regions.
+type CrossRegionServiceServer interface {
+	// Replicate events to a remote region
+	ReplicateEvents(context.Context, *RegionReplicateRequest) (*RegionReplicateResponse, error)
+	// Fetch events from a remote region (for catch-up sync)
+	FetchEvents(*RegionFetchRequest, grpc.ServerStreamingServer[RegionFetchResponse]) error
+	mustEmbedUnimplementedCrossRegionServiceServer()
+}
+
+// UnimplementedCrossRegionServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedCrossRegionServiceServer struct{}
+
+func (UnimplementedCrossRegionServiceServer) ReplicateEvents(context.Context, *RegionReplicateRequest) (*RegionReplicateResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ReplicateEvents not implemented")
+}
+func (UnimplementedCrossRegionServiceServer) FetchEvents(*RegionFetchRequest, grpc.ServerStreamingServer[RegionFetchResponse]) error {
+	return status.Errorf(codes.Unimplemented, "method FetchEvents not implemented")
+}
+func (UnimplementedCrossRegionServiceServer) mustEmbedUnimplementedCrossRegionServiceServer() {}
+func (UnimplementedCrossRegionServiceServer) testEmbeddedByValue()                            {}
+
+// UnsafeCrossRegionServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to CrossRegionServiceServer will
+// result in compilation errors.
+type UnsafeCrossRegionServiceServer interface {
+	mustEmbedUnimplementedCrossRegionServiceServer()
+}
+
+func RegisterCrossRegionServiceServer(s grpc.ServiceRegistrar, srv CrossRegionServiceServer) {
+	// If the following call pancis, it indicates UnimplementedCrossRegionServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&CrossRegionService_ServiceDesc, srv)
+}
+
+func _CrossRegionService_ReplicateEvents_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RegionReplicateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CrossRegionServiceServer).ReplicateEvents(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: CrossRegionService_ReplicateEvents_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CrossRegionServiceServer).ReplicateEvents(ctx, req.(*RegionReplicateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _CrossRegionService_FetchEvents_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(RegionFetchRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(CrossRegionServiceServer).FetchEvents(m, &grpc.GenericServerStream[RegionFetchRequest, RegionFetchResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type CrossRegionService_FetchEventsServer = grpc.ServerStreamingServer[RegionFetchResponse]
+
+// CrossRegionService_ServiceDesc is the grpc.ServiceDesc for CrossRegionService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var CrossRegionService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "cronos_db.CrossRegionService",
+	HandlerType: (*CrossRegionServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "ReplicateEvents",
+			Handler:    _CrossRegionService_ReplicateEvents_Handler,
+		},
+	},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "FetchEvents",
+			Handler:       _CrossRegionService_FetchEvents_Handler,
+			ServerStreams: true,
+		},
+	},
+	Metadata: "proto/events.proto",
+}
+
+const (
+	TransactionService_BeginTransaction_FullMethodName   = "/cronos_db.TransactionService/BeginTransaction"
+	TransactionService_PrepareTransaction_FullMethodName = "/cronos_db.TransactionService/PrepareTransaction"
+	TransactionService_CommitTransaction_FullMethodName  = "/cronos_db.TransactionService/CommitTransaction"
+	TransactionService_AbortTransaction_FullMethodName   = "/cronos_db.TransactionService/AbortTransaction"
+)
+
+// TransactionServiceClient is the client API for TransactionService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// TransactionService for distributed 2PC transactions.
+type TransactionServiceClient interface {
+	// Initiate a new distributed transaction
+	BeginTransaction(ctx context.Context, in *BeginTransactionRequest, opts ...grpc.CallOption) (*BeginTransactionResponse, error)
+	// Phase 1: Prepare all participants
+	PrepareTransaction(ctx context.Context, in *PrepareTransactionRequest, opts ...grpc.CallOption) (*PrepareTransactionResponse, error)
+	// Phase 2: Commit all participants
+	CommitTransaction(ctx context.Context, in *CommitTransactionRequest, opts ...grpc.CallOption) (*CommitTransactionResponse, error)
+	// Abort/rollback a transaction
+	AbortTransaction(ctx context.Context, in *AbortTransactionRequest, opts ...grpc.CallOption) (*AbortTransactionResponse, error)
+}
+
+type transactionServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewTransactionServiceClient(cc grpc.ClientConnInterface) TransactionServiceClient {
+	return &transactionServiceClient{cc}
+}
+
+func (c *transactionServiceClient) BeginTransaction(ctx context.Context, in *BeginTransactionRequest, opts ...grpc.CallOption) (*BeginTransactionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(BeginTransactionResponse)
+	err := c.cc.Invoke(ctx, TransactionService_BeginTransaction_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *transactionServiceClient) PrepareTransaction(ctx context.Context, in *PrepareTransactionRequest, opts ...grpc.CallOption) (*PrepareTransactionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PrepareTransactionResponse)
+	err := c.cc.Invoke(ctx, TransactionService_PrepareTransaction_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *transactionServiceClient) CommitTransaction(ctx context.Context, in *CommitTransactionRequest, opts ...grpc.CallOption) (*CommitTransactionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CommitTransactionResponse)
+	err := c.cc.Invoke(ctx, TransactionService_CommitTransaction_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *transactionServiceClient) AbortTransaction(ctx context.Context, in *AbortTransactionRequest, opts ...grpc.CallOption) (*AbortTransactionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AbortTransactionResponse)
+	err := c.cc.Invoke(ctx, TransactionService_AbortTransaction_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// TransactionServiceServer is the server API for TransactionService service.
+// All implementations must embed UnimplementedTransactionServiceServer
+// for forward compatibility.
+//
+// TransactionService for distributed 2PC transactions.
+type TransactionServiceServer interface {
+	// Initiate a new distributed transaction
+	BeginTransaction(context.Context, *BeginTransactionRequest) (*BeginTransactionResponse, error)
+	// Phase 1: Prepare all participants
+	PrepareTransaction(context.Context, *PrepareTransactionRequest) (*PrepareTransactionResponse, error)
+	// Phase 2: Commit all participants
+	CommitTransaction(context.Context, *CommitTransactionRequest) (*CommitTransactionResponse, error)
+	// Abort/rollback a transaction
+	AbortTransaction(context.Context, *AbortTransactionRequest) (*AbortTransactionResponse, error)
+	mustEmbedUnimplementedTransactionServiceServer()
+}
+
+// UnimplementedTransactionServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedTransactionServiceServer struct{}
+
+func (UnimplementedTransactionServiceServer) BeginTransaction(context.Context, *BeginTransactionRequest) (*BeginTransactionResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method BeginTransaction not implemented")
+}
+func (UnimplementedTransactionServiceServer) PrepareTransaction(context.Context, *PrepareTransactionRequest) (*PrepareTransactionResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method PrepareTransaction not implemented")
+}
+func (UnimplementedTransactionServiceServer) CommitTransaction(context.Context, *CommitTransactionRequest) (*CommitTransactionResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CommitTransaction not implemented")
+}
+func (UnimplementedTransactionServiceServer) AbortTransaction(context.Context, *AbortTransactionRequest) (*AbortTransactionResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method AbortTransaction not implemented")
+}
+func (UnimplementedTransactionServiceServer) mustEmbedUnimplementedTransactionServiceServer() {}
+func (UnimplementedTransactionServiceServer) testEmbeddedByValue()                            {}
+
+// UnsafeTransactionServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to TransactionServiceServer will
+// result in compilation errors.
+type UnsafeTransactionServiceServer interface {
+	mustEmbedUnimplementedTransactionServiceServer()
+}
+
+func RegisterTransactionServiceServer(s grpc.ServiceRegistrar, srv TransactionServiceServer) {
+	// If the following call pancis, it indicates UnimplementedTransactionServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&TransactionService_ServiceDesc, srv)
+}
+
+func _TransactionService_BeginTransaction_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BeginTransactionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(TransactionServiceServer).BeginTransaction(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: TransactionService_BeginTransaction_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(TransactionServiceServer).BeginTransaction(ctx, req.(*BeginTransactionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _TransactionService_PrepareTransaction_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PrepareTransactionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(TransactionServiceServer).PrepareTransaction(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: TransactionService_PrepareTransaction_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(TransactionServiceServer).PrepareTransaction(ctx, req.(*PrepareTransactionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _TransactionService_CommitTransaction_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CommitTransactionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(TransactionServiceServer).CommitTransaction(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: TransactionService_CommitTransaction_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(TransactionServiceServer).CommitTransaction(ctx, req.(*CommitTransactionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _TransactionService_AbortTransaction_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AbortTransactionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(TransactionServiceServer).AbortTransaction(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: TransactionService_AbortTransaction_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(TransactionServiceServer).AbortTransaction(ctx, req.(*AbortTransactionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// TransactionService_ServiceDesc is the grpc.ServiceDesc for TransactionService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var TransactionService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "cronos_db.TransactionService",
+	HandlerType: (*TransactionServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "BeginTransaction",
+			Handler:    _TransactionService_BeginTransaction_Handler,
+		},
+		{
+			MethodName: "PrepareTransaction",
+			Handler:    _TransactionService_PrepareTransaction_Handler,
+		},
+		{
+			MethodName: "CommitTransaction",
+			Handler:    _TransactionService_CommitTransaction_Handler,
+		},
+		{
+			MethodName: "AbortTransaction",
+			Handler:    _TransactionService_AbortTransaction_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

@@ -2,10 +2,14 @@ package dedup
 
 import (
 	"fmt"
+	"runtime"
 	"testing"
 )
 
 func TestRustBloomIntegration(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Rust FFI bloom filter not available on Windows")
+	}
 	// Create Rust-backed bloom filter
 	// 1000 items, 0.01 FPR
 	bf := NewRustBloomFilter(1000, 0.01)

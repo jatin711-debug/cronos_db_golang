@@ -44,6 +44,33 @@ const (
 	// Checkpoint configuration
 	DefaultCheckpointInterval = 10 * time.Second
 
+	// Tracing configuration (kept conservative to protect throughput)
+	DefaultTracingEnabled      = false
+	DefaultTracingExporter     = "none"
+	DefaultTracingOTLPEndpoint = "127.0.0.1:4317"
+	DefaultTracingSampleRatio  = 0.01
+	DefaultTracingInsecure     = true
+
+	// Scheduler cold store configuration
+	DefaultHotWindowMinutes = 60 // 1 hour hot window
+
+	// Adaptive hydrator configuration
+	DefaultHydratorMinIntervalMs = 5000   // 5 seconds minimum
+	DefaultHydratorMaxIntervalMs = 300000 // 5 minutes maximum
+
+	// Admission control configuration (0 = disabled)
+	DefaultMaxReadyQueueSize       = 1_000_000
+	DefaultMaxTimingWheelSize      = 10_000_000
+	DefaultMaxInFlightPerPartition = 500_000
+
+	// Circuit breaker configuration
+	DefaultCircuitBreakerFailureThreshold = 0.5   // 50% failure rate trips breaker
+	DefaultCircuitBreakerOpenDurationMs   = 30000 // 30 seconds
+	DefaultCircuitBreakerMinAttempts      = 10
+
+	// Clock skew detection
+	DefaultClockSkewThresholdMs = 5000 // 5 seconds
+
 	// Cluster configuration
 	DefaultClusterEnabled    = false
 	DefaultClusterGossipAddr = ":7946"
@@ -53,4 +80,15 @@ const (
 	DefaultHeartbeatInterval = 1 * time.Second
 	DefaultFailureTimeout    = 5 * time.Second
 	DefaultSuspectTimeout    = 3 * time.Second
+
+	// Gossip backend
+	DefaultUseMemberlist = false // Default to custom gossip for backward compatibility
+
+	// Encryption at rest
+	DefaultEncryptionEnabled = false
+	DefaultEncryptionKeyFile = ""
+
+	// Topic rate limiting (0 = disabled)
+	DefaultTopicRateLimitPerSecond = 0.0
+	DefaultTopicRateLimitBurst     = 0.0
 )

@@ -1,0 +1,29 @@
+sequenceDiagram
+    participant Main as cmd/api/main.go
+    participant Config as internal/config
+    participant PM as internal/partition
+    participant Cluster as internal/cluster
+    participant API as internal/api
+    participant BG as Background Loops
+
+    Main->>Config: LoadConfig()
+    Main->>Main: Init logger, tracing, slo, audit
+    Main->>PM: NewPartitionManagerWithCache(...)
+    Main->>BG: Start disk monitor and backup scheduler
+    alt cluster enabled
+        Main->>Cluster: NewManager(config)
+        Main->>Cluster: SetPartitionAccessor(pm)
+        Main->>Cluster: Start()
+        Main->>Cluster: JoinCluster(seed)
+    end
+    Main->>PM: Create and start initial partitions
+    Main->>PM: Wire WAL append hooks for CDC and cross region
+    Main->>API: NewGRPCServer(config)
+    Main->>API: Register Event, Consumer, Partition, Tx
+    Main->>API: Register Replication, Raft, CrossRegion
+    Main->>API: Start()
+    Main->>BG: Start stats loop and retention loop
+    Note over Main,BG: Wait for SIGINT or SIGTERM
+    Main->>API: GracefulStop()
+    Main->>PM: StopAllPartitions()
+    Main->>Cluster: Stop()

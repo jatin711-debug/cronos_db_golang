@@ -7,15 +7,30 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/jatin711-debug/cronos_db_golang/internal/api"
+	"github.com/jatin711-debug/cronos_db_golang/internal/audit"
+	"github.com/jatin711-debug/cronos_db_golang/internal/auth"
+	"github.com/jatin711-debug/cronos_db_golang/internal/cdc"
 	"github.com/jatin711-debug/cronos_db_golang/internal/cluster"
+	"github.com/jatin711-debug/cronos_db_golang/internal/compliance"
 	"github.com/jatin711-debug/cronos_db_golang/internal/config"
 	"github.com/jatin711-debug/cronos_db_golang/internal/partition"
+	"github.com/jatin711-debug/cronos_db_golang/internal/replication"
+	"github.com/jatin711-debug/cronos_db_golang/internal/schema"
+	"github.com/jatin711-debug/cronos_db_golang/internal/slo"
+	"github.com/jatin711-debug/cronos_db_golang/internal/storage"
+	"github.com/jatin711-debug/cronos_db_golang/internal/tenant"
+	"github.com/jatin711-debug/cronos_db_golang/internal/tracing"
+	"github.com/jatin711-debug/cronos_db_golang/internal/tx"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -31,6 +46,87 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Wrap config for hot reload
+	reloadableCfg := config.NewReloadableConfig(cfg)
+	reloadableCfg.StartSIGHUPListener(context.Background())
+
+	// Initialize audit logging
+	auditLogger, err := audit.NewLogger(cfg.DataDir)
+	if err != nil {
+		slog.Warn("Failed to initialize audit logger", "error", err)
+	}
+	defer func() {
+		if auditLogger != nil {
+			_ = auditLogger.Close()
+		}
+	}()
+
+	// Initialize schema registry
+	schemaRegistry, err := schema.NewRegistry(cfg.DataDir)
+	if err != nil {
+		slog.Warn("Failed to initialize schema registry", "error", err)
+	}
+	_ = schemaRegistry
+
+	// Initialize tenant accountant
+	tenantAccountant := tenant.NewAccountant()
+
+	// Initialize CDC manager
+	cdcManager := cdc.NewManager()
+	defer func() { _ = cdcManager.Close() }()
+
+	// Register CDC sinks from environment
+	if kafkaBrokers := os.Getenv("CRONOS_CDC_KAFKA_BROKERS"); kafkaBrokers != "" {
+		kafkaTopic := os.Getenv("CRONOS_CDC_KAFKA_TOPIC")
+		if kafkaTopic == "" {
+			kafkaTopic = "cronos-cdc"
+		}
+		brokers := strings.Split(kafkaBrokers, ",")
+		for i := range brokers {
+			brokers[i] = strings.TrimSpace(brokers[i])
+		}
+		cdcManager.RegisterSink(cdc.NewKafkaSink(brokers, kafkaTopic))
+		slog.Info("CDC Kafka sink registered", "brokers", brokers, "topic", kafkaTopic)
+	}
+	if webhookURL := os.Getenv("CRONOS_CDC_WEBHOOK_URL"); webhookURL != "" {
+		cdcManager.RegisterSink(cdc.NewWebhookSink(webhookURL))
+		slog.Info("CDC webhook sink registered", "url", webhookURL)
+	}
+
+	// Initialize cross-region replicator
+	crossRegionReplicator := replication.NewCrossRegionReplicator(replication.RegionID(cfg.NodeRegion))
+	defer func() { _ = crossRegionReplicator.Close() }()
+
+	// Initialize SLO recorder
+	sloRecorder := slo.NewRecorder(slo.Window{
+		Duration:     time.Minute,
+		TargetP99:    500 * time.Millisecond,
+		MaxErrorRate: 0.001,
+	})
+	sloRecorder.Start()
+	defer sloRecorder.Stop()
+
+	// Register SLO collector with Prometheus
+	prometheus.MustRegister(sloRecorder.PrometheusCollector())
+
+	if err := tracing.InitTracing(&tracing.Config{
+		ServiceName:  "cronos-api-" + cfg.NodeID,
+		Enabled:      cfg.TracingEnabled,
+		ExporterType: cfg.TracingExporter,
+		OTLPEndpoint: cfg.TracingOTLPEndpoint,
+		SampleRatio:  cfg.TracingSampleRatio,
+		OTLPInsecure: cfg.TracingInsecure,
+	}); err != nil {
+		slog.Warn("Failed to initialize tracing; continuing without tracing", "error", err)
+	}
+	defer func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer shutdownCancel()
+		if err := tracing.Shutdown(shutdownCtx); err != nil {
+			slog.Warn("Tracing shutdown error", "error", err)
+		}
+	}()
+
 	// Create shared PebbleDB block cache sized to ~25% of available RAM.
 	// This prevents memory fragmentation when running many partitions.
 	sharedCache := pebble.NewCache(256 << 20) // 256MB default; scales with partition count
@@ -38,6 +134,43 @@ func main() {
 
 	// Create partition manager with shared cache
 	pm := partition.NewPartitionManagerWithCache(cfg.NodeID, cfg, sharedCache)
+
+	// Start disk pressure monitor
+	diskMonitor := partition.NewDiskMonitor(cfg.DataDir, 0.85, func() {
+		slog.Info("Disk pressure detected: triggering emergency compaction")
+		for i := int32(0); i < int32(cfg.PartitionCount); i++ {
+			if p, err := pm.GetInternalPartition(i); err == nil && p != nil {
+				p.RunCompaction()
+			}
+		}
+	})
+	diskMonitor.Start()
+	defer diskMonitor.Stop()
+
+	// Start WAL backup scheduler
+	backupScheduler := storage.NewBackupScheduler(
+		cfg.DataDir+"/wal",
+		cfg.DataDir+"/backups",
+		1*time.Hour,
+		7*24*time.Hour,
+	)
+	backupScheduler.Start()
+	defer backupScheduler.Stop()
+
+	// Start compliance retention enforcer
+	retentionEnforcer := compliance.NewEnforcer(cfg.DataDir, compliance.RetentionPolicy{
+		MaxAge:       30 * 24 * time.Hour,
+		MaxSizeBytes: 100 << 30, // 100GB
+	})
+	go func() {
+		ticker := time.NewTicker(1 * time.Hour)
+		defer ticker.Stop()
+		for range ticker.C {
+			if err := retentionEnforcer.Run(context.Background()); err != nil {
+				slog.Warn("Retention enforcement failed", "error", err)
+			}
+		}
+	}()
 
 	// Create cluster manager (if enabled)
 	var clusterMgr *cluster.Manager
@@ -56,13 +189,16 @@ func main() {
 			GRPCAddr:          cfg.ClusterGRPCAddr,
 			RaftAddr:          cfg.ClusterRaftAddr,
 			RaftDir:           raftDir,
-			SeedNodes:         cfg.ClusterSeeds, // Pass seed nodes for join vs bootstrap decision
+			SeedNodes:         cfg.ClusterSeeds,
 			VirtualNodes:      cfg.VirtualNodes,
 			HeartbeatInterval: cfg.HeartbeatInterval,
 			FailureTimeout:    cfg.FailureTimeout,
 			SuspectTimeout:    cfg.SuspectTimeout,
 			PartitionCount:    cfg.PartitionCount,
 			ReplicationFactor: cfg.ReplicationFactor,
+			Rack:              cfg.NodeRack,
+			Zone:              cfg.NodeZone,
+			Region:            cfg.NodeRegion,
 		}
 
 		clusterMgr = cluster.NewManager(clusterConfig)
@@ -109,6 +245,29 @@ func main() {
 		}
 	}
 
+	// Wire CDC and cross-region replication hooks into all partitions
+	for i := int32(0); i < int32(cfg.PartitionCount); i++ {
+		p, err := pm.GetInternalPartition(i)
+		if err != nil || p == nil || p.Wal == nil {
+			continue
+		}
+		p.Wal.SetAppendHook(func(event *types.Event) {
+			if cdcManager != nil {
+				cdcManager.Emit(context.Background(), &cdc.ChangeEvent{
+					Timestamp:   time.Now(),
+					Op:          "append",
+					PartitionID: event.PartitionId,
+					Topic:       event.Topic,
+					Offset:      event.Offset,
+					Event:       event,
+				})
+			}
+			if crossRegionReplicator != nil && cfg.NodeRegion != "" {
+				crossRegionReplicator.ReplicateAsync(event)
+			}
+		})
+	}
+
 	// Get any available partition for handler setup (dedup and consumer group are shared)
 	var part *partition.Partition
 	for i := int32(0); i < int32(cfg.PartitionCount); i++ {
@@ -123,9 +282,60 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Build auth config if enabled
+	var authConfig *auth.Config
+	if cfg.AuthEnabled {
+		authConfig = &auth.Config{
+			Enabled: cfg.AuthEnabled,
+			Policy:  auth.AllowAllPolicy(),
+		}
+		if cfg.AuthJWTSecret != "" {
+			authConfig.JWTSecret = []byte(cfg.AuthJWTSecret)
+		}
+		if cfg.AuthJWTPublicKey != "" {
+			pubKey, err := auth.LoadPublicKey(cfg.AuthJWTPublicKey)
+			if err != nil {
+				slog.Warn("Failed to load JWT public key", "error", err)
+			} else {
+				authConfig.JWTPublicKey = pubKey
+			}
+		}
+		if cfg.AuthPolicyFile != "" {
+			policy, err := auth.NewPolicyFromFile(cfg.AuthPolicyFile)
+			if err != nil {
+				slog.Warn("Failed to load auth policy", "error", err)
+			} else {
+				authConfig.Policy = policy
+			}
+		}
+	}
+
+	// Create version gate for zero-downtime upgrades
+	versionGate := api.NewVersionGate()
+
+	// Create topic rate limiter if configured
+	var topicRateLimiter *api.TopicRateLimiter
+	if cfg.TopicRateLimitPerSecond > 0 && cfg.TopicRateLimitBurst > 0 {
+		topicRateLimiter = api.NewTopicRateLimiter(cfg.TopicRateLimitPerSecond, cfg.TopicRateLimitBurst)
+	}
+
 	// Create gRPC server
 	grpcConfig := api.DefaultConfig()
 	grpcConfig.Address = cfg.GPRCAddress
+	if cfg.TLSEnabled {
+		grpcConfig.TLS = &api.TLSConfig{
+			Enabled:    cfg.TLSEnabled,
+			CAFile:     cfg.TLSCAFile,
+			CertFile:   cfg.TLSCertFile,
+			KeyFile:    cfg.TLSKeyFile,
+			ClientAuth: cfg.TLSClientAuth,
+		}
+	}
+	grpcConfig.Auth = authConfig
+	grpcConfig.AuditLogger = auditLogger
+	grpcConfig.VersionGate = versionGate
+	grpcConfig.TopicRateLimiter = topicRateLimiter
+	grpcConfig.SLORecorder = sloRecorder
 
 	grpcServer := api.NewGRPCServer(grpcConfig)
 
@@ -142,6 +352,18 @@ func main() {
 		eventHandler = api.NewEventServiceHandler(pm, nil, nil)
 	}
 
+	// Wire framework components into event handler
+	if auditLogger != nil {
+		eventHandler.SetAuditLogger(auditLogger)
+	}
+	if schemaRegistry != nil {
+		eventHandler.SetSchemaRegistry(schemaRegistry)
+	}
+	if tenantAccountant != nil {
+		eventHandler.SetTenantAccountant(tenantAccountant)
+		pm.SetTenantAccountant(tenantAccountant)
+	}
+
 	// Wire cluster router for partition-aware request routing
 	if clusterMgr != nil {
 		eventHandler.SetClusterRouter(clusterMgr)
@@ -156,6 +378,35 @@ func main() {
 	// Create partition metadata service handler
 	partitionHandler := api.NewPartitionServiceHandler(pm, clusterMgr, cfg.NodeID)
 
+	// Create transaction service handler (2PC)
+	transactionHandler := tx.NewHandler(pm)
+	grpcServer.SetTransactionHandler(transactionHandler)
+
+	// Register cross-region replication server
+	crossRegionServer := api.NewCrossRegionServer(pm)
+	grpcServer.RegisterCrossRegionServer(crossRegionServer)
+
+	// Register internal replication and raft metadata services
+	replicationServer := api.NewReplicationServiceHandler(pm)
+	grpcServer.RegisterReplicationServer(replicationServer)
+	if clusterMgr != nil {
+		raftServer := api.NewRaftServiceHandler(clusterMgr, cfg.NodeID)
+		grpcServer.RegisterRaftServer(raftServer)
+	}
+
+	// Load remote regions from environment
+	if regions := os.Getenv("CRONOS_REGIONS"); regions != "" {
+		for r := range strings.SplitSeq(regions, ",") {
+			parts := strings.SplitN(strings.TrimSpace(r), "=", 2)
+			if len(parts) == 2 {
+				crossRegionReplicator.AddRegion(&replication.RegionConnection{
+					RegionID: replication.RegionID(parts[0]),
+					Endpoint: parts[1],
+				})
+			}
+		}
+	}
+
 	// Register services
 	grpcServer.RegisterServices(eventHandler, consumerHandler, partitionHandler)
 
@@ -168,15 +419,9 @@ func main() {
 
 	// Health check endpoint with cluster status
 	mux := http.NewServeMux()
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		if cfg.ClusterEnabled && clusterMgr != nil {
-			fmt.Fprintf(w, "OK - Cluster Mode\n")
-			fmt.Fprintf(w, "Node: %s\n", cfg.NodeID)
-		} else {
-			fmt.Fprintf(w, "OK - Standalone Mode\n")
-		}
-	})
+
+	healthChecker := api.NewHealthChecker(cfg, pm, clusterMgr)
+	healthChecker.Register(mux)
 
 	mux.Handle("/metrics", promhttp.Handler())
 
@@ -192,6 +437,11 @@ func main() {
 			os.Exit(1)
 		}
 	}()
+
+	// Start auto-scaler with real system metrics
+	autoScaler := cluster.NewAutoScaler(cluster.NewSystemMetrics(cfg.DataDir))
+	autoScaler.Start()
+	defer autoScaler.Stop()
 
 	// Setup signal handling for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
@@ -213,11 +463,62 @@ func main() {
 		for {
 			select {
 			case <-ticker.C:
+				// Refresh low-frequency gauges on the same interval as stats logging.
+				for i := int32(0); i < int32(cfg.PartitionCount); i++ {
+					p, err := pm.GetInternalPartition(i)
+					if err != nil || p == nil {
+						continue
+					}
+
+					partitionLabel := strconv.FormatInt(int64(i), 10)
+
+					if p.Scheduler != nil {
+						schedulerStats := p.Scheduler.GetStats()
+						api.SetTimingWheelMetrics(partitionLabel, schedulerStats.ActiveTimers, int64(schedulerStats.OverflowLevel))
+					}
+
+					if p.Wal != nil {
+						activeSegmentSize := int64(0)
+						if activeSegment := p.Wal.GetActiveSegment(); activeSegment != nil {
+							activeSegmentSize = activeSegment.GetSize()
+						}
+						api.SetWALMetrics(partitionLabel, len(p.Wal.GetSegments()), activeSegmentSize, p.Wal.GetHighWatermark())
+					}
+
+					if p.DedupStore != nil {
+						if dedupStats, err := p.DedupStore.GetStats(); err == nil && dedupStats != nil {
+							falsePositiveRate := 0.0
+							totalBloomPositives := dedupStats.BloomHits + dedupStats.BloomFalsePositives
+							if totalBloomPositives > 0 {
+								falsePositiveRate = float64(dedupStats.BloomFalsePositives) / float64(totalBloomPositives)
+							}
+							api.SetDedupMetrics(partitionLabel, dedupStats.BloomMemoryBytes, falsePositiveRate, dedupStats.PebbleHits)
+						}
+					}
+
+					if p.Dispatcher != nil {
+						dispatcherStats := p.Dispatcher.GetStats()
+						workerQueueDepth := int64(0)
+						if p.Worker != nil {
+							workerQueueDepth = p.Worker.GetStats().QueueLength
+						}
+						api.SetDeliveryMetrics(partitionLabel, dispatcherStats.ActiveDeliveries, dispatcherStats.CreditsInUse, workerQueueDepth)
+					}
+				}
+
 				stats := pm.GetStats()
 				slog.Info("Stats", "stats", stats)
 				if cfg.ClusterEnabled && clusterMgr != nil {
 					clusterStats := clusterMgr.GetStats()
+					api.SetClusterMetrics(
+						int64(clusterStats.TotalNodes),
+						int64(clusterStats.AliveNodes),
+						int64(clusterStats.NumPartitions),
+						int64(clusterStats.LeaderPartitions),
+					)
 					slog.Info("Cluster Stats", "stats", clusterStats)
+				} else {
+					api.SetClusterMetrics(1, 1, stats.TotalPartitions, stats.LeaderPartitions)
 				}
 			case <-ctx.Done():
 				return

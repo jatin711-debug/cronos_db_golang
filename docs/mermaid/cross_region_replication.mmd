@@ -1,0 +1,17 @@
+flowchart TB
+    subgraph RegionA
+      ALeader[Leader Partition]
+      AFollower1[Follower 1]
+      AFollower2[Follower 2]
+    end
+    subgraph RegionB
+      BIngress[CrossRegionService]
+      BLeader[Leader Partition]
+      BFollower[Follower]
+    end
+
+    ALeader -->|Append hook batch| BIngress
+    BIngress -->|PublishBatch| BLeader
+    BLeader -->|Replication Append| BFollower
+    ALeader -->|Replication Append| AFollower1
+    ALeader -->|Replication Append| AFollower2

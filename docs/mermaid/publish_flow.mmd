@@ -1,0 +1,31 @@
+sequenceDiagram
+    participant Producer
+    participant API as EventService.Publish
+    participant PM as PartitionManager
+    participant Dedup
+    participant WAL
+    participant Scheduler
+    participant Worker
+    participant Dispatcher
+    participant Consumer
+    participant Group as ConsumerGroup
+
+    Producer->>API: Publish(event)
+    API->>PM: Resolve partition for topic or key
+    API->>Dedup: IsDuplicate(message_id)
+    alt duplicate
+      Dedup-->>API: duplicate=true
+      API-->>Producer: duplicate error
+    else new event
+      Dedup-->>API: duplicate=false
+      API->>WAL: Append event and assign offset
+      API->>Scheduler: Schedule by schedule_ts
+      API-->>Producer: success with offset
+    end
+
+    Scheduler->>Worker: ready notification
+    Worker->>Dispatcher: dispatch batch
+    Dispatcher->>Consumer: delivery stream message
+    Consumer->>API: Ack(delivery_id, next_offset)
+    API->>Group: CommitOffset(group, partition, next_offset)
+    Group-->>API: committed

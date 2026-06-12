@@ -246,3 +246,101 @@ func TestPebbleStore_PruneExpired(t *testing.T) {
 		t.Error("Expected pruned entry to not exist")
 	}
 }
+
+func TestPebbleStore_LWW(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	store, err := NewPebbleStore(tmpDir, 0, 1, nil)
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	// Initially, key should not have a timestamp
+	_, exists, err := store.GetTimestamp("msg-lww")
+	if err != nil {
+		t.Fatalf("GetTimestamp failed: %v", err)
+	}
+	if exists {
+		t.Fatal("Expected key to not exist initially")
+	}
+
+	// 1. Put key with specific timestamp
+	expectedTS := int64(123456789)
+	err = store.Put("msg-lww", 42, expectedTS)
+	if err != nil {
+		t.Fatalf("Put failed: %v", err)
+	}
+
+	// 2. Get and verify timestamp
+	ts, exists, err := store.GetTimestamp("msg-lww")
+	if err != nil {
+		t.Fatalf("GetTimestamp failed: %v", err)
+	}
+	if !exists {
+		t.Fatal("Expected key to exist")
+	}
+	if ts.UnixNano() != expectedTS {
+		t.Errorf("Expected timestamp %d, got %d", expectedTS, ts.UnixNano())
+	}
+
+	// 3. Overwrite with newer timestamp
+	newerTS := int64(987654321)
+	err = store.Put("msg-lww", 43, newerTS)
+	if err != nil {
+		t.Fatalf("Overwrite failed: %v", err)
+	}
+
+	ts, exists, err = store.GetTimestamp("msg-lww")
+	if err != nil {
+		t.Fatalf("GetTimestamp failed: %v", err)
+	}
+	if !exists {
+		t.Fatal("Expected key to exist")
+	}
+	if ts.UnixNano() != newerTS {
+		t.Errorf("Expected newer timestamp %d, got %d", newerTS, ts.UnixNano())
+	}
+
+	// 4. Verify offset was updated as well
+	offset, found, err := store.GetOffset("msg-lww")
+	if err != nil {
+		t.Fatalf("GetOffset failed: %v", err)
+	}
+	if !found {
+		t.Fatal("Expected offset to be found")
+	}
+	if offset != 43 {
+		t.Errorf("Expected offset 43, got %d", offset)
+	}
+}
+
+func TestBloomPebbleStore_LWW(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	store, err := NewBloomPebbleStore(tmpDir, 0, 1, 1000, 0.01, nil)
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	// Put via BloomPebbleStore
+	expectedTS := int64(123456789)
+	err = store.Put("msg-bloom-lww", 100, expectedTS)
+	if err != nil {
+		t.Fatalf("Put failed: %v", err)
+	}
+
+	// Get and verify
+	ts, exists, err := store.GetTimestamp("msg-bloom-lww")
+	if err != nil {
+		t.Fatalf("GetTimestamp failed: %v", err)
+	}
+	if !exists {
+		t.Fatal("Expected key to exist")
+	}
+	if ts.UnixNano() != expectedTS {
+		t.Errorf("Expected timestamp %d, got %d", expectedTS, ts.UnixNano())
+	}
+}
+

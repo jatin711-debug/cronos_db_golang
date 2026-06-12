@@ -3,6 +3,8 @@ package client
 import (
 	"testing"
 	"time"
+
+	"github.com/jatin711-debug/cronos_db_golang/pkg/client/internal/circuitbreaker"
 )
 
 func TestNormalizeMessageEncodesValueAndSetsCodecMeta(t *testing.T) {
@@ -53,26 +55,27 @@ func TestNormalizeMessagePayloadLimit(t *testing.T) {
 }
 
 func TestCircuitBreakerOpensAndRecovers(t *testing.T) {
-	breaker := circuitBreaker{
-		threshold: 2,
-		cooldown:  30 * time.Millisecond,
-	}
-	if !breaker.Allow() {
+	cb := circuitbreaker.New(circuitbreaker.Config{
+		FailureThreshold: 2,
+		SuccessThreshold: 1,
+		Timeout:          30 * time.Millisecond,
+	})
+	if !cb.Allow() {
 		t.Fatal("expected breaker to allow initially")
 	}
 
-	breaker.RecordFailure()
-	if !breaker.Allow() {
+	cb.RecordFailure()
+	if !cb.Allow() {
 		t.Fatal("expected breaker to still allow before threshold")
 	}
 
-	breaker.RecordFailure()
-	if breaker.Allow() {
+	cb.RecordFailure()
+	if cb.Allow() {
 		t.Fatal("expected breaker to be open after threshold")
 	}
 
 	time.Sleep(40 * time.Millisecond)
-	if !breaker.Allow() {
+	if !cb.Allow() {
 		t.Fatal("expected breaker to close after cooldown")
 	}
 }

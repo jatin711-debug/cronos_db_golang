@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -38,6 +39,59 @@ func LoadConfig() (*types.Config, error) {
 	config.RaftDir = DefaultRaftDir
 	config.StatsPrintInterval = DefaultStatsPrintInterval
 	config.CheckpointInterval = DefaultCheckpointInterval
+	config.TracingEnabled = DefaultTracingEnabled
+	config.TracingExporter = DefaultTracingExporter
+	config.TracingOTLPEndpoint = DefaultTracingOTLPEndpoint
+	config.TracingSampleRatio = DefaultTracingSampleRatio
+	config.TracingInsecure = DefaultTracingInsecure
+
+	// Scheduler cold store defaults
+	config.HotWindowMinutes = DefaultHotWindowMinutes
+
+	// Admission control defaults
+	config.MaxReadyQueueSize = DefaultMaxReadyQueueSize
+	config.MaxTimingWheelSize = DefaultMaxTimingWheelSize
+	config.MaxInFlightPerPartition = DefaultMaxInFlightPerPartition
+
+	// Circuit breaker defaults
+	config.CircuitBreakerFailureThreshold = DefaultCircuitBreakerFailureThreshold
+	config.CircuitBreakerOpenDurationMs = DefaultCircuitBreakerOpenDurationMs
+	config.CircuitBreakerMinAttempts = DefaultCircuitBreakerMinAttempts
+
+	// Clock skew defaults
+	config.ClockSkewThresholdMs = DefaultClockSkewThresholdMs
+
+	// Gossip backend defaults
+	config.UseMemberlist = DefaultUseMemberlist
+
+	// TLS defaults (all disabled by default)
+	config.TLSEnabled = false
+	config.TLSClientAuth = false
+
+	// Auth defaults (all disabled by default)
+	config.AuthEnabled = false
+
+	// Node topology defaults
+	config.NodeRack = ""
+	config.NodeZone = ""
+	config.NodeRegion = ""
+
+	// Exactly-once commits default
+	config.ExactlyOnceCommits = false
+
+	// Load shedding default (disabled)
+	config.LoadSheddingThreshold = 0.0
+
+	// Follower reads default
+	config.FollowerReadsEnabled = false
+
+	// Encryption defaults
+	config.EncryptionEnabled = DefaultEncryptionEnabled
+	config.EncryptionKeyFile = DefaultEncryptionKeyFile
+
+	// Topic rate limit defaults
+	config.TopicRateLimitPerSecond = DefaultTopicRateLimitPerSecond
+	config.TopicRateLimitBurst = DefaultTopicRateLimitBurst
 
 	// Cluster defaults
 	config.ClusterEnabled = DefaultClusterEnabled
@@ -63,16 +117,27 @@ func LoadConfig() (*types.Config, error) {
 	flag.StringVar(&config.FsyncMode, "fsync-mode", DefaultFsyncMode, "fsync mode: every_event, batch, periodic")
 	var flushInterval int
 	flag.IntVar(&flushInterval, "flush-interval", DefaultFlushIntervalMS, "Flush interval in milliseconds")
-	config.FlushIntervalMS = int32(flushInterval)
 
 	// Scheduler configuration
 	flag.IntVar(&config.TickMS, "tick-ms", DefaultTickMS, "Scheduler tick duration in milliseconds")
 	flag.IntVar(&config.WheelSize, "wheel-size", DefaultWheelSize, "Timing wheel size")
+	flag.IntVar(&config.HotWindowMinutes, "hot-window-minutes", DefaultHotWindowMinutes, "Hot window in minutes for cold store (0 = disable)")
+	flag.IntVar(&config.HydratorMinIntervalMs, "hydrator-min-interval", DefaultHydratorMinIntervalMs, "Minimum hydrator scan interval in ms")
+	flag.IntVar(&config.HydratorMaxIntervalMs, "hydrator-max-interval", DefaultHydratorMaxIntervalMs, "Maximum hydrator scan interval in ms")
+
+	// Admission control configuration
+	flag.Int64Var(&config.MaxReadyQueueSize, "max-ready-queue", DefaultMaxReadyQueueSize, "Max ready queue depth per partition")
+	flag.Int64Var(&config.MaxTimingWheelSize, "max-timing-wheel-size", DefaultMaxTimingWheelSize, "Max active timers in hot timing wheel")
+	flag.Int64Var(&config.MaxInFlightPerPartition, "max-in-flight", DefaultMaxInFlightPerPartition, "Max in-flight deliveries per partition")
+
 	// Delivery configuration
 	flag.DurationVar(&config.DefaultAckTimeout, "ack-timeout", 30*time.Second, "Default ack timeout")
 	flag.IntVar(&config.MaxRetries, "max-retries", DefaultMaxRetries, "Maximum delivery retries")
 	flag.DurationVar(&config.RetryBackoff, "retry-backoff", 1*time.Second, "Retry backoff")
 	flag.IntVar(&config.MaxDeliveryCredits, "max-credits", DefaultMaxDeliveryCredits, "Maximum delivery credits")
+	flag.Float64Var(&config.CircuitBreakerFailureThreshold, "cb-failure-threshold", DefaultCircuitBreakerFailureThreshold, "Circuit breaker failure rate to trip (0.0-1.0)")
+	flag.Int64Var(&config.CircuitBreakerMinAttempts, "cb-min-attempts", DefaultCircuitBreakerMinAttempts, "Min attempts before circuit breaker evaluates")
+	flag.Int64Var(&config.CircuitBreakerOpenDurationMs, "cb-open-duration-ms", DefaultCircuitBreakerOpenDurationMs, "Circuit breaker open duration in milliseconds")
 
 	// Dedup configuration
 	flag.IntVar(&config.DedupTTLHours, "dedup-ttl", DefaultDedupTTLHours, "Deduplication TTL in hours (7 days)")
@@ -95,11 +160,56 @@ func LoadConfig() (*types.Config, error) {
 	flag.DurationVar(&config.HeartbeatInterval, "heartbeat-interval", DefaultHeartbeatInterval, "Cluster heartbeat interval")
 	flag.DurationVar(&config.FailureTimeout, "failure-timeout", DefaultFailureTimeout, "Node failure detection timeout")
 	flag.DurationVar(&config.SuspectTimeout, "suspect-timeout", DefaultSuspectTimeout, "Node suspect timeout")
+	flag.BoolVar(&config.UseMemberlist, "use-memberlist", DefaultUseMemberlist, "Use HashiCorp Memberlist (SWIM) instead of custom TCP gossip")
+	flag.Int64Var(&config.ClockSkewThresholdMs, "clock-skew-threshold-ms", DefaultClockSkewThresholdMs, "Max allowed clock skew from leader in ms (0 = disabled)")
+
+	// TLS flags
+	flag.BoolVar(&config.TLSEnabled, "tls-enabled", false, "Enable TLS for gRPC")
+	flag.StringVar(&config.TLSCAFile, "tls-ca-file", "", "Path to CA certificate file")
+	flag.StringVar(&config.TLSCertFile, "tls-cert-file", "", "Path to TLS certificate file")
+	flag.StringVar(&config.TLSKeyFile, "tls-key-file", "", "Path to TLS private key file")
+	flag.BoolVar(&config.TLSClientAuth, "tls-client-auth", false, "Require client certificates (mTLS)")
+
+	// Auth flags
+	flag.BoolVar(&config.AuthEnabled, "auth-enabled", false, "Enable JWT authentication")
+	flag.StringVar(&config.AuthJWTSecret, "auth-jwt-secret", "", "HMAC secret for JWT verification")
+	flag.StringVar(&config.AuthJWTPublicKey, "auth-jwt-public-key", "", "Path to Ed25519/RSA public key file for JWT verification")
+	flag.StringVar(&config.AuthPolicyFile, "auth-policy-file", "", "Path to RBAC policy JSON file")
+
+	// Node topology flags
+	flag.StringVar(&config.NodeRack, "node-rack", "", "Rack / AZ label for topology-aware placement")
+	flag.StringVar(&config.NodeZone, "node-zone", "", "Zone label for topology-aware placement")
+	flag.StringVar(&config.NodeRegion, "node-region", "", "Region label for topology-aware placement")
+
+	// Exactly-once commits
+	flag.BoolVar(&config.ExactlyOnceCommits, "exactly-once-commits", false, "Enable exactly-once consumer offset commits")
+
+	// Load shedding
+	flag.Float64Var(&config.LoadSheddingThreshold, "load-shedding-threshold", 0.0, "Load shedding threshold (0.0-1.0, 0 = disabled)")
+
+	// Follower reads
+	flag.BoolVar(&config.FollowerReadsEnabled, "follower-reads", false, "Allow follower nodes to serve replay reads")
+
+	// Encryption flags
+	flag.BoolVar(&config.EncryptionEnabled, "encryption-enabled", DefaultEncryptionEnabled, "Enable AES-256-GCM encryption at rest for WAL segments")
+	flag.StringVar(&config.EncryptionKeyFile, "encryption-key-file", DefaultEncryptionKeyFile, "Path to 32-byte encryption key file")
+
+	// Topic rate limit flags
+	flag.Float64Var(&config.TopicRateLimitPerSecond, "topic-rate-limit", DefaultTopicRateLimitPerSecond, "Per-subject per-topic rate limit (events/sec, 0 = disabled)")
+	flag.Float64Var(&config.TopicRateLimitBurst, "topic-rate-burst", DefaultTopicRateLimitBurst, "Per-subject per-topic rate limit burst (0 = disabled)")
 
 	var clusterSeeds string
 	flag.StringVar(&clusterSeeds, "cluster-seeds", "", "Comma-separated list of seed node addresses")
 
+	// Tracing configuration
+	flag.BoolVar(&config.TracingEnabled, "tracing-enabled", DefaultTracingEnabled, "Enable OpenTelemetry tracing")
+	flag.StringVar(&config.TracingExporter, "tracing-exporter", DefaultTracingExporter, "Tracing exporter: none, stdout, otlp")
+	flag.StringVar(&config.TracingOTLPEndpoint, "tracing-otlp-endpoint", DefaultTracingOTLPEndpoint, "OTLP gRPC endpoint (host:port)")
+	flag.Float64Var(&config.TracingSampleRatio, "tracing-sample-ratio", DefaultTracingSampleRatio, "Tracing sample ratio from 0.0 to 1.0")
+	flag.BoolVar(&config.TracingInsecure, "tracing-insecure", DefaultTracingInsecure, "Use insecure OTLP connection (no TLS)")
+
 	flag.Parse()
+	config.FlushIntervalMS = int32(flushInterval)
 
 	// Parse cluster seeds
 	if clusterSeeds != "" {
@@ -119,6 +229,9 @@ func LoadConfig() (*types.Config, error) {
 	if grpcAddr := os.Getenv("CRONOS_GRPC_ADDR"); grpcAddr != "" && config.GPRCAddress == DefaultGRPCAddress {
 		config.GPRCAddress = grpcAddr
 	}
+	if httpAddr := os.Getenv("CRONOS_HTTP_ADDR"); httpAddr != "" && config.HTTPAddress == DefaultHTTPAddress {
+		config.HTTPAddress = httpAddr
+	}
 	if clusterEnabled := os.Getenv("CRONOS_CLUSTER"); clusterEnabled == "true" {
 		config.ClusterEnabled = true
 	}
@@ -128,10 +241,82 @@ func LoadConfig() (*types.Config, error) {
 			config.ClusterSeeds[i] = strings.TrimSpace(seed)
 		}
 	}
+	if tracingEnabled := os.Getenv("CRONOS_TRACING_ENABLED"); tracingEnabled != "" {
+		if parsed, err := strconv.ParseBool(tracingEnabled); err == nil {
+			config.TracingEnabled = parsed
+		}
+	}
+	if tracingExporter := os.Getenv("CRONOS_TRACING_EXPORTER"); tracingExporter != "" {
+		config.TracingExporter = strings.TrimSpace(tracingExporter)
+	}
+	if tracingEndpoint := os.Getenv("CRONOS_TRACING_OTLP_ENDPOINT"); tracingEndpoint != "" {
+		config.TracingOTLPEndpoint = strings.TrimSpace(tracingEndpoint)
+	}
+	if tracingRatio := os.Getenv("CRONOS_TRACING_SAMPLE_RATIO"); tracingRatio != "" {
+		if parsed, err := strconv.ParseFloat(tracingRatio, 64); err == nil {
+			config.TracingSampleRatio = parsed
+		}
+	}
+	if tracingInsecure := os.Getenv("CRONOS_TRACING_INSECURE"); tracingInsecure != "" {
+		if parsed, err := strconv.ParseBool(tracingInsecure); err == nil {
+			config.TracingInsecure = parsed
+		}
+	}
+
+	// TLS environment overrides
+	if tlsEnabled := os.Getenv("CRONOS_TLS_ENABLED"); tlsEnabled != "" {
+		if parsed, err := strconv.ParseBool(tlsEnabled); err == nil {
+			config.TLSEnabled = parsed
+		}
+	}
+	if caFile := os.Getenv("CRONOS_TLS_CA_FILE"); caFile != "" {
+		config.TLSCAFile = caFile
+	}
+	if certFile := os.Getenv("CRONOS_TLS_CERT_FILE"); certFile != "" {
+		config.TLSCertFile = certFile
+	}
+	if keyFile := os.Getenv("CRONOS_TLS_KEY_FILE"); keyFile != "" {
+		config.TLSKeyFile = keyFile
+	}
+
+	// Auth environment overrides
+	if authEnabled := os.Getenv("CRONOS_AUTH_ENABLED"); authEnabled != "" {
+		if parsed, err := strconv.ParseBool(authEnabled); err == nil {
+			config.AuthEnabled = parsed
+		}
+	}
+	if jwtSecret := os.Getenv("CRONOS_AUTH_JWT_SECRET"); jwtSecret != "" {
+		config.AuthJWTSecret = jwtSecret
+	}
+
+	// Topology environment overrides
+	if rack := os.Getenv("CRONOS_NODE_RACK"); rack != "" {
+		config.NodeRack = rack
+	}
+	if zone := os.Getenv("CRONOS_NODE_ZONE"); zone != "" {
+		config.NodeZone = zone
+	}
+	if region := os.Getenv("CRONOS_NODE_REGION"); region != "" {
+		config.NodeRegion = region
+	}
 
 	// Validate required configuration
 	if err := ValidateConfig(&config); err != nil {
 		return nil, err
+	}
+
+	// Validate TLS config if enabled
+	if config.TLSEnabled {
+		if config.TLSCertFile == "" || config.TLSKeyFile == "" {
+			return nil, fmt.Errorf("tls-enabled requires tls-cert-file and tls-key-file")
+		}
+	}
+
+	// Validate auth config if enabled
+	if config.AuthEnabled {
+		if config.AuthJWTSecret == "" && config.AuthJWTPublicKey == "" {
+			return nil, fmt.Errorf("auth-enabled requires auth-jwt-secret or auth-jwt-public-key")
+		}
 	}
 
 	return &config, nil
@@ -153,6 +338,12 @@ func ValidateConfig(c *types.Config) error {
 	}
 	if c.GPRCAddress == "" {
 		return fmt.Errorf("grpc-addr is required")
+	}
+	if c.TracingSampleRatio < 0 || c.TracingSampleRatio > 1 {
+		return fmt.Errorf("tracing-sample-ratio must be between 0.0 and 1.0")
+	}
+	if c.FlushIntervalMS <= 0 {
+		return fmt.Errorf("flush-interval must be > 0")
 	}
 	return nil
 }
