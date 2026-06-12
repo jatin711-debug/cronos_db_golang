@@ -66,6 +66,11 @@ type Node struct {
 	UpdatedAt  time.Time         `json:"updated_at"`
 	// Partition assignments
 	Partitions []PartitionAssignment `json:"partitions"`
+
+	// Topology labels for rack-aware placement
+	Rack   string `json:"rack,omitempty"`
+	Zone   string `json:"zone,omitempty"`
+	Region string `json:"region,omitempty"`
 }
 
 // PartitionAssignment represents a partition assigned to a node
@@ -131,6 +136,12 @@ type Config struct {
 	SuspectTimeout    time.Duration
 	PartitionCount    int
 	ReplicationFactor int
+	UseMemberlist     bool
+
+	// Topology labels
+	Rack   string
+	Zone   string
+	Region string
 }
 
 // ClusterConfig represents cluster configuration (internal)
@@ -151,6 +162,12 @@ type ClusterConfig struct {
 	ReplicationFactor int           `json:"replication_factor"`
 	NumPartitions     int           `json:"num_partitions"`
 	VirtualNodes      int           `json:"virtual_nodes"`
+	UseMemberlist     bool          `json:"use_memberlist"`
+
+	// Topology labels
+	Rack   string `json:"rack,omitempty"`
+	Zone   string `json:"zone,omitempty"`
+	Region string `json:"region,omitempty"`
 }
 
 // DefaultClusterConfig returns default cluster configuration

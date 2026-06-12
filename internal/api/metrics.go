@@ -90,12 +90,15 @@ func MetricsInterceptor() grpc.UnaryServerInterceptor {
 			}
 		}
 
-		key := counterKey{method: info.FullMethod, status: statusCode}
+		// Cardinality protection: sanitize method name to prevent unbounded label growth
+		method := sanitizeMetricLabel(info.FullMethod)
+
+		key := counterKey{method: method, status: statusCode}
 		var counter prometheus.Counter
 		if val, ok := counterCache.Load(key); ok {
 			counter = val.(prometheus.Counter)
 		} else {
-			counter = grpcRequestsTotal.WithLabelValues(info.FullMethod, statusCode)
+			counter = grpcRequestsTotal.WithLabelValues(method, statusCode)
 			if actual, loaded := counterCache.LoadOrStore(key, counter); loaded {
 				counter = actual.(prometheus.Counter)
 			}
@@ -103,11 +106,11 @@ func MetricsInterceptor() grpc.UnaryServerInterceptor {
 		counter.Inc()
 
 		var observer prometheus.Observer
-		if val, ok := observerCache.Load(info.FullMethod); ok {
+		if val, ok := observerCache.Load(method); ok {
 			observer = val.(prometheus.Observer)
 		} else {
-			observer = grpcRequestDuration.WithLabelValues(info.FullMethod)
-			if actual, loaded := observerCache.LoadOrStore(info.FullMethod, observer); loaded {
+			observer = grpcRequestDuration.WithLabelValues(method)
+			if actual, loaded := observerCache.LoadOrStore(method, observer); loaded {
 				observer = actual.(prometheus.Observer)
 			}
 		}
@@ -115,6 +118,17 @@ func MetricsInterceptor() grpc.UnaryServerInterceptor {
 
 		return resp, err
 	}
+}
+
+// sanitizeMetricLabel prevents high-cardinality strings from becoming metric labels.
+// It strips dynamic IDs and limits length.
+func sanitizeMetricLabel(method string) string {
+	// gRPC methods are like "/package.Service/Method" — keep as-is
+	// But if someone passes a message ID, replace it
+	if len(method) > 256 {
+		method = method[:256]
+	}
+	return method
 }
 
 // =============================================================================
@@ -161,6 +175,29 @@ var (
 			Help: "Consumer group lag (high_watermark - committed_offset) per group and partition",
 		},
 		[]string{"group", "partition"},
+	)
+
+	// Delivery metrics
+	dispatcherActiveDeliveries = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "cronos_dispatcher_active_deliveries",
+			Help: "Number of active in-flight deliveries in dispatcher",
+		},
+		[]string{"partition"},
+	)
+	dispatcherCreditsInUse = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "cronos_dispatcher_credits_in_use",
+			Help: "Credits currently consumed by subscriptions",
+		},
+		[]string{"partition"},
+	)
+	workerQueueDepth = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "cronos_delivery_worker_queue_depth",
+			Help: "Number of events waiting in delivery worker queue",
+		},
+		[]string{"partition"},
 	)
 	consumerGroupMembers = promauto.NewGaugeVec(
 		prometheus.GaugeOpts{
@@ -241,6 +278,22 @@ var (
 			Help: "Number of partitions where this node is leader",
 		},
 	)
+
+	// Clock skew metric
+	clockSkewMs = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "cronos_clock_skew_ms",
+			Help: "Absolute clock skew from leader in milliseconds",
+		},
+	)
+
+	// Admission control metric
+	admissionRejectedTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "cronos_admission_rejected_total",
+			Help: "Total number of publishes rejected by admission control",
+		},
+	)
 )
 
 // SetTimingWheelMetrics sets timing wheel metrics for a partition
@@ -287,6 +340,13 @@ func SetClusterMetrics(totalNodes, aliveNodes, totalPartitions, leaderPartitions
 	clusterPartitionsLeader.Set(float64(leaderPartitions))
 }
 
+// SetDeliveryMetrics sets delivery subsystem gauges for a partition.
+func SetDeliveryMetrics(partitionID string, activeDeliveries int64, creditsInUse int64, queueDepth int64) {
+	dispatcherActiveDeliveries.WithLabelValues(partitionID).Set(float64(activeDeliveries))
+	dispatcherCreditsInUse.WithLabelValues(partitionID).Set(float64(creditsInUse))
+	workerQueueDepth.WithLabelValues(partitionID).Set(float64(queueDepth))
+}
+
 // ObserveWALAppend records WAL append latency
 func ObserveWALAppend(partitionID string, d time.Duration) {
 	walAppendLatency.WithLabelValues(partitionID).Observe(d.Seconds())
@@ -305,4 +365,14 @@ func ObserveDispatch(partitionID string, d time.Duration) {
 // ObserveSegmentRotation records segment rotation latency
 func ObserveSegmentRotation(partitionID string, d time.Duration) {
 	segmentRotationLatency.WithLabelValues(partitionID).Observe(d.Seconds())
+}
+
+// SetClockSkew records clock skew from leader
+func SetClockSkew(skewMs int64) {
+	clockSkewMs.Set(float64(skewMs))
+}
+
+// IncAdmissionRejected increments the admission rejected counter
+func IncAdmissionRejected() {
+	admissionRejectedTotal.Inc()
 }

@@ -180,25 +180,20 @@ func (g *GroupManager) LeaveGroup(groupID, memberID string) error {
 		return fmt.Errorf("member %s not found in group", memberID)
 	}
 
-	// Set member as inactive
+	// Set member as inactive and remove immediately.
+	// The 30s grace period was removed because:
+	// 1. CommittedOffsets (per-group) already persist consumer progress.
+	// 2. MemberOffsets (per-member) is not used for ack processing.
+	// 3. Keeping inactive members risks delivering messages to disconnected consumers.
 	member.Active = false
 	member.LastSeenTS = time.Now().UnixMilli()
+	delete(group.Members, memberID)
+	delete(group.MemberOffsets, memberID)
 
 	// Rebalance to reassign partition
 	if err := g.rebalanceGroup(group); err != nil {
 		return fmt.Errorf("rebalance after leave: %w", err)
 	}
-
-	// Remove member after delay (grace period)
-	go func() {
-		time.Sleep(30 * time.Second) // 30 second grace period
-		g.mu.Lock()
-		if group, exists := g.groups[groupID]; exists {
-			delete(group.Members, memberID)
-			delete(group.MemberOffsets, memberID)
-		}
-		g.mu.Unlock()
-	}()
 
 	return nil
 }
@@ -259,14 +254,14 @@ func (g *GroupManager) rebalanceGroup(group *types.ConsumerGroup) error {
 }
 
 // CommitOffset commits an offset for a consumer group.
-// Uses RLock instead of Lock because it only writes to a specific group's
-// CommittedOffsets map. This allows concurrent commits for different groups
-// and concurrent reads to proceed without blocking.
+// Holds the full write lock because Go's memory model does NOT permit
+// concurrent map writes even to different keys, and RLock does not
+// synchronize with other RLock holders for map mutations.
 func (g *GroupManager) CommitOffset(groupID string, partitionID int64, offset int64) error {
-	g.mu.RLock()
-	group, exists := g.groups[groupID]
-	g.mu.RUnlock()
+	g.mu.Lock()
+	defer g.mu.Unlock()
 
+	group, exists := g.groups[groupID]
 	if !exists {
 		return fmt.Errorf("group %s not found", groupID)
 	}
@@ -276,11 +271,6 @@ func (g *GroupManager) CommitOffset(groupID string, partitionID int64, offset in
 		return fmt.Errorf("invalid partition %d", partitionID)
 	}
 
-	// Update in-memory committed offset
-	// Note: this is safe without the write lock because each group's
-	// CommittedOffsets map is only modified by CommitOffset for that specific group,
-	// and map writes to different keys are safe (but same key needs care).
-	// In practice, partition offsets for a group are committed by one consumer at a time.
 	group.CommittedOffsets[int32(partitionID)] = offset
 	group.UpdatedTS = time.Now().UnixMilli()
 

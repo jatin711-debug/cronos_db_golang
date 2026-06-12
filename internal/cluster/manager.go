@@ -13,7 +13,7 @@ import (
 type Manager struct {
 	mu                sync.RWMutex
 	config            *ClusterConfig
-	membership        *Membership
+	membership        MembershipService
 	router            *Router
 	raft              *RaftNode
 	partitionAccessor PartitionAccessor
@@ -37,12 +37,15 @@ func NewManager(cfg *Config) *Manager {
 		RaftDataDir:       cfg.RaftDir,
 		SeedNodes:         cfg.SeedNodes,
 		HeartbeatInterval: cfg.HeartbeatInterval,
-		ElectionTimeout:   cfg.HeartbeatInterval * 5, // Election timeout should be > heartbeat
+		ElectionTimeout:   cfg.HeartbeatInterval * 5,
 		FailureTimeout:    cfg.FailureTimeout,
 		SuspectTimeout:    cfg.SuspectTimeout,
 		ReplicationFactor: cfg.ReplicationFactor,
 		NumPartitions:     cfg.PartitionCount,
 		VirtualNodes:      cfg.VirtualNodes,
+		Rack:              cfg.Rack,
+		Zone:              cfg.Zone,
+		Region:            cfg.Region,
 	}
 
 	if config.HeartbeatInterval == 0 {
@@ -113,10 +116,21 @@ func (m *Manager) Start() error {
 		}
 	}
 
-	// Create membership
-	membership, err := NewMembership(m.config)
-	if err != nil {
-		return fmt.Errorf("create membership: %w", err)
+	// Create membership (custom TCP or HashiCorp Memberlist)
+	var membership MembershipService
+	var err error
+	if m.config.UseMemberlist {
+		membership, err = NewMemberlistMembership(m.config)
+		if err != nil {
+			return fmt.Errorf("create memberlist membership: %w", err)
+		}
+		log.Printf("[CLUSTER] Using HashiCorp Memberlist (SWIM) for cluster membership")
+	} else {
+		membership, err = NewMembership(m.config)
+		if err != nil {
+			return fmt.Errorf("create membership: %w", err)
+		}
+		log.Printf("[CLUSTER] Using custom TCP gossip for cluster membership")
 	}
 	m.membership = membership
 
@@ -125,9 +139,20 @@ func (m *Manager) Start() error {
 		// When a new node joins via gossip, add it to Raft if we're the leader
 		if m.raft != nil && m.raft.IsLeader() && node.RaftAddr != "" {
 			log.Printf("[CLUSTER] Adding node %s to Raft cluster at %s", node.ID, node.RaftAddr)
-			if err := m.raft.Join(node.ID, node.RaftAddr); err != nil {
-				log.Printf("[CLUSTER] Warning: Failed to add node %s to Raft: %v", node.ID, err)
+			// Retry with exponential backoff — the target node may still be booting
+			var lastErr error
+			for attempt := 1; attempt <= 3; attempt++ {
+				if err := m.raft.Join(node.ID, node.RaftAddr); err != nil {
+					lastErr = err
+					backoff := time.Duration(attempt) * time.Second
+					log.Printf("[CLUSTER] Raft join attempt %d/3 failed for %s: %v (retrying in %v)", attempt, node.ID, err, backoff)
+					time.Sleep(backoff)
+					continue
+				}
+				log.Printf("[CLUSTER] Successfully added node %s to Raft cluster", node.ID)
+				return
 			}
+			log.Printf("[CLUSTER] Warning: Failed to add node %s to Raft after 3 attempts: %v", node.ID, lastErr)
 		}
 	})
 
@@ -318,14 +343,69 @@ func (m *Manager) electNewLeader(partitionID int32, info *PartitionInfo) {
 		}
 	}
 
+	// If we are the new leader, promote the local partition
+	if newLeader == m.config.NodeID && m.partitionAccessor != nil {
+		if err := m.partitionAccessor.PromoteToLeader(partitionID, newInfo.Epoch); err != nil {
+			log.Printf("[CLUSTER] Failed to promote partition %d to leader: %v", partitionID, err)
+		}
+		// Register all alive replicas as followers
+		for _, replicaID := range info.Replicas {
+			if replicaID == newLeader {
+				continue
+			}
+			if !aliveNodeIDs[replicaID] {
+				continue
+			}
+			node, err := m.membership.GetNode(replicaID)
+			if err != nil || node == nil || node.Address == "" {
+				continue
+			}
+			if err := m.partitionAccessor.AddFollower(partitionID, replicaID, node.Address); err != nil {
+				log.Printf("[CLUSTER] Failed to add follower %s to partition %d: %v", replicaID, partitionID, err)
+			}
+		}
+	}
+
+	// If we were the old leader, demote
+	if info.LeaderID == m.config.NodeID && newLeader != m.config.NodeID && m.partitionAccessor != nil {
+		if err := m.partitionAccessor.DemoteFromLeader(partitionID); err != nil {
+			log.Printf("[CLUSTER] Failed to demote partition %d: %v", partitionID, err)
+		}
+	}
+
 	log.Printf("[CLUSTER] Partition %d new leader: %s (epoch=%d)",
 		partitionID, newLeader, newInfo.Epoch)
 }
 
 // syncClusterState syncs cluster state to Raft
 func (m *Manager) syncClusterState() {
-	// This would sync any local state changes to Raft
-	// For now, just log
+	m.mu.RLock()
+	raftNode := m.raft
+	router := m.router
+	m.mu.RUnlock()
+
+	if raftNode == nil || router == nil {
+		return
+	}
+
+	state := raftNode.GetState()
+	if state == nil {
+		return
+	}
+
+	assignments := router.GetAllPartitions()
+	for partitionID, info := range assignments {
+		if info == nil {
+			continue
+		}
+		if _, exists := state.Partitions[partitionID]; exists {
+			continue
+		}
+
+		if err := m.AssignPartition(info); err != nil {
+			log.Printf("[CLUSTER] Failed to sync partition %d metadata to Raft: %v", partitionID, err)
+		}
+	}
 }
 
 // SetPartitionAccessor sets the partition accessor for state transfer operations
@@ -418,7 +498,7 @@ func (m *Manager) JoinCluster(leaderAddr string) error {
 }
 
 // GetMembership returns the membership manager
-func (m *Manager) GetMembership() *Membership {
+func (m *Manager) GetMembership() MembershipService {
 	return m.membership
 }
 
@@ -548,6 +628,11 @@ func (m *Manager) IsPartitionLeader(partitionID int32) bool {
 	return m.router.IsPartitionLeader(partitionID)
 }
 
+// GetPartitionEpoch returns the cluster epoch for a partition.
+func (m *Manager) GetPartitionEpoch(partitionID int32) int64 {
+	return m.router.GetPartitionEpoch(partitionID)
+}
+
 // GetLocalPartitions returns partitions owned by this node
 func (m *Manager) GetLocalPartitions() []int32 {
 	return m.router.GetLocalPartitions()
@@ -585,4 +670,50 @@ type ClusterStats struct {
 	NumPartitions    int    `json:"num_partitions"`
 	LocalPartitions  int    `json:"local_partitions"`
 	LeaderPartitions int    `json:"leader_partitions"`
+}
+
+// AssignPartition proposes a partition assignment to the Raft cluster
+func (m *Manager) AssignPartition(info *PartitionInfo) error {
+	m.mu.RLock()
+	raftNode := m.raft
+	m.mu.RUnlock()
+
+	if raftNode == nil {
+		return fmt.Errorf("raft node not initialized")
+	}
+
+	payload, err := json.Marshal(info)
+	if err != nil {
+		return fmt.Errorf("marshal partition info: %w", err)
+	}
+
+	cmd := &Command{
+		Type:    CommandTypeAssignPartition,
+		Payload: payload,
+	}
+
+	return raftNode.Apply(cmd)
+}
+
+// UpdatePartition proposes a partition metadata update to the Raft cluster
+func (m *Manager) UpdatePartition(info *PartitionInfo) error {
+	m.mu.RLock()
+	raftNode := m.raft
+	m.mu.RUnlock()
+
+	if raftNode == nil {
+		return fmt.Errorf("raft node not initialized")
+	}
+
+	payload, err := json.Marshal(info)
+	if err != nil {
+		return fmt.Errorf("marshal partition info: %w", err)
+	}
+
+	cmd := &Command{
+		Type:    CommandTypeUpdatePartition,
+		Payload: payload,
+	}
+
+	return raftNode.Apply(cmd)
 }

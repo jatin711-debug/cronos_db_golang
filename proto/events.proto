@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package cronos_db;
 
-option go_package = "github.com/jatin711-debug/cronos_db_golang/pkg/types;types";
+option go_package = "cronos_db/pkg/types;types";
 
 // ============================================================================
 // Core Event Types
@@ -410,6 +410,19 @@ message RetentionResponse {
   int64 bytes_freed = 4;
 }
 
+message SplitPartitionRequest {
+  int32 source_partition_id = 1;
+  int32 new_partition_id = 2;
+  int64 split_offset = 3;
+}
+
+message SplitPartitionResponse {
+  bool success = 1;
+  string error = 2;
+  int64 source_high_watermark = 3;
+  int64 new_first_offset = 4;
+}
+
 // ============================================================================
 // Raft Metadata RPCs (Internal)
 // ============================================================================
@@ -486,6 +499,9 @@ service PartitionService {
 
   // Run retention policy
   rpc RunRetention(RetentionRequest) returns (RetentionResponse);
+
+  // Split a partition into two at a given offset
+  rpc SplitPartition(SplitPartitionRequest) returns (SplitPartitionResponse);
 }
 
 service ConsumerGroupService {
@@ -519,5 +535,99 @@ service RaftService {
 
   // Internal: Get raft status
   rpc Status(RaftStatusRequest) returns (RaftStatusResponse);
+}
+
+// CrossRegionService handles async replication between geographic regions.
+service CrossRegionService {
+  // Replicate events to a remote region
+  rpc ReplicateEvents(RegionReplicateRequest) returns (RegionReplicateResponse);
+
+  // Fetch events from a remote region (for catch-up sync)
+  rpc FetchEvents(RegionFetchRequest) returns (stream RegionFetchResponse);
+}
+
+// Request to replicate events to a remote region.
+message RegionReplicateRequest {
+  string region_id = 1;
+  int32 partition_id = 2;
+  repeated Event events = 3;
+  int64 first_offset = 4;
+}
+
+// Response from a replicate call.
+message RegionReplicateResponse {
+  bool success = 1;
+  string error = 2;
+  int64 last_offset = 3;
+}
+
+// Request to fetch events from a remote region.
+message RegionFetchRequest {
+  string region_id = 1;
+  int32 partition_id = 2;
+  int64 start_offset = 3;
+  int64 max_bytes = 4;
+}
+
+// Response stream from a fetch call.
+message RegionFetchResponse {
+  bool success = 1;
+  string error = 2;
+  repeated Event events = 3;
+  bool has_more = 4;
+}
+
+// TransactionService for distributed 2PC transactions.
+service TransactionService {
+  // Initiate a new distributed transaction
+  rpc BeginTransaction(BeginTransactionRequest) returns (BeginTransactionResponse);
+
+  // Phase 1: Prepare all participants
+  rpc PrepareTransaction(PrepareTransactionRequest) returns (PrepareTransactionResponse);
+
+  // Phase 2: Commit all participants
+  rpc CommitTransaction(CommitTransactionRequest) returns (CommitTransactionResponse);
+
+  // Abort/rollback a transaction
+  rpc AbortTransaction(AbortTransactionRequest) returns (AbortTransactionResponse);
+}
+
+message BeginTransactionRequest {
+  string transaction_id = 1;
+  repeated int32 participant_partition_ids = 2;
+}
+
+message BeginTransactionResponse {
+  bool success = 1;
+  string error = 2;
+  int64 created_ts = 3;
+}
+
+message PrepareTransactionRequest {
+  string transaction_id = 1;
+}
+
+message PrepareTransactionResponse {
+  bool success = 1;
+  string error = 2;
+  bool vote = 3; // true = prepared, false = rollback
+}
+
+message CommitTransactionRequest {
+  string transaction_id = 1;
+}
+
+message CommitTransactionResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message AbortTransactionRequest {
+  string transaction_id = 1;
+}
+
+message AbortTransactionResponse {
+  bool success = 1;
+  string error = 2;
 }
 

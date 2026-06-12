@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: CronosDB
+    orgId: 1
+    folder: CronosDB
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /var/lib/grafana/dashboards

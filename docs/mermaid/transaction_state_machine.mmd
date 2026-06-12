@@ -1,0 +1,13 @@
+stateDiagram-v2
+    [*] --> Started
+    Started --> Preparing: PrepareTransaction
+    Preparing --> Prepared: all participants vote yes
+    Preparing --> Aborted: any vote no or timeout
+    Prepared --> Committing: CommitTransaction
+    Committing --> Committed: all commit callbacks succeed
+    Committing --> FailedCommit: commit callback failure
+    FailedCommit --> Recovering: coordinator recovery loop
+    Recovering --> Committed: idempotent commit replay
+    Recovering --> Aborted: rollback path
+    Committed --> [*]
+    Aborted --> [*]

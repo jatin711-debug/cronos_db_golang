@@ -4,6 +4,7 @@ import (
 	"runtime"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/cockroachdb/pebble"
 )
@@ -30,8 +31,15 @@ type GoBloomFilter struct {
 
 // NewBloomFilter creates a bloom filter sized for expectedItems with targetFPR false positive rate
 func NewBloomFilter(expectedItems uint64, targetFPR float64) BloomFilter {
+	if runtime.GOOS == "windows" {
+		return NewGoBloomFilter(expectedItems, targetFPR)
+	}
 	// Using Rust implementation for 5-10x performance gain
-	return NewRustBloomFilter(expectedItems, targetFPR)
+	bf := NewRustBloomFilter(expectedItems, targetFPR)
+	if bf == nil {
+		return NewGoBloomFilter(expectedItems, targetFPR)
+	}
+	return bf
 }
 
 // NewGoBloomFilter creates a pure Go bloom filter
@@ -334,6 +342,33 @@ func (s *BloomPebbleStore) Exists(messageID string) (bool, error) {
 	// Check PebbleDB
 	return s.pebble.Exists(messageID)
 }
+
+// GetTimestamp returns stored timestamp for message ID
+func (s *BloomPebbleStore) GetTimestamp(messageID string) (time.Time, bool, error) {
+	// Fast path: bloom filter says "definitely not exists"
+	if !s.bloom.MayContain(messageID) {
+		return time.Time{}, false, nil
+	}
+
+	// Check PebbleDB
+	return s.pebble.GetTimestamp(messageID)
+}
+
+// Put inserts or overwrites an entry directly with a given created timestamp
+func (s *BloomPebbleStore) Put(messageID string, offset int64, createdTS int64) error {
+	s.bloomMu.Lock()
+	defer s.bloomMu.Unlock()
+
+	for s.resetInProgress.Load() {
+		s.bloomMu.Unlock()
+		runtime.Gosched()
+		s.bloomMu.Lock()
+	}
+
+	s.bloom.Add(messageID)
+	return s.pebble.Put(messageID, offset, createdTS)
+}
+
 
 // PruneExpired removes expired entries and checks bloom filter health
 // If false positive rate is too high, resets the bloom filter

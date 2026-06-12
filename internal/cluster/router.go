@@ -12,13 +12,19 @@ type PartitionAccessor interface {
 	SyncPartitionFromLeader(partitionID int32, leaderAddr string) error
 	// GetOrCreatePartition gets or creates a local partition
 	GetOrCreatePartition(partitionID int32) error
+	// PromoteToLeader promotes a local partition to leader and starts replication
+	PromoteToLeader(partitionID int32, epoch int64) error
+	// AddFollower adds a follower to a local leader partition
+	AddFollower(partitionID int32, followerID string, followerAddr string) error
+	// DemoteFromLeader demotes a local partition from leader
+	DemoteFromLeader(partitionID int32) error
 }
 
 // Router handles routing requests to the correct node/partition
 type Router struct {
 	mu                sync.RWMutex
 	hashRing          *HashRing
-	membership        *Membership
+	membership        MembershipService
 	numPartitions     int
 	localNodeID       string
 	partitionAccessor PartitionAccessor
@@ -30,7 +36,7 @@ type Router struct {
 // NewRouter creates a new partition router.
 // virtualNodes controls hash-ring granularity and can materially impact
 // partition leader distribution when partition counts are small.
-func NewRouter(membership *Membership, numPartitions, replicationFactor, virtualNodes int, accessor PartitionAccessor) *Router {
+func NewRouter(membership MembershipService, numPartitions, replicationFactor, virtualNodes int, accessor PartitionAccessor) *Router {
 	r := &Router{
 		hashRing:          NewHashRing(virtualNodes, replicationFactor),
 		membership:        membership,
@@ -57,6 +63,11 @@ func (r *Router) initializePartitions() {
 	// Add existing nodes to hash ring
 	for _, node := range r.membership.GetAliveNodes() {
 		r.hashRing.AddNode(node.ID)
+		r.hashRing.SetNodeTopology(node.ID, NodeTopology{
+			Rack:   node.Rack,
+			Zone:   node.Zone,
+			Region: node.Region,
+		})
 	}
 
 	// Compute partition assignments
@@ -100,6 +111,11 @@ func (r *Router) onNodeJoin(node *Node) {
 
 	// Add node to hash ring
 	r.hashRing.AddNode(node.ID)
+	r.hashRing.SetNodeTopology(node.ID, NodeTopology{
+		Rack:   node.Rack,
+		Zone:   node.Zone,
+		Region: node.Region,
+	})
 
 	// Compute moves
 	moves := r.hashRing.Rebalance(oldAssignments, r.numPartitions)
@@ -326,6 +342,18 @@ func (r *Router) GetPartitionInfo(partitionID int32) (*PartitionInfo, error) {
 		return nil, fmt.Errorf("partition %d not found", partitionID)
 	}
 	return info, nil
+}
+
+// GetPartitionEpoch returns the cluster epoch for a partition.
+func (r *Router) GetPartitionEpoch(partitionID int32) int64 {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	info, exists := r.assignments[partitionID]
+	if !exists {
+		return 0
+	}
+	return info.Epoch
 }
 
 // GetAllPartitions returns all partition information

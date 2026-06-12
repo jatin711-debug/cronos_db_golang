@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"os"
 	"testing"
 	"time"
 
@@ -207,7 +208,7 @@ func TestTimingWheel_Cascade(t *testing.T) {
 func TestScheduler_Schedule(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	scheduler, err := NewScheduler(tmpDir, 0, 100, 60)
+	scheduler, err := NewScheduler(tmpDir, 0, 100, 60, 0, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to create scheduler: %v", err)
 	}
@@ -233,7 +234,7 @@ func TestScheduler_Schedule(t *testing.T) {
 func TestScheduler_ImmediateEvent(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	scheduler, err := NewScheduler(tmpDir, 0, 100, 60)
+	scheduler, err := NewScheduler(tmpDir, 0, 100, 60, 0, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to create scheduler: %v", err)
 	}
@@ -260,7 +261,7 @@ func TestScheduler_ImmediateEvent(t *testing.T) {
 func TestScheduler_StartStop(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	scheduler, err := NewScheduler(tmpDir, 0, 50, 60)
+	scheduler, err := NewScheduler(tmpDir, 0, 50, 60, 0, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to create scheduler: %v", err)
 	}
@@ -303,7 +304,7 @@ func TestScheduler_Checkpoint(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// Create and use scheduler
-	scheduler1, err := NewScheduler(tmpDir, 0, 100, 60)
+	scheduler1, err := NewScheduler(tmpDir, 0, 100, 60, 0, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to create scheduler: %v", err)
 	}
@@ -313,7 +314,7 @@ func TestScheduler_Checkpoint(t *testing.T) {
 	scheduler1.Stop()
 
 	// Create new scheduler - should recover state
-	scheduler2, err := NewScheduler(tmpDir, 0, 100, 60)
+	scheduler2, err := NewScheduler(tmpDir, 0, 100, 60, 0, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to create second scheduler: %v", err)
 	}
@@ -324,5 +325,130 @@ func TestScheduler_Checkpoint(t *testing.T) {
 	if stats.CurrentTick == 0 {
 		// Note: checkpoint might not have been written if interval not reached
 		t.Log("Checkpoint recovery: tick count is 0 (may be expected if no checkpoint written)")
+	}
+}
+
+
+// --- Adaptive Hydrator Tests ---
+
+func TestScheduler_SetHydratorIntervals(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	s, err := NewScheduler(tmpDir, 0, 100, 60, 0, nil, nil)
+	if err != nil {
+		t.Fatalf("Failed to create scheduler: %v", err)
+	}
+	defer s.Stop()
+
+	// Default intervals (set even when cold store is disabled)
+	if s.hydratorMinInterval != 5*time.Second {
+		t.Errorf("Expected default min interval 5s, got %v", s.hydratorMinInterval)
+	}
+	if s.hydratorMaxInterval != 5*time.Minute {
+		t.Errorf("Expected default max interval 5m, got %v", s.hydratorMaxInterval)
+	}
+	if s.hydratorInterval != 60*time.Second {
+		t.Errorf("Expected default interval 60s, got %v", s.hydratorInterval)
+	}
+
+	// Custom intervals
+	s.SetHydratorIntervals(10000, 120000) // 10s min, 120s max
+	if s.hydratorMinInterval != 10*time.Second {
+		t.Errorf("Expected min interval 10s, got %v", s.hydratorMinInterval)
+	}
+	if s.hydratorMaxInterval != 2*time.Minute {
+		t.Errorf("Expected max interval 2m, got %v", s.hydratorMaxInterval)
+	}
+
+	// Clamp: current interval should be within new bounds
+	if s.hydratorInterval < s.hydratorMinInterval {
+		t.Errorf("Interval %v should be clamped to min %v", s.hydratorInterval, s.hydratorMinInterval)
+	}
+	if s.hydratorInterval > s.hydratorMaxInterval {
+		t.Errorf("Interval %v should be clamped to max %v", s.hydratorInterval, s.hydratorMaxInterval)
+	}
+}
+
+func TestScheduler_AdaptHydratorInterval_Busy(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	s, err := NewScheduler(tmpDir, 0, 100, 60, 0, nil, nil)
+	if err != nil {
+		t.Fatalf("Failed to create scheduler: %v", err)
+	}
+	defer s.Stop()
+
+	base := 60 * time.Second
+	s.hydratorInterval = base
+
+	// Simulate high hydration — interval should shrink
+	s.adaptHydratorInterval(15000, 100*time.Millisecond)
+	if s.hydratorInterval >= base {
+		t.Errorf("Expected interval to decrease under high load, got %v (was %v)", s.hydratorInterval, base)
+	}
+	if s.hydratorInterval < s.hydratorMinInterval {
+		t.Errorf("Interval %v should not go below min %v", s.hydratorInterval, s.hydratorMinInterval)
+	}
+}
+
+func TestScheduler_AdaptHydratorInterval_Idle(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	s, err := NewScheduler(tmpDir, 0, 100, 60, 0, nil, nil)
+	if err != nil {
+		t.Fatalf("Failed to create scheduler: %v", err)
+	}
+	defer s.Stop()
+
+	base := 60 * time.Second
+	s.hydratorInterval = base
+
+	// Simulate idle — interval should grow
+	s.adaptHydratorInterval(0, 10*time.Millisecond)
+	if s.hydratorInterval <= base {
+		t.Errorf("Expected interval to increase when idle, got %v (was %v)", s.hydratorInterval, base)
+	}
+	if s.hydratorInterval > s.hydratorMaxInterval {
+		t.Errorf("Interval %v should not exceed max %v", s.hydratorInterval, s.hydratorMaxInterval)
+	}
+}
+
+func TestScheduler_AdaptHydratorInterval_GrowingColdStore(t *testing.T) {
+	// Use manual temp dir because Windows holds Pebble file handles briefly after Close.
+	tmpDir, err := os.MkdirTemp("", "scheduler-hydrator-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+
+	s, err := NewScheduler(tmpDir, 0, 100, 60, 60, nil, nil)
+	if err != nil {
+		os.RemoveAll(tmpDir)
+		t.Fatalf("Failed to create scheduler: %v", err)
+	}
+	defer func() {
+		s.Stop()
+		// Retry cleanup a few times on Windows
+		for i := 0; i < 20; i++ {
+			if err := os.RemoveAll(tmpDir); err == nil {
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}()
+
+	base := 60 * time.Second
+	s.hydratorInterval = base
+	s.lastColdStoreCount = 0
+
+	// Manually bump the cold store count by storing entries
+	// Since we have a cold store (hotWindowMinutes=60), we can use it
+	for i := 0; i < 1500; i++ {
+		s.coldStore.Store(int64(i), time.Now().UnixMilli()+2*60*60*1000) // 2 hours in future
+	}
+
+	// Simulate some hydration with a growing cold store
+	s.adaptHydratorInterval(50, 10*time.Millisecond)
+	if s.hydratorInterval >= base {
+		t.Errorf("Expected interval to decrease when cold store is growing, got %v (was %v)", s.hydratorInterval, base)
 	}
 }

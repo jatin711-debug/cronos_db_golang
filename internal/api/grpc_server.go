@@ -1,23 +1,29 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"time"
 
+	"github.com/jatin711-debug/cronos_db_golang/internal/audit"
+	"github.com/jatin711-debug/cronos_db_golang/internal/auth"
 	"github.com/jatin711-debug/cronos_db_golang/internal/tracing"
+	"github.com/jatin711-debug/cronos_db_golang/internal/tx"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/reflection"
 )
 
 // GRPCServer represents the gRPC server
 type GRPCServer struct {
-	server   *grpc.Server
-	listener net.Listener
-	config   *Config
+	server    *grpc.Server
+	listener  net.Listener
+	config    *Config
+	txHandler *tx.Handler
 }
 
 // Config represents gRPC server configuration
@@ -30,6 +36,17 @@ type Config struct {
 	MaxConnectionIdle     time.Duration
 	MaxConnectionAge      time.Duration
 	MaxConnectionAgeGrace time.Duration
+	TLS                   *TLSConfig
+	Auth                  *auth.Config
+	TopicRateLimiter      *TopicRateLimiter
+	AuditLogger           *audit.Logger
+	VersionGate           *VersionGate
+	SLORecorder           SLORecorder
+}
+
+// SLORecorder is the minimal interface for SLO latency tracking.
+type SLORecorder interface {
+	Record(latency time.Duration, err bool)
 }
 
 // DefaultConfig returns default gRPC server configuration
@@ -48,14 +65,15 @@ func DefaultConfig() *Config {
 
 // NewGRPCServer creates a new gRPC server
 func NewGRPCServer(config *Config) *GRPCServer {
-	server := grpc.NewServer(
+	opts := []grpc.ServerOption{
 		grpc.MaxRecvMsgSize(config.MaxRecvMsgSize),
 		grpc.MaxSendMsgSize(config.MaxSendMsgSize),
-		grpc.MaxConcurrentStreams(10000),         // Prevent OOM from too many concurrent streams
-		grpc.InitialWindowSize(16*1024*1024),     // 16MB stream flow control window
-		grpc.InitialConnWindowSize(32*1024*1024), // 32MB connection flow control window
-		grpc.WriteBufferSize(4*1024*1024),        // 4MB write buffer
-		grpc.ReadBufferSize(4*1024*1024),         // 4MB read buffer
+		grpc.MaxConcurrentStreams(10000),
+		grpc.InitialWindowSize(16 * 1024 * 1024),
+		grpc.InitialConnWindowSize(32 * 1024 * 1024),
+		grpc.WriteBufferSize(4 * 1024 * 1024),
+		grpc.ReadBufferSize(4 * 1024 * 1024),
+		grpc.ConnectionTimeout(30 * time.Second),
 		grpc.KeepaliveParams(keepalive.ServerParameters{
 			Time:    config.KeepaliveMinTime,
 			Timeout: config.KeepaliveTimeout,
@@ -66,15 +84,54 @@ func NewGRPCServer(config *Config) *GRPCServer {
 		}),
 		grpc.ChainUnaryInterceptor(
 			tracing.GRPCServerInterceptor(),
+			SLOUnaryInterceptor(config.SLORecorder),
+			VersionInterceptor(config.VersionGate),
+			auth.Interceptor(config.Auth),
+			TopicRateLimitInterceptor(config.TopicRateLimiter),
+			AuditUnaryInterceptor(config.AuditLogger),
 			MetricsInterceptor(),
-			RateLimitInterceptor(1000000.0, 2000000.0), // 1M req/s, burst of 2M per IP for load testing
+			RateLimitInterceptor(1000000.0, 2000000.0),
 		),
-	)
+		grpc.ChainStreamInterceptor(
+			auth.StreamInterceptor(config.Auth),
+			AuditStreamInterceptor(config.AuditLogger),
+		),
+	}
+
+	if config.TLS != nil && config.TLS.Enabled {
+		tlsCfg, err := BuildServerTLSConfig(config.TLS)
+		if err != nil {
+			// Log and continue without TLS rather than panic
+			fmt.Printf("[GRPC] TLS config error: %v; starting without TLS\n", err)
+		} else if tlsCfg != nil {
+			opts = append(opts, grpc.Creds(credentials.NewTLS(tlsCfg)))
+		}
+	}
+
+	server := grpc.NewServer(opts...)
 
 	return &GRPCServer{
 		server: server,
 		config: config,
 	}
+}
+
+// SLOUnaryInterceptor records request latency and error status for SLO tracking.
+func SLOUnaryInterceptor(recorder SLORecorder) grpc.UnaryServerInterceptor {
+	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp interface{}, err error) {
+		if recorder == nil {
+			return handler(ctx, req)
+		}
+		start := time.Now()
+		resp, err = handler(ctx, req)
+		recorder.Record(time.Since(start), err != nil)
+		return resp, err
+	}
+}
+
+// SetTransactionHandler sets the transaction service handler.
+func (g *GRPCServer) SetTransactionHandler(h *tx.Handler) {
+	g.txHandler = h
 }
 
 // RegisterServices registers all gRPC services
@@ -90,6 +147,24 @@ func (g *GRPCServer) RegisterServices(
 	if partitionHandler != nil {
 		types.RegisterPartitionServiceServer(g.server, partitionHandler)
 	}
+	if g.txHandler != nil {
+		types.RegisterTransactionServiceServer(g.server, g.txHandler)
+	}
+}
+
+// RegisterCrossRegionServer registers the cross-region replication service.
+func (g *GRPCServer) RegisterCrossRegionServer(srv types.CrossRegionServiceServer) {
+	types.RegisterCrossRegionServiceServer(g.server, srv)
+}
+
+// RegisterReplicationServer registers the internal replication service.
+func (g *GRPCServer) RegisterReplicationServer(srv types.ReplicationServiceServer) {
+	types.RegisterReplicationServiceServer(g.server, srv)
+}
+
+// RegisterRaftServer registers the internal raft metadata service.
+func (g *GRPCServer) RegisterRaftServer(srv types.RaftServiceServer) {
+	types.RegisterRaftServiceServer(g.server, srv)
 }
 
 // Start starts the gRPC server

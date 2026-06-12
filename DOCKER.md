@@ -82,6 +82,53 @@ docker volume inspect cronos_db_cronos-data
 | `CRONOS_HTTP_ADDR` | `0.0.0.0:8080` | HTTP health check address |
 | `CRONOS_CLUSTER` | `false` | Enable cluster mode |
 | `CRONOS_CLUSTER_SEEDS` | (none) | Comma-separated seed addresses |
+| `CRONOS_TRACING_ENABLED` | `false` | Enable OpenTelemetry tracing |
+| `CRONOS_TRACING_EXPORTER` | `otlp` | Tracing exporter (`none`, `stdout`, `otlp`) |
+| `CRONOS_TRACING_OTLP_ENDPOINT` | `otel-collector:4317` | OTLP gRPC endpoint |
+| `CRONOS_TRACING_SAMPLE_RATIO` | `0.01` | Trace sampling ratio (0.0-1.0) |
+| `CRONOS_TRACING_INSECURE` | `true` | Disable TLS for OTLP exporter |
+
+## Observability Stack (Grafana + Prometheus + Tempo + OTEL Collector)
+
+### Start observability services
+
+```bash
+make observability-up
+```
+
+### Start app tracing with low overhead sampling
+
+Use 1% sampling to keep throughput impact minimal:
+
+```bash
+# Linux/macOS
+CRONOS_TRACING_ENABLED=true \
+CRONOS_TRACING_EXPORTER=otlp \
+CRONOS_TRACING_OTLP_ENDPOINT=127.0.0.1:4317 \
+CRONOS_TRACING_SAMPLE_RATIO=0.01 \
+make node1
+```
+
+```powershell
+# Windows PowerShell
+$env:CRONOS_TRACING_ENABLED="true"
+$env:CRONOS_TRACING_EXPORTER="otlp"
+$env:CRONOS_TRACING_OTLP_ENDPOINT="127.0.0.1:4317"
+$env:CRONOS_TRACING_SAMPLE_RATIO="0.01"
+make node1
+```
+
+### Open dashboards
+
+- Grafana: `http://localhost:3000` (admin/admin)
+- Prometheus: `http://localhost:9090`
+- Tempo API: `http://localhost:3200`
+
+### Stop observability services
+
+```bash
+make observability-down
+```
 
 ## Common Commands
 

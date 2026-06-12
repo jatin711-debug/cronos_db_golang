@@ -24,7 +24,7 @@ func TestWAL_AppendAndRead(t *testing.T) {
 		FlushIntervalMS:  100,
 	}
 
-	wal, err := NewWAL(tmpDir, 0, config)
+	wal, err := NewWAL(tmpDir, 0, config, nil)
 	if err != nil {
 		t.Fatalf("Failed to create WAL: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestWAL_SegmentRotation(t *testing.T) {
 		FlushIntervalMS:  100,
 	}
 
-	wal, err := NewWAL(tmpDir, 0, config)
+	wal, err := NewWAL(tmpDir, 0, config, nil)
 	if err != nil {
 		t.Fatalf("Failed to create WAL: %v", err)
 	}
@@ -181,7 +181,7 @@ func TestSegment_ReadEvent(t *testing.T) {
 	defer os.RemoveAll(tmpDir)
 
 	// Create segment
-	segment, err := NewSegment(tmpDir, 0, true)
+	segment, err := NewSegment(tmpDir, 0, true, nil)
 	if err != nil {
 		t.Fatalf("Failed to create segment: %v", err)
 	}
@@ -231,7 +231,7 @@ func TestWAL_Recovery(t *testing.T) {
 	}
 
 	// Create and write to WAL
-	wal1, err := NewWAL(tmpDir, 0, config)
+	wal1, err := NewWAL(tmpDir, 0, config, nil)
 	if err != nil {
 		t.Fatalf("Failed to create WAL: %v", err)
 	}
@@ -251,7 +251,7 @@ func TestWAL_Recovery(t *testing.T) {
 	wal1.Close()
 
 	// Reopen WAL (simulates recovery)
-	wal2, err := NewWAL(tmpDir, 0, config)
+	wal2, err := NewWAL(tmpDir, 0, config, nil)
 	if err != nil {
 		t.Fatalf("Failed to reopen WAL: %v", err)
 	}
@@ -280,7 +280,7 @@ func TestSegment_Metadata(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	segment, err := NewSegment(tmpDir, 100, true)
+	segment, err := NewSegment(tmpDir, 100, true, nil)
 	if err != nil {
 		t.Fatalf("Failed to create segment: %v", err)
 	}

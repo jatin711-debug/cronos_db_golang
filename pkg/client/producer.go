@@ -12,7 +12,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jatin711-debug/cronos_db_golang/pkg/client/internal/circuitbreaker"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/client/internal/errs"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/client/internal/hedging"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/client/internal/retry"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
@@ -86,13 +88,8 @@ type ProducerConfig struct {
 	BlockOnQueueFull bool
 	MaxInFlight      int
 	MaxQueuedBytes   int64
-	CircuitBreaker   CircuitBreakerConfig
-}
-
-// CircuitBreakerConfig controls producer circuit breaker behavior.
-type CircuitBreakerConfig struct {
-	FailureThreshold int
-	Cooldown         time.Duration
+	CircuitBreaker   circuitbreaker.Config
+	Hedging          hedging.Policy
 }
 
 // DefaultProducerConfig returns safe producer defaults.
@@ -107,10 +104,12 @@ func DefaultProducerConfig() ProducerConfig {
 		BlockOnQueueFull:      true,
 		MaxInFlight:           1024,
 		MaxQueuedBytes:        256 * 1024 * 1024, // 256MB async queue cap
-		CircuitBreaker: CircuitBreakerConfig{
-			FailureThreshold: 0,
-			Cooldown:         5 * time.Second,
+		CircuitBreaker: circuitbreaker.Config{
+			FailureThreshold: 0, // disabled by default
+			SuccessThreshold: 2,
+			Timeout:          5 * time.Second,
 		},
+		Hedging: hedging.DefaultPolicy(),
 	}
 }
 
@@ -132,7 +131,7 @@ type Producer struct {
 	closed      atomic.Bool
 	queuedBytes atomic.Int64
 	wg          sync.WaitGroup
-	breaker     circuitBreaker
+	cb          *circuitbreaker.CircuitBreaker
 }
 
 // NewProducer creates a producer bound to a client.
@@ -161,20 +160,21 @@ func NewProducer(client *Client, cfg ProducerConfig) (*Producer, error) {
 	if cfg.MaxPayloadBytes <= 0 {
 		cfg.MaxPayloadBytes = client.cfg.MaxSendMsgSize
 	}
-	if cfg.CircuitBreaker.Cooldown <= 0 {
-		cfg.CircuitBreaker.Cooldown = 5 * time.Second
+	if cfg.CircuitBreaker.Timeout <= 0 {
+		cfg.CircuitBreaker.Timeout = 5 * time.Second
 	}
 
+	var cb *circuitbreaker.CircuitBreaker
+	if cfg.CircuitBreaker.FailureThreshold > 0 {
+		cb = circuitbreaker.New(cfg.CircuitBreaker)
+	}
 	p := &Producer{
 		client:      client,
 		cfg:         cfg,
 		partitioner: cfg.Partitioner,
 		queue:       make(chan asyncSendRequest, cfg.AsyncQueueSize),
 		inFlight:    make(chan struct{}, cfg.MaxInFlight),
-		breaker: circuitBreaker{
-			threshold: cfg.CircuitBreaker.FailureThreshold,
-			cooldown:  cfg.CircuitBreaker.Cooldown,
-		},
+		cb:          cb,
 	}
 	for i := 0; i < cfg.AsyncWorkers; i++ {
 		p.wg.Add(1)
@@ -190,7 +190,7 @@ func (c *Client) NewProducer(cfg ProducerConfig) (*Producer, error) {
 
 // Send publishes one message synchronously.
 func (p *Producer) Send(ctx context.Context, msg Message) (*SendResult, error) {
-	if !p.breaker.Allow() {
+	if p.cb != nil && !p.cb.Allow() {
 		return nil, p.wrapErr("producer.send", ErrorKindUnavailable, ErrCircuitOpen)
 	}
 	if err := p.acquireInFlight(ctx); err != nil {
@@ -226,22 +226,56 @@ func (p *Producer) Send(ctx context.Context, msg Message) (*SendResult, error) {
 		allowDuplicate := p.cfg.DefaultAllowDuplicate || msg.AllowDuplicate
 		shouldRetry := false
 
-		for _, addr := range route.CandidateAddresses {
-			client, err := p.client.eventClientForAddress(addr)
-			if err != nil {
-				lastErr = err
-				continue
+		// Hedging: on first attempt with multiple addresses, try candidates in parallel
+		if attempt == 0 && p.cfg.Hedging.Enabled && len(route.CandidateAddresses) > 1 {
+			type hedgeResult struct {
+				resp *types.PublishResponse
+				addr string
 			}
-
-			reqCtx, cancel := p.client.requestContext(ctx)
-			start := time.Now()
-			resp, err := client.Publish(reqCtx, &types.PublishRequest{
-				Event:          event,
-				AllowDuplicate: allowDuplicate,
+			var addrIdx atomic.Int32
+			hedgeRes, hedgeErr := hedging.Do[hedgeResult](ctx, p.cfg.Hedging, func(hctx context.Context) (hedgeResult, error) {
+				idx := int(addrIdx.Add(1) - 1)
+				if idx >= len(route.CandidateAddresses) {
+					return hedgeResult{}, fmt.Errorf("exhausted hedge candidates")
+				}
+				addr := route.CandidateAddresses[idx]
+				resp, err := p.tryPublish(hctx, addr, event, allowDuplicate)
+				return hedgeResult{resp: resp, addr: addr}, err
 			})
-			cancel()
-			p.client.observeRequest("event.publish", addr, start, err)
+			if hedgeErr == nil && hedgeRes.resp != nil {
+				if hedgeRes.resp.GetSuccess() {
+					if p.cb != nil {
+						p.cb.RecordSuccess()
+					}
+					return &SendResult{
+						MessageID:   msg.MessageID,
+						PartitionID: hedgeRes.resp.GetPartitionId(),
+						Offset:      hedgeRes.resp.GetOffset(),
+						ScheduleTS:  hedgeRes.resp.GetScheduleTs(),
+						NodeAddress: hedgeRes.addr,
+						LeaderID:    route.LeaderID,
+					}, nil
+				}
+				lastErr = errors.New(hedgeRes.resp.GetError())
+				if isLeaderRelatedMessage(hedgeRes.resp.GetError()) {
+					p.client.MarkMetadataStale()
+					shouldRetry = true
+				}
+			} else if hedgeErr != nil {
+				lastErr = hedgeErr
+				if errs.IsLeaderRelated(hedgeErr) {
+					p.client.MarkMetadataStale()
+					shouldRetry = true
+				}
+				if errs.IsRetryable(hedgeErr) {
+					shouldRetry = true
+				}
+			}
+		}
 
+		// Normal sequential retry through candidates
+		for _, addr := range route.CandidateAddresses {
+			resp, err := p.tryPublish(ctx, addr, event, allowDuplicate)
 			if err != nil {
 				lastErr = err
 				if errs.IsLeaderRelated(err) {
@@ -252,7 +286,9 @@ func (p *Producer) Send(ctx context.Context, msg Message) (*SendResult, error) {
 					shouldRetry = true
 					continue
 				}
-				p.breaker.RecordFailure()
+				if p.cb != nil {
+					p.cb.RecordFailure()
+				}
 				return nil, p.wrapErr("producer.send", ErrorKindTransport, err)
 			}
 			if resp == nil {
@@ -261,7 +297,9 @@ func (p *Producer) Send(ctx context.Context, msg Message) (*SendResult, error) {
 				continue
 			}
 			if resp.GetSuccess() {
-				p.breaker.RecordSuccess()
+				if p.cb != nil {
+					p.cb.RecordSuccess()
+				}
 				return &SendResult{
 					MessageID:   msg.MessageID,
 					PartitionID: resp.GetPartitionId(),
@@ -278,7 +316,9 @@ func (p *Producer) Send(ctx context.Context, msg Message) (*SendResult, error) {
 				shouldRetry = true
 				continue
 			}
-			p.breaker.RecordFailure()
+			if p.cb != nil {
+				p.cb.RecordFailure()
+			}
 			return nil, p.wrapErr("producer.send", ErrorKindValidation, lastErr)
 		}
 
@@ -290,8 +330,27 @@ func (p *Producer) Send(ctx context.Context, msg Message) (*SendResult, error) {
 	if lastErr == nil {
 		lastErr = fmt.Errorf("publish failed after %d attempts", p.cfg.RetryPolicy.MaxAttempts)
 	}
-	p.breaker.RecordFailure()
+	if p.cb != nil {
+		p.cb.RecordFailure()
+	}
 	return nil, p.wrapErr("producer.send", ErrorKindUnavailable, lastErr)
+}
+
+// tryPublish sends a single publish request to the given address.
+func (p *Producer) tryPublish(ctx context.Context, addr string, event *types.Event, allowDuplicate bool) (*types.PublishResponse, error) {
+	client, err := p.client.eventClientForAddress(addr)
+	if err != nil {
+		return nil, err
+	}
+	reqCtx, cancel := p.client.requestContext(ctx)
+	defer cancel()
+	start := time.Now()
+	resp, err := client.Publish(reqCtx, &types.PublishRequest{
+		Event:          event,
+		AllowDuplicate: allowDuplicate,
+	})
+	p.client.observeRequest("event.publish", addr, start, err)
+	return resp, err
 }
 
 // SendBatch publishes a set of messages.
@@ -702,52 +761,6 @@ func estimateMessageBytes(msg Message) int64 {
 
 // ErrCircuitOpen indicates producer circuit breaker is open.
 var ErrCircuitOpen = errors.New("producer circuit breaker is open")
-
-type circuitBreaker struct {
-	mu sync.Mutex
-
-	threshold int
-	cooldown  time.Duration
-
-	failures  int
-	openUntil time.Time
-}
-
-func (c *circuitBreaker) Allow() bool {
-	if c.threshold <= 0 {
-		return true
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.openUntil.IsZero() || time.Now().After(c.openUntil) {
-		return true
-	}
-	return false
-}
-
-func (c *circuitBreaker) RecordSuccess() {
-	if c.threshold <= 0 {
-		return
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.failures = 0
-	c.openUntil = time.Time{}
-}
-
-func (c *circuitBreaker) RecordFailure() {
-	if c.threshold <= 0 {
-		return
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.failures++
-	if c.failures < c.threshold {
-		return
-	}
-	c.failures = 0
-	c.openUntil = time.Now().Add(c.cooldown)
-}
 
 type deliveryOutcome struct {
 	result *SendResult

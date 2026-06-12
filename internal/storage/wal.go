@@ -54,6 +54,8 @@ type WAL struct {
 	dirty              atomic.Bool // Set on write, cleared on flush
 	quit               chan struct{}
 	wg                 sync.WaitGroup
+	cipher             *SegmentCipher
+	appendHook         func(event *types.Event) // Called after successful append (e.g. CDC)
 }
 
 // WALConfig represents WAL configuration
@@ -65,7 +67,7 @@ type WALConfig struct {
 }
 
 // NewWAL creates a new WAL
-func NewWAL(dataDir string, partitionID int32, config *WALConfig) (*WAL, error) {
+func NewWAL(dataDir string, partitionID int32, config *WALConfig, cipher *SegmentCipher) (*WAL, error) {
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		return nil, fmt.Errorf("create data dir: %w", err)
 	}
@@ -79,6 +81,7 @@ func NewWAL(dataDir string, partitionID int32, config *WALConfig) (*WAL, error) 
 		config:        config,
 		fsyncMode:     ParseFsyncMode(config.FsyncMode),
 		quit:          make(chan struct{}),
+		cipher:        cipher,
 	}
 
 	// Load existing segments
@@ -98,6 +101,11 @@ func NewWAL(dataDir string, partitionID int32, config *WALConfig) (*WAL, error) 
 	}
 
 	return wal, nil
+}
+
+// SetAppendHook registers a callback invoked after each successful event append.
+func (w *WAL) SetAppendHook(hook func(event *types.Event)) {
+	w.appendHook = hook
 }
 
 // loadSegments loads existing segments
@@ -128,7 +136,7 @@ func (w *WAL) loadSegments() error {
 
 	// Load each segment
 	for _, filename := range segmentFiles {
-		segment, err := OpenSegment(w.dataDir, filename)
+		segment, err := OpenSegment(w.dataDir, filename, w.cipher)
 		if err != nil {
 			return fmt.Errorf("open segment %s: %w", filename, err)
 		}
@@ -286,6 +294,13 @@ func (w *WAL) AppendBatch(events []*types.Event) error {
 	w.highWatermark = events[len(events)-1].Offset
 	w.dirty.Store(true)
 
+	// Emit CDC events if hook is registered
+	if w.appendHook != nil {
+		for _, event := range events {
+			w.appendHook(event)
+		}
+	}
+
 	// Sync inline only for every_event mode.
 	if w.fsyncMode == FsyncEveryEvent {
 		if err := w.activeSegment.FlushBuffer(); err != nil {
@@ -341,7 +356,7 @@ func (w *WAL) maybePreCreateNextSegment(nextOffset int64) {
 	}
 	w.nextSegMu.Unlock()
 
-	seg, err := NewSegment(w.dataDir, nextOffset, true)
+	seg, err := NewSegment(w.dataDir, nextOffset, true, w.cipher)
 	if err != nil {
 		log.Printf("[WAL-%d] failed to pre-create next segment: %v", w.partitionID, err)
 		w.preCreateTriggered.Store(false)
@@ -368,7 +383,7 @@ func (w *WAL) openActiveSegment() error {
 	}
 
 	// Create new active segment
-	segment, err := NewSegment(w.dataDir, w.nextOffset, true)
+	segment, err := NewSegment(w.dataDir, w.nextOffset, true, w.cipher)
 	if err != nil {
 		return fmt.Errorf("create new segment: %w", err)
 	}
@@ -412,6 +427,11 @@ func (w *WAL) AppendEvent(event *types.Event) error {
 	w.highWatermark = event.Offset
 	w.dirty.Store(true)
 
+	// Emit CDC event if hook is registered
+	if w.appendHook != nil {
+		w.appendHook(event)
+	}
+
 	// Sync inline for every_event mode
 	if w.fsyncMode == FsyncEveryEvent {
 		if err := w.activeSegment.FlushBuffer(); err != nil {
@@ -451,31 +471,41 @@ func (w *WAL) AppendEvent(event *types.Event) error {
 // rotateSegment swaps to the pre-created next segment if available,
 // otherwise falls back to synchronous creation.
 func (w *WAL) rotateSegment() error {
-	// Close current active segment
-	if err := w.activeSegment.Close(); err != nil {
-		return fmt.Errorf("close active segment: %w", err)
-	}
+	var nextSeg *Segment
 
 	// Try to use pre-created segment
 	w.nextSegMu.Lock()
 	if w.nextSegment != nil {
-		w.segments = append(w.segments, w.nextSegment)
-		w.activeSegment = w.nextSegment
+		nextSeg = w.nextSegment
 		w.nextSegment = nil
-		w.nextSegMu.Unlock()
-		w.preCreateTriggered.Store(false)
-		return nil
 	}
 	w.nextSegMu.Unlock()
 
-	// Fallback: create synchronously
-	newSegment, err := NewSegment(w.dataDir, w.nextOffset, true)
-	if err != nil {
-		return fmt.Errorf("create new active segment: %w", err)
+	if nextSeg == nil {
+		// Fallback: create synchronously
+		var err error
+		nextSeg, err = NewSegment(w.dataDir, w.nextOffset, true, w.cipher)
+		if err != nil {
+			return fmt.Errorf("create new active segment: %w", err)
+		}
 	}
-	w.segments = append(w.segments, newSegment)
-	w.activeSegment = newSegment
+
+	// Now we have the new segment ready!
+	oldActive := w.activeSegment
+	w.segments = append(w.segments, nextSeg)
+	w.activeSegment = nextSeg
 	w.preCreateTriggered.Store(false)
+
+	// Now close the old active segment safely
+	if oldActive != nil {
+		oldActive.mu.Lock()
+		oldActive.isActive = false // mark old segment as inactive
+		oldActive.mu.Unlock()
+		if err := oldActive.Close(); err != nil {
+			log.Printf("Failed to close rotated WAL segment: %v", err)
+			// Don't fail the rotation because the new active segment is already open and active!
+		}
+	}
 
 	return nil
 }
@@ -509,6 +539,27 @@ func (w *WAL) ReadEvents(startOffset, endOffset int64) ([]*types.Event, error) {
 	}
 
 	return result, nil
+}
+
+// ReadEvent reads a single event by offset
+func (w *WAL) ReadEvent(offset int64) (*types.Event, error) {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+
+	for _, segment := range w.segments {
+		if segment.GetFirstOffset() > offset || segment.GetLastOffset() < offset {
+			continue
+		}
+		event, err := segment.ReadEvent(offset)
+		if err != nil {
+			return nil, fmt.Errorf("read event at offset %d from segment %s: %w", offset, segment.GetFilename(), err)
+		}
+		if event != nil {
+			event.PartitionId = w.partitionID
+			return event, nil
+		}
+	}
+	return nil, fmt.Errorf("event at offset %d not found", offset)
 }
 
 // ReadEventsByTime reads events in timestamp range
@@ -619,10 +670,18 @@ func (w *WAL) Close() error {
 
 	if w.activeSegment != nil {
 		// Final flush + sync before close
-		_ = w.activeSegment.FlushBuffer()
-		_ = w.activeSegment.Sync()
-		if err := w.activeSegment.Close(); err != nil {
-			return err
+		var closeErr error
+		if err := w.activeSegment.FlushBuffer(); err != nil {
+			closeErr = fmt.Errorf("flush active segment: %w", err)
+		}
+		if err := w.activeSegment.Sync(); err != nil && closeErr == nil {
+			closeErr = fmt.Errorf("sync active segment: %w", err)
+		}
+		if err := w.activeSegment.Close(); err != nil && closeErr == nil {
+			closeErr = fmt.Errorf("close active segment: %w", err)
+		}
+		if closeErr != nil {
+			return closeErr
 		}
 	}
 

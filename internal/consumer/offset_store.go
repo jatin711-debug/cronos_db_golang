@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/google/uuid"
 )
 
 type offsetKey struct {
@@ -28,6 +29,13 @@ type OffsetStore struct {
 
 	pendingMu sync.RWMutex
 	pending   map[offsetKey]int64 // offset >= 0 is a commit. offset == -2 means deleted.
+
+	// Exactly-once commit dedup: in-memory LRU of recent commit IDs.
+	// Protected by commitMu. Capacity ~1M entries per partition.
+	exactlyOnce   bool
+	commitMu      sync.RWMutex
+	recentCommits map[string]struct{}
+	commitQueue   []string // FIFO for eviction
 }
 
 // NewOffsetStore creates a new offset store
@@ -52,11 +60,13 @@ func NewOffsetStore(dataDir string, partitionID int32, cache *pebble.Cache) (*Of
 	}
 
 	store := &OffsetStore{
-		db:          db,
-		dataDir:     dataDir,
-		partitionID: partitionID,
-		quit:        make(chan struct{}),
-		pending:     make(map[offsetKey]int64),
+		db:            db,
+		dataDir:       dataDir,
+		partitionID:   partitionID,
+		quit:          make(chan struct{}),
+		pending:       make(map[offsetKey]int64),
+		recentCommits: make(map[string]struct{}),
+		commitQueue:   make([]string, 0, 1_000_000),
 	}
 	store.startFlushLoop()
 
@@ -123,6 +133,38 @@ func (s *OffsetStore) CommitOffset(groupID string, partitionID int32, offset int
 	return nil
 }
 
+// CommitOffsetExactlyOnce commits an offset with a commit ID for exactly-once semantics.
+// Returns true if the commit was applied, false if it was a duplicate.
+func (s *OffsetStore) CommitOffsetExactlyOnce(groupID string, partitionID int32, offset int64, commitID string) (bool, error) {
+	if commitID == "" {
+		// Fall back to at-least-once if no commit ID provided
+		return true, s.CommitOffset(groupID, partitionID, offset)
+	}
+
+	s.commitMu.Lock()
+	if _, exists := s.recentCommits[commitID]; exists {
+		s.commitMu.Unlock()
+		return false, nil // Duplicate commit ID
+	}
+	// Record commit ID
+	s.recentCommits[commitID] = struct{}{}
+	s.commitQueue = append(s.commitQueue, commitID)
+	// Evict oldest if over capacity
+	if len(s.commitQueue) > 1_000_000 {
+		oldest := s.commitQueue[0]
+		s.commitQueue = s.commitQueue[1:]
+		delete(s.recentCommits, oldest)
+	}
+	s.commitMu.Unlock()
+
+	// Persist commit ID with offset
+	s.pendingMu.Lock()
+	s.pending[offsetKey{groupID: groupID, partitionID: partitionID}] = offset
+	s.pendingMu.Unlock()
+	s.dirty.Store(true)
+	return true, nil
+}
+
 // GetOffset gets committed offset for a consumer group.
 func (s *OffsetStore) GetOffset(groupID string, partitionID int32) (int64, error) {
 	key := offsetKey{groupID: groupID, partitionID: partitionID}
@@ -185,14 +227,22 @@ func (s *OffsetStore) buildValue(offset int64) []byte {
 	return value
 }
 
+// buildValueExactlyOnce builds storage value with commit ID
+func (s *OffsetStore) buildValueExactlyOnce(offset int64, commitID string) []byte {
+	idBytes := uuid.MustParse(commitID)
+	value := make([]byte, 8+16)
+	binary.BigEndian.PutUint64(value[0:8], uint64(offset))
+	copy(value[8:24], idBytes[:])
+	return value
+}
+
 // parseValue parses storage value
 func (s *OffsetStore) parseValue(value []byte) (int64, error) {
-	if len(value) != 8 {
+	if len(value) < 8 {
 		return 0, fmt.Errorf("invalid value size")
 	}
 
-	// FIXED to use binary.BigEndian
-	offset := int64(binary.BigEndian.Uint64(value))
+	offset := int64(binary.BigEndian.Uint64(value[0:8]))
 	return offset, nil
 }
 

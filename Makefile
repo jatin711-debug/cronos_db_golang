@@ -6,8 +6,10 @@
 .DEFAULT_GOAL := help
 
 .PHONY: help print-config build ensure-build-dir rust-dedup test proto clean clean-data \
-	verify-env lint ci node1 node2 node3 cluster loadtest loadtest-batch loadtest-max loadtest-small health \
-	docker docker-build docker-single docker-cluster docker-logs docker-down docker-clean
+	verify-env verify-tag-env verify-release-env tag-preflight release-preflight lint ci tag tag-push release publish \
+	node1 node2 node3 cluster loadtest loadtest-batch loadtest-max loadtest-small health \
+	docker docker-build docker-single docker-cluster docker-logs docker-down docker-clean \
+	observability-up observability-down
 
 # -----------------------------------------------------------------------------
 # Tooling and build settings
@@ -23,6 +25,25 @@ RUST_PROFILE ?= release
 RUST_LIB_BASENAME ?= cronos_dedup
 
 DOCKER_COMPOSE ?= docker compose
+REMOTE ?= origin
+VERSION ?=
+RELEASE_TITLE ?= CronosDB $(VERSION)
+RELEASE_NOTES_FILE ?=
+RELEASE_DRAFT ?= false
+RELEASE_PRERELEASE ?= false
+
+GH_RELEASE_NOTES_ARGS := --generate-notes
+ifneq ($(strip $(RELEASE_NOTES_FILE)),)
+GH_RELEASE_NOTES_ARGS := --notes-file "$(RELEASE_NOTES_FILE)"
+endif
+
+GH_RELEASE_EXTRA_FLAGS :=
+ifeq ($(RELEASE_DRAFT),true)
+GH_RELEASE_EXTRA_FLAGS += --draft
+endif
+ifeq ($(RELEASE_PRERELEASE),true)
+GH_RELEASE_EXTRA_FLAGS += --prerelease
+endif
 
 CARGO_PROFILE_FLAG := --release
 ifneq ($(RUST_PROFILE),release)
@@ -50,6 +71,17 @@ VERIFY_CARGO_CMD = where cargo >NUL 2>&1 || (echo [verify-env] Missing required 
 VERIFY_PROTOC_CMD = where protoc >NUL 2>&1 || (echo [verify-env] Missing required tool: protoc && exit /b 1)
 VERIFY_DOCKER_CMD = where docker >NUL 2>&1 || (echo [verify-env] Missing required tool: docker && exit /b 1)
 VERIFY_DOCKER_COMPOSE_CMD = docker compose version >NUL 2>&1 || (echo [verify-env] Missing required tool: docker compose && exit /b 1)
+VERIFY_GIT_CMD = where git >NUL 2>&1 || (echo [verify-tag-env] Missing required tool: git && exit /b 1)
+VERIFY_GH_CMD = where gh >NUL 2>&1 || (echo [verify-release-env] Missing required tool: gh && exit /b 1)
+VERIFY_GH_AUTH_CMD = gh auth status >NUL 2>&1 || (echo [verify-release-env] Not authenticated. Run: gh auth login && exit /b 1)
+
+REQUIRE_VERSION_CMD = powershell -NoProfile -Command "if ([string]::IsNullOrWhiteSpace('$(VERSION)')) { Write-Error 'VERSION is required. Example: make tag VERSION=v0.2.1'; exit 1 }"
+VALIDATE_VERSION_CMD = powershell -NoProfile -Command "if ('$(VERSION)' -notmatch '^v\d+\.\d+\.\d+([.-][0-9A-Za-z.-]+)?$$') { Write-Error 'VERSION must look like vMAJOR.MINOR.PATCH'; exit 1 }"
+VERIFY_GIT_CLEAN_CMD = powershell -NoProfile -Command "$$s = git status --porcelain; if ($$s) { Write-Error 'Working tree not clean. Commit or stash changes before tagging.'; exit 1 }"
+VERIFY_TAG_EXISTS_LOCAL_CMD = powershell -NoProfile -Command "git rev-parse -q --verify refs/tags/$(VERSION) 2>$$null >$$null; if ($$LASTEXITCODE -ne 0) { Write-Error 'Missing local tag $(VERSION). Run make tag VERSION=$(VERSION) first.'; exit 1 }"
+VERIFY_TAG_ABSENT_LOCAL_CMD = powershell -NoProfile -Command "git rev-parse -q --verify refs/tags/$(VERSION) 2>$$null >$$null; if ($$LASTEXITCODE -eq 0) { Write-Error 'Tag already exists locally: $(VERSION)'; exit 1 }"
+VERIFY_TAG_EXISTS_REMOTE_CMD = powershell -NoProfile -Command "$$r = git ls-remote --tags $(REMOTE) refs/tags/$(VERSION); if (-not $$r) { Write-Error 'Tag $(VERSION) not found on remote $(REMOTE). Run make tag-push VERSION=$(VERSION).'; exit 1 }"
+VERIFY_TAG_ABSENT_REMOTE_CMD = powershell -NoProfile -Command "$$r = git ls-remote --tags $(REMOTE) refs/tags/$(VERSION); if ($$r) { Write-Error 'Tag already exists on remote $(REMOTE): $(VERSION)'; exit 1 }"
 
 else
 UNAME_S := $(shell uname -s 2>/dev/null)
@@ -77,6 +109,17 @@ VERIFY_CARGO_CMD = command -v cargo >/dev/null 2>&1 || (echo '[verify-env] Missi
 VERIFY_PROTOC_CMD = command -v protoc >/dev/null 2>&1 || (echo '[verify-env] Missing required tool: protoc' && exit 1)
 VERIFY_DOCKER_CMD = command -v docker >/dev/null 2>&1 || (echo '[verify-env] Missing required tool: docker' && exit 1)
 VERIFY_DOCKER_COMPOSE_CMD = docker compose version >/dev/null 2>&1 || (echo '[verify-env] Missing required tool: docker compose' && exit 1)
+VERIFY_GIT_CMD = command -v git >/dev/null 2>&1 || (echo '[verify-tag-env] Missing required tool: git' && exit 1)
+VERIFY_GH_CMD = command -v gh >/dev/null 2>&1 || (echo '[verify-release-env] Missing required tool: gh' && exit 1)
+VERIFY_GH_AUTH_CMD = gh auth status >/dev/null 2>&1 || (echo '[verify-release-env] Not authenticated. Run: gh auth login' && exit 1)
+
+REQUIRE_VERSION_CMD = test -n "$(strip $(VERSION))" || (echo 'VERSION is required. Example: make tag VERSION=v0.2.1' && exit 1)
+VALIDATE_VERSION_CMD = printf '%s' "$(VERSION)" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$$' || (echo 'VERSION must look like vMAJOR.MINOR.PATCH' && exit 1)
+VERIFY_GIT_CLEAN_CMD = test -z "$$(git status --porcelain)" || (echo 'Working tree not clean. Commit or stash changes before tagging.' && exit 1)
+VERIFY_TAG_EXISTS_LOCAL_CMD = git rev-parse -q --verify refs/tags/$(VERSION) >/dev/null 2>&1 || (echo 'Missing local tag $(VERSION). Run make tag VERSION=$(VERSION) first.' && exit 1)
+VERIFY_TAG_ABSENT_LOCAL_CMD = ! git rev-parse -q --verify refs/tags/$(VERSION) >/dev/null 2>&1 || (echo 'Tag already exists locally: $(VERSION)' && exit 1)
+VERIFY_TAG_EXISTS_REMOTE_CMD = test -n "$$(git ls-remote --tags $(REMOTE) refs/tags/$(VERSION))" || (echo 'Tag $(VERSION) not found on remote $(REMOTE). Run make tag-push VERSION=$(VERSION).' && exit 1)
+VERIFY_TAG_ABSENT_REMOTE_CMD = test -z "$$(git ls-remote --tags $(REMOTE) refs/tags/$(VERSION))" || (echo 'Tag already exists on remote $(REMOTE): $(VERSION)' && exit 1)
 endif
 
 # -----------------------------------------------------------------------------
@@ -92,6 +135,11 @@ SEGMENT_SIZE_BYTES ?= 1073741824
 VIRTUAL_NODES ?= 2048
 MAX_CREDITS ?= 50000
 ACK_TIMEOUT ?= 60s
+TRACING_ENABLED ?= false
+TRACING_EXPORTER ?= otlp
+TRACING_OTLP_ENDPOINT ?= 127.0.0.1:4317
+TRACING_SAMPLE_RATIO ?= 0.01
+TRACING_INSECURE ?= true
 
 # Load test settings
 NODES ?= 3
@@ -127,6 +175,7 @@ help:
 	@echo   make node1          - Start node 1 (bootstrap)
 	@echo   make node2          - Start node 2 (joins node1)
 	@echo   make node3          - Start node 3 (joins node1)
+	@echo   (set TRACING_ENABLED=true to export traces with low sample ratio)
 	@echo   make cluster        - Print cluster startup order
 	@echo   make health         - Check node health endpoints
 	@echo.
@@ -139,6 +188,17 @@ help:
 	@echo   make docker         - Build image
 	@echo   make docker-single  - Start single-node container
 	@echo   make docker-cluster - Start 3-node container cluster
+	@echo.
+	@echo Observability
+	@echo   make observability-up   - Start Prometheus + Grafana + Tempo + OTEL Collector
+	@echo   make observability-down - Stop/remove observability services
+	@echo.
+	@echo Release
+	@echo   make tag VERSION=v0.2.1      - Create local annotated tag (requires clean git state)
+	@echo   make tag-push VERSION=v0.2.1 - Push an existing local tag to REMOTE (default: origin)
+	@echo   make release VERSION=v0.2.1  - Create GitHub Release from pushed tag using gh CLI
+	@echo   make publish VERSION=v0.2.1  - Run ci (includes rust-dedup), tag, push, and release
+	@echo   Optional overrides: REMOTE=origin RELEASE_NOTES_FILE=notes.md RELEASE_DRAFT=true RELEASE_PRERELEASE=true
 
 verify-env:
 	@echo Verifying required tools...
@@ -148,6 +208,26 @@ verify-env:
 	@$(VERIFY_DOCKER_CMD)
 	@$(VERIFY_DOCKER_COMPOSE_CMD)
 	@echo Environment verification passed.
+
+verify-tag-env:
+	@echo Verifying tag tooling...
+	@$(VERIFY_GIT_CMD)
+	@echo Tag tooling verification passed.
+
+verify-release-env: verify-tag-env
+	@echo Verifying release tooling...
+	@$(VERIFY_GH_CMD)
+	@$(VERIFY_GH_AUTH_CMD)
+	@echo Release tooling verification passed.
+
+tag-preflight: verify-tag-env
+	@$(REQUIRE_VERSION_CMD)
+	@$(VALIDATE_VERSION_CMD)
+	@$(VERIFY_GIT_CLEAN_CMD)
+
+release-preflight: verify-release-env
+	@$(REQUIRE_VERSION_CMD)
+	@$(VALIDATE_VERSION_CMD)
 
 lint:
 	@echo Running lint checks...
@@ -193,6 +273,37 @@ test: rust-dedup
 proto:
 	protoc --go_out=. --go-grpc_out=. proto/events.proto
 
+tag: tag-preflight
+	@$(VERIFY_TAG_ABSENT_LOCAL_CMD)
+	@$(VERIFY_TAG_ABSENT_REMOTE_CMD)
+	git tag -a $(VERSION) -m "release: $(VERSION)"
+	@echo Created tag $(VERSION)
+
+tag-push: verify-tag-env
+	@$(REQUIRE_VERSION_CMD)
+	@$(VALIDATE_VERSION_CMD)
+	@$(VERIFY_TAG_EXISTS_LOCAL_CMD)
+	@$(VERIFY_TAG_ABSENT_REMOTE_CMD)
+	git push $(REMOTE) $(VERSION)
+	@echo Pushed tag $(VERSION) to $(REMOTE)
+
+release: release-preflight
+	@$(VERIFY_TAG_EXISTS_LOCAL_CMD)
+	@$(VERIFY_TAG_EXISTS_REMOTE_CMD)
+	gh release create $(VERSION) --title "$(RELEASE_TITLE)" $(GH_RELEASE_NOTES_ARGS) $(GH_RELEASE_EXTRA_FLAGS)
+	@echo Created GitHub release for $(VERSION)
+
+publish: tag-preflight
+	@echo [publish] Step 1/4: ci (includes rust dedup build for $(PLATFORM))
+	@$(MAKE) ci
+	@echo [publish] Step 2/4: tag
+	@$(MAKE) tag VERSION=$(VERSION) REMOTE=$(REMOTE)
+	@echo [publish] Step 3/4: tag-push
+	@$(MAKE) tag-push VERSION=$(VERSION) REMOTE=$(REMOTE)
+	@echo [publish] Step 4/4: release
+	@$(MAKE) release VERSION=$(VERSION) REMOTE=$(REMOTE) RELEASE_TITLE="$(RELEASE_TITLE)" RELEASE_NOTES_FILE="$(RELEASE_NOTES_FILE)" RELEASE_DRAFT=$(RELEASE_DRAFT) RELEASE_PRERELEASE=$(RELEASE_PRERELEASE)
+	@echo Published $(VERSION)
+
 clean:
 	@$(CLEAN_BUILD_CMD)
 	@$(CLEAN_DATA_CMD)
@@ -214,6 +325,11 @@ node1: rust-dedup
 		--virtual-nodes=$(VIRTUAL_NODES) \
 		--max-credits=$(MAX_CREDITS) \
 		--ack-timeout=$(ACK_TIMEOUT) \
+		--tracing-enabled=$(TRACING_ENABLED) \
+		--tracing-exporter=$(TRACING_EXPORTER) \
+		--tracing-otlp-endpoint=$(TRACING_OTLP_ENDPOINT) \
+		--tracing-sample-ratio=$(TRACING_SAMPLE_RATIO) \
+		--tracing-insecure=$(TRACING_INSECURE) \
 		--data-dir=./data/node1 \
 		--grpc-addr=127.0.0.1:9000 \
 		--http-addr=127.0.0.1:8080 \
@@ -235,6 +351,11 @@ node2:
 		--virtual-nodes=$(VIRTUAL_NODES) \
 		--max-credits=$(MAX_CREDITS) \
 		--ack-timeout=$(ACK_TIMEOUT) \
+		--tracing-enabled=$(TRACING_ENABLED) \
+		--tracing-exporter=$(TRACING_EXPORTER) \
+		--tracing-otlp-endpoint=$(TRACING_OTLP_ENDPOINT) \
+		--tracing-sample-ratio=$(TRACING_SAMPLE_RATIO) \
+		--tracing-insecure=$(TRACING_INSECURE) \
 		--data-dir=./data/node2 \
 		--grpc-addr=127.0.0.1:9001 \
 		--http-addr=127.0.0.1:8081 \
@@ -257,6 +378,11 @@ node3:
 		--virtual-nodes=$(VIRTUAL_NODES) \
 		--max-credits=$(MAX_CREDITS) \
 		--ack-timeout=$(ACK_TIMEOUT) \
+		--tracing-enabled=$(TRACING_ENABLED) \
+		--tracing-exporter=$(TRACING_EXPORTER) \
+		--tracing-otlp-endpoint=$(TRACING_OTLP_ENDPOINT) \
+		--tracing-sample-ratio=$(TRACING_SAMPLE_RATIO) \
+		--tracing-insecure=$(TRACING_INSECURE) \
 		--data-dir=./data/node3 \
 		--grpc-addr=127.0.0.1:9002 \
 		--http-addr=127.0.0.1:8082 \
@@ -317,3 +443,10 @@ docker-down:
 
 docker-clean:
 	$(DOCKER_COMPOSE) down -v
+
+observability-up:
+	$(DOCKER_COMPOSE) --profile observability up -d prometheus tempo otel-collector grafana
+
+observability-down:
+	$(DOCKER_COMPOSE) --profile observability stop grafana prometheus tempo otel-collector
+	$(DOCKER_COMPOSE) --profile observability rm -f grafana prometheus tempo otel-collector

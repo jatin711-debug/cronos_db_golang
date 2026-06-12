@@ -15,10 +15,10 @@ It combines the durability of a write-ahead log, the precision of a hierarchical
 
 | Metric | Value |
 |--------|-------|
-| **Cluster Throughput** | **1,010,933 events/sec** |
-| **Publish Latency P50** | **105µs** |
-| **Publish Latency P99** | **468µs** |
-| **Success Rate** | **100%** (zero errors, 96M events) |
+| **Cluster Throughput** | **Up to ~1.0M events/sec** (max profile, single machine) |
+| **Publish Latency P50** | **~100-150µs** (batch mode) |
+| **Publish Latency P99** | **<1ms** (batch mode) |
+| **Success Rate** | **99.9-100%** in batch benchmark profiles |
 | **Timer Precision** | 100ms tick (configurable) |
 | **Dedup False Positive Rate** | <1% (Rust bloom filter) |
 
@@ -36,6 +36,7 @@ It combines the durability of a write-ahead log, the precision of a hierarchical
 
 ### Scheduling
 - **Hierarchical Timing Wheel** — O(1) timer add/remove/tick for millions of events
+- **Two-Tier Cold/Hot Scheduler** — PebbleDB cold store for far-future events (>1hr); adaptive hydrator adjusts scan frequency based on load (5s–5min). Keeps hot memory bounded.
 - **Absolute Time Tracking** — No drift across overflow wheel cascades
 - **Batch Scheduling** — Single lock acquisition for entire batch
 - **Crash Recovery** — Incremental WAL replay with checkpointing
@@ -47,17 +48,20 @@ It combines the durability of a write-ahead log, the precision of a hierarchical
 
 ### Delivery
 - **Credit-Based Flow Control** — Backpressure prevents consumer overload
+- **Non-Blocking Retry Heap** — Min-heap by `retryAt` keeps `timeoutLoop` responsive; no inline `time.Sleep`
+- **Per-Subscription Circuit Breaker** — Atomic state machine (Closed→Open→HalfOpen) skips dead subscribers automatically
 - **At-Least-Once Semantics** — Ack-based with configurable retry + exponential backoff
-- **Dead Letter Queue** — Failed events captured for inspection/replay
+- **Dead Letter Queue** — Append-only binary segments (CRC32, 64MB rotation) for inspection/replay
 - **32-Shard Dispatcher** — Reduced lock contention under high concurrency
 
 ### Distributed
 - **Multi-Node Clustering** — 3+ nodes with automatic partition distribution
 - **Raft Consensus** — Metadata consistency (HashiCorp Raft)
-- **Gossip Protocol** — TCP heartbeats, failure detection, node discovery
-- **Consistent Hashing** — SHA-256 ring with 150 virtual nodes per physical node
+- **Pluggable Gossip** — Choose custom TCP heartbeats or HashiCorp Memberlist (SWIM protocol) via config
+- **Consistent Hashing** — SHA-256 ring with configurable virtual nodes (`-virtual-nodes`, default 150)
 - **Binary Replication Protocol** — Custom wire format (0xCAFEBABE magic)
 - **Bulk File Sync** — Segment-level transfer for new node bootstrap
+- **Clock Skew Detection** — Cross-node heartbeat timestamp comparison; warns if absolute skew exceeds 5 seconds
 
 ### API
 - **gRPC Streaming** — Bidirectional subscribe, streaming replay
@@ -86,21 +90,24 @@ graph TB
 
     subgraph "Per-Partition Engine"
         WAL["WAL<br/>Segmented + Indexed"]
+        CS["Cold Store<br/>PebbleDB (>1hr)"]
         SCH["Timing Wheel<br/>Hierarchical"]
         DD["Dedup<br/>Rust Bloom + PebbleDB"]
-        DSP["Dispatcher<br/>32 Shards"]
+        DSP["Dispatcher<br/>32 Shards + Circuit Breaker"]
         CG["Consumer Groups<br/>Persistent Offsets"]
     end
 
     subgraph "Cluster"
         RAFT["Raft<br/>Metadata"]
-        GOSSIP["Gossip<br/>Heartbeats"]
+        GOSSIP["Gossip<br/>TCP Heartbeats or Memberlist/SWIM"]
         REPL["Replication<br/>Binary Protocol"]
     end
 
     C1 -->|"Publish/Batch"| GW
     C2 -->|"Subscribe stream"| GW
     GW --> PM --> DD --> WAL --> SCH
+    WAL --> CS
+    CS -->|"Hydrator (60s)"| SCH
     SCH -->|"Ready events"| DSP -->|"Stream"| C2
     WAL -.-> REPL
     PM -.-> RAFT
@@ -108,6 +115,8 @@ graph TB
 ```
 
 > For the full architecture with 30+ Mermaid diagrams, sequence diagrams, and deep-dive explanations, see **[ARCHITECTURE.md](ARCHITECTURE.md)**.
+>
+> For per-feature architecture docs and standalone Mermaid source files, see **[docs/architecture/README.md](docs/architecture/README.md)** and **[docs/mermaid](docs/mermaid)**.
 
 ---
 
@@ -156,14 +165,14 @@ make health
 ### Load Test
 
 ```bash
-# Batch mode — ~1M events/sec (3 nodes on same machine)
-make loadtest-batch PUBLISHERS=32 EVENTS=1000000 BATCH_SIZE=4000
+# Max-throughput profile from Makefile presets
+make loadtest-max
 
 # Standard benchmark
 make loadtest-batch PUBLISHERS=20 EVENTS=50000 BATCH_SIZE=1000
 
-# Max throughput profile
-make loadtest-max
+# Custom profile (example)
+make loadtest-batch PUBLISHERS=32 EVENTS=100000 BATCH_SIZE=4000
 ```
 
 ### Docker
@@ -222,8 +231,13 @@ import client "github.com/jatin711-debug/cronos_db_golang/pkg/client"
 ```go
 ctx := context.Background()
 
-cfg := client.DefaultConfig("127.0.0.1:9000")
+cfg := client.DefaultConfig("127.0.0.1:9000", "127.0.0.1:9001", "127.0.0.1:9002")
 cfg.Security.Insecure = true
+cfg.NodeIDToAddress = map[string]string{
+    "node1": "127.0.0.1:9000",
+    "node2": "127.0.0.1:9001",
+    "node3": "127.0.0.1:9002",
+}
 
 c, err := client.Dial(ctx, cfg)
 if err != nil {
@@ -284,6 +298,7 @@ go run ./examples/pubsub_demo
 ```
 
 This demo publishes one JSON event with a 10-second schedule window and prints the received delivery metadata/payload.
+By default it bootstraps local cluster ports `9000,9001,9002`; use `-addr` to force a single node.
 
 ---
 
@@ -291,27 +306,16 @@ This demo publishes one JSON event with a 10-second schedule window and prints t
 
 ### Benchmarks (3-Node Cluster on Single Machine)
 
-| Metric | Value | Notes |
-|--------|-------|-------|
-| **Cluster Throughput** | **1,010,933 events/sec** | 96M events, batch 4000, 32 publishers/node |
-| **Per-Node Throughput** | **336,978 events/sec** | 3 nodes on same machine |
-| **Publish Latency P50** | **105µs** | Batch publish |
-| **Publish Latency P95** | **337µs** | Batch publish |
-| **Publish Latency P99** | **468µs** | Batch publish |
-| **Latency Min** | **5µs** | Best case |
-| **Latency Max** | **900µs** | Worst case |
-| **Success Rate** | **100.00%** | Zero errors across 96 million events |
-| **Duration** | **1m 35s** | For 96M events total |
+| Profile | Throughput | Notes |
+|--------|------------|-------|
+| `make loadtest-max` | Up to ~1.0M events/sec | Batch 4000, 32 publishers/node, 9.6M events total |
+| Standard batch profile | ~550K events/sec | Batch 1000, 20 publishers/node |
+| Single-node batch | ~180K events/sec | One node, batch mode |
+| Single-event mode | ~10K events/sec | One event per RPC |
 
-> All 3 nodes running on the **same physical machine** — sharing CPU, memory, and disk I/O.
+Representative latency in batch mode is typically P50 ~100-150µs and P99 under 1ms on a single-machine 3-node setup.
 
-### Previous Benchmark (smaller batch)
-
-| Metric | Value | Notes |
-|--------|-------|-------|
-| Cluster Throughput | 550K events/sec | Batch 1000, 20 publishers/node |
-| Single Node Throughput | ~180K events/sec | Batch mode |
-| Single Event Throughput | ~10K events/sec | One event per RPC |
+> Throughput varies by CPU, disk, scheduler settings, and payload size. Re-run the provided load tests in your environment for production sizing.
 
 ### What Makes It Fast
 
@@ -326,6 +330,9 @@ This demo publishes one JSON event with a 10-second schedule window and prints t
 | PebbleDB NoSync + disabled WAL | Our WAL provides durability |
 | FNV-1a routing (not SHA-256) | ~5ns partition lookup |
 | Atomic CAS credits | Lock-free flow control |
+| Cold store (offsets only, ~16B/key) | Millions of far-future events without RAM bloat |
+| Retry heap (non-blocking) | `timeoutLoop` stays responsive under retry storms |
+| Circuit breaker (atomic state machine) | Instant skip of dead subscribers, no goroutine leaks |
 
 ---
 
@@ -366,6 +373,21 @@ This demo publishes one JSON event with a 10-second schedule window and prints t
 | `-cluster` | `false` | Enable cluster mode |
 | `-cluster-seeds` | *(empty)* | Comma-separated seed node addresses |
 | `-virtual-nodes` | `150` | Virtual nodes per physical node in hash ring |
+| `-hot-window-minutes` | `60` | Events beyond this window go to cold store (0 = disabled) |
+| `-hydrator-min-interval` | `5000` | Minimum adaptive hydrator scan interval in ms |
+| `-hydrator-max-interval` | `300000` | Maximum adaptive hydrator scan interval in ms |
+| `-max-ready-queue` | `1000000` | Max ready queue depth per partition |
+| `-max-timing-wheel-size` | `10000000` | Max active timers in hot timing wheel |
+| `-max-in-flight` | `500000` | Max in-flight deliveries per partition |
+| `-cb-failure-threshold` | `0.5` | Circuit breaker failure rate to trip (0.0–1.0) |
+| `-cb-min-attempts` | `10` | Min attempts before circuit breaker evaluates |
+| `-cb-open-duration-ms` | `30000` | Circuit breaker open duration in milliseconds |
+| `-use-memberlist` | `false` | Use HashiCorp Memberlist (SWIM) instead of custom TCP gossip |
+| `-tracing-enabled` | `false` | Enable OpenTelemetry tracing |
+| `-tracing-exporter` | `none` | Tracing exporter (`none`, `stdout`, `otlp`) |
+| `-tracing-otlp-endpoint` | `127.0.0.1:4317` | OTLP gRPC endpoint for trace export |
+| `-tracing-sample-ratio` | `0.01` | Sampling ratio (0.0-1.0); lower keeps overhead low |
+| `-tracing-insecure` | `true` | Disable TLS when exporting via OTLP |
 
 ### Environment Variables
 
@@ -374,8 +396,14 @@ This demo publishes one JSON event with a 10-second schedule window and prints t
 | `CRONOS_NODE_ID` | `-node-id` |
 | `CRONOS_DATA_DIR` | `-data-dir` |
 | `CRONOS_GRPC_ADDR` | `-grpc-addr` |
+| `CRONOS_HTTP_ADDR` | `-http-addr` |
 | `CRONOS_CLUSTER` | `-cluster` |
 | `CRONOS_CLUSTER_SEEDS` | `-cluster-seeds` |
+| `CRONOS_TRACING_ENABLED` | `-tracing-enabled` |
+| `CRONOS_TRACING_EXPORTER` | `-tracing-exporter` |
+| `CRONOS_TRACING_OTLP_ENDPOINT` | `-tracing-otlp-endpoint` |
+| `CRONOS_TRACING_SAMPLE_RATIO` | `-tracing-sample-ratio` |
+| `CRONOS_TRACING_INSECURE` | `-tracing-insecure` |
 
 ---
 
@@ -391,11 +419,11 @@ cronos_db/
 │   ├── consumer/                   # Consumer groups, persistent offset store
 │   ├── dedup/                      # Bloom filter (Rust FFI) + PebbleDB two-tier
 │   │   └── rust/src/lib.rs         # Rust: lock-free bloom, Rayon parallel batch
-│   ├── delivery/                   # Dispatcher (32 shards), worker, DLQ
+│   ├── delivery/                   # Dispatcher (32 shards), circuit breaker, retry heap, DLQ segments
 │   ├── partition/                  # Partition lifecycle, WAL replay, compaction
 │   ├── replay/                     # Time-range and offset-based replay engine
 │   ├── replication/                # Binary protocol, leader/follower, bulk sync
-│   ├── scheduler/                  # Timing wheel, checkpoint, recovery
+│   ├── scheduler/                  # Timing wheel, cold store, hydrator, checkpoint, recovery
 │   ├── storage/                    # WAL, segments, sparse index, mmap
 │   └── tracing/                    # OpenTelemetry integration
 ├── pkg/
@@ -430,9 +458,11 @@ cronos_db/
 | Service | Methods | Purpose |
 |---------|---------|---------|
 | **EventService** | `Publish`, `PublishBatch`, `Subscribe`, `Ack`, `Replay` | Core pub/sub |
+| **PartitionService** | `GetPartition`, `ListPartitions`, `GetWALStatus`, `GetSchedulerStatus`, `Compact`, `RunRetention`, `SplitPartition` | Partition metadata and admin |
 | **ConsumerGroupService** | `Create`, `Get`, `List`, `Rebalance` | Group management |
 | **ReplicationService** | `Append`, `Sync` | Internal replication |
 | **RaftService** | `Join`, `Leave`, `Status` | Internal cluster |
+| **CrossRegionService** | `ReplicateEvents`, `FetchEvents` | Cross-region replication |
 
 ### Key RPCs
 
@@ -506,10 +536,16 @@ See [proto/events.proto](proto/events.proto) for the complete specification.
 - [x] Health checks in Docker
 - [x] Cross-platform Makefile (Windows/Linux/macOS)
 - [x] CI pipeline target (`make ci`)
+- [x] Two-tier scheduler with adaptive hydrator (cold store + hot timing wheel)
+- [x] Non-blocking retry heap (min-heap by retry deadline)
+- [x] Admission control (readyQueue / timingWheel / in-flight limits)
+- [x] Per-subscription circuit breaker (Closed→Open→HalfOpen)
+- [x] Pluggable memberlist gossip (HashiCorp Memberlist / SWIM)
+- [x] Append-only DLQ segments (binary format, CRC32, rotation)
+- [x] Clock skew detection (cross-node heartbeat comparison)
 
 ### Remaining 🚧
 - [ ] Admin CLI & dashboard
-- [ ] OTLP exporter for distributed tracing (provider ready, exporter TBD)
 - [ ] TLS/mTLS between nodes
 - [ ] Topic-level ACLs
 
@@ -536,6 +572,9 @@ See [proto/events.proto](proto/events.proto) for the complete specification.
 | Document | Description |
 |----------|-------------|
 | **[ARCHITECTURE.md](ARCHITECTURE.md)** | Deep-dive with 30+ Mermaid diagrams — data flows, sequence diagrams, state machines |
+| **[docs/architecture/README.md](docs/architecture/README.md)** | Architecture split by feature (cluster, compliance, dedup, delivery, schema, slo, storage, and more) |
+| **[docs/mermaid](docs/mermaid)** | Standalone Mermaid diagram source files (.mmd) for architecture and runtime flows |
+| [docs/DEVELOPER_ARCHITECTURE_GUIDE.md](docs/DEVELOPER_ARCHITECTURE_GUIDE.md) | Comprehensive developer-oriented architecture and navigation guide |
 | [proto/events.proto](proto/events.proto) | Complete gRPC API specification (5 services, 30+ message types) |
 | [pkg/client](pkg/client) | Production Go SDK (producer/consumer/replay/metadata routing) |
 | [pkg.go.dev/client page](https://pkg.go.dev/github.com/jatin711-debug/cronos_db_golang/pkg/client) | Generated API reference and package docs |
