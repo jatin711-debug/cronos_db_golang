@@ -294,11 +294,10 @@ func (w *WAL) AppendBatch(events []*types.Event) error {
 	w.highWatermark = events[len(events)-1].Offset
 	w.dirty.Store(true)
 
-	// Emit CDC events if hook is registered
+	// Collect hook events to fire after unlock
+	var hookEvents []*types.Event
 	if w.appendHook != nil {
-		for _, event := range events {
-			w.appendHook(event)
-		}
+		hookEvents = append(hookEvents, events...)
 	}
 
 	// Sync inline only for every_event mode.
@@ -341,6 +340,11 @@ func (w *WAL) AppendBatch(events []*types.Event) error {
 		if w.activeSegment.GetSize() >= threshold && w.preCreateTriggered.CompareAndSwap(false, true) {
 			go w.maybePreCreateNextSegment(w.nextOffset)
 		}
+	}
+
+	// Fire hooks AFTER releasing the lock to avoid blocking writers
+	for _, e := range hookEvents {
+		w.appendHook(e)
 	}
 
 	return nil
@@ -427,9 +431,10 @@ func (w *WAL) AppendEvent(event *types.Event) error {
 	w.highWatermark = event.Offset
 	w.dirty.Store(true)
 
-	// Emit CDC event if hook is registered
+	// Collect hook events to fire after unlock
+	var hookEvents []*types.Event
 	if w.appendHook != nil {
-		w.appendHook(event)
+		hookEvents = append(hookEvents, event)
 	}
 
 	// Sync inline for every_event mode
@@ -463,6 +468,11 @@ func (w *WAL) AppendEvent(event *types.Event) error {
 		if w.activeSegment.GetSize() >= threshold && w.preCreateTriggered.CompareAndSwap(false, true) {
 			go w.maybePreCreateNextSegment(w.nextOffset)
 		}
+	}
+
+	// Fire hooks AFTER releasing the lock to avoid blocking writers
+	for _, e := range hookEvents {
+		w.appendHook(e)
 	}
 
 	return nil
@@ -515,7 +525,16 @@ func (w *WAL) ReadEvents(startOffset, endOffset int64) ([]*types.Event, error) {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 
-	result := make([]*types.Event, 0)
+	// Pre-allocate with a reasonable capacity estimate
+	// (endOffset-startOffset+1) capped at 1024 to avoid over-allocation
+	estimated := endOffset - startOffset + 1
+	if estimated < 0 {
+		estimated = 0
+	}
+	if estimated > 1024 {
+		estimated = 1024
+	}
+	result := make([]*types.Event, 0, estimated)
 
 	// Find segments that contain the range
 	for _, segment := range w.segments {
@@ -567,7 +586,8 @@ func (w *WAL) ReadEventsByTime(startTS, endTS int64) ([]*types.Event, error) {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 
-	result := make([]*types.Event, 0)
+	// Pre-allocate with a reasonable capacity estimate
+	result := make([]*types.Event, 0, 256)
 
 	// Find segments that contain the timestamp range
 	for _, segment := range w.segments {

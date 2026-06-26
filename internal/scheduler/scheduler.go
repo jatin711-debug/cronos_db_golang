@@ -268,6 +268,8 @@ func (s *Scheduler) drainExpiredToReady() {
 				localBuf = append(localBuf, timer.Event)
 				s.timingWheel.PutTimer(timer)
 			}
+			// Return the slice to the pool after processing
+			expiredSlicePool.Put(expiredTimers)
 		default:
 			goto done
 		}
