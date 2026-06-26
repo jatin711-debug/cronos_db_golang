@@ -9,6 +9,13 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 )
 
+// expiredSlicePool pools []*Timer slices to eliminate per-tick allocations.
+var expiredSlicePool = sync.Pool{
+	New: func() interface{} {
+		return make([]*Timer, 0, 64)
+	},
+}
+
 // TimingWheel implements a hierarchical timing wheel for efficient timer management
 type TimingWheel struct {
 	mu            sync.RWMutex
@@ -232,10 +239,10 @@ func (tw *TimingWheel) tickLocked() {
 	tw.wheel[currentSlot] = nil
 
 	// Send expired timers via non-blocking send to prevent wheel stalls.
-	// Copy the batch since the channel consumer may hold a reference.
+	// Use pooled slice to avoid per-tick allocation.
 	if len(tw.expiredBuf) > 0 {
-		expiredCopy := make([]*Timer, len(tw.expiredBuf))
-		copy(expiredCopy, tw.expiredBuf)
+		expiredCopy := expiredSlicePool.Get().([]*Timer)
+		expiredCopy = append(expiredCopy[:0], tw.expiredBuf...)
 		select {
 		case tw.expired <- expiredCopy:
 		default:
@@ -243,7 +250,9 @@ func (tw *TimingWheel) tickLocked() {
 			select {
 			case tw.expired <- expiredCopy:
 			default:
-				log.Printf("[TIMING-WHEEL] WARNING: expired channel full, %d timers delayed", len(expiredCopy))
+				// Return slice to pool since we couldn't send it
+				expiredSlicePool.Put(expiredCopy)
+				log.Printf("[TIMING-WHEEL] WARNING: expired channel full, %d timers delayed", len(tw.expiredBuf))
 			}
 		}
 	}

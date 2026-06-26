@@ -579,9 +579,9 @@ func (s *Segment) writeRecord(record []byte) (int64, error) {
 			return 0, fmt.Errorf("encrypt: %w", err)
 		}
 		// Write new length prefix for encrypted payload
-		length := make([]byte, 4)
-		binary.BigEndian.PutUint32(length, uint32(4+len(ciphertext)))
-		n1, err := s.writer.Write(length)
+		var length [4]byte
+		binary.BigEndian.PutUint32(length[:], uint32(4+len(ciphertext)))
+		n1, err := s.writer.Write(length[:])
 		if err != nil {
 			return int64(n1), err
 		}
