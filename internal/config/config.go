@@ -198,6 +198,14 @@ func LoadConfig() (*types.Config, error) {
 	flag.Float64Var(&config.TopicRateLimitPerSecond, "topic-rate-limit", DefaultTopicRateLimitPerSecond, "Per-subject per-topic rate limit (events/sec, 0 = disabled)")
 	flag.Float64Var(&config.TopicRateLimitBurst, "topic-rate-burst", DefaultTopicRateLimitBurst, "Per-subject per-topic rate limit burst (0 = disabled)")
 
+	// Memory-based backpressure flags
+	flag.Float64Var(&config.MaxMemoryUsagePercent, "max-memory-percent", DefaultMaxMemoryUsagePercent, "Max memory usage %% before rejecting publishes (0 = disabled)")
+	flag.Int64Var(&config.MemoryCheckIntervalMs, "memory-check-interval", DefaultMemoryCheckIntervalMs, "Memory check interval in milliseconds")
+
+	// Ingest rate limiting per partition
+	flag.Int64Var(&config.MaxIngestRatePerPartition, "max-ingest-rate", DefaultMaxIngestRatePerPartition, "Max events/sec per partition (0 = unlimited)")
+	flag.Int64Var(&config.IngestRateBurstSize, "ingest-burst-size", DefaultIngestRateBurstSize, "Token bucket burst size for ingest rate limit")
+
 	var clusterSeeds string
 	flag.StringVar(&clusterSeeds, "cluster-seeds", "", "Comma-separated list of seed node addresses")
 

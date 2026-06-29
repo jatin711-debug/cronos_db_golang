@@ -22,6 +22,8 @@ type Segment struct {
 	writer          *bufio.Writer
 	reader          io.ReaderAt
 	mmapData        []byte // Memory mapped data
+	mmapWritePos    int64  // Current write position in mmap
+	mmapSize        int64  // Total mmap size
 	firstOffset     int64
 	lastOffset      int64
 	firstTS         int64
@@ -58,6 +60,20 @@ func NewSegment(dataDir string, firstOffset int64, isActive bool, cipher *Segmen
 		return nil, fmt.Errorf("open segment file: %w", err)
 	}
 
+	// Pre-allocate segment file for zero-allocation writes
+	const preallocSize = 1024 * 1024 * 1024 // 1GB pre-allocation
+	if err := preallocateFile(file, preallocSize); err != nil {
+		// Pre-allocation is optional — log warning but continue
+		log.Printf("[SEGMENT] Pre-allocation failed for %s: %v (continuing without pre-allocation)", filename, err)
+	}
+
+	// Get file stats after pre-allocation
+	stat, err := file.Stat()
+	if err != nil {
+		file.Close()
+		return nil, fmt.Errorf("stat file after preallocate: %w", err)
+	}
+
 	// Create index
 	index, err := NewIndex(dataDir, firstOffset)
 	if err != nil {
@@ -65,9 +81,8 @@ func NewSegment(dataDir string, firstOffset int64, isActive bool, cipher *Segmen
 		return nil, fmt.Errorf("create index: %w", err)
 	}
 
-	// Try to mmap the file for reading
+	// Mmap the file for zero-copy reads and writes
 	var mmapData []byte
-	stat, _ := file.Stat()
 	if stat.Size() > 0 {
 		mmapData, _ = mmapFile(file, stat.Size())
 		// We ignore mmap errors and fall back to file reading (mmapData will be nil if error)
@@ -78,6 +93,8 @@ func NewSegment(dataDir string, firstOffset int64, isActive bool, cipher *Segmen
 		writer:          bufio.NewWriterSize(file, 4*1024*1024), // 4MB buffer for high throughput
 		reader:          file,                                   // io.ReaderAt doesn't have buffered option
 		mmapData:        mmapData,
+		mmapWritePos:    0, // Track mmap write position
+		mmapSize:        stat.Size(),
 		firstOffset:     firstOffset,
 		nextOffset:      firstOffset,
 		createdTS:       time.Now().UnixMilli(),
@@ -93,7 +110,6 @@ func NewSegment(dataDir string, firstOffset int64, isActive bool, cipher *Segmen
 	}
 
 	// Write header if new file
-	stat, _ = file.Stat()
 	if stat.Size() == 0 {
 		if err := segment.writeHeader(); err != nil {
 			file.Close()
@@ -131,11 +147,22 @@ func OpenSegment(dataDir string, filename string, cipher *SegmentCipher) (*Segme
 		return nil, fmt.Errorf("open index: %w", err)
 	}
 
-	// Try to mmap the file
+	// Pre-allocate if needed for active segments
+	const preallocSize = 1024 * 1024 * 1024 // 1GB
+	if stat.Size() < preallocSize {
+		if err := preallocateFile(file, preallocSize); err != nil {
+			log.Printf("[SEGMENT] Pre-allocation failed for %s: %v (continuing)", filename, err)
+		} else {
+			stat, _ = file.Stat() // Refresh size
+		}
+	}
+
+	// Try to mmap the file with readwrite for zero-copy writes
 	var mmapData []byte
+	mmapSize := stat.Size()
 	if stat.Size() > 0 {
 		mmapData, _ = mmapFile(file, stat.Size())
-		// Fallback to file reading if mmap fails or unsupported
+		// Fallback to file reading if mmap fails
 	}
 
 	segment := &Segment{
@@ -143,6 +170,8 @@ func OpenSegment(dataDir string, filename string, cipher *SegmentCipher) (*Segme
 		writer:        bufio.NewWriterSize(file, 4*1024*1024), // 4MB buffer for high throughput
 		reader:        file,
 		mmapData:      mmapData,
+		mmapWritePos:  stat.Size(), // Start writing at end of existing data
+		mmapSize:      mmapSize,
 		firstOffset:   firstOffset,
 		createdTS:     time.Now().UnixMilli(),
 		isActive:      true, // Opened segments are active by default
@@ -564,10 +593,44 @@ func parseEventRecordWithoutLength(record []byte) (*types.Event, error) {
 	}, nil
 }
 
-// writeRecord writes record to segment. If encryption is enabled, the record payload
-// (bytes after the 4-byte length prefix) is encrypted with AES-256-GCM.
+// writeRecord writes record to segment using mmap if available, otherwise bufio.Writer.
+// If encryption is enabled, the record payload is encrypted with AES-256-GCM.
 // Returns the actual number of bytes written to the segment file.
 func (s *Segment) writeRecord(record []byte) (int64, error) {
+	// Fast path: use mmap for zero-copy writes if available
+	if s.mmapData != nil && s.cipher == nil {
+		return s.writeRecordMmap(record)
+	}
+
+	// Slow path: use bufio.Writer (for encrypted or non-mmap segments)
+	return s.writeRecordBuffered(record)
+}
+
+// writeRecordMmap writes directly to memory-mapped file (zero-copy, zero-syscall).
+func (s *Segment) writeRecordMmap(record []byte) (int64, error) {
+	recordLen := len(record)
+	if recordLen == 0 {
+		return 0, nil
+	}
+
+	// Check if we have space in mmap
+	if s.mmapWritePos+int64(recordLen) > s.mmapSize {
+		// Remap with larger size
+		if err := s.remapMmap(s.mmapSize * 2); err != nil {
+			return 0, fmt.Errorf("remap mmap: %w", err)
+		}
+	}
+
+	// Copy directly to mmap (single memcpy, no syscall)
+	copy(s.mmapData[s.mmapWritePos:], record)
+	s.mmapWritePos += int64(recordLen)
+	s.sizeBytes = s.mmapWritePos
+
+	return int64(recordLen), nil
+}
+
+// writeRecordBuffered writes using bufio.Writer (for encryption or fallback).
+func (s *Segment) writeRecordBuffered(record []byte) (int64, error) {
 	if s.cipher != nil {
 		// record includes 4-byte length prefix; encrypt payload after it
 		if len(record) < 4 {
@@ -590,6 +653,34 @@ func (s *Segment) writeRecord(record []byte) (int64, error) {
 	}
 	n, err := s.writer.Write(record)
 	return int64(n), err
+}
+
+// remapMmap remaps the file with a new size.
+func (s *Segment) remapMmap(newSize int64) error {
+	if s.mmapData != nil {
+		if err := syncMmap(s.mmapData); err != nil {
+			log.Printf("[SEGMENT] mmap sync before remap failed: %v", err)
+		}
+		if err := munmapFile(s.mmapData); err != nil {
+			return fmt.Errorf("unmap old mmap: %w", err)
+		}
+		s.mmapData = nil
+	}
+
+	// Extend file
+	if err := preallocateFile(s.segmentFile, newSize); err != nil {
+		return fmt.Errorf("preallocate for remap: %w", err)
+	}
+
+	// Remap
+	mmapData, err := mmapFile(s.segmentFile, newSize)
+	if err != nil {
+		return fmt.Errorf("mmap after preallocate: %w", err)
+	}
+
+	s.mmapData = mmapData
+	s.mmapSize = newSize
+	return nil
 }
 
 // decryptRecord decrypts record payload if encryption is enabled.
@@ -1035,7 +1126,7 @@ func (s *Segment) truncateToPosition(pos int64) error {
 }
 
 // FlushBuffer flushes the buffered writer without syncing to disk.
-// Use this for frequent, low-cost flush operations.
+// For mmap segments, this syncs the mmap view to disk.
 // Safe to call on a closed segment — returns nil without action.
 func (s *Segment) FlushBuffer() error {
 	s.mu.RLock()
@@ -1043,16 +1134,28 @@ func (s *Segment) FlushBuffer() error {
 	if s.closed {
 		return nil
 	}
+	// If using mmap, sync mmap to disk
+	if s.mmapData != nil {
+		return syncMmap(s.mmapData[:s.mmapWritePos])
+	}
 	return s.writer.Flush()
 }
 
 // Sync persists the segment file to disk (fdatasync).
+// For mmap segments, this flushes the mmap view.
 // Safe to call on a closed segment — returns nil without action.
 func (s *Segment) Sync() error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.closed {
 		return nil
+	}
+	// If using mmap, sync mmap to disk
+	if s.mmapData != nil {
+		if err := syncMmap(s.mmapData[:s.mmapWritePos]); err != nil {
+			return err
+		}
+		return s.segmentFile.Sync() // Also sync the file descriptor
 	}
 	return s.segmentFile.Sync()
 }
@@ -1064,6 +1167,12 @@ func (s *Segment) Flush() error {
 	defer s.mu.RUnlock()
 	if s.closed {
 		return nil
+	}
+	if s.mmapData != nil {
+		if err := syncMmap(s.mmapData[:s.mmapWritePos]); err != nil {
+			return err
+		}
+		return s.segmentFile.Sync()
 	}
 	if err := s.writer.Flush(); err != nil {
 		return err
@@ -1082,17 +1191,27 @@ func (s *Segment) Close() error {
 	s.closed = true
 
 	var firstErr error
-	if err := s.writer.Flush(); err != nil {
-		firstErr = fmt.Errorf("flush writer: %w", err)
-	}
-	if err := s.segmentFile.Sync(); err != nil && firstErr == nil {
-		firstErr = fmt.Errorf("sync file: %w", err)
+
+	// If using mmap, sync and unmap
+	if s.mmapData != nil {
+		if err := syncMmap(s.mmapData[:s.mmapWritePos]); err != nil {
+			firstErr = fmt.Errorf("sync mmap: %w", err)
+		}
+		if err := munmapFile(s.mmapData); err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("unmap: %w", err)
+			}
+		}
+		s.mmapData = nil
+	} else {
+		// Buffered writer path
+		if err := s.writer.Flush(); err != nil {
+			firstErr = fmt.Errorf("flush writer: %w", err)
+		}
 	}
 
-	// Unmap memory
-	if s.mmapData != nil {
-		munmapFile(s.mmapData)
-		s.mmapData = nil
+	if err := s.segmentFile.Sync(); err != nil && firstErr == nil {
+		firstErr = fmt.Errorf("sync file: %w", err)
 	}
 
 	if s.index != nil {

@@ -106,6 +106,14 @@ type Config struct {
 	// Topic rate limiting (0 = disabled)
 	TopicRateLimitPerSecond float64
 	TopicRateLimitBurst     float64
+
+	// Memory-based backpressure (0 = disabled)
+	MaxMemoryUsagePercent float64 // Max memory usage % before rejecting publishes (e.g., 80.0)
+	MemoryCheckIntervalMs int64   // How often to check memory in ms
+
+	// Ingest rate limiting (0 = disabled)
+	MaxIngestRatePerPartition int64 // Max events/sec per partition (0 = unlimited)
+	IngestRateBurstSize       int64 // Token bucket burst size
 }
 
 // Partition represents a data partition
