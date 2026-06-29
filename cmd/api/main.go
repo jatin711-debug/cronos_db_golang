@@ -528,37 +528,64 @@ func main() {
 
 	// Wait for shutdown signal
 	<-sigChan
-	slog.Info("Shutting down...")
-	cancel() // Stop background tasks
+	slog.Info("Shutting down...", "node_id", cfg.NodeID)
+	cancel() // Stop background tasks (stats, etc.)
 
-	// 1. Graceful gRPC shutdown: stop accepting new requests but finish in-flight RPCs
-	grpcShutdownCtx, grpcShutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer grpcShutdownCancel()
+	// Create an overall shutdown context with generous timeout
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer shutdownCancel()
+
+	shutdownDone := make(chan struct{})
 	go func() {
-		<-grpcShutdownCtx.Done()
-		grpcServer.Stop() // Force stop if graceful takes too long
-	}()
-	grpcServer.GracefulStop()
+		defer close(shutdownDone)
 
-	// 2. Shutdown health server
-	healthShutdownCtx, healthShutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer healthShutdownCancel()
-	if err := healthServer.Shutdown(healthShutdownCtx); err != nil {
-		slog.Error("Health server shutdown error", "error", err)
-	}
+		// 1. Stop accepting NEW requests first (drain phase)
+		slog.Info("Shutdown phase 1: Draining incoming requests...")
+		grpcServer.GracefulStop() // Stop accepting new gRPC connections
 
-	// 3. Stop all partitions gracefully (drains in-flight deliveries, flushes WAL)
-	slog.Info("Stopping all partitions...")
-	if err := pm.StopAllPartitions(); err != nil {
-		slog.Error("Failed to cleanly stop all partitions", "error", err)
-	}
-
-	// 4. Shutdown cluster manager
-	if clusterMgr != nil {
-		if err := clusterMgr.Stop(); err != nil {
-			slog.Error("Failed to stop cluster manager", "error", err)
+		// 2. Shutdown health server to stop new HTTP health checks
+		healthShutdownCtx, healthShutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer healthShutdownCancel()
+		if err := healthServer.Shutdown(healthShutdownCtx); err != nil {
+			slog.Warn("Health server shutdown error", "error", err)
 		}
-	}
 
-	slog.Info("Shutdown complete")
+		// 3. Stop all partitions gracefully (drains in-flight deliveries, flushes WAL)
+		slog.Info("Shutdown phase 2: Stopping partitions (draining deliveries, flushing WAL)...")
+		if err := pm.StopAllPartitions(); err != nil {
+			slog.Error("Failed to cleanly stop all partitions", "error", err)
+		}
+
+		// 4. Shutdown cluster manager
+		if clusterMgr != nil {
+			slog.Info("Shutdown phase 3: Stopping cluster manager...")
+			if err := clusterMgr.Stop(); err != nil {
+				slog.Error("Failed to stop cluster manager", "error", err)
+			}
+		}
+
+		// 5. Final WAL flush for all partitions (extra safety)
+		slog.Info("Shutdown phase 4: Final WAL flush...")
+		for i := int32(0); i < int32(cfg.PartitionCount); i++ {
+			p, err := pm.GetInternalPartition(i)
+			if err != nil || p == nil || p.Wal == nil {
+				continue
+			}
+			if err := p.Wal.Flush(); err != nil {
+				slog.Warn("Final WAL flush failed", "partition", i, "error", err)
+			}
+		}
+
+		slog.Info("Shutdown complete", "node_id", cfg.NodeID)
+	}()
+
+	// Wait for shutdown or timeout
+	select {
+	case <-shutdownDone:
+		slog.Info("Graceful shutdown completed successfully")
+	case <-shutdownCtx.Done():
+		slog.Error("Shutdown timed out after 60s, forcing exit")
+		// Force stop gRPC if still running
+		grpcServer.Stop()
+	}
 }
