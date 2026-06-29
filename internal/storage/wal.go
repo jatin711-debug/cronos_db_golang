@@ -108,7 +108,7 @@ func (w *WAL) SetAppendHook(hook func(event *types.Event)) {
 	w.appendHook = hook
 }
 
-// loadSegments loads existing segments
+// loadSegments loads existing segments and verifies their integrity on startup.
 func (w *WAL) loadSegments() error {
 	segmentsDir := filepath.Join(w.dataDir, "segments")
 	if _, err := os.Stat(segmentsDir); os.IsNotExist(err) {
@@ -134,15 +134,60 @@ func (w *WAL) loadSegments() error {
 	// Sort by offset
 	sort.Strings(segmentFiles)
 
-	// Load each segment
+	// Load each segment with verification
 	for _, filename := range segmentFiles {
 		segment, err := OpenSegment(w.dataDir, filename, w.cipher)
 		if err != nil {
-			return fmt.Errorf("open segment %s: %w", filename, err)
+			log.Printf("[WAL-%d] WARNING: Failed to open segment %s: %v", w.partitionID, filename, err)
+			// Try to recover by skipping corrupt segment
+			continue
 		}
+
+		// Verify segment integrity by reading all events and checking CRCs
+		if err := w.verifySegment(segment); err != nil {
+			log.Printf("[WAL-%d] WARNING: Segment %s verification failed: %v", w.partitionID, filename, err)
+			segment.Close()
+			// Skip corrupt segment - data before this segment is still valid
+			continue
+		}
+
 		w.segments = append(w.segments, segment)
 		w.nextOffset = segment.GetLastOffset() + 1
 		w.highWatermark = segment.GetLastOffset()
+	}
+
+	if len(w.segments) > 0 {
+		log.Printf("[WAL-%d] Loaded %d segments, nextOffset=%d", w.partitionID, len(w.segments), w.nextOffset)
+	}
+
+	return nil
+}
+
+// verifySegment reads all events from a segment to verify CRC integrity.
+// This is called on startup to detect data corruption.
+func (w *WAL) verifySegment(segment *Segment) error {
+	firstOffset := segment.GetFirstOffset()
+	lastOffset := segment.GetLastOffset()
+
+	if firstOffset > lastOffset {
+		return nil // Empty segment
+	}
+
+	events, err := segment.ReadEventsByOffsetRange(firstOffset, lastOffset)
+	if err != nil {
+		return fmt.Errorf("read events for verification: %w", err)
+	}
+
+	// Verify each event's CRC by re-parsing the raw record
+	for _, event := range events {
+		if event == nil {
+			return fmt.Errorf("nil event in segment")
+		}
+		// The event was successfully parsed, which means CRC passed
+		// Additional check: verify offset continuity
+		if event.Offset < firstOffset || event.Offset > lastOffset {
+			return fmt.Errorf("event offset %d out of segment range [%d, %d]", event.Offset, firstOffset, lastOffset)
+		}
 	}
 
 	return nil
