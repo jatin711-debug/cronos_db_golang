@@ -59,14 +59,15 @@ func (p *Partition) IsKeyInBounds(key string) bool {
 
 // PartitionManager manages all partitions
 type PartitionManager struct {
-	mu               sync.RWMutex
-	partitions       map[int32]*Partition
-	nodeID           string
-	config           *types.Config
-	pebbleCache      *pebble.Cache
-	tenantAccountant tenantAccountant
-	splitting        map[int32]bool // tracks partitions currently undergoing split
-	splittingMu      sync.RWMutex
+	mu                sync.RWMutex
+	partitions        map[int32]*Partition
+	nodeID            string
+	config            *types.Config
+	pebbleCache       *pebble.Cache
+	tenantAccountant  tenantAccountant
+	splitting         map[int32]bool // tracks partitions currently undergoing split
+	splittingMu       sync.RWMutex
+	backpressureMgr   *BackpressureManager
 }
 
 // tenantAccountant is the minimal interface needed for delivery callbacks.
@@ -77,10 +78,11 @@ type tenantAccountant interface {
 // NewPartitionManager creates a new partition manager
 func NewPartitionManager(nodeID string, config *types.Config) *PartitionManager {
 	return &PartitionManager{
-		partitions: make(map[int32]*Partition),
-		nodeID:     nodeID,
-		config:     config,
-		splitting:  make(map[int32]bool),
+		partitions:      make(map[int32]*Partition),
+		nodeID:          nodeID,
+		config:          config,
+		splitting:       make(map[int32]bool),
+		backpressureMgr: NewBackpressureManager(config.MaxMemoryUsagePercent, config.MemoryCheckIntervalMs),
 	}
 }
 
@@ -209,6 +211,12 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 	}
 
 	pm.partitions[partitionID] = partition
+
+	// Set up rate limiter for this partition if configured
+	if pm.backpressureMgr != nil && pm.config.MaxIngestRatePerPartition > 0 && pm.config.IngestRateBurstSize > 0 {
+		pm.backpressureMgr.SetRateLimiter(partitionID, pm.config.MaxIngestRatePerPartition, pm.config.IngestRateBurstSize)
+	}
+
 	return nil
 }
 
@@ -393,6 +401,11 @@ func (pm *PartitionManager) GetPartitionForKey(key string) (*types.Partition, er
 
 // CanAccept returns true if the partition can accept new publishes without exceeding capacity limits.
 func (pm *PartitionManager) CanAccept(partitionID int32) bool {
+	// Check backpressure first (memory + rate limiting)
+	if pm.backpressureMgr != nil && !pm.backpressureMgr.CanAccept(partitionID) {
+		return false
+	}
+
 	pm.mu.RLock()
 	partition, exists := pm.partitions[partitionID]
 	pm.mu.RUnlock()
@@ -489,8 +502,36 @@ func (pm *PartitionManager) startPartitionLocked(partitionID int32) error {
 
 // startPartitionInternal starts a partition's background workers
 func (pm *PartitionManager) startPartitionInternal(partition *Partition) error {
-	// Replay WAL to recover scheduled timers that haven't fired yet
-	pm.replayWALTimers(partition)
+	// Try to load snapshot for fast recovery
+	snapshotMgr := NewSnapshotManager(partition.DataDir, partition.ID)
+	snapshot, err := snapshotMgr.LoadSnapshot()
+	if err != nil {
+		log.Printf("[Partition %d] Failed to load snapshot: %v", partition.ID, err)
+	}
+
+	if snapshot != nil {
+		// Fast recovery: skip WAL replay up to snapshot point
+		log.Printf("[Partition %d] Fast recovery from snapshot: HWM=%d, scheduled=%d",
+			partition.ID, snapshot.HighWatermark, snapshot.LastScheduledOffset)
+
+		// Restore consumer offsets
+		for groupID, offset := range snapshot.ConsumerOffsets {
+			if partition.ConsumerGroup != nil {
+				// Create or update consumer group with restored offset
+				_ = partition.ConsumerGroup.CommitOffset(groupID, int64(partition.ID), offset)
+			}
+		}
+
+		// Replay only from snapshot point forward
+		if snapshot.LastScheduledOffset < partition.Wal.GetLastOffset() {
+			pm.replayWALTimersFromOffset(partition, snapshot.LastScheduledOffset+1)
+		} else {
+			log.Printf("[Partition %d] No new events since snapshot, skipping replay", partition.ID)
+		}
+	} else {
+		// Full WAL replay (slow path)
+		pm.replayWALTimers(partition)
+	}
 
 	// Start scheduler
 	partition.Scheduler.Start()
@@ -555,6 +596,9 @@ func (pm *PartitionManager) startPartitionInternal(partition *Partition) error {
 		}
 	}()
 
+	// Start periodic snapshot creation (every 5 minutes)
+	go snapshotMgr.StartPeriodicSnapshots(partition, 5*time.Minute)
+
 	return nil
 }
 
@@ -616,6 +660,56 @@ func (pm *PartitionManager) replayWALTimers(partition *Partition) {
 
 	log.Printf("[Partition %d] WAL replay complete: %d future events re-scheduled, %d already expired (offsets %d-%d)",
 		partition.ID, scheduledCount, expiredCount, startOffset, lastScheduled)
+}
+
+// replayWALTimersFromOffset replays WAL events starting from a specific offset
+// (used for snapshot recovery to avoid full WAL replay).
+func (pm *PartitionManager) replayWALTimersFromOffset(partition *Partition, startOffset int64) {
+	lastOffset := partition.Wal.GetLastOffset()
+	if lastOffset < 0 {
+		return // Empty WAL, nothing to replay
+	}
+
+	if startOffset > lastOffset {
+		log.Printf("[Partition %d] Timer replay from offset %d: already up to date at offset %d", partition.ID, startOffset, lastOffset)
+		return
+	}
+
+	now := time.Now().UnixMilli()
+	scheduledCount := 0
+	expiredCount := 0
+	lastScheduled := startOffset - 1
+
+	const replayBatchSize int64 = 10000
+	for batchStart := startOffset; batchStart <= lastOffset; batchStart += replayBatchSize {
+		batchEnd := min(batchStart+replayBatchSize-1, lastOffset)
+
+		events, err := partition.Wal.ReadEvents(batchStart, batchEnd)
+		if err != nil {
+			log2.Warn("WAL replay from offset failed", "partition", partition.ID, "start_offset", batchStart, "end_offset", batchEnd, "error", err)
+			return
+		}
+
+		for _, event := range events {
+			if event.GetScheduleTs() > now {
+				// Future event — re-schedule it
+				if err := partition.Scheduler.Schedule(event); err != nil {
+					// Timer may already exist if recovery runs twice; skip silently
+					continue
+				}
+				scheduledCount++
+			} else {
+				expiredCount++
+			}
+			lastScheduled = event.Offset
+		}
+	}
+
+	// Update checkpoint incrementally
+	pm.writeTimerCheckpoint(partition, lastScheduled)
+
+	log.Printf("[Partition %d] WAL replay from offset %d complete: %d future events re-scheduled, %d already expired (offsets %d-%d)",
+		partition.ID, startOffset, scheduledCount, expiredCount, startOffset, lastScheduled)
 }
 
 // TimerCheckpoint stores the incremental replay progress

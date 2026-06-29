@@ -59,7 +59,8 @@ func (h *HealthChecker) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/health", h.handleHealth)
 	mux.HandleFunc("/health/deep", h.handleDeepHealth)
 	mux.HandleFunc("/health/ready", h.handleReady)
-	mux.HandleFunc("/metrics", h.handleMetrics)
+	// Note: /metrics is registered in main.go with promhttp.Handler()
+	// This avoids double-registration panic
 }
 
 func (h *HealthChecker) handleHealth(w http.ResponseWriter, r *http.Request) {
