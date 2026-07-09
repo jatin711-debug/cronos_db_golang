@@ -144,28 +144,39 @@ func (l *Leader) readLoop(id string, t *Transport) {
 	}
 }
 
-// handleAck handles acknowledgment
+// handleAck handles acknowledgment. ACKs from a different term are ignored.
 func (l *Leader) handleAck(id string, ack *AppendAckMessage) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	if follower, ok := l.followers[id]; ok {
-		if ack.Success {
-			if ack.Offset > follower.HighWatermark {
-				follower.HighWatermark = ack.Offset
-			}
-			follower.InSync = true
-		}
-		// Compute and expose replication lag using WAL high watermark
-		var lag int64
-		if l.wal != nil {
-			lag = l.wal.GetHighWatermark() - follower.HighWatermark
-		}
-		if lag < 0 {
-			lag = 0
-		}
-		replicationLag.WithLabelValues(id, fmt.Sprintf("%d", l.partitionID)).Set(float64(lag))
+	follower, ok := l.followers[id]
+	if !ok {
+		return
 	}
+
+	// Ignore stale-term ACKs.
+	if ack.Term != l.epoch {
+		log.Printf("[LEADER] ignoring ack from follower %s with stale term %d (current %d)", id, ack.Term, l.epoch)
+		return
+	}
+
+	if ack.Success {
+		if ack.Offset > follower.HighWatermark {
+			follower.HighWatermark = ack.Offset
+		}
+		follower.InSync = true
+	} else {
+		follower.InSync = false
+	}
+	// Compute and expose replication lag using WAL high watermark
+	var lag int64
+	if l.wal != nil {
+		lag = l.wal.GetHighWatermark() - follower.HighWatermark
+	}
+	if lag < 0 {
+		lag = 0
+	}
+	replicationLag.WithLabelValues(id, fmt.Sprintf("%d", l.partitionID)).Set(float64(lag))
 }
 
 // RemoveFollower removes a follower
@@ -188,8 +199,8 @@ func (l *Leader) RemoveFollower(id string) error {
 }
 
 // Replicate replicates an event batch to followers and waits for quorum ACKs.
-// It buffers events, flushes all followers, then waits for a majority of followers
-// to acknowledge the last offset before returning.
+// It buffers events, flushes all followers, then waits for a majority of in-sync
+// followers to acknowledge the last offset before returning.
 func (l *Leader) Replicate(events []*types.Event) error {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
@@ -198,24 +209,29 @@ func (l *Leader) Replicate(events []*types.Event) error {
 		return nil // No followers to replicate to
 	}
 
-	var activeCount int
-	for _, follower := range l.followers {
-		if follower.Connected {
-			activeCount++
-		}
+	isr := l.inSyncReplicasLocked()
+	neededAcks := (len(isr) + 1) / 2
+	if neededAcks == 0 {
+		return nil // No ISR yet, treat as success (followers will catch up)
 	}
 
-	neededAcks := (len(l.followers) + 1) / 2
-	if activeCount < neededAcks {
-		return fmt.Errorf("replication quorum failed: only %d of %d followers connected", activeCount, len(l.followers))
+	activeISR := 0
+	for _, id := range isr {
+		if f := l.followers[id]; f != nil && f.Connected {
+			activeISR++
+		}
+	}
+	if activeISR < neededAcks {
+		return fmt.Errorf("replication quorum failed: only %d of %d ISR followers connected", activeISR, len(isr))
 	}
 
 	lastOffset := events[len(events)-1].Offset
 
-	// Phase 1: Buffer events to all active followers
-	sendChan := make(chan error, activeCount)
-	for _, follower := range l.followers {
-		if !follower.Connected {
+	// Phase 1: Buffer events to all active ISR followers
+	sendChan := make(chan error, activeISR)
+	for _, id := range isr {
+		follower := l.followers[id]
+		if follower == nil || !follower.Connected {
 			continue
 		}
 
@@ -230,16 +246,17 @@ func (l *Leader) Replicate(events []*types.Event) error {
 		}(follower)
 	}
 
-	for i := 0; i < activeCount; i++ {
+	for i := 0; i < activeISR; i++ {
 		if err := <-sendChan; err != nil {
 			return fmt.Errorf("replication buffer failed: %w", err)
 		}
 	}
 
-	// Phase 2: Flush all followers so data is on the wire
-	flushChan := make(chan error, activeCount)
-	for _, follower := range l.followers {
-		if !follower.Connected {
+	// Phase 2: Flush all active ISR followers so data is on the wire
+	flushChan := make(chan error, activeISR)
+	for _, id := range isr {
+		follower := l.followers[id]
+		if follower == nil || !follower.Connected {
 			continue
 		}
 		go func(f *FollowerInfo) {
@@ -259,8 +276,8 @@ func (l *Leader) Replicate(events []*types.Event) error {
 
 	successes := 0
 	failures := 0
-	maxFailures := activeCount - neededAcks
-	for i := 0; i < activeCount; i++ {
+	maxFailures := activeISR - neededAcks
+	for i := 0; i < activeISR; i++ {
 		err := <-flushChan
 		if err == nil {
 			successes++
@@ -275,14 +292,28 @@ func (l *Leader) Replicate(events []*types.Event) error {
 		}
 	}
 
-	// Phase 3: Wait for quorum of followers to ack the last offset
+	// Phase 3: Wait for quorum of ISR followers to ack the last offset
 	return l.waitForQuorumAcks(lastOffset, l.replicateTimeout)
 }
 
-// waitForQuorumAcks blocks until a majority of followers have acked an offset
+// inSyncReplicasLocked returns the list of follower IDs that are currently in ISR.
+func (l *Leader) inSyncReplicasLocked() []string {
+	var isr []string
+	for id, f := range l.followers {
+		if f.InSync && f.Connected {
+			isr = append(isr, id)
+		}
+	}
+	return isr
+}
+
+// waitForQuorumAcks blocks until a majority of in-sync followers have acked an offset
 // >= targetOffset, or until timeout.
 func (l *Leader) waitForQuorumAcks(targetOffset int64, timeout time.Duration) error {
-	neededAcks := (len(l.followers) + 1) / 2
+	neededAcks := (len(l.inSyncReplicasLocked()) + 1) / 2
+	if neededAcks == 0 {
+		return nil
+	}
 	deadline := time.Now().Add(timeout)
 	pollInterval := 10 * time.Millisecond
 
@@ -290,7 +321,7 @@ func (l *Leader) waitForQuorumAcks(targetOffset int64, timeout time.Duration) er
 		l.mu.RLock()
 		acks := 0
 		for _, f := range l.followers {
-			if f.Connected && f.HighWatermark >= targetOffset {
+			if f.InSync && f.Connected && f.HighWatermark >= targetOffset {
 				acks++
 			}
 		}
@@ -303,7 +334,7 @@ func (l *Leader) waitForQuorumAcks(targetOffset int64, timeout time.Duration) er
 		time.Sleep(pollInterval)
 	}
 
-	return fmt.Errorf("replication quorum timeout: not enough followers acked offset %d within %v", targetOffset, timeout)
+	return fmt.Errorf("replication quorum timeout: not enough ISR followers acked offset %d within %v", targetOffset, timeout)
 }
 
 // sendBatch sends a batch to a follower (public, acquires f.mu)
@@ -315,6 +346,20 @@ func (l *Leader) sendBatch(follower *FollowerInfo, events []*types.Event) error 
 
 // sendBatchLocked sends a batch to a follower (caller must hold f.mu)
 func (l *Leader) sendBatchLocked(follower *FollowerInfo, events []*types.Event) error {
+	if len(events) == 0 {
+		return nil
+	}
+
+	// Verify the buffer is contiguous with the follower's next expected offset.
+	if events[0].Offset != follower.NextOffset {
+		return fmt.Errorf("gap detected for follower %s: expected offset %d, got %d", follower.ID, follower.NextOffset, events[0].Offset)
+	}
+	for i := 1; i < len(events); i++ {
+		if events[i].Offset != events[i-1].Offset+1 {
+			return fmt.Errorf("non-contiguous offsets for follower %s: %d followed by %d", follower.ID, events[i-1].Offset, events[i].Offset)
+		}
+	}
+
 	// Add to follower's buffer
 	follower.Buffer = append(follower.Buffer, events...)
 
@@ -337,11 +382,15 @@ func (l *Leader) flushFollower(follower *FollowerInfo) error {
 		return fmt.Errorf("no connection to follower %s", follower.ID)
 	}
 
+	prevLogIndex := follower.NextOffset - 1
+	prevLogTerm := l.getPrevLogTerm(prevLogIndex)
+
 	req := &types.ReplicationAppendRequest{
 		PartitionId:        l.partitionID,
 		Events:             follower.Buffer,
 		ExpectedNextOffset: follower.NextOffset,
 		Term:               l.epoch,
+		PrevLogTerm:        prevLogTerm,
 	}
 
 	if err := trans.WriteProtoMessage(MsgTypeAppendEntries, req); err != nil {
@@ -360,6 +409,19 @@ func (l *Leader) flushFollower(follower *FollowerInfo) error {
 	follower.Buffer = follower.Buffer[:0]
 
 	return nil
+}
+
+// getPrevLogTerm returns the term of the log entry at the given offset.
+// Currently this returns the leader's current epoch because the WAL does not
+// store per-entry terms. A future WAL format change should store/retrieve the
+// actual term of each entry.
+func (l *Leader) getPrevLogTerm(offset int64) int64 {
+	if offset < 0 {
+		return 0
+	}
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.epoch
 }
 
 // GetHighWatermark returns the minimum high watermark across followers
@@ -417,6 +479,18 @@ func (l *Leader) SetEpoch(epoch int64) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.epoch = epoch
+}
+
+// GetFollowerOffsets returns the high watermark offset for each follower.
+func (l *Leader) GetFollowerOffsets() map[string]int64 {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	offsets := make(map[string]int64, len(l.followers))
+	for id, follower := range l.followers {
+		offsets[id] = follower.HighWatermark
+	}
+	return offsets
 }
 
 // Start starts the leader replication

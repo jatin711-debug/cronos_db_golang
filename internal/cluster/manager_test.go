@@ -37,6 +37,10 @@ func (m *MockPartitionAccessor) DemoteFromLeader(partitionID int32) error {
 	return nil
 }
 
+func (m *MockPartitionAccessor) GetPartitionReplicaOffsets(partitionID int32) map[string]int64 {
+	return nil
+}
+
 func TestClusterManager_Initialization(t *testing.T) {
 	cfg := &Config{
 		NodeID:            "node-1",
@@ -104,6 +108,99 @@ func TestClusterRouter_Assignments(t *testing.T) {
 		if !router.IsPartitionLeader(i) {
 			t.Errorf("Expected this node to be leader of partition %d", i)
 		}
+	}
+}
+
+func TestStringSliceSetEqual(t *testing.T) {
+	cases := []struct {
+		a      []string
+		b      []string
+		equal  bool
+		reason string
+	}{
+		{[]string{"a", "b"}, []string{"b", "a"}, true, "order ignored"},
+		{[]string{"a", "b"}, []string{"a", "b", "c"}, false, "length differs"},
+		{[]string{}, []string{}, true, "both empty"},
+		{[]string{"a"}, []string{"a"}, true, "single element"},
+		{[]string{"a", "a"}, []string{"a", "a"}, true, "duplicates match"},
+		{[]string{"a", "a"}, []string{"a"}, false, "duplicate count differs"},
+	}
+	for _, tc := range cases {
+		got := stringSliceSetEqual(tc.a, tc.b)
+		if got != tc.equal {
+			t.Errorf("stringSliceSetEqual(%v, %v): expected %v (%s), got %v", tc.a, tc.b, tc.equal, tc.reason, got)
+		}
+	}
+}
+
+func TestPartitionAssignmentChanged(t *testing.T) {
+	base := &PartitionInfo{
+		ID:       1,
+		LeaderID: "node1",
+		Replicas: []string{"node1", "node2"},
+		ISR:      []string{"node1", "node2"},
+		State:    PartitionStateOnline,
+	}
+	cases := []struct {
+		name     string
+		fsm      *PartitionInfo
+		router   *PartitionInfo
+		expected bool
+	}{
+		{"identical", base, base, false},
+		{"leader changed", base, func() *PartitionInfo { p := *base; p.LeaderID = "node2"; return &p }(), true},
+		{"replica order changed", base, func() *PartitionInfo { p := *base; p.Replicas = []string{"node2", "node1"}; return &p }(), false},
+		{"replica set changed", base, func() *PartitionInfo { p := *base; p.Replicas = []string{"node1", "node3"}; return &p }(), true},
+		{"isr set changed", base, func() *PartitionInfo { p := *base; p.ISR = []string{"node1"}; return &p }(), true},
+		{"state changed", base, func() *PartitionInfo { p := *base; p.State = PartitionStateRebalancing; return &p }(), true},
+		{"nil fsm", nil, base, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := partitionAssignmentChanged(tc.fsm, tc.router)
+			if got != tc.expected {
+				t.Errorf("expected %v, got %v", tc.expected, got)
+			}
+		})
+	}
+}
+
+func TestRouterUpdatePartitionAssignment(t *testing.T) {
+	localNode := &Node{
+		ID:         "node-1",
+		Address:    "127.0.0.1:9002",
+		GossipAddr: "127.0.0.1:8002",
+		State:      NodeStateAlive,
+	}
+	mockMembership := &mockMembershipService{
+		local: localNode,
+		nodes: map[string]*Node{"node-1": localNode},
+	}
+	accessor := &MockPartitionAccessor{
+		syncCalls:     make(map[int32]string),
+		promoteCalls:  make(map[int32]int64),
+		followerCalls: make(map[int32]string),
+		demoteCalls:   make(map[int32]bool),
+	}
+	router := NewRouter(mockMembership, 4, 1, 150, accessor)
+
+	router.UpdatePartitionAssignment(2, "node-2", []string{"node-2", "node-3"}, []string{"node-2"})
+
+	info, err := router.GetPartitionInfo(2)
+	if err != nil {
+		t.Fatalf("GetPartitionInfo failed: %v", err)
+	}
+	if info.LeaderID != "node-2" {
+		t.Errorf("expected leader node-2, got %s", info.LeaderID)
+	}
+	if !stringSliceSetEqual(info.Replicas, []string{"node-2", "node-3"}) {
+		t.Errorf("expected replicas [node-2 node-3], got %v", info.Replicas)
+	}
+	if !stringSliceSetEqual(info.ISR, []string{"node-2"}) {
+		t.Errorf("expected ISR [node-2], got %v", info.ISR)
+	}
+	if info.State != PartitionStateOnline {
+		t.Errorf("expected state online, got %v", info.State)
 	}
 }
 

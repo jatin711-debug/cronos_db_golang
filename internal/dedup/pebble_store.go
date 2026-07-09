@@ -6,9 +6,11 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/jatin711-debug/cronos_db_golang/internal/metrics"
 )
 
 // PebbleStore is a PebbleDB-backed dedup store
@@ -56,6 +58,11 @@ func NewPebbleStore(dataDir string, partitionID int32, ttlHours int32, cache *pe
 
 // CheckAndStore checks if message ID exists, and stores it if not
 func (p *PebbleStore) CheckAndStore(messageID string, offset int64) (bool, error) {
+	start := time.Now()
+	defer func() {
+		metrics.ObserveDedupCheck(strconv.FormatInt(int64(p.partitionID), 10), "pebble_slow", time.Since(start))
+	}()
+
 	key := []byte(messageID)
 
 	// Check if exists
@@ -239,6 +246,17 @@ func (p *PebbleStore) Close() error {
 		return fmt.Errorf("flush before close: %w", err)
 	}
 	return p.db.Close()
+}
+
+// Checkpoint creates a PebbleDB checkpoint of the dedup store at destDir.
+// The checkpoint is a consistent, point-in-time snapshot that can be used for
+// backups or seeding a new replica.
+func (p *PebbleStore) Checkpoint(destDir string) error {
+	if err := p.db.Checkpoint(destDir); err != nil {
+		return fmt.Errorf("dedup checkpoint: %w", err)
+	}
+	log.Printf("[DEDUP] Checkpoint created at %s for partition %d", destDir, p.partitionID)
+	return nil
 }
 
 // buildValue builds storage value

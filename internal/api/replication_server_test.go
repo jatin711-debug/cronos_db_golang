@@ -53,11 +53,12 @@ func TestReplicationServiceHandler_AppendAndSync(t *testing.T) {
 	h := NewReplicationServiceHandler(pm)
 	ctx := context.Background()
 
+	now := time.Now().UnixMilli()
 	appendResp, err := h.Append(ctx, &types.ReplicationAppendRequest{
 		PartitionId: 0,
 		Events: []*types.Event{
-			{MessageId: "rep-1", Topic: "topic-test", ScheduleTs: time.Now().UnixMilli(), Payload: []byte("a")},
-			{MessageId: "rep-2", Topic: "topic-test", ScheduleTs: time.Now().UnixMilli(), Payload: []byte("b")},
+			{MessageId: "rep-1", Topic: "topic-test", Offset: 0, ScheduleTs: now, Payload: []byte("a")},
+			{MessageId: "rep-2", Topic: "topic-test", Offset: 1, ScheduleTs: now, Payload: []byte("b")},
 		},
 	})
 	if err != nil {
@@ -66,8 +67,8 @@ func TestReplicationServiceHandler_AppendAndSync(t *testing.T) {
 	if !appendResp.GetSuccess() {
 		t.Fatalf("Append failed: %s", appendResp.GetError())
 	}
-	if appendResp.GetNextOffset() < 2 {
-		t.Fatalf("expected next offset >= 2, got %d", appendResp.GetNextOffset())
+	if appendResp.GetNextOffset() != 2 {
+		t.Fatalf("expected next offset 2, got %d", appendResp.GetNextOffset())
 	}
 
 	stream := &mockReplicationSyncStream{ctx: ctx}
@@ -107,19 +108,19 @@ func TestReplicationServiceHandler_AppendOffsetMismatch(t *testing.T) {
 
 	h := NewReplicationServiceHandler(pm)
 	ctx := context.Background()
+	now := time.Now().UnixMilli()
 
 	_, _ = h.Append(ctx, &types.ReplicationAppendRequest{
 		PartitionId: 0,
 		Events: []*types.Event{
-			{MessageId: "rep-seed", Topic: "topic-test", ScheduleTs: time.Now().UnixMilli(), Payload: []byte("seed")},
+			{MessageId: "rep-seed", Topic: "topic-test", Offset: 0, ScheduleTs: now, Payload: []byte("seed")},
 		},
 	})
 
 	resp, err := h.Append(ctx, &types.ReplicationAppendRequest{
-		PartitionId:        0,
-		ExpectedNextOffset: 999,
+		PartitionId: 0,
 		Events: []*types.Event{
-			{MessageId: "rep-mismatch", Topic: "topic-test", ScheduleTs: time.Now().UnixMilli(), Payload: []byte("x")},
+			{MessageId: "rep-mismatch", Topic: "topic-test", Offset: 999, ScheduleTs: now, Payload: []byte("x")},
 		},
 	})
 	if err != nil {
@@ -128,7 +129,7 @@ func TestReplicationServiceHandler_AppendOffsetMismatch(t *testing.T) {
 	if resp.GetSuccess() {
 		t.Fatal("expected append to fail on offset mismatch")
 	}
-	if !strings.Contains(resp.GetError(), "offset mismatch") {
+	if !strings.Contains(resp.GetError(), "gap") && !strings.Contains(resp.GetError(), "offset mismatch") {
 		t.Fatalf("expected offset mismatch error, got: %s", resp.GetError())
 	}
 }

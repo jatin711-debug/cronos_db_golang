@@ -79,6 +79,12 @@ type Config struct {
 	TLSKeyFile     string
 	TLSClientAuth  bool // require client certs (mTLS)
 
+	// Internal replication mTLS configuration (leader <-> follower traffic)
+	ReplicationTLSEnabled  bool
+	ReplicationTLSCAFile   string
+	ReplicationTLSCertFile string
+	ReplicationTLSKeyFile  string
+
 	// Auth configuration
 	AuthEnabled       bool
 	AuthJWTSecret     string // HMAC secret for JWT verification

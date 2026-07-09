@@ -253,3 +253,14 @@ func (s *OffsetStore) Close() error {
 	s.flushPending()
 	return s.db.Close()
 }
+
+// Checkpoint creates a PebbleDB checkpoint of the offset store at destDir.
+// Pending in-memory commits are flushed before the checkpoint so it is
+// consistent with the latest committed offsets.
+func (s *OffsetStore) Checkpoint(destDir string) error {
+	s.flushPending()
+	if err := s.db.Checkpoint(destDir); err != nil {
+		return fmt.Errorf("offset checkpoint: %w", err)
+	}
+	return nil
+}

@@ -18,6 +18,8 @@ type PartitionAccessor interface {
 	AddFollower(partitionID int32, followerID string, followerAddr string) error
 	// DemoteFromLeader demotes a local partition from leader
 	DemoteFromLeader(partitionID int32) error
+	// GetPartitionReplicaOffsets returns the latest replica offsets for a local partition.
+	GetPartitionReplicaOffsets(partitionID int32) map[string]int64
 }
 
 // Router handles routing requests to the correct node/partition
@@ -31,6 +33,10 @@ type Router struct {
 
 	// Partition assignments cache
 	assignments map[int32]*PartitionInfo
+
+	// onRebalance is called whenever the router recomputes assignments due to
+	// membership changes. It lets the manager immediately sync metadata to Raft.
+	onRebalance func()
 }
 
 // NewRouter creates a new partition router.
@@ -49,10 +55,23 @@ func NewRouter(membership MembershipService, numPartitions, replicationFactor, v
 	// Initialize partition assignments
 	r.initializePartitions()
 
-	// Subscribe to membership events
-	go r.watchMembershipEvents()
-
 	return r
+}
+
+// Start begins watching membership events. It should be called after any
+// rebalance callbacks have been registered so that the first events are not
+// missed.
+func (r *Router) Start() {
+	go r.watchMembershipEvents()
+}
+
+// SetOnRebalance registers a callback that is invoked after the router
+// recomputes assignments due to a node join or leave. The callback should
+// not block or call back into the router while holding the router lock.
+func (r *Router) SetOnRebalance(cb func()) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onRebalance = cb
 }
 
 // initializePartitions initializes partition assignments
@@ -123,9 +142,15 @@ func (r *Router) onNodeJoin(node *Node) {
 	// Update cached assignments with minimal router lock hold time.
 	r.mu.Lock()
 	r.updateAssignments()
+	cb := r.onRebalance
 	r.mu.Unlock()
 
 	log.Printf("[ROUTER] Node %s joined, %d partition moves needed", node.ID, len(moves))
+
+	// Notify the manager so it can immediately sync the updated assignments to Raft.
+	if cb != nil {
+		cb()
+	}
 
 	// Trigger partition rebalancing (async)
 	go r.executeRebalance(moves)
@@ -145,9 +170,15 @@ func (r *Router) onNodeLeave(node *Node) {
 	// Update cached assignments with minimal router lock hold time.
 	r.mu.Lock()
 	r.updateAssignments()
+	cb := r.onRebalance
 	r.mu.Unlock()
 
 	log.Printf("[ROUTER] Node %s left, %d partition moves needed", node.ID, len(moves))
+
+	// Notify the manager so it can immediately sync the updated assignments to Raft.
+	if cb != nil {
+		cb()
+	}
 
 	// Trigger partition rebalancing (async)
 	go r.executeRebalance(moves)
@@ -354,6 +385,53 @@ func (r *Router) GetPartitionEpoch(partitionID int32) int64 {
 		return 0
 	}
 	return info.Epoch
+}
+
+// UpdatePartitionAssignment updates the cached partition assignment for cases
+// where the FSM is the source of truth (e.g. leader failover). It keeps the
+// router's local view consistent with the authoritative cluster state so that
+// subsequent health checks and routing decisions do not revert to stale data.
+func (r *Router) UpdatePartitionAssignment(partitionID int32, leaderID string, replicas []string, isr []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	info, exists := r.assignments[partitionID]
+	if !exists {
+		info = &PartitionInfo{ID: partitionID}
+		r.assignments[partitionID] = info
+	}
+
+	info.LeaderID = leaderID
+	if len(replicas) > 0 {
+		info.Replicas = append([]string(nil), replicas...)
+	} else {
+		info.Replicas = nil
+	}
+	if len(isr) > 0 {
+		info.ISR = append([]string(nil), isr...)
+	} else {
+		info.ISR = nil
+	}
+	info.State = PartitionStateOnline
+}
+
+// UpdateReplicaOffsets updates the per-replica high-watermark offsets for a partition.
+// This is used by the cluster leader to track replication lag and choose the least-lag
+// replica during failover.
+func (r *Router) UpdateReplicaOffsets(partitionID int32, offsets map[string]int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	info, exists := r.assignments[partitionID]
+	if !exists {
+		return
+	}
+	if info.ReplicaOffsets == nil {
+		info.ReplicaOffsets = make(map[string]int64)
+	}
+	for id, offset := range offsets {
+		info.ReplicaOffsets[id] = offset
+	}
 }
 
 // GetAllPartitions returns all partition information

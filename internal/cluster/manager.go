@@ -173,6 +173,15 @@ func (m *Manager) Start() error {
 
 	// Create router
 	m.router = NewRouter(m.membership, m.config.NumPartitions, m.config.ReplicationFactor, m.config.VirtualNodes, m.partitionAccessor)
+	// When membership changes rebalance partition assignments, immediately sync
+	// the new leader/replica mapping into Raft so metadata APIs don't return
+	// stale assignments (e.g. a node showing 0 leader partitions).
+	m.router.SetOnRebalance(func() {
+		if m.IsLeader() {
+			m.syncClusterState()
+		}
+	})
+	m.router.Start()
 
 	// Start background tasks
 	go m.leaderTasks()
@@ -259,11 +268,35 @@ func (m *Manager) leaderTasks() {
 
 // performLeaderTasks performs leader-only tasks
 func (m *Manager) performLeaderTasks() {
-	// Check for under-replicated partitions
+	// Check for under-replicated partitions and dead leaders
 	m.checkPartitionHealth()
+
+	// Refresh replica offsets for partitions this node leads so failover can be
+	// lag-aware. Remote leaders will report their own offsets when they run this
+	// same path, and the router state is synced through Raft below.
+	m.updateReplicaOffsets()
 
 	// Update cluster state in Raft
 	m.syncClusterState()
+}
+
+// updateReplicaOffsets queries local partition leaders and pushes their
+// follower/high-watermark offsets into the router.
+func (m *Manager) updateReplicaOffsets() {
+	if m.partitionAccessor == nil || m.router == nil {
+		return
+	}
+
+	partitions := m.router.GetAllPartitions()
+	for partitionID, info := range partitions {
+		if info.LeaderID != m.config.NodeID {
+			continue
+		}
+		offsets := m.partitionAccessor.GetPartitionReplicaOffsets(partitionID)
+		if len(offsets) > 0 {
+			m.router.UpdateReplicaOffsets(partitionID, offsets)
+		}
+	}
 }
 
 // checkPartitionHealth checks for unhealthy partitions
@@ -298,7 +331,9 @@ func (m *Manager) checkPartitionHealth() {
 	}
 }
 
-// electNewLeader elects a new leader for a partition
+// electNewLeader elects a new leader for a partition.  When replica offsets are
+// available, the alive ISR/replica with the highest offset is chosen to minimize
+// data loss and replay; otherwise it falls back to the first available replica.
 func (m *Manager) electNewLeader(partitionID int32, info *PartitionInfo) {
 	aliveNodes := m.membership.GetAliveNodes()
 	aliveNodeIDs := make(map[string]bool)
@@ -306,15 +341,10 @@ func (m *Manager) electNewLeader(partitionID int32, info *PartitionInfo) {
 		aliveNodeIDs[node.ID] = true
 	}
 
-	// Find first alive replica to be new leader
-	var newLeader string
-	for _, nodeID := range info.Replicas {
-		if aliveNodeIDs[nodeID] && nodeID != info.LeaderID {
-			newLeader = nodeID
-			break
-		}
-	}
+	oldLeader := info.LeaderID
 
+	// Use the centralized election logic to pick the most caught-up alive replica.
+	newLeader, bestOffset := ChooseFailoverLeader(info, aliveNodeIDs)
 	if newLeader == "" {
 		log.Printf("[CLUSTER] No available replica for partition %d", partitionID)
 		return
@@ -322,13 +352,14 @@ func (m *Manager) electNewLeader(partitionID int32, info *PartitionInfo) {
 
 	// Update partition via Raft
 	newInfo := &PartitionInfo{
-		ID:       partitionID,
-		Topic:    info.Topic,
-		LeaderID: newLeader,
-		Replicas: info.Replicas,
-		ISR:      info.ISR,
-		Epoch:    info.Epoch + 1,
-		State:    PartitionStateOnline,
+		ID:             partitionID,
+		Topic:          info.Topic,
+		LeaderID:       newLeader,
+		Replicas:       info.Replicas,
+		ISR:            info.ISR,
+		Epoch:          info.Epoch + 1,
+		State:          PartitionStateOnline,
+		ReplicaOffsets: info.ReplicaOffsets,
 	}
 
 	if m.raft != nil {
@@ -341,6 +372,15 @@ func (m *Manager) electNewLeader(partitionID int32, info *PartitionInfo) {
 			log.Printf("[CLUSTER] Failed to update partition leader: %v", err)
 			return
 		}
+	}
+
+	// Keep the router's local view in sync with the FSM so that subsequent
+	// health checks do not re-detect the failed leader and trigger another election.
+	m.mu.RLock()
+	rt := m.router
+	m.mu.RUnlock()
+	if rt != nil {
+		rt.UpdatePartitionAssignment(partitionID, newLeader, newInfo.Replicas, newInfo.ISR)
 	}
 
 	// If we are the new leader, promote the local partition
@@ -367,24 +407,28 @@ func (m *Manager) electNewLeader(partitionID int32, info *PartitionInfo) {
 	}
 
 	// If we were the old leader, demote
-	if info.LeaderID == m.config.NodeID && newLeader != m.config.NodeID && m.partitionAccessor != nil {
+	if oldLeader == m.config.NodeID && newLeader != m.config.NodeID && m.partitionAccessor != nil {
 		if err := m.partitionAccessor.DemoteFromLeader(partitionID); err != nil {
 			log.Printf("[CLUSTER] Failed to demote partition %d: %v", partitionID, err)
 		}
 	}
 
-	log.Printf("[CLUSTER] Partition %d new leader: %s (epoch=%d)",
-		partitionID, newLeader, newInfo.Epoch)
+	log.Printf("[CLUSTER] Partition %d new leader: %s (epoch=%d, offset=%d)",
+		partitionID, newLeader, newInfo.Epoch, bestOffset)
 }
 
-// syncClusterState syncs cluster state to Raft
+// syncClusterState syncs cluster state to Raft. It now also updates existing
+// partition assignments when the hash-ring-derived router state differs from
+// the persisted FSM state, preventing stale metadata (e.g. a node showing 0
+// leader partitions after rebalancing).
 func (m *Manager) syncClusterState() {
 	m.mu.RLock()
 	raftNode := m.raft
 	router := m.router
+	membership := m.membership
 	m.mu.RUnlock()
 
-	if raftNode == nil || router == nil {
+	if raftNode == nil || router == nil || membership == nil {
 		return
 	}
 
@@ -393,19 +437,89 @@ func (m *Manager) syncClusterState() {
 		return
 	}
 
+	aliveNodes := membership.GetAliveNodes()
+	aliveNodeIDs := make(map[string]bool, len(aliveNodes))
+	for _, n := range aliveNodes {
+		aliveNodeIDs[n.ID] = true
+	}
+
 	assignments := router.GetAllPartitions()
 	for partitionID, info := range assignments {
-		if info == nil {
-			continue
-		}
-		if _, exists := state.Partitions[partitionID]; exists {
+		if info == nil || info.LeaderID == "" || !aliveNodeIDs[info.LeaderID] {
 			continue
 		}
 
-		if err := m.AssignPartition(info); err != nil {
-			log.Printf("[CLUSTER] Failed to sync partition %d metadata to Raft: %v", partitionID, err)
+		existing, exists := state.Partitions[partitionID]
+		if !exists {
+			if err := m.AssignPartition(info); err != nil {
+				log.Printf("[CLUSTER] Failed to sync partition %d metadata to Raft: %v", partitionID, err)
+			}
+			continue
+		}
+
+		if !partitionAssignmentChanged(existing, info) {
+			continue
+		}
+
+		updated := &PartitionInfo{
+			ID:             existing.ID,
+			Topic:          existing.Topic,
+			LeaderID:       info.LeaderID,
+			Replicas:       info.Replicas,
+			ISR:            info.ISR,
+			Epoch:          existing.Epoch,
+			State:          info.State,
+			ReplicaOffsets: existing.ReplicaOffsets,
+		}
+		if updated.Topic == "" && info.Topic != "" {
+			updated.Topic = info.Topic
+		}
+
+		if err := m.UpdatePartition(updated); err != nil {
+			log.Printf("[CLUSTER] Failed to update partition %d metadata in Raft: %v", partitionID, err)
 		}
 	}
+}
+
+// partitionAssignmentChanged returns true if the leader or replica set has
+// changed between the FSM and the router assignment.
+func partitionAssignmentChanged(fsm, router *PartitionInfo) bool {
+	if fsm == nil || router == nil {
+		return fsm != router
+	}
+	if fsm.LeaderID != router.LeaderID {
+		return true
+	}
+	if fsm.State != router.State {
+		return true
+	}
+	if !stringSliceSetEqual(fsm.Replicas, router.Replicas) {
+		return true
+	}
+	if !stringSliceSetEqual(fsm.ISR, router.ISR) {
+		return true
+	}
+	return false
+}
+
+func stringSliceSetEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	if len(a) == 0 {
+		return true
+	}
+	seen := make(map[string]int, len(a))
+	for _, s := range a {
+		seen[s]++
+	}
+	for _, s := range b {
+		if seen[s] == 0 {
+			return false
+		}
+		seen[s]--
+	}
+	return true
 }
 
 // SetPartitionAccessor sets the partition accessor for state transfer operations

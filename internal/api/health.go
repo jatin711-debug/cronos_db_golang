@@ -91,14 +91,14 @@ func (h *HealthChecker) handleReady(w http.ResponseWriter, r *http.Request) {
 		healthy = false
 	}
 
-	// Check WAL writeability - can we actually write to the WAL?
+	// Check WAL readability - can we read from the WAL without mutating it?
 	if h.PartitionMgr != nil {
-		walWritable := h.checkWALWritable()
-		if !walWritable {
-			checks["wal_writable"] = HealthCheck{Status: "down", Detail: "WAL not writable", Healthy: false}
+		walReadable, walDetail := h.checkWALReadable()
+		if !walReadable {
+			checks["wal_readable"] = HealthCheck{Status: "down", Detail: walDetail, Healthy: false}
 			healthy = false
 		} else {
-			checks["wal_writable"] = HealthCheck{Status: "up", Detail: "WAL writable", Healthy: true}
+			checks["wal_readable"] = HealthCheck{Status: "up", Detail: walDetail, Healthy: true}
 		}
 	}
 
@@ -145,22 +145,32 @@ func (h *HealthChecker) handleDeepHealth(w http.ResponseWriter, r *http.Request)
 			}
 			label := "partition_" + strconv.FormatInt(int64(i), 10)
 
-			// WAL check - test actual writeability
+			// WAL check - test readability, not mutability
 			if p.Wal != nil {
 				hwm := p.Wal.GetHighWatermark()
-				// Try a test write to verify WAL is actually functional
-				testEvent := &types.Event{
-					MessageId:  fmt.Sprintf("health-check-%d-%d", i, now.UnixNano()),
-					ScheduleTs: now.UnixMilli() + 86400000, // 24h in future - won't be delivered
-					Payload:    []byte("healthcheck"),
-					Topic:      "__healthcheck",
+				flushErrors := p.Wal.GetFlushErrors()
+				replayErr := p.GetReplayError()
+				detail := fmt.Sprintf("HWM=%d, flush_errors=%d", hwm, flushErrors)
+				walHealthy := true
+				if replayErr != nil {
+					detail += fmt.Sprintf(", replay_error=%v", replayErr)
+					walHealthy = false
 				}
-				if err := p.Wal.AppendEvent(testEvent); err != nil {
-					checks[label+"_wal"] = HealthCheck{Status: "degraded", Detail: fmt.Sprintf("WAL append failed: %v", err), Healthy: false}
+				if flushErrors > 0 {
+					walHealthy = false
+				}
+				if hwm >= 0 {
+					if _, err := p.Wal.ReadEvent(hwm); err != nil {
+						detail = fmt.Sprintf("WAL read failed at HWM %d: %v", hwm, err)
+						walHealthy = false
+					}
+				}
+				status := "up"
+				if !walHealthy {
+					status = "degraded"
 					healthy = false
-				} else {
-					checks[label+"_wal"] = HealthCheck{Status: "up", Detail: fmt.Sprintf("WAL active, HWM=%d", hwm), Healthy: true}
 				}
+				checks[label+"_wal"] = HealthCheck{Status: status, Detail: detail, Healthy: walHealthy}
 			}
 
 			// Scheduler check
@@ -284,10 +294,10 @@ func (h *HealthChecker) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// checkWALWritable tests if we can actually write to the WAL by doing a test append.
-func (h *HealthChecker) checkWALWritable() bool {
+// checkWALReadable tests if we can read from the WAL without mutating it.
+func (h *HealthChecker) checkWALReadable() (bool, string) {
 	if h.PartitionMgr == nil {
-		return false
+		return false, "partition manager not initialized"
 	}
 
 	// Try partition 0 first
@@ -303,19 +313,17 @@ func (h *HealthChecker) checkWALWritable() bool {
 	}
 
 	if p == nil || p.Wal == nil {
-		return false
+		return false, "no WAL available"
 	}
 
-	// Try a test write
-	testEvent := &types.Event{
-		MessageId:  fmt.Sprintf("wal-write-test-%d", time.Now().UnixNano()),
-		ScheduleTs: time.Now().UnixMilli() + 86400000, // 24h in future
-		Payload:    []byte("test"),
-		Topic:      "__healthcheck",
+	hwm := p.Wal.GetHighWatermark()
+	if hwm < 0 {
+		return true, "empty WAL is readable"
 	}
 
-	if err := p.Wal.AppendEvent(testEvent); err != nil {
-		return false
+	if _, err := p.Wal.ReadEvent(hwm); err != nil {
+		return false, fmt.Sprintf("WAL read at HWM %d failed: %v", hwm, err)
 	}
-	return true
+
+	return true, fmt.Sprintf("WAL readable, HWM=%d", hwm)
 }

@@ -3,6 +3,7 @@ package storage
 import (
 	"bufio"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"io"
@@ -54,11 +55,22 @@ func NewSegment(dataDir string, firstOffset int64, isActive bool, cipher *Segmen
 		return nil, fmt.Errorf("create segments dir: %w", err)
 	}
 
-	// Open or create segment file
-	file, err := os.OpenFile(filePath, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
+	// Open or create segment file. We intentionally avoid os.O_APPEND; on Windows
+	// O_APPEND can cause SetEndOfFile to return ERROR_ACCESS_DENIED during
+	// pre-allocation, and the code already writes sequentially at the current offset.
+	file, err := os.OpenFile(filePath, os.O_RDWR|os.O_CREATE, 0644)
 	if err != nil {
 		return nil, fmt.Errorf("open segment file: %w", err)
 	}
+
+	// Determine whether the file is newly created *before* extending it. Pre-allocation
+	// sets the size to 1GB, so we cannot rely on stat.Size() == 0 after that step.
+	stat, err := file.Stat()
+	if err != nil {
+		file.Close()
+		return nil, fmt.Errorf("stat file: %w", err)
+	}
+	isNewFile := stat.Size() == 0
 
 	// Pre-allocate segment file for zero-allocation writes
 	const preallocSize = 1024 * 1024 * 1024 // 1GB pre-allocation
@@ -68,10 +80,28 @@ func NewSegment(dataDir string, firstOffset int64, isActive bool, cipher *Segmen
 	}
 
 	// Get file stats after pre-allocation
-	stat, err := file.Stat()
+	stat, err = file.Stat()
 	if err != nil {
 		file.Close()
 		return nil, fmt.Errorf("stat file after preallocate: %w", err)
+	}
+
+	createdTS := time.Now().UnixMilli()
+	dataEnd := stat.Size()
+
+	// For newly created files, write the header directly to the file before any
+	// mmap or buffered writer is set up. This guarantees the header is at offset 0
+	// and leaves the file position at the end of the header for subsequent writes.
+	if isNewFile {
+		if _, err := file.Write(buildSegmentHeader(firstOffset, createdTS)); err != nil {
+			file.Close()
+			return nil, fmt.Errorf("write header: %w", err)
+		}
+		if err := file.Sync(); err != nil {
+			file.Close()
+			return nil, fmt.Errorf("sync header: %w", err)
+		}
+		dataEnd = 64
 	}
 
 	// Create index
@@ -81,9 +111,11 @@ func NewSegment(dataDir string, firstOffset int64, isActive bool, cipher *Segmen
 		return nil, fmt.Errorf("create index: %w", err)
 	}
 
-	// Mmap the file for zero-copy reads and writes
+	// Mmap the file for zero-copy reads and writes. Encrypted segments use the
+	// buffered writer path instead because records are transformed before being
+	// persisted, so reads must come from the file, not a stale mmap view.
 	var mmapData []byte
-	if stat.Size() > 0 {
+	if stat.Size() > 0 && cipher == nil {
 		mmapData, _ = mmapFile(file, stat.Size())
 		// We ignore mmap errors and fall back to file reading (mmapData will be nil if error)
 	}
@@ -93,11 +125,12 @@ func NewSegment(dataDir string, firstOffset int64, isActive bool, cipher *Segmen
 		writer:          bufio.NewWriterSize(file, 4*1024*1024), // 4MB buffer for high throughput
 		reader:          file,                                   // io.ReaderAt doesn't have buffered option
 		mmapData:        mmapData,
-		mmapWritePos:    0, // Track mmap write position
+		mmapWritePos:    dataEnd, // Start appending after existing data / header
 		mmapSize:        stat.Size(),
+		sizeBytes:       dataEnd,
 		firstOffset:     firstOffset,
 		nextOffset:      firstOffset,
-		createdTS:       time.Now().UnixMilli(),
+		createdTS:       createdTS,
 		isActive:        isActive,
 		dataDir:         dataDir,
 		filename:        filename,
@@ -109,22 +142,18 @@ func NewSegment(dataDir string, firstOffset int64, isActive bool, cipher *Segmen
 		cipher:          cipher,
 	}
 
-	// Write header if new file
-	if stat.Size() == 0 {
-		if err := segment.writeHeader(); err != nil {
-			file.Close()
-			index.Close()
-			return nil, fmt.Errorf("write header: %w", err)
-		}
-	}
-
 	return segment, nil
 }
 
 // OpenSegment opens an existing segment
 func OpenSegment(dataDir string, filename string, cipher *SegmentCipher) (*Segment, error) {
 	filePath := filepath.Join(dataDir, "segments", filename)
-	file, err := os.OpenFile(filePath, os.O_RDWR|os.O_APPEND, 0644)
+
+	// Open the existing segment without os.O_APPEND. O_APPEND can cause
+	// SetEndOfFile to fail with ERROR_ACCESS_DENIED on Windows when the file
+	// is opened for pre-allocation, and replay/write paths manage the offset
+	// explicitly.
+	file, err := os.OpenFile(filePath, os.O_RDWR, 0644)
 	if err != nil {
 		return nil, fmt.Errorf("open segment file: %w", err)
 	}
@@ -147,20 +176,16 @@ func OpenSegment(dataDir string, filename string, cipher *SegmentCipher) (*Segme
 		return nil, fmt.Errorf("open index: %w", err)
 	}
 
-	// Pre-allocate if needed for active segments
-	const preallocSize = 1024 * 1024 * 1024 // 1GB
-	if stat.Size() < preallocSize {
-		if err := preallocateFile(file, preallocSize); err != nil {
-			log.Printf("[SEGMENT] Pre-allocation failed for %s: %v (continuing)", filename, err)
-		} else {
-			stat, _ = file.Stat() // Refresh size
-		}
-	}
+	// Skip pre-allocation when reopening an existing segment for replay. Only
+	// the active segment needs room to grow, and WAL replay opens every segment
+	// as read-only. This avoids the noisy Windows SetEndOfFile warning.
 
-	// Try to mmap the file with readwrite for zero-copy writes
+	// Try to mmap the file for zero-copy reads. Encrypted segments read from the
+	// file because records are transformed on the write path, so the mmap view
+	// would not contain the plaintext record layout.
 	var mmapData []byte
 	mmapSize := stat.Size()
-	if stat.Size() > 0 {
+	if stat.Size() > 0 && cipher == nil {
 		mmapData, _ = mmapFile(file, stat.Size())
 		// Fallback to file reading if mmap fails
 	}
@@ -184,21 +209,61 @@ func OpenSegment(dataDir string, filename string, cipher *SegmentCipher) (*Segme
 		cipher:        cipher,
 	}
 
+	// Validate header before scanning records.
+	if err := segment.readHeader(); err != nil {
+		_ = segment.Close()
+		return nil, fmt.Errorf("invalid segment header: %w", err)
+	}
+
 	// Scan segment to get metadata
 	if err := segment.scan(); err != nil {
-		file.Close()
-		index.Close()
+		_ = segment.Close()
 		return nil, fmt.Errorf("scan segment: %w", err)
 	}
 
 	// Set nextOffset based on lastOffset found during scan
 	segment.nextOffset = segment.lastOffset + 1
 
+	// Position the file handle at the end of the data so the buffered writer
+	// (used for encrypted records) appends instead of overwriting.
+	if _, err := file.Seek(segment.sizeBytes, io.SeekStart); err != nil {
+		_ = segment.Close()
+		return nil, fmt.Errorf("seek to end of data: %w", err)
+	}
+
 	return segment, nil
 }
 
-// writeHeader writes segment file header
-func (s *Segment) writeHeader() error {
+// readHeader validates the 64-byte segment header and returns an error if the
+// magic number, version, or header CRC is invalid.
+func (s *Segment) readHeader() error {
+	if s.segmentFile == nil {
+		return fmt.Errorf("segment file not open")
+	}
+	if _, err := s.segmentFile.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("seek to header: %w", err)
+	}
+	header := make([]byte, 64)
+	if _, err := io.ReadFull(s.segmentFile, header); err != nil {
+		return fmt.Errorf("read header: %w", err)
+	}
+	if string(header[0:6]) != "CRNOS1" {
+		return fmt.Errorf("bad header magic: %q", header[0:7])
+	}
+	if header[7] != 1 {
+		return fmt.Errorf("unsupported segment version: %d", header[7])
+	}
+	stored := binary.BigEndian.Uint32(header[60:64])
+	computed := crc32.ChecksumIEEE(header[0:60])
+	if stored != computed {
+		return fmt.Errorf("header CRC mismatch: stored=%08x computed=%08x", stored, computed)
+	}
+	return nil
+}
+
+// buildSegmentHeader returns the 64-byte segment header with magic, version,
+// first offset, created timestamp, and CRC32.
+func buildSegmentHeader(firstOffset, createdTS int64) []byte {
 	header := make([]byte, 64)
 
 	// Magic number "CRNOS1" (7 bytes)
@@ -208,10 +273,10 @@ func (s *Segment) writeHeader() error {
 	header[7] = 1
 
 	// First offset (8 bytes)
-	binary.BigEndian.PutUint64(header[8:16], uint64(s.firstOffset))
+	binary.BigEndian.PutUint64(header[8:16], uint64(firstOffset))
 
 	// Created timestamp (8 bytes)
-	binary.BigEndian.PutUint64(header[24:32], uint64(s.createdTS))
+	binary.BigEndian.PutUint64(header[24:32], uint64(createdTS))
 
 	// Reserved (32 bytes for future use)
 	// ...
@@ -220,11 +285,7 @@ func (s *Segment) writeHeader() error {
 	crc := crc32.ChecksumIEEE(header[0:60])
 	binary.BigEndian.PutUint32(header[60:64], crc)
 
-	_, err := s.writer.Write(header)
-	if err == nil {
-		s.sizeBytes += 64
-	}
-	return err
+	return header
 }
 
 // AppendEvent appends an event to the segment
@@ -1086,10 +1147,9 @@ func (s *Segment) scan() error {
 	// If we found corrupt data at the tail, truncate the file
 	if lastGoodPos < s.sizeBytes {
 		if err := s.truncateToPosition(lastGoodPos); err != nil {
-			log.Printf("[SEGMENT] Warning: failed to truncate corrupt tail: %v", err)
-		} else {
-			log.Printf("[SEGMENT] Truncated %d bytes of corrupt tail", s.sizeBytes-lastGoodPos)
+			return fmt.Errorf("truncate corrupt tail at %d: %w", lastGoodPos, err)
 		}
+		log.Printf("[SEGMENT] Truncated %d bytes of corrupt tail", s.sizeBytes-lastGoodPos)
 	}
 
 	// If we couldn't find any events, start from firstOffset
@@ -1180,49 +1240,54 @@ func (s *Segment) Flush() error {
 	return s.segmentFile.Sync()
 }
 
-// Close closes segment
+// Close closes segment and returns all accumulated close/sync errors.
 func (s *Segment) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	return s.closeLocked()
+}
+
+// closeLocked performs the actual close logic. Caller must hold s.mu.
+func (s *Segment) closeLocked() error {
 	if s.closed {
 		return nil
 	}
 	s.closed = true
 
-	var firstErr error
+	var errs []error
+
+	// Always flush the buffered writer first. Even when mmap is active, the
+	// writer may contain data (e.g., encrypted records or headers written
+	// before the mmap path was chosen) and must be persisted before unmapping.
+	if err := s.writer.Flush(); err != nil {
+		errs = append(errs, fmt.Errorf("flush writer: %w", err))
+	}
 
 	// If using mmap, sync and unmap
 	if s.mmapData != nil {
 		if err := syncMmap(s.mmapData[:s.mmapWritePos]); err != nil {
-			firstErr = fmt.Errorf("sync mmap: %w", err)
+			errs = append(errs, fmt.Errorf("sync mmap: %w", err))
 		}
 		if err := munmapFile(s.mmapData); err != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("unmap: %w", err)
-			}
+			errs = append(errs, fmt.Errorf("unmap: %w", err))
 		}
 		s.mmapData = nil
-	} else {
-		// Buffered writer path
-		if err := s.writer.Flush(); err != nil {
-			firstErr = fmt.Errorf("flush writer: %w", err)
-		}
 	}
 
-	if err := s.segmentFile.Sync(); err != nil && firstErr == nil {
-		firstErr = fmt.Errorf("sync file: %w", err)
+	if err := s.segmentFile.Sync(); err != nil {
+		errs = append(errs, fmt.Errorf("sync file: %w", err))
 	}
 
 	if s.index != nil {
-		if err := s.index.Close(); err != nil && firstErr == nil {
-			firstErr = fmt.Errorf("close index: %w", err)
+		if err := s.index.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close index: %w", err))
 		}
 	}
-	if err := s.segmentFile.Close(); err != nil && firstErr == nil {
-		firstErr = fmt.Errorf("close segment file: %w", err)
+	if err := s.segmentFile.Close(); err != nil {
+		errs = append(errs, fmt.Errorf("close segment file: %w", err))
 	}
-	return firstErr
+	return errors.Join(errs...)
 }
 
 // Delete permanently removes the segment and its index files from disk
@@ -1230,33 +1295,26 @@ func (s *Segment) Delete() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Close files first if they are open
-	if s.segmentFile != nil {
-		_ = s.segmentFile.Close()
-	}
+	var errs []error
 
-	if s.mmapData != nil {
-		munmapFile(s.mmapData)
-		s.mmapData = nil
-	}
-
-	if s.index != nil {
-		_ = s.index.Close()
+	// Close files first if not already closed.
+	if err := s.closeLocked(); err != nil {
+		errs = append(errs, fmt.Errorf("close segment before delete: %w", err))
 	}
 
 	// Delete segment file
 	filePath := filepath.Join(s.dataDir, "segments", s.filename)
 	if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("delete segment file: %w", err)
+		errs = append(errs, fmt.Errorf("delete segment file: %w", err))
 	}
 
 	// Delete index file
 	indexFilePath := filepath.Join(s.dataDir, "index", s.indexFilename)
 	if err := os.Remove(indexFilePath); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("delete index file: %w", err)
+		errs = append(errs, fmt.Errorf("delete index file: %w", err))
 	}
 
-	return nil
+	return errors.Join(errs...)
 }
 
 // IsFull checks if segment is full

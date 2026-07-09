@@ -2,6 +2,8 @@ package replication
 
 import (
 	"fmt"
+	"hash"
+	"hash/crc32"
 	"io"
 	"log"
 	"net"
@@ -124,37 +126,105 @@ func (f *Follower) handleMessage(t *Transport, msgType uint8, payload []byte) er
 			return err
 		}
 
-		// Write to WAL
-		// Use AppendBatch
-		if f.wal != nil {
-			if err := f.wal.AppendBatch(msg.Events); err != nil {
-				log.Printf("[FOLLOWER] Failed to append batch: %v", err)
-				// Send failure ack
+		f.mu.Lock()
+
+		// Term validation: reject stale leaders, step up on newer term.
+		if msg.Term < f.epoch {
+			term := f.epoch
+			nextOffset := f.nextOffset
+			f.mu.Unlock()
+			ack := &types.ReplicationAppendResponse{
+				Success:    false,
+				LastOffset: nextOffset - 1,
+				NextOffset: nextOffset,
+				Term:       term,
+			}
+			return t.WriteProtoMessage(MsgTypeAppendAck, ack)
+		}
+		if msg.Term > f.epoch {
+			f.epoch = msg.Term
+		}
+
+		// Gap detection: the new entries must start exactly where the WAL expects.
+		expectedNext := msg.PrevLogIndex + 1
+		if expectedNext != f.nextOffset {
+			term := f.epoch
+			localNext := f.nextOffset
+			f.mu.Unlock()
+			log.Printf("[FOLLOWER] Append entries gap for partition %d: expected %d, local %d", f.partitionID, expectedNext, localNext)
+			ack := &types.ReplicationAppendResponse{
+				Success:    false,
+				LastOffset: localNext - 1,
+				NextOffset: localNext,
+				Term:       term,
+				Error:      fmt.Sprintf("offset mismatch: expected %d, local %d", expectedNext, localNext),
+			}
+			return t.WriteProtoMessage(MsgTypeAppendAck, ack)
+		}
+
+		// Append replicated events, preserving leader-assigned offsets.
+		if f.wal != nil && len(msg.Events) > 0 {
+			if err := f.wal.AppendReplicatedBatch(msg.Events); err != nil {
+				term := f.epoch
+				nextOffset := f.nextOffset
+				f.mu.Unlock()
+				log.Printf("[FOLLOWER] Failed to append replicated batch: %v", err)
 				ack := &types.ReplicationAppendResponse{
 					Success:    false,
-					LastOffset: f.nextOffset,
+					LastOffset: nextOffset - 1,
+					NextOffset: nextOffset,
+					Term:       term,
+					Error:      err.Error(),
 				}
 				return t.WriteProtoMessage(MsgTypeAppendAck, ack)
 			}
 		}
 
-		// Update offset
-		if len(msg.Events) > 0 {
-			f.nextOffset = msg.Events[len(msg.Events)-1].Offset + 1
-		}
+		f.nextOffset = f.wal.GetNextOffset()
+		term := f.epoch
+		lastOffset := f.nextOffset - 1
+		f.mu.Unlock()
 
 		// Send success ack
 		ack := &types.ReplicationAppendResponse{
 			Success:    true,
-			LastOffset: f.nextOffset - 1,
+			LastOffset: lastOffset,
+			NextOffset: f.nextOffset,
+			Term:       term,
 		}
 		return t.WriteProtoMessage(MsgTypeAppendAck, ack)
 
 	case MsgTypeHeartbeat:
+		msg := &HeartbeatMessage{}
+		if err := msg.Decode(payload); err != nil {
+			return err
+		}
+
+		f.mu.Lock()
+		if msg.Term < f.epoch {
+			term := f.epoch
+			lastOffset := f.nextOffset - 1
+			f.mu.Unlock()
+			ack := &types.ReplicationAppendResponse{
+				Success:    false,
+				LastOffset: lastOffset,
+				Term:       term,
+				Error:      "heartbeat term is stale",
+			}
+			return t.WriteProtoMessage(MsgTypeHeartbeatAck, ack)
+		}
+		if msg.Term > f.epoch {
+			f.epoch = msg.Term
+		}
+		term := f.epoch
+		lastOffset := f.nextOffset - 1
+		f.mu.Unlock()
+
 		// Respond to heartbeat
 		ack := &types.ReplicationAppendResponse{
 			Success:    true,
-			LastOffset: f.nextOffset - 1,
+			LastOffset: lastOffset,
+			Term:       term,
 		}
 		return t.WriteProtoMessage(MsgTypeHeartbeatAck, ack)
 	}
@@ -207,10 +277,14 @@ func (f *Follower) SyncFilesFromLeader() error {
 	segmentsDir := filepath.Join(walDataDir, "segments")
 	var currentFile *os.File
 	var currentFilePath string
+	var currentHash hash.Hash32
 
 	for {
 		msgType, payload, err := transport.ReadMessage()
 		if err != nil {
+			if currentFile != nil {
+				currentFile.Close()
+			}
 			if err == io.EOF {
 				return fmt.Errorf("leader disconnected during bulk sync")
 			}
@@ -221,8 +295,22 @@ func (f *Follower) SyncFilesFromLeader() error {
 		case MsgTypeFileTransferStart:
 			msg := &FileTransferStartMessage{}
 			if err := msg.Decode(payload); err != nil {
+				if currentFile != nil {
+					currentFile.Close()
+				}
 				return err
 			}
+
+			f.mu.RLock()
+			localEpoch := f.epoch
+			f.mu.RUnlock()
+			if msg.Epoch < localEpoch {
+				if currentFile != nil {
+					currentFile.Close()
+				}
+				return fmt.Errorf("bulk sync rejected stale leader epoch %d (local %d)", msg.Epoch, localEpoch)
+			}
+
 			currentFilePath = filepath.Join(segmentsDir, msg.Filename)
 
 			// Open new file for writing
@@ -234,22 +322,33 @@ func (f *Follower) SyncFilesFromLeader() error {
 			if err != nil {
 				return fmt.Errorf("create segment file %s: %w", msg.Filename, err)
 			}
+			currentHash = crc32.NewIEEE()
 
 		case MsgTypeFileTransferData:
 			msg := &FileTransferDataMessage{}
 			if err := msg.Decode(payload); err != nil {
+				if currentFile != nil {
+					currentFile.Close()
+				}
 				return err
 			}
 			if currentFile == nil {
 				return fmt.Errorf("received data without FileTransferStart")
 			}
 			if _, err := currentFile.Write(msg.Data); err != nil {
+				currentFile.Close()
 				return fmt.Errorf("write segment data: %w", err)
+			}
+			if currentHash != nil {
+				currentHash.Write(msg.Data)
 			}
 
 		case MsgTypeFileTransferEnd:
 			msg := &FileTransferEndMessage{}
 			if err := msg.Decode(payload); err != nil {
+				if currentFile != nil {
+					currentFile.Close()
+				}
 				return err
 			}
 			if currentFile != nil {
@@ -260,10 +359,28 @@ func (f *Follower) SyncFilesFromLeader() error {
 				return fmt.Errorf("leader reported failure during bulk transfer")
 			}
 
+			f.mu.RLock()
+			localEpoch := f.epoch
+			f.mu.RUnlock()
+			if msg.Epoch < localEpoch {
+				return fmt.Errorf("bulk sync end rejected stale leader epoch %d (local %d)", msg.Epoch, localEpoch)
+			}
+
+			if currentHash != nil {
+				receivedChecksum := currentHash.Sum32()
+				if msg.FileChecksum != 0 && receivedChecksum != msg.FileChecksum {
+					return fmt.Errorf("bulk sync checksum mismatch for %s: computed %x, expected %x", currentFilePath, receivedChecksum, msg.FileChecksum)
+				}
+				currentHash = nil
+			}
+
 			log.Printf("[FOLLOWER] Bulk file sync completed successfully")
 
 			// Reload WAL to pick up new segments
 			f.mu.Lock()
+			if msg.Epoch > f.epoch {
+				f.epoch = msg.Epoch
+			}
 			f.wal.ReloadSegments()
 			f.nextOffset = f.wal.GetNextOffset()
 			f.mu.Unlock()

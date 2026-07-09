@@ -2,11 +2,13 @@ package dedup
 
 import (
 	"runtime"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/jatin711-debug/cronos_db_golang/internal/metrics"
 )
 
 // BloomFilter interface abstracting the backend
@@ -215,6 +217,12 @@ func NewBloomPebbleStore(dataDir string, partitionID int32, ttlHours int32, expe
 
 // CheckAndStore checks if message ID exists using bloom filter first
 func (s *BloomPebbleStore) CheckAndStore(messageID string, offset int64) (bool, error) {
+	start := time.Now()
+	path := "bloom_fast"
+	defer func() {
+		metrics.ObserveDedupCheck(strconv.FormatInt(int64(s.pebble.partitionID), 10), path, time.Since(start))
+	}()
+
 	// Fast path: bloom filter says "definitely not exists"
 	// Use RLock for concurrent reads, no spinning
 	s.bloomMu.RLock()
@@ -233,6 +241,7 @@ func (s *BloomPebbleStore) CheckAndStore(messageID string, offset int64) (bool, 
 	s.bloomMu.RUnlock()
 
 	// Slow path: bloom filter says "maybe exists", must check PebbleDB
+	path = "pebble_slow"
 	exists, err := s.pebble.CheckAndStore(messageID, offset)
 	if err != nil {
 		return false, err
@@ -422,6 +431,13 @@ func (s *BloomPebbleStore) GetStats() (*DedupStats, error) {
 // Close closes the store
 func (s *BloomPebbleStore) Close() error {
 	return s.pebble.Close()
+}
+
+// Checkpoint creates a PebbleDB checkpoint of the underlying Pebble store at
+// destDir. The bloom filter is not captured; it will be rebuilt from the Pebble
+// state on the restored node.
+func (s *BloomPebbleStore) Checkpoint(destDir string) error {
+	return s.pebble.Checkpoint(destDir)
 }
 
 // ResetBloom resets the bloom filter (use during maintenance)

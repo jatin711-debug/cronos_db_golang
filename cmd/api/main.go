@@ -19,6 +19,7 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/internal/cluster"
 	"github.com/jatin711-debug/cronos_db_golang/internal/compliance"
 	"github.com/jatin711-debug/cronos_db_golang/internal/config"
+	"github.com/jatin711-debug/cronos_db_golang/internal/metrics"
 	"github.com/jatin711-debug/cronos_db_golang/internal/partition"
 	"github.com/jatin711-debug/cronos_db_golang/internal/replication"
 	"github.com/jatin711-debug/cronos_db_golang/internal/schema"
@@ -45,6 +46,13 @@ func main() {
 		slog.Error("Failed to load config", "error", err)
 		os.Exit(1)
 	}
+
+	slog.Info("Configuration loaded",
+		"auth_enabled", cfg.AuthEnabled,
+		"auth_jwt_secret_set", cfg.AuthJWTSecret != "",
+		"auth_policy_file", cfg.AuthPolicyFile,
+		"auth_explicitly_disabled_by_flag", !cfg.AuthEnabled,
+	)
 
 	// Wrap config for hot reload
 	reloadableCfg := config.NewReloadableConfig(cfg)
@@ -337,7 +345,11 @@ func main() {
 	grpcConfig.TopicRateLimiter = topicRateLimiter
 	grpcConfig.SLORecorder = sloRecorder
 
-	grpcServer := api.NewGRPCServer(grpcConfig)
+	grpcServer, err := api.NewGRPCServer(grpcConfig)
+	if err != nil {
+		slog.Error("Failed to create gRPC server", "error", err)
+		os.Exit(1)
+	}
 
 	// Create event service handler
 	var eventHandler *api.EventServiceHandler
@@ -367,6 +379,11 @@ func main() {
 	// Wire cluster router for partition-aware request routing
 	if clusterMgr != nil {
 		eventHandler.SetClusterRouter(clusterMgr)
+	}
+
+	// Wire topic-level RBAC policy (nil when auth is disabled)
+	if authConfig != nil {
+		eventHandler.SetAuthPolicy(authConfig.Policy)
 	}
 
 	// Create consumer group service handler
@@ -472,54 +489,73 @@ func main() {
 
 					partitionLabel := strconv.FormatInt(int64(i), 10)
 
-					if p.Scheduler != nil {
-						schedulerStats := p.Scheduler.GetStats()
-						api.SetTimingWheelMetrics(partitionLabel, schedulerStats.ActiveTimers, int64(schedulerStats.OverflowLevel))
-					}
-
-					if p.Wal != nil {
-						activeSegmentSize := int64(0)
-						if activeSegment := p.Wal.GetActiveSegment(); activeSegment != nil {
-							activeSegmentSize = activeSegment.GetSize()
+						if p.Scheduler != nil {
+							schedulerStats := p.Scheduler.GetStats()
+							metrics.SetTimingWheelMetrics(partitionLabel, schedulerStats.ActiveTimers, int64(schedulerStats.OverflowLevel))
 						}
-						api.SetWALMetrics(partitionLabel, len(p.Wal.GetSegments()), activeSegmentSize, p.Wal.GetHighWatermark())
-					}
 
-					if p.DedupStore != nil {
-						if dedupStats, err := p.DedupStore.GetStats(); err == nil && dedupStats != nil {
-							falsePositiveRate := 0.0
-							totalBloomPositives := dedupStats.BloomHits + dedupStats.BloomFalsePositives
-							if totalBloomPositives > 0 {
-								falsePositiveRate = float64(dedupStats.BloomFalsePositives) / float64(totalBloomPositives)
+						if p.Wal != nil {
+							activeSegmentSize := int64(0)
+							if activeSegment := p.Wal.GetActiveSegment(); activeSegment != nil {
+								activeSegmentSize = activeSegment.GetSize()
 							}
-							api.SetDedupMetrics(partitionLabel, dedupStats.BloomMemoryBytes, falsePositiveRate, dedupStats.PebbleHits)
+							metrics.SetWALMetrics(partitionLabel, len(p.Wal.GetSegments()), activeSegmentSize, p.Wal.GetHighWatermark())
+						}
+
+						if p.DedupStore != nil {
+							if dedupStats, err := p.DedupStore.GetStats(); err == nil && dedupStats != nil {
+								falsePositiveRate := 0.0
+								totalBloomPositives := dedupStats.BloomHits + dedupStats.BloomFalsePositives
+								if totalBloomPositives > 0 {
+									falsePositiveRate = float64(dedupStats.BloomFalsePositives) / float64(totalBloomPositives)
+								}
+								metrics.SetDedupMetrics(partitionLabel, dedupStats.BloomMemoryBytes, falsePositiveRate, dedupStats.PebbleHits)
+							}
+						}
+
+						if p.Dispatcher != nil {
+							dispatcherStats := p.Dispatcher.GetStats()
+							workerQueueDepth := int64(0)
+							if p.Worker != nil {
+								workerQueueDepth = p.Worker.GetStats().QueueLength
+							}
+							metrics.SetDeliveryMetrics(partitionLabel, dispatcherStats.ActiveDeliveries, dispatcherStats.CreditsInUse, workerQueueDepth)
+						}
+
+						if p.ConsumerGroup != nil && p.Wal != nil {
+							hwm := p.Wal.GetHighWatermark()
+							for _, group := range p.ConsumerGroup.ListGroups() {
+								var lag int64
+								for _, part := range group.Partitions {
+									committed := group.CommittedOffsets[part]
+									if committed < 0 {
+										committed = -1
+									}
+									partLag := hwm - committed
+									if partLag < 0 {
+										partLag = 0
+									}
+									lag += partLag
+									metrics.SetConsumerGroupMetrics(group.GroupID, strconv.FormatInt(int64(part), 10), partLag, len(group.Members))
+								}
+							}
 						}
 					}
 
-					if p.Dispatcher != nil {
-						dispatcherStats := p.Dispatcher.GetStats()
-						workerQueueDepth := int64(0)
-						if p.Worker != nil {
-							workerQueueDepth = p.Worker.GetStats().QueueLength
-						}
-						api.SetDeliveryMetrics(partitionLabel, dispatcherStats.ActiveDeliveries, dispatcherStats.CreditsInUse, workerQueueDepth)
+					stats := pm.GetStats()
+					slog.Info("Stats", "stats", stats)
+					if cfg.ClusterEnabled && clusterMgr != nil {
+						clusterStats := clusterMgr.GetStats()
+						metrics.SetClusterMetrics(
+							int64(clusterStats.TotalNodes),
+							int64(clusterStats.AliveNodes),
+							int64(clusterStats.NumPartitions),
+							int64(clusterStats.LeaderPartitions),
+						)
+						slog.Info("Cluster Stats", "stats", clusterStats)
+					} else {
+						metrics.SetClusterMetrics(1, 1, stats.TotalPartitions, stats.LeaderPartitions)
 					}
-				}
-
-				stats := pm.GetStats()
-				slog.Info("Stats", "stats", stats)
-				if cfg.ClusterEnabled && clusterMgr != nil {
-					clusterStats := clusterMgr.GetStats()
-					api.SetClusterMetrics(
-						int64(clusterStats.TotalNodes),
-						int64(clusterStats.AliveNodes),
-						int64(clusterStats.NumPartitions),
-						int64(clusterStats.LeaderPartitions),
-					)
-					slog.Info("Cluster Stats", "stats", clusterStats)
-				} else {
-					api.SetClusterMetrics(1, 1, stats.TotalPartitions, stats.LeaderPartitions)
-				}
 			case <-ctx.Done():
 				return
 			}

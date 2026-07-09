@@ -1348,7 +1348,9 @@ type ReplicationAppendRequest struct {
 	// Expected next offset (for gap detection)
 	ExpectedNextOffset int64 `protobuf:"varint,3,opt,name=expected_next_offset,json=expectedNextOffset,proto3" json:"expected_next_offset,omitempty"`
 	// Leader term
-	Term          int64 `protobuf:"varint,4,opt,name=term,proto3" json:"term,omitempty"`
+	Term int64 `protobuf:"varint,4,opt,name=term,proto3" json:"term,omitempty"`
+	// Term of the log entry immediately preceding the new entries
+	PrevLogTerm   int64 `protobuf:"varint,5,opt,name=prev_log_term,json=prevLogTerm,proto3" json:"prev_log_term,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1411,6 +1413,13 @@ func (x *ReplicationAppendRequest) GetTerm() int64 {
 	return 0
 }
 
+func (x *ReplicationAppendRequest) GetPrevLogTerm() int64 {
+	if x != nil {
+		return x.PrevLogTerm
+	}
+	return 0
+}
+
 type ReplicationAppendResponse struct {
 	state   protoimpl.MessageState `protogen:"open.v1"`
 	Success bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
@@ -1418,7 +1427,9 @@ type ReplicationAppendResponse struct {
 	// Last replicated offset
 	LastOffset int64 `protobuf:"varint,3,opt,name=last_offset,json=lastOffset,proto3" json:"last_offset,omitempty"`
 	// Next expected offset
-	NextOffset    int64 `protobuf:"varint,4,opt,name=next_offset,json=nextOffset,proto3" json:"next_offset,omitempty"`
+	NextOffset int64 `protobuf:"varint,4,opt,name=next_offset,json=nextOffset,proto3" json:"next_offset,omitempty"`
+	// Term of the follower/acknowledger
+	Term          int64 `protobuf:"varint,5,opt,name=term,proto3" json:"term,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1477,6 +1488,13 @@ func (x *ReplicationAppendResponse) GetLastOffset() int64 {
 func (x *ReplicationAppendResponse) GetNextOffset() int64 {
 	if x != nil {
 		return x.NextOffset
+	}
+	return 0
+}
+
+func (x *ReplicationAppendResponse) GetTerm() int64 {
+	if x != nil {
+		return x.Term
 	}
 	return 0
 }
@@ -3675,19 +3693,21 @@ const file_proto_events_proto_rawDesc = "" +
 	"\x15partition_assignments\x18\x03 \x03(\v2C.cronos_db.RebalanceConsumerGroupResponse.PartitionAssignmentsEntryR\x14partitionAssignments\x1aG\n" +
 	"\x19PartitionAssignmentsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\x05R\x05value:\x028\x01\"\xad\x01\n" +
+	"\x05value\x18\x02 \x01(\x05R\x05value:\x028\x01\"\xd1\x01\n" +
 	"\x18ReplicationAppendRequest\x12!\n" +
 	"\fpartition_id\x18\x01 \x01(\x05R\vpartitionId\x12(\n" +
 	"\x06events\x18\x02 \x03(\v2\x10.cronos_db.EventR\x06events\x120\n" +
 	"\x14expected_next_offset\x18\x03 \x01(\x03R\x12expectedNextOffset\x12\x12\n" +
-	"\x04term\x18\x04 \x01(\x03R\x04term\"\x8d\x01\n" +
+	"\x04term\x18\x04 \x01(\x03R\x04term\x12\"\n" +
+	"\rprev_log_term\x18\x05 \x01(\x03R\vprevLogTerm\"\xa1\x01\n" +
 	"\x19ReplicationAppendResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x14\n" +
 	"\x05error\x18\x02 \x01(\tR\x05error\x12\x1f\n" +
 	"\vlast_offset\x18\x03 \x01(\x03R\n" +
 	"lastOffset\x12\x1f\n" +
 	"\vnext_offset\x18\x04 \x01(\x03R\n" +
-	"nextOffset\"{\n" +
+	"nextOffset\x12\x12\n" +
+	"\x04term\x18\x05 \x01(\x03R\x04term\"{\n" +
 	"\x16ReplicationSyncRequest\x12!\n" +
 	"\fpartition_id\x18\x01 \x01(\x05R\vpartitionId\x12!\n" +
 	"\fstart_offset\x18\x02 \x01(\x03R\vstartOffset\x12\x1b\n" +

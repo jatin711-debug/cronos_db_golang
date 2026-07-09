@@ -29,7 +29,7 @@ services:
       - CRONOS_TRACING_SAMPLE_RATIO=${CRONOS_TRACING_SAMPLE_RATIO:-0.01}
       - CRONOS_TRACING_INSECURE=${CRONOS_TRACING_INSECURE:-true}
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 30s
       timeout: 3s
       retries: 3
@@ -67,13 +67,10 @@ services:
       - CRONOS_TRACING_SAMPLE_RATIO=${CRONOS_TRACING_SAMPLE_RATIO:-0.01}
       - CRONOS_TRACING_INSECURE=${CRONOS_TRACING_INSECURE:-true}
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 30s
       timeout: 3s
       retries: 3
-    depends_on:
-      - cronos-node2
-      - cronos-node3
 
   # ---------------------------------------------------------------------------
   # Cluster Node 2 (Follower)
@@ -108,10 +105,12 @@ services:
       - CRONOS_TRACING_SAMPLE_RATIO=${CRONOS_TRACING_SAMPLE_RATIO:-0.01}
       - CRONOS_TRACING_INSECURE=${CRONOS_TRACING_INSECURE:-true}
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 30s
       timeout: 3s
       retries: 3
+    depends_on:
+      - cronos-node1
 
   # ---------------------------------------------------------------------------
   # Cluster Node 3 (Follower)
@@ -146,10 +145,12 @@ services:
       - CRONOS_TRACING_SAMPLE_RATIO=${CRONOS_TRACING_SAMPLE_RATIO:-0.01}
       - CRONOS_TRACING_INSECURE=${CRONOS_TRACING_INSECURE:-true}
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 30s
       timeout: 3s
       retries: 3
+    depends_on:
+      - cronos-node1
 
   # ---------------------------------------------------------------------------
   # Observability stack (optional profile)

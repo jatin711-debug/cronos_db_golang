@@ -1,0 +1,52 @@
+{{- if .Values.alerts.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "cronos-db.fullname" . }}
+  labels:
+    {{- include "cronos-db.labels" . | nindent 4 }}
+spec:
+  groups:
+    - name: cronos-db
+      rules:
+        - alert: CronosDBNodeDown
+          expr: up{job=~".*cronos-db.*"} == 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "CronosDB node {{ $labels.instance }} is down"
+
+        - alert: CronosDBReplicationLagHigh
+          expr: |
+            (
+              cronos_replication_lag{job=~".*cronos-db.*"}
+              / on(partition) group_left ()
+              (cronos_wal_high_watermark{job=~".*cronos-db.*"} > 0)
+            ) > 0.1
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "CronosDB replication lag is high for partition {{ $labels.partition }}"
+
+        - alert: CronosDBWALFlushErrors
+          expr: rate(cronos_wal_flush_errors_total{job=~".*cronos-db.*"}[5m]) > 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "CronosDB WAL flush errors on {{ $labels.instance }}"
+
+        - alert: CronosDBUnderReplicated
+          expr: |
+            (
+              cronos_cluster_partitions_total{job=~".*cronos-db.*"}
+              - cronos_cluster_partitions_leader{job=~".*cronos-db.*"}
+            ) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "CronosDB has under-replicated partitions"
+{{- end }}

@@ -480,6 +480,62 @@ func TestSegment_Header(t *testing.T) {
 	}
 }
 
+func TestSegment_InvalidHeaderRejected(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create a valid segment.
+	seg, err := NewSegment(tmpDir, 0, true, nil)
+	if err != nil {
+		t.Fatalf("NewSegment failed: %v", err)
+	}
+	seg.Flush()
+	seg.Close()
+
+	// Corrupt the header magic.
+	filePath := filepath.Join(tmpDir, "segments", seg.GetFilename())
+	f, err := os.OpenFile(filePath, os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatalf("open file for corruption: %v", err)
+	}
+	if _, err := f.WriteAt([]byte("BADHDR"), 0); err != nil {
+		t.Fatalf("write corrupt header: %v", err)
+	}
+	f.Close()
+
+	// Reopen should fail because the header is invalid.
+	if _, err := OpenSegment(tmpDir, seg.GetFilename(), nil); err == nil {
+		t.Fatal("expected OpenSegment to fail with invalid header, got nil")
+	}
+}
+
+func TestSegment_HeaderCRCMismatchRejected(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create a valid segment.
+	seg, err := NewSegment(tmpDir, 0, true, nil)
+	if err != nil {
+		t.Fatalf("NewSegment failed: %v", err)
+	}
+	seg.Flush()
+	seg.Close()
+
+	// Corrupt the version byte (offset 7) without touching the CRC.
+	filePath := filepath.Join(tmpDir, "segments", seg.GetFilename())
+	f, err := os.OpenFile(filePath, os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatalf("open file for corruption: %v", err)
+	}
+	if _, err := f.WriteAt([]byte{0xFF}, 7); err != nil {
+		t.Fatalf("write corrupt version byte: %v", err)
+	}
+	f.Close()
+
+	// Reopen should fail because the header CRC no longer matches.
+	if _, err := OpenSegment(tmpDir, seg.GetFilename(), nil); err == nil {
+		t.Fatal("expected OpenSegment to fail with header CRC mismatch, got nil")
+	}
+}
+
 // makeEvent is a test helper to create a types.Event
 func makeEvent(offset int64, msgID string, topic string) *types.Event {
 	return &types.Event{
