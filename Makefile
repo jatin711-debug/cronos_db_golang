@@ -271,7 +271,10 @@ test: rust-dedup
 	$(GO_RUNTIME_PREFIX) go test ./...
 
 proto:
-	protoc --go_out=. --go-grpc_out=. proto/events.proto
+	@# Remove stale generated files so protoc always produces a clean output
+	@rm -f pkg/types/events.pb.go pkg/types/events_grpc.pb.go
+	@rm -rf cronos_db/pkg/types github.com
+	protoc --go_out=. --go_opt=module=github.com/jatin711-debug/cronos_db_golang --go-grpc_out=. --go-grpc_opt=module=github.com/jatin711-debug/cronos_db_golang proto/events.proto
 
 tag: tag-preflight
 	@$(VERIFY_TAG_ABSENT_LOCAL_CMD)
@@ -315,6 +318,7 @@ clean-data:
 node1: rust-dedup
 	$(GO_RUNTIME_PREFIX) go run ./cmd/api \
 		--node-id=node1 \
+		--auth-enabled=false \
 		--cluster \
 		--partition-count=$(PARTITION_COUNT) \
 		--replication-factor=$(REPLICATION_FACTOR) \
@@ -341,6 +345,7 @@ node1: rust-dedup
 node2: 
 	$(GO_RUNTIME_PREFIX) go run ./cmd/api \
 		--node-id=node2 \
+		--auth-enabled=false \
 		--cluster \
 		--partition-count=$(PARTITION_COUNT) \
 		--replication-factor=$(REPLICATION_FACTOR) \
@@ -368,6 +373,7 @@ node2:
 node3: 
 	$(GO_RUNTIME_PREFIX) go run ./cmd/api \
 		--node-id=node3 \
+		--auth-enabled=false \
 		--cluster \
 		--partition-count=$(PARTITION_COUNT) \
 		--replication-factor=$(REPLICATION_FACTOR) \

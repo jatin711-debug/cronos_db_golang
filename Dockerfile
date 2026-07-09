@@ -5,7 +5,7 @@
 # -----------------------------------------------------------------------------
 # Stage 1: Build Rust bloom filter
 # -----------------------------------------------------------------------------
-FROM rust:1.94 AS rust-builder
+FROM rust:1.86 AS rust-builder
 
 WORKDIR /build/rust-dedup
 
@@ -64,6 +64,7 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     tzdata \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user for security

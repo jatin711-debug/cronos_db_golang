@@ -92,13 +92,14 @@ type ClusterState struct {
 
 // PartitionInfo represents partition metadata
 type PartitionInfo struct {
-	ID       int32          `json:"id"`
-	Topic    string         `json:"topic"`
-	LeaderID string         `json:"leader_id"`
-	Replicas []string       `json:"replicas"` // Node IDs
-	ISR      []string       `json:"isr"`      // In-Sync Replicas
-	Epoch    int64          `json:"epoch"`
-	State    PartitionState `json:"state"`
+	ID             int32            `json:"id"`
+	Topic          string           `json:"topic"`
+	LeaderID       string           `json:"leader_id"`
+	Replicas       []string         `json:"replicas"`        // Node IDs
+	ISR            []string         `json:"isr"`             // In-Sync Replicas
+	Epoch          int64            `json:"epoch"`
+	State          PartitionState   `json:"state"`
+	ReplicaOffsets map[string]int64 `json:"replica_offsets"` // Per-replica high watermark (offset)
 }
 
 // PartitionState represents the state of a partition

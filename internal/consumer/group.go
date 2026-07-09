@@ -86,6 +86,19 @@ func (g *GroupManager) GetGroup(groupID string) (*types.ConsumerGroup, bool) {
 	return group, exists
 }
 
+// CheckpointOffsetStore creates a point-in-time checkpoint of the persistent
+// offset store if one is configured. Returns nil if no offset store is attached.
+func (g *GroupManager) CheckpointOffsetStore(destDir string) error {
+	g.mu.RLock()
+	store := g.offsetStore
+	g.mu.RUnlock()
+
+	if store == nil {
+		return nil
+	}
+	return store.Checkpoint(destDir)
+}
+
 // JoinGroup adds a consumer to a group
 func (g *GroupManager) JoinGroup(groupID, memberID, address, topic string, partitionID int32) error {
 	g.mu.Lock()

@@ -1,0 +1,88 @@
+replicaCount: 3
+
+image:
+  repository: johnny711dock/cronos-db
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 1Gi
+  limits:
+    cpu: 2000m
+    memory: 4Gi
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+persistence:
+  enabled: true
+  storageClass: ""
+  accessMode: ReadWriteOnce
+  size: 10Gi
+
+service:
+  type: ClusterIP
+  grpcPort: 9000
+  httpPort: 8080
+
+headlessService:
+  gossipPort: 7946
+  clusterGRPCPort: 7947
+  raftPort: 7948
+
+config:
+  nodeIdPrefix: "cronos-node"
+  dataDir: /data
+  partitionCount: 8
+  replicationFactor: 3
+  fsyncMode: every_event
+  segmentSizeBytes: 536870912
+  indexInterval: 1000
+  flushIntervalMs: 100
+  tickMs: 100
+  wheelSize: 60
+  dedupTTLHours: 24
+  bloomCapacity: 1000000
+  tracingEnabled: false
+  tracingExporter: otlp
+  tracingOTLPEndpoint: ""
+  tracingSampleRatio: 0.01
+  tracingInsecure: true
+
+# Enable only when TLS certificates are provided via secrets.
+tls:
+  enabled: false
+  # existingSecret: cronos-db-tls
+
+metrics:
+  enabled: true
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}
+
+alerts:
+  enabled: false

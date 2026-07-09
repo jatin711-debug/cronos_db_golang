@@ -17,9 +17,14 @@ type TLSConfig struct {
 }
 
 // BuildServerTLSConfig builds a tls.Config for the gRPC server.
+// Returns an error if TLS is disabled or if the configuration is invalid.
 func BuildServerTLSConfig(cfg *TLSConfig) (*tls.Config, error) {
 	if !cfg.Enabled {
-		return nil, nil
+		return nil, fmt.Errorf("TLS is disabled")
+	}
+
+	if cfg.CertFile == "" || cfg.KeyFile == "" {
+		return nil, fmt.Errorf("tls-enabled requires tls-cert-file and tls-key-file")
 	}
 
 	cert, err := tls.LoadX509KeyPair(cfg.CertFile, cfg.KeyFile)
@@ -48,9 +53,13 @@ func BuildServerTLSConfig(cfg *TLSConfig) (*tls.Config, error) {
 			return nil, fmt.Errorf("parse CA file: no certs loaded")
 		}
 		tlsCfg.ClientCAs = pool
-		if cfg.ClientAuth {
-			tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
+	}
+
+	if cfg.ClientAuth {
+		if cfg.CAFile == "" {
+			return nil, fmt.Errorf("tls-client-auth requires tls-ca-file")
 		}
+		tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
 	}
 
 	return tlsCfg, nil

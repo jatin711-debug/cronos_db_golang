@@ -14,6 +14,7 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/internal/auth"
 	"github.com/jatin711-debug/cronos_db_golang/internal/consumer"
 	"github.com/jatin711-debug/cronos_db_golang/internal/delivery"
+	"github.com/jatin711-debug/cronos_db_golang/internal/metrics"
 	"github.com/jatin711-debug/cronos_db_golang/internal/partition"
 	"github.com/jatin711-debug/cronos_db_golang/internal/replay"
 	"github.com/jatin711-debug/cronos_db_golang/internal/schema"
@@ -26,6 +27,16 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+// durableAckEnabled returns true if the event explicitly requests a durable fsync
+// before the publish response is returned. This lets clients opt into stronger
+// durability guarantees per event without changing the gRPC API.
+func durableAckEnabled(e *types.Event) bool {
+	if e == nil || e.Meta == nil {
+		return false
+	}
+	return e.Meta["cronos.durable_ack"] == "true"
+}
+
 // EventServiceHandler implements the EventService handler
 type EventServiceHandler struct {
 	types.UnimplementedEventServiceServer
@@ -37,6 +48,7 @@ type EventServiceHandler struct {
 	schemaRegistry   *schema.Registry
 	tenantAccountant *tenant.Accountant
 	auditLogger      *audit.Logger
+	authPolicy       *auth.Policy
 }
 
 // DedupManager interface
@@ -124,6 +136,12 @@ func (h *EventServiceHandler) SetAuditLogger(l *audit.Logger) {
 	h.auditLogger = l
 }
 
+// SetAuthPolicy sets the RBAC policy for topic-level authorization.
+// A nil policy disables topic authorization.
+func (h *EventServiceHandler) SetAuthPolicy(p *auth.Policy) {
+	h.authPolicy = p
+}
+
 // ensureClusterPartitionWritable validates that this node should accept writes
 // for the target partition when running in cluster mode or under active splits.
 func (h *EventServiceHandler) ensureClusterPartitionWritable(partitionID int32) error {
@@ -208,6 +226,11 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 		}, nil
 	}
 
+	// Topic-level authorization
+	if err := auth.CheckTopicPermission(ctx, event.Topic, "publish", h.authPolicy); err != nil {
+		return nil, err
+	}
+
 	// Schema validation
 	if h.schemaRegistry != nil && event.Topic != "" {
 		if err := h.schemaRegistry.Validate(event.Topic, event.Payload); err != nil {
@@ -229,7 +252,7 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 
 	// Admission control: reject if partition is overloaded
 	if !h.partitionManager.CanAccept(partitionID) {
-		IncAdmissionRejected()
+		metrics.IncAdmissionRejected()
 		return nil, status.Errorf(codes.ResourceExhausted,
 			"partition %d is at capacity; retry with backoff", partitionID)
 	}
@@ -244,7 +267,7 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 
 		// Check admission on fallback partition too
 		if !h.partitionManager.CanAccept(topicPartitionID) {
-			IncAdmissionRejected()
+			metrics.IncAdmissionRejected()
 			return nil, status.Errorf(codes.ResourceExhausted,
 				"partition %d is at capacity; retry with backoff", topicPartitionID)
 		}
@@ -302,12 +325,20 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 		event.Meta["tenant_id"] = string(tenantID)
 	}
 
-	// Append to WAL (no sync on every write for performance - WAL handles periodic flush)
+	// Append to WAL (sync behavior depends on fsync mode; durable_ack forces an fsync)
 	if err := partitionInternal.Wal.AppendEvent(event); err != nil {
 		return &types.PublishResponse{
 			Success: false,
 			Error:   fmt.Sprintf("append to WAL: %v", err),
 		}, nil
+	}
+	if durableAckEnabled(event) {
+		if err := partitionInternal.Wal.Flush(); err != nil {
+			return &types.PublishResponse{
+				Success: false,
+				Error:   fmt.Sprintf("durable fsync: %v", err),
+			}, nil
+		}
 	}
 
 	// Schedule the event in timing wheel
@@ -325,6 +356,16 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 		PartitionId: partitionInternal.ID,
 		ScheduleTs:  event.GetScheduleTs(),
 	}, nil
+}
+
+// anyDurableAck returns true if any event in the batch requests a durable fsync.
+func anyDurableAck(events []*types.Event) bool {
+	for _, e := range events {
+		if durableAckEnabled(e) {
+			return true
+		}
+	}
+	return false
 }
 
 // PublishBatch handles batch publish requests for high-throughput ingestion
@@ -357,6 +398,15 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 			continue
 		}
 
+		// Topic-level authorization
+		if err := auth.CheckTopicPermission(ctx, event.Topic, "publish", h.authPolicy); err != nil {
+			atomic.AddInt32(&errorCount, 1)
+			if lastError == "" {
+				lastError = err.Error()
+			}
+			continue
+		}
+
 		// Schema validation
 		if h.schemaRegistry != nil && event.Topic != "" {
 			if err := h.schemaRegistry.Validate(event.Topic, event.Payload); err != nil {
@@ -385,7 +435,7 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 
 		// Admission control
 		if !h.partitionManager.CanAccept(partitionID) {
-			IncAdmissionRejected()
+			metrics.IncAdmissionRejected()
 			atomic.AddInt32(&errorCount, 1)
 			if lastError == "" {
 				lastError = fmt.Sprintf("partition %d is at capacity", partitionID)
@@ -500,6 +550,19 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 				return
 			}
 
+			// Force fsync if any event in the batch requested durable acknowledgement.
+			if anyDurableAck(evts) {
+				if err := partitionInternal.Wal.Flush(); err != nil {
+					atomic.AddInt32(&errorCount, int32(len(evts)))
+					mu.Lock()
+					if lastError == "" {
+						lastError = fmt.Sprintf("durable fsync for partition %d: %v", pid, err)
+					}
+					mu.Unlock()
+					return
+				}
+			}
+
 			// Batch schedule all events (single lock acquisition)
 			if err := partitionInternal.Scheduler.ScheduleBatch(evts); err != nil {
 				// Events are in WAL, just log scheduling error
@@ -559,6 +622,11 @@ func (h *EventServiceHandler) Subscribe(stream grpc.BidiStreamingServer[types.Su
 	// Receive subscription request
 	req, err := stream.Recv()
 	if err != nil {
+		return err
+	}
+
+	// Topic-level authorization
+	if err := auth.CheckTopicPermission(ctx, req.GetTopic(), "subscribe", h.authPolicy); err != nil {
 		return err
 	}
 

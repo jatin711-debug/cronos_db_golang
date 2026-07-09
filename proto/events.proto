@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package cronos_db;
 
-option go_package = "cronos_db/pkg/types;types";
+option go_package = "github.com/jatin711-debug/cronos_db_golang/pkg/types;types";
 
 // ============================================================================
 // Core Event Types
@@ -243,6 +243,9 @@ message ReplicationAppendRequest {
 
   // Leader term
   int64 term = 4;
+
+  // Term of the log entry immediately preceding the new entries
+  int64 prev_log_term = 5;
 }
 
 message ReplicationAppendResponse {
@@ -254,6 +257,9 @@ message ReplicationAppendResponse {
 
   // Next expected offset
   int64 next_offset = 4;
+
+  // Term of the follower/acknowledger
+  int64 term = 5;
 }
 
 message ReplicationSyncRequest {

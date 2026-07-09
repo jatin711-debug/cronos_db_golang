@@ -11,6 +11,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/jatin711-debug/cronos_db_golang/internal/metrics"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 )
 
@@ -342,6 +343,11 @@ func (d *Dispatcher) pickSubscriber(groupSubs []*Subscription, startIdx int) *Su
 
 // Dispatch dispatches an event to subscribers.
 func (d *Dispatcher) Dispatch(event *types.Event) error {
+	start := time.Now()
+	defer func() {
+		metrics.ObserveDispatch(strconv.FormatInt(int64(event.GetPartitionId()), 10), time.Since(start))
+	}()
+
 	d.partitionsMu.RLock()
 	allSubs := d.partitionSubs[event.GetPartitionId()]
 	d.partitionsMu.RUnlock()
@@ -463,6 +469,11 @@ func (d *Dispatcher) DispatchBatch(events []*types.Event) error {
 }
 
 func (d *Dispatcher) dispatchPartitionBatch(partitionID int32, events []*types.Event) error {
+	start := time.Now()
+	defer func() {
+		metrics.ObserveDispatch(strconv.FormatInt(int64(partitionID), 10), time.Since(start))
+	}()
+
 	d.partitionsMu.RLock()
 	allSubs := d.partitionSubs[partitionID]
 	d.partitionsMu.RUnlock()

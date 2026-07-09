@@ -2,17 +2,22 @@ package storage
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"log"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/jatin711-debug/cronos_db_golang/internal/metrics"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
 // FsyncMode controls when the WAL performs fsync.
@@ -37,11 +42,21 @@ func ParseFsyncMode(s string) FsyncMode {
 	}
 }
 
+// walFlushErrorsTotal tracks flush/sync failures in the WAL background loop.
+var walFlushErrorsTotal = promauto.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "cronos_wal_flush_errors_total",
+		Help: "Total number of WAL background flush/sync errors per partition",
+	},
+	[]string{"partition"},
+)
+
 // WAL represents Write-Ahead Log with segmented storage
 type WAL struct {
 	mu                 sync.RWMutex
 	dataDir            string
 	partitionID        int32
+	partitionLabel     string // cached string for metrics
 	segments           []*Segment
 	activeSegment      *Segment
 	nextSegment        *Segment    // Pre-created next segment for fast rotation
@@ -52,6 +67,7 @@ type WAL struct {
 	config             *WALConfig
 	fsyncMode          FsyncMode   // Parsed once at init, avoids per-write string cmp
 	dirty              atomic.Bool // Set on write, cleared on flush
+	flushErrors        atomic.Int64
 	quit               chan struct{}
 	wg                 sync.WaitGroup
 	cipher             *SegmentCipher
@@ -73,15 +89,16 @@ func NewWAL(dataDir string, partitionID int32, config *WALConfig, cipher *Segmen
 	}
 
 	wal := &WAL{
-		dataDir:       dataDir,
-		partitionID:   partitionID,
-		segments:      make([]*Segment, 0),
-		nextOffset:    0,
-		highWatermark: 0,
-		config:        config,
-		fsyncMode:     ParseFsyncMode(config.FsyncMode),
-		quit:          make(chan struct{}),
-		cipher:        cipher,
+		dataDir:        dataDir,
+		partitionID:    partitionID,
+		partitionLabel: strconv.FormatInt(int64(partitionID), 10),
+		segments:       make([]*Segment, 0),
+		nextOffset:     0,
+		highWatermark:  0,
+		config:         config,
+		fsyncMode:      ParseFsyncMode(config.FsyncMode),
+		quit:           make(chan struct{}),
+		cipher:         cipher,
 	}
 
 	// Load existing segments
@@ -145,8 +162,12 @@ func (w *WAL) loadSegments() error {
 
 		// Verify segment integrity by reading all events and checking CRCs
 		if err := w.verifySegment(segment); err != nil {
-			log.Printf("[WAL-%d] WARNING: Segment %s verification failed: %v", w.partitionID, filename, err)
-			segment.Close()
+			closeErr := segment.Close()
+			if closeErr != nil {
+				log.Printf("[WAL-%d] WARNING: Segment %s verification failed: %v; additionally failed to close: %v", w.partitionID, filename, err, closeErr)
+			} else {
+				log.Printf("[WAL-%d] WARNING: Segment %s verification failed: %v", w.partitionID, filename, err)
+			}
 			// Skip corrupt segment - data before this segment is still valid
 			continue
 		}
@@ -292,6 +313,11 @@ func (w *WAL) AppendBatch(events []*types.Event) error {
 		return nil
 	}
 
+	start := time.Now()
+	defer func() {
+		metrics.ObserveWALAppend(strconv.FormatInt(int64(w.partitionID), 10), time.Since(start))
+	}()
+
 	// 1. Prepare records OUTSIDE the lock
 	prepared := make([]*PreparedRecord, len(events))
 	for i, event := range events {
@@ -395,6 +421,125 @@ func (w *WAL) AppendBatch(events []*types.Event) error {
 	return nil
 }
 
+// AppendReplicatedBatch appends a batch of events that already carry their leader-assigned
+// offsets. It verifies that the batch starts at the WAL's next expected offset and that
+// the offsets are contiguous, then writes the records without reassigning offsets.
+// This is the path used by followers during leader-follower replication.
+func (w *WAL) AppendReplicatedBatch(events []*types.Event) error {
+	if len(events) == 0 {
+		return nil
+	}
+
+	start := time.Now()
+	defer func() {
+		metrics.ObserveWALAppend(strconv.FormatInt(int64(w.partitionID), 10), time.Since(start))
+	}()
+
+	prepared := make([]*PreparedRecord, len(events))
+	for i, event := range events {
+		prep, err := PrepareRecord(event)
+		if err != nil {
+			for j := 0; j < i; j++ {
+				if len(prepared[j].Buf) <= 4096 {
+					recordBufPool.Put(prepared[j].Buf)
+				}
+			}
+			return err
+		}
+		prepared[i] = prep
+	}
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	// Verify contiguity and starting offset against WAL's expected next offset.
+	if events[0].Offset != w.nextOffset {
+		for _, prep := range prepared {
+			if len(prep.Buf) <= 4096 {
+				recordBufPool.Put(prep.Buf)
+			}
+		}
+		return fmt.Errorf("replicated batch gap: expected start offset %d, got %d", w.nextOffset, events[0].Offset)
+	}
+	for i := 1; i < len(events); i++ {
+		if events[i].Offset != events[i-1].Offset+1 {
+			for _, prep := range prepared {
+				if len(prep.Buf) <= 4096 {
+					recordBufPool.Put(prep.Buf)
+				}
+			}
+			return fmt.Errorf("non-contiguous replicated offsets: %d followed by %d", events[i-1].Offset, events[i].Offset)
+		}
+	}
+
+	for _, prep := range prepared {
+		prep.Event.PartitionId = w.partitionID
+		binary.BigEndian.PutUint64(prep.Buf[8:16], uint64(prep.Event.Offset))
+		crc := crc32.ChecksumIEEE(prep.Buf[8:])
+		binary.BigEndian.PutUint32(prep.Buf[4:8], crc)
+		w.nextOffset = prep.Event.Offset + 1
+	}
+
+	if err := w.activeSegment.AppendPreparedBatchUnsafe(prepared, w.config.IndexInterval); err != nil {
+		for _, prep := range prepared {
+			if len(prep.Buf) <= 4096 {
+				recordBufPool.Put(prep.Buf)
+			}
+		}
+		return fmt.Errorf("append replicated batch to segment: %w", err)
+	}
+
+	w.highWatermark = events[len(events)-1].Offset
+	w.dirty.Store(true)
+
+	var hookEvents []*types.Event
+	if w.appendHook != nil {
+		hookEvents = append(hookEvents, events...)
+	}
+
+	if w.fsyncMode == FsyncEveryEvent {
+		if err := w.activeSegment.FlushBuffer(); err != nil {
+			for _, prep := range prepared {
+				if len(prep.Buf) <= 4096 {
+					recordBufPool.Put(prep.Buf)
+				}
+			}
+			return fmt.Errorf("flush replicated batch: %w", err)
+		}
+		if err := w.activeSegment.Sync(); err != nil {
+			for _, prep := range prepared {
+				if len(prep.Buf) <= 4096 {
+					recordBufPool.Put(prep.Buf)
+				}
+			}
+			return fmt.Errorf("sync replicated batch: %w", err)
+		}
+	}
+
+	for _, prep := range prepared {
+		if len(prep.Buf) <= 4096 {
+			recordBufPool.Put(prep.Buf)
+		}
+	}
+
+	if w.activeSegment.IsFull(w.config.SegmentSizeBytes) {
+		if err := w.rotateSegment(); err != nil {
+			return fmt.Errorf("rotate segment: %w", err)
+		}
+	} else {
+		threshold := int64(float64(w.config.SegmentSizeBytes) * 0.9)
+		if w.activeSegment.GetSize() >= threshold && w.preCreateTriggered.CompareAndSwap(false, true) {
+			go w.maybePreCreateNextSegment(w.nextOffset)
+		}
+	}
+
+	for _, e := range hookEvents {
+		w.appendHook(e)
+	}
+
+	return nil
+}
+
 // maybePreCreateNextSegment creates the next segment in the background
 // so that rotation can swap it in with minimal lock hold time.
 func (w *WAL) maybePreCreateNextSegment(nextOffset int64) {
@@ -415,10 +560,12 @@ func (w *WAL) maybePreCreateNextSegment(nextOffset int64) {
 	w.nextSegMu.Lock()
 	if w.nextSegment == nil {
 		w.nextSegment = seg
-	} else {
-		_ = seg.Close() // Another goroutine won the race
-	}
-	w.nextSegMu.Unlock()
+		} else {
+			if err := seg.Close(); err != nil {
+				log.Printf("[WAL-%d] failed to close unused pre-created segment: %v", w.partitionID, err)
+			}
+		}
+		w.nextSegMu.Unlock()
 }
 
 // openActiveSegment opens or creates active segment
@@ -444,6 +591,11 @@ func (w *WAL) openActiveSegment() error {
 
 // AppendEvent appends an event to WAL
 func (w *WAL) AppendEvent(event *types.Event) error {
+	start := time.Now()
+	defer func() {
+		metrics.ObserveWALAppend(strconv.FormatInt(int64(w.partitionID), 10), time.Since(start))
+	}()
+
 	// Prepare record outside the lock
 	prep, err := PrepareRecord(event)
 	if err != nil {
@@ -526,6 +678,11 @@ func (w *WAL) AppendEvent(event *types.Event) error {
 // rotateSegment swaps to the pre-created next segment if available,
 // otherwise falls back to synchronous creation.
 func (w *WAL) rotateSegment() error {
+	start := time.Now()
+	defer func() {
+		metrics.ObserveSegmentRotation(strconv.FormatInt(int64(w.partitionID), 10), time.Since(start))
+	}()
+
 	var nextSeg *Segment
 
 	// Try to use pre-created segment
@@ -557,7 +714,7 @@ func (w *WAL) rotateSegment() error {
 		oldActive.isActive = false // mark old segment as inactive
 		oldActive.mu.Unlock()
 		if err := oldActive.Close(); err != nil {
-			log.Printf("Failed to close rotated WAL segment: %v", err)
+			log.Printf("[WAL-%d] Failed to close rotated segment %s: %v", w.partitionID, oldActive.GetFilename(), err)
 			// Don't fail the rotation because the new active segment is already open and active!
 		}
 	}
@@ -682,6 +839,7 @@ func (w *WAL) periodicFlushLoop() {
 
 			if seg == nil || flushErr != nil {
 				if flushErr != nil {
+					w.recordFlushError()
 					log.Printf("[WAL-%d] background flush error: %v", w.partitionID, flushErr)
 				}
 				continue
@@ -691,6 +849,7 @@ func (w *WAL) periodicFlushLoop() {
 			// Writers can continue appending to the bufio.Writer while we sync.
 			if w.fsyncMode == FsyncPeriodic || w.fsyncMode == FsyncBatch {
 				if err := seg.Sync(); err != nil {
+					w.recordFlushError()
 					log.Printf("[WAL-%d] background sync error: %v", w.partitionID, err)
 				}
 			}
@@ -699,6 +858,17 @@ func (w *WAL) periodicFlushLoop() {
 			return
 		}
 	}
+}
+
+// recordFlushError increments the local flush error counter and the Prometheus counter.
+func (w *WAL) recordFlushError() {
+	w.flushErrors.Add(1)
+	walFlushErrorsTotal.WithLabelValues(w.partitionLabel).Inc()
+}
+
+// GetFlushErrors returns the number of background flush/sync errors observed.
+func (w *WAL) GetFlushErrors() int64 {
+	return w.flushErrors.Load()
 }
 
 // Flush flushes all pending writes to disk.
@@ -733,24 +903,42 @@ func (w *WAL) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
+	var errs []error
+
 	if w.activeSegment != nil {
 		// Final flush + sync before close
-		var closeErr error
 		if err := w.activeSegment.FlushBuffer(); err != nil {
-			closeErr = fmt.Errorf("flush active segment: %w", err)
+			errs = append(errs, fmt.Errorf("flush active segment: %w", err))
 		}
-		if err := w.activeSegment.Sync(); err != nil && closeErr == nil {
-			closeErr = fmt.Errorf("sync active segment: %w", err)
+		if err := w.activeSegment.Sync(); err != nil {
+			errs = append(errs, fmt.Errorf("sync active segment: %w", err))
 		}
-		if err := w.activeSegment.Close(); err != nil && closeErr == nil {
-			closeErr = fmt.Errorf("close active segment: %w", err)
-		}
-		if closeErr != nil {
-			return closeErr
+		if err := w.activeSegment.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close active segment: %w", err))
 		}
 	}
 
-	return nil
+	// Close any remaining non-active segments (e.g., after rotation).
+	for _, seg := range w.segments {
+		if seg == w.activeSegment {
+			continue
+		}
+		if err := seg.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close segment %s: %w", seg.GetFilename(), err))
+		}
+	}
+
+	// Close pre-created next segment if it was prepared but never activated.
+	w.nextSegMu.Lock()
+	if w.nextSegment != nil {
+		if err := w.nextSegment.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close pre-created segment: %w", err))
+		}
+		w.nextSegment = nil
+	}
+	w.nextSegMu.Unlock()
+
+	return errors.Join(errs...)
 }
 
 // GetSegments returns all segments
@@ -881,8 +1069,11 @@ func (w *WAL) ReloadSegments() error {
 	defer w.mu.Unlock()
 
 	// Close existing segments
+	var closeErrs []error
 	for _, seg := range w.segments {
-		seg.Close()
+		if err := seg.Close(); err != nil {
+			closeErrs = append(closeErrs, fmt.Errorf("close segment %s: %w", seg.GetFilename(), err))
+		}
 	}
 	w.segments = make([]*Segment, 0)
 	w.activeSegment = nil
@@ -897,7 +1088,7 @@ func (w *WAL) ReloadSegments() error {
 		return fmt.Errorf("reload open active segment: %w", err)
 	}
 
-	return nil
+	return errors.Join(closeErrs...)
 }
 
 // Compact compacts old segments based on consumer offsets.

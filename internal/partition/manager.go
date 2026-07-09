@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jatin711-debug/cronos_db_golang/internal/consumer"
@@ -43,6 +44,20 @@ type Partition struct {
 	CreatedTS     time.Time
 	UpdatedTS     time.Time
 	deliveryQuit  chan struct{} // Quit channel for delivery goroutine
+	replayErr     atomic.Pointer[error]
+}
+
+// GetReplayError returns the last WAL replay error for this partition, if any.
+func (p *Partition) GetReplayError() error {
+	if err := p.replayErr.Load(); err != nil {
+		return *err
+	}
+	return nil
+}
+
+// setReplayError stores the last WAL replay error.
+func (p *Partition) setReplayError(err error) {
+	p.replayErr.Store(&err)
 }
 
 // IsKeyInBounds returns true if key falls within the partition bounds [MinKey, MaxKey).
@@ -636,6 +651,8 @@ func (pm *PartitionManager) replayWALTimers(partition *Partition) {
 
 		events, err := partition.Wal.ReadEvents(batchStart, batchEnd)
 		if err != nil {
+			err = fmt.Errorf("WAL replay failed at offsets %d-%d: %w", batchStart, batchEnd, err)
+			partition.setReplayError(err)
 			log2.Warn("WAL replay failed", "partition", partition.ID, "start_offset", batchStart, "end_offset", batchEnd, "error", err)
 			return
 		}
@@ -644,7 +661,7 @@ func (pm *PartitionManager) replayWALTimers(partition *Partition) {
 			if event.GetScheduleTs() > now {
 				// Future event — re-schedule it
 				if err := partition.Scheduler.Schedule(event); err != nil {
-					// Timer may already exist if recovery runs twice; skip silently
+					log2.Warn("WAL replay scheduler error", "partition", partition.ID, "offset", event.Offset, "error", err)
 					continue
 				}
 				scheduledCount++
@@ -686,6 +703,8 @@ func (pm *PartitionManager) replayWALTimersFromOffset(partition *Partition, star
 
 		events, err := partition.Wal.ReadEvents(batchStart, batchEnd)
 		if err != nil {
+			err = fmt.Errorf("WAL replay from offset %d failed at offsets %d-%d: %w", startOffset, batchStart, batchEnd, err)
+			partition.setReplayError(err)
 			log2.Warn("WAL replay from offset failed", "partition", partition.ID, "start_offset", batchStart, "end_offset", batchEnd, "error", err)
 			return
 		}
@@ -694,7 +713,7 @@ func (pm *PartitionManager) replayWALTimersFromOffset(partition *Partition, star
 			if event.GetScheduleTs() > now {
 				// Future event — re-schedule it
 				if err := partition.Scheduler.Schedule(event); err != nil {
-					// Timer may already exist if recovery runs twice; skip silently
+					log2.Warn("WAL replay scheduler error", "partition", partition.ID, "offset", event.Offset, "error", err)
 					continue
 				}
 				scheduledCount++
@@ -1053,6 +1072,30 @@ func (pm *PartitionManager) GetPartitionEpoch(partitionID int32) int64 {
 		return partition.Epoch
 	}
 	return 0
+}
+
+// GetPartitionReplicaOffsets returns the latest high-watermark offsets for a partition's
+// replicas, including the local WAL high watermark for this node if it leads the partition.
+func (pm *PartitionManager) GetPartitionReplicaOffsets(partitionID int32) map[string]int64 {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+
+	partition, exists := pm.partitions[partitionID]
+	if !exists || partition == nil {
+		return nil
+	}
+
+	offsets := make(map[string]int64)
+	if partition.Wal != nil {
+		// Local replica offset is the WAL high watermark (last durable offset).
+		offsets[pm.nodeID] = partition.Wal.GetHighWatermark()
+	}
+	if partition.ReplLeader != nil {
+		for followerID, offset := range partition.ReplLeader.GetFollowerOffsets() {
+			offsets[followerID] = offset
+		}
+	}
+	return offsets
 }
 
 // PartitionLoadStatus exposes backpressure signals for a partition.

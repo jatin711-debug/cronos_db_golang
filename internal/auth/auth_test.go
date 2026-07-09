@@ -360,10 +360,26 @@ func TestClaimsFromContext_Missing(t *testing.T) {
 	}
 }
 
-func TestCheckTopicPermission_NoClaims(t *testing.T) {
+func TestCheckTopicPermission_NoClaims_NilPolicy_Allowed(t *testing.T) {
 	err := CheckTopicPermission(context.Background(), "topic", "publish", nil)
+	if err != nil {
+		t.Fatalf("expected nil policy to allow unauthenticated requests, got: %v", err)
+	}
+}
+
+func TestCheckTopicPermission_NoClaims_WithPolicy_Denied(t *testing.T) {
+	policy := &Policy{
+		Subjects: map[string]*Subject{
+			"user": {
+				Topics: map[string]TopicPerms{
+					"topic": {Publish: true},
+				},
+			},
+		},
+	}
+	err := CheckTopicPermission(context.Background(), "topic", "publish", policy)
 	if err == nil {
-		t.Error("expected error without claims")
+		t.Fatal("expected error when a policy exists but claims are missing")
 	}
 }
 

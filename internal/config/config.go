@@ -170,6 +170,12 @@ func LoadConfig() (*types.Config, error) {
 	flag.StringVar(&config.TLSKeyFile, "tls-key-file", "", "Path to TLS private key file")
 	flag.BoolVar(&config.TLSClientAuth, "tls-client-auth", false, "Require client certificates (mTLS)")
 
+	// Internal replication mTLS flags
+	flag.BoolVar(&config.ReplicationTLSEnabled, "replication-tls-enabled", false, "Enable mTLS for internal replication traffic")
+	flag.StringVar(&config.ReplicationTLSCAFile, "replication-tls-ca-file", "", "Path to internal replication CA certificate file")
+	flag.StringVar(&config.ReplicationTLSCertFile, "replication-tls-cert-file", "", "Path to internal replication certificate file")
+	flag.StringVar(&config.ReplicationTLSKeyFile, "replication-tls-key-file", "", "Path to internal replication private key file")
+
 	// Auth flags
 	flag.BoolVar(&config.AuthEnabled, "auth-enabled", false, "Enable JWT authentication")
 	flag.StringVar(&config.AuthJWTSecret, "auth-jwt-secret", "", "HMAC secret for JWT verification")
@@ -287,10 +293,36 @@ func LoadConfig() (*types.Config, error) {
 		config.TLSKeyFile = keyFile
 	}
 
-	// Auth environment overrides
-	if authEnabled := os.Getenv("CRONOS_AUTH_ENABLED"); authEnabled != "" {
-		if parsed, err := strconv.ParseBool(authEnabled); err == nil {
-			config.AuthEnabled = parsed
+	// Internal replication mTLS environment overrides
+	if replicationTLSEnabled := os.Getenv("CRONOS_REPLICATION_TLS_ENABLED"); replicationTLSEnabled != "" {
+		if parsed, err := strconv.ParseBool(replicationTLSEnabled); err == nil {
+			config.ReplicationTLSEnabled = parsed
+		}
+	}
+	if caFile := os.Getenv("CRONOS_REPLICATION_TLS_CA_FILE"); caFile != "" {
+		config.ReplicationTLSCAFile = caFile
+	}
+	if certFile := os.Getenv("CRONOS_REPLICATION_TLS_CERT_FILE"); certFile != "" {
+		config.ReplicationTLSCertFile = certFile
+	}
+	if keyFile := os.Getenv("CRONOS_REPLICATION_TLS_KEY_FILE"); keyFile != "" {
+		config.ReplicationTLSKeyFile = keyFile
+	}
+
+	// Auth environment overrides. We only honor CRONOS_AUTH_ENABLED when the
+	// --auth-enabled flag was not explicitly provided on the command line, so
+	// that flags always take precedence over environment variables.
+	authEnabledExplicit := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "auth-enabled" {
+			authEnabledExplicit = true
+		}
+	})
+	if !authEnabledExplicit {
+		if authEnabled := os.Getenv("CRONOS_AUTH_ENABLED"); authEnabled != "" {
+			if parsed, err := strconv.ParseBool(authEnabled); err == nil {
+				config.AuthEnabled = parsed
+			}
 		}
 	}
 	if jwtSecret := os.Getenv("CRONOS_AUTH_JWT_SECRET"); jwtSecret != "" {

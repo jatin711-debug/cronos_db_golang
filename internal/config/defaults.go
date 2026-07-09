@@ -15,7 +15,7 @@ const (
 	// WAL configuration
 	DefaultSegmentSizeBytes = 536870912 // 512MB
 	DefaultIndexInterval    = 1000
-	DefaultFsyncMode        = "periodic"
+	DefaultFsyncMode        = "every_event"
 	DefaultFlushIntervalMS  = 1000
 
 	// Scheduler configuration
