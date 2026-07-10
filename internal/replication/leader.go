@@ -2,10 +2,13 @@ package replication
 
 import (
 	"crypto/tls"
+	"encoding/binary"
 	"fmt"
+	"hash/crc32"
 	"log"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jatin711-debug/cronos_db_golang/internal/storage"
@@ -36,7 +39,6 @@ type Leader struct {
 	minInSyncReplicas int // minimum ISR size (including leader) required to ack a write
 	quit              chan struct{}
 	quitOnce          sync.Once
-	transports        map[string]*Transport
 	wal               *storage.WAL
 	tlsConfig         *MTLSConfig // optional mTLS for replication connections
 }
@@ -53,6 +55,7 @@ type FollowerInfo struct {
 	Buffer        []*types.Event
 	LastError     error
 	InSync        bool // Whether follower is in-sync with leader
+	transport     *Transport
 }
 
 // NewLeader creates a new leader. minInSyncReplicas is the minimum ISR size
@@ -66,6 +69,9 @@ func NewLeader(partitionID int32, batchSize int32, flushInterval time.Duration, 
 	if nodeID == "" {
 		nodeID = "leader"
 	}
+	if wal != nil {
+		wal.SetCurrentTerm(1)
+	}
 	return &Leader{
 		partitionID:       partitionID,
 		nodeID:            nodeID,
@@ -76,7 +82,6 @@ func NewLeader(partitionID int32, batchSize int32, flushInterval time.Duration, 
 		replicateTimeout:  10 * time.Second,
 		minInSyncReplicas: minInSyncReplicas,
 		quit:              make(chan struct{}),
-		transports:        make(map[string]*Transport),
 		wal:               wal,
 		tlsConfig:         tlsConfig,
 	}
@@ -91,10 +96,15 @@ func (l *Leader) AddFollower(id, address string) error {
 		return fmt.Errorf("follower %s already exists", id)
 	}
 
+	nextOffset := int64(0)
+	if l.wal != nil {
+		nextOffset = l.wal.GetNextOffset()
+	}
+
 	l.followers[id] = &FollowerInfo{
 		ID:         id,
 		Address:    address,
-		NextOffset: 0,
+		NextOffset: nextOffset,
 		Connected:  false,
 		InSync:     false,
 	}
@@ -143,8 +153,8 @@ func (l *Leader) connectFollower(id, address string) {
 	}
 
 	l.mu.Lock()
-	l.transports[id] = transport
 	if follower, exists := l.followers[id]; exists {
+		follower.transport = transport
 		follower.Connected = true
 	}
 	l.mu.Unlock()
@@ -163,9 +173,11 @@ func (l *Leader) readLoop(id string, t *Transport) {
 			log.Printf("[LEADER] Connection lost to %s: %v", id, err)
 			l.mu.Lock()
 			if f, ok := l.followers[id]; ok {
+				f.mu.Lock()
 				f.Connected = false
+				f.transport = nil
+				f.mu.Unlock()
 			}
-			delete(l.transports, id)
 			l.mu.Unlock()
 			return
 		}
@@ -199,6 +211,13 @@ func (l *Leader) handleAck(id string, ack *AppendAckMessage) {
 		if ack.Offset > follower.HighWatermark {
 			follower.HighWatermark = ack.Offset
 		}
+		// Advance NextOffset to the next expected entry. Prefer the follower's
+		// reported NextOffset; fall back to HighWatermark+1 for older followers.
+		if ack.NextOffset > follower.NextOffset {
+			follower.NextOffset = ack.NextOffset
+		} else if ack.Offset+1 > follower.NextOffset {
+			follower.NextOffset = ack.Offset + 1
+		}
 		follower.InSync = true
 	} else {
 		follower.InSync = false
@@ -219,15 +238,19 @@ func (l *Leader) RemoveFollower(id string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	if _, exists := l.followers[id]; !exists {
+	follower, exists := l.followers[id]
+	if !exists {
 		return fmt.Errorf("follower %s not found", id)
 	}
 
 	// Close connection
-	if trans, exists := l.transports[id]; exists {
-		trans.Close()
-		delete(l.transports, id)
+	follower.mu.Lock()
+	if follower.transport != nil {
+		follower.transport.Close()
+		follower.transport = nil
 	}
+	follower.Connected = false
+	follower.mu.Unlock()
 
 	delete(l.followers, id)
 	return nil
@@ -297,9 +320,7 @@ func (l *Leader) Replicate(events []*types.Event) error {
 		}
 		utils.GoSafe("leader-send-batch", func() {
 			f := follower
-			f.mu.Lock()
-			err := l.sendBatchLocked(f, events)
-			f.mu.Unlock()
+			err := l.sendBatch(f, events)
 			if err != nil {
 				log.Printf("[LEADER] Failed to buffer for %s: %v", f.ID, err)
 			}
@@ -322,16 +343,18 @@ func (l *Leader) Replicate(events []*types.Event) error {
 		}
 		utils.GoSafe("leader-flush", func() {
 			f := follower
-			f.mu.Lock()
 			err := l.flushFollower(f)
 			if err != nil {
+				f.mu.Lock()
 				f.LastError = err
 				f.InSync = false
+				f.mu.Unlock()
 			} else {
+				f.mu.Lock()
 				f.LastError = nil
 				f.LastAckTS = time.Now().UnixMilli()
+				f.mu.Unlock()
 			}
-			f.mu.Unlock()
 			flushChan <- err
 		})
 	}
@@ -434,55 +457,74 @@ func (l *Leader) sendBatchLocked(follower *FollowerInfo, events []*types.Event) 
 
 // flushFollower flushes a follower's buffer
 func (l *Leader) flushFollower(follower *FollowerInfo) error {
+	follower.mu.Lock()
 	if len(follower.Buffer) == 0 {
+		follower.mu.Unlock()
 		return nil
 	}
+	events := make([]*types.Event, len(follower.Buffer))
+	copy(events, follower.Buffer)
+	trans := follower.transport
+	nextOffset := follower.NextOffset
+	follower.mu.Unlock()
 
-	trans, exists := l.transports[follower.ID]
-	if !exists || trans == nil {
+	if trans == nil {
 		return fmt.Errorf("no connection to follower %s", follower.ID)
 	}
 
-	prevLogIndex := follower.NextOffset - 1
+	prevLogIndex := nextOffset - 1
 	prevLogTerm := l.getPrevLogTerm(prevLogIndex)
+
+	// Populate per-event checksums and compute a batch-level checksum.
+	batchChecksum := computeBatchChecksum(events)
 
 	req := &types.ReplicationAppendRequest{
 		PartitionId:        l.partitionID,
-		Events:             follower.Buffer,
-		ExpectedNextOffset: follower.NextOffset,
-		Term:               l.epoch,
+		Events:             events,
+		ExpectedNextOffset: nextOffset,
+		Term:               atomic.LoadInt64(&l.epoch),
 		PrevLogTerm:        prevLogTerm,
+		Checksum:           batchChecksum,
 	}
 
 	if err := trans.WriteProtoMessage(MsgTypeAppendEntries, req); err != nil {
 		return err
 	}
 
-	log.Printf("[LEADER] Replicating %d events to %s (binary)", len(follower.Buffer), follower.ID)
+	log.Printf("[LEADER] Replicating %d events to %s (binary)", len(events), follower.ID)
 
-	// Update next offset based on the flushed buffer
-	if len(follower.Buffer) > 0 {
-		lastEvent := follower.Buffer[len(follower.Buffer)-1]
-		follower.NextOffset = lastEvent.Offset + 1
+	// Only advance NextOffset and remove sent events after a successful write.
+	follower.mu.Lock()
+	if len(events) > 0 {
+		lastSentOffset := events[len(events)-1].Offset
+		if lastSentOffset+1 > follower.NextOffset {
+			follower.NextOffset = lastSentOffset + 1
+		}
+		// Remove the exact prefix we just sent from the buffer.
+		if len(follower.Buffer) >= len(events) {
+			follower.Buffer = follower.Buffer[len(events):]
+		} else {
+			follower.Buffer = follower.Buffer[:0]
+		}
 	}
-
-	// Clear buffer
-	follower.Buffer = follower.Buffer[:0]
+	follower.mu.Unlock()
 
 	return nil
 }
 
 // getPrevLogTerm returns the term of the log entry at the given offset.
-// Currently this returns the leader's current epoch because the WAL does not
-// store per-entry terms. A future WAL format change should store/retrieve the
-// actual term of each entry.
+// It reads the term from the WAL record when possible; otherwise it falls back
+// to the leader's current epoch.
 func (l *Leader) getPrevLogTerm(offset int64) int64 {
 	if offset < 0 {
 		return 0
 	}
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	return l.epoch
+	if l.wal != nil {
+		if term, err := l.wal.GetTermForOffset(offset); err == nil && term > 0 {
+			return term
+		}
+	}
+	return atomic.LoadInt64(&l.epoch)
 }
 
 // GetHighWatermark returns the minimum high watermark across followers
@@ -530,16 +572,17 @@ func (l *Leader) GetInSyncReplicas() []string {
 
 // GetEpoch returns the current epoch
 func (l *Leader) GetEpoch() int64 {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	return l.epoch
+	return atomic.LoadInt64(&l.epoch)
 }
 
 // SetEpoch sets the epoch (used during leader election)
 func (l *Leader) SetEpoch(epoch int64) {
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	l.epoch = epoch
+	l.mu.Unlock()
+	if l.wal != nil {
+		l.wal.SetCurrentTerm(epoch)
+	}
 }
 
 // GetFollowerOffsets returns the high watermark offset for each follower.
@@ -596,9 +639,14 @@ func (l *Leader) Stop() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	for id, trans := range l.transports {
-		trans.Close()
-		delete(l.transports, id)
+	for _, f := range l.followers {
+		f.mu.Lock()
+		if f.transport != nil {
+			f.transport.Close()
+			f.transport = nil
+		}
+		f.Connected = false
+		f.mu.Unlock()
 	}
 }
 
@@ -638,7 +686,24 @@ func (l *Leader) countInSyncFollowers() int64 {
 	return count
 }
 
-// LeaderStats represents leader statistics
+// computeBatchChecksum returns a CRC32 over the event payloads, offsets, and
+// terms in a replication batch. It also ensures each event has a per-payload
+// checksum populated.
+func computeBatchChecksum(events []*types.Event) uint32 {
+	h := crc32.NewIEEE()
+	buf := make([]byte, 20)
+	for _, e := range events {
+		if e.Checksum == 0 {
+			e.Checksum = crc32.ChecksumIEEE(e.Payload)
+		}
+		binary.BigEndian.PutUint64(buf[0:8], uint64(e.Offset))
+		binary.BigEndian.PutUint64(buf[8:16], uint64(e.Term))
+		binary.BigEndian.PutUint32(buf[16:20], e.Checksum)
+		h.Write(buf)
+		h.Write(e.Payload)
+	}
+	return h.Sum32()
+}
 type LeaderStats struct {
 	Followers          int64
 	ConnectedFollowers int64

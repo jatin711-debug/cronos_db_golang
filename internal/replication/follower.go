@@ -177,6 +177,36 @@ func (f *Follower) handleMessage(t *Transport, msgType uint8, payload []byte) er
 
 		// Append replicated events, preserving leader-assigned offsets.
 		if f.wal != nil && len(msg.Events) > 0 {
+			// Verify the batch-level checksum from the leader.
+			if msg.Checksum != 0 {
+				computed := computeBatchChecksum(msg.Events)
+				if computed != msg.Checksum {
+					term := f.epoch
+					nextOffset := f.nextOffset
+					f.mu.Unlock()
+					log.Printf("[FOLLOWER] Replication batch checksum mismatch from leader for partition %d", f.partitionID)
+					ack := &types.ReplicationAppendResponse{
+						Success:    false,
+						LastOffset: nextOffset - 1,
+						NextOffset: nextOffset,
+						Term:       term,
+						Error:      "replication batch checksum mismatch",
+					}
+					return t.WriteProtoMessage(MsgTypeAppendAck, ack)
+				}
+			}
+
+			// Stamp each event with the leader's term and a per-payload checksum.
+			for _, e := range msg.Events {
+				if e.Term == 0 {
+					e.Term = msg.Term
+				}
+				if e.Checksum == 0 && len(e.Payload) > 0 {
+					e.Checksum = crc32.ChecksumIEEE(e.Payload)
+				}
+			}
+
+			f.wal.SetCurrentTerm(msg.Term)
 			if err := f.wal.AppendReplicatedBatch(msg.Events); err != nil {
 				term := f.epoch
 				nextOffset := f.nextOffset

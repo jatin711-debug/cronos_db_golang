@@ -72,6 +72,7 @@ type WAL struct {
 	quitOnce           sync.Once
 	wg                 sync.WaitGroup
 	cipher             *SegmentCipher
+	currentTerm        int64       // Raft term used for new records
 	appendHook         func(event *types.Event) // Called after successful append (e.g. CDC)
 }
 
@@ -119,6 +120,18 @@ func NewWAL(dataDir string, partitionID int32, config *WALConfig, cipher *Segmen
 	}
 
 	return wal, nil
+}
+
+// SetCurrentTerm sets the Raft term used for new records. The replication layer
+// calls this whenever a partition becomes leader or appends entries under a
+// leader's term.
+func (w *WAL) SetCurrentTerm(term int64) {
+	atomic.StoreInt64(&w.currentTerm, term)
+}
+
+// GetCurrentTerm returns the term used for new records.
+func (w *WAL) GetCurrentTerm() int64 {
+	return atomic.LoadInt64(&w.currentTerm)
 }
 
 // SetAppendHook registers a callback invoked after each successful event append.
@@ -219,6 +232,7 @@ func (w *WAL) verifySegment(segment *Segment) error {
 type PreparedRecord struct {
 	Event *types.Event
 	Buf   []byte
+	Term  int64
 }
 
 var recordBufPool = sync.Pool{
@@ -253,15 +267,24 @@ func releasePreparedSlice(prepared []*PreparedRecord) {
 	}
 }
 
-// PrepareRecord serializes an event to a byte slice with placeholders for offset and CRC
-func PrepareRecord(event *types.Event) (*PreparedRecord, error) {
+// PrepareRecord serializes an event to a byte slice with placeholders for offset and CRC.
+// The record format v2 is: [crc32 4][term 8][offset 8][schedule_ts 8][msgID len 2][msgID]
+// [topic len 2][topic][payload len 4][payload][checksum 4][meta count 2][meta...].
+func PrepareRecord(event *types.Event, term int64) (*PreparedRecord, error) {
+	if event.Term == 0 {
+		event.Term = term
+	}
+	if event.Checksum == 0 && len(event.Payload) > 0 {
+		event.Checksum = crc32.ChecksumIEEE(event.Payload)
+	}
+
 	msgIDLen := len(event.GetMessageId())
 	topicLen := len(event.Topic)
 	payloadLen := len(event.Payload)
 	metaCount := len(event.Meta)
 
 	// Calculate size
-	size := 4 + 4 + 8 + 8 + 2 + msgIDLen + 2 + topicLen + 4 + payloadLen + 2
+	size := 4 + 4 + 8 + 8 + 8 + 2 + msgIDLen + 2 + topicLen + 4 + payloadLen + 4 + 2
 	for k, v := range event.Meta {
 		metaEntrySize := 2 + len(k) + 2 + len(v)
 		if size > (1<<63-1)-metaEntrySize {
@@ -286,6 +309,10 @@ func PrepareRecord(event *types.Event) (*PreparedRecord, error) {
 
 	// CRC32 (4 bytes) - placeholder
 	offset += 4
+
+	// Term (8 bytes)
+	binary.BigEndian.PutUint64(buf[offset:offset+8], uint64(term))
+	offset += 8
 
 	// Offset (8 bytes) - placeholder
 	offset += 8
@@ -312,6 +339,10 @@ func PrepareRecord(event *types.Event) (*PreparedRecord, error) {
 	copy(buf[offset:offset+payloadLen], event.Payload)
 	offset += payloadLen
 
+	// Payload checksum (4 bytes)
+	binary.BigEndian.PutUint32(buf[offset:offset+4], event.Checksum)
+	offset += 4
+
 	// Meta count (2 bytes)
 	binary.BigEndian.PutUint16(buf[offset:offset+2], uint16(metaCount))
 	offset += 2
@@ -331,7 +362,17 @@ func PrepareRecord(event *types.Event) (*PreparedRecord, error) {
 	return &PreparedRecord{
 		Event: event,
 		Buf:   buf,
+		Term:  term,
 	}, nil
+}
+
+// termForEvent returns the term to use when writing an event. Replicated events
+// may already carry their term; locally produced events use the WAL's current term.
+func (w *WAL) termForEvent(event *types.Event) int64 {
+	if event.Term != 0 {
+		return event.Term
+	}
+	return w.GetCurrentTerm()
 }
 
 // AppendBatch appends a batch of events to WAL
@@ -350,7 +391,7 @@ func (w *WAL) AppendBatch(events []*types.Event) error {
 	defer releasePreparedSlice(prepared)
 
 	for i, event := range events {
-		prep, err := PrepareRecord(event)
+		prep, err := PrepareRecord(event, w.termForEvent(event))
 		if err != nil {
 			// If error, return already allocated buffers to pool
 			for j := 0; j < i; j++ {
@@ -371,8 +412,8 @@ func (w *WAL) AppendBatch(events []*types.Event) error {
 		prep.Event.PartitionId = w.partitionID
 		w.nextOffset++
 
-		// Fill offset (bytes 8-16)
-		binary.BigEndian.PutUint64(prep.Buf[8:16], uint64(prep.Event.Offset))
+		// Fill offset (bytes 16-24)
+		binary.BigEndian.PutUint64(prep.Buf[16:24], uint64(prep.Event.Offset))
 
 		// Compute and fill CRC32 (bytes 4-8)
 		crc := crc32.ChecksumIEEE(prep.Buf[8:])
@@ -483,7 +524,7 @@ func (w *WAL) AppendReplicatedBatch(events []*types.Event) error {
 	defer releasePreparedSlice(prepared)
 
 	for i, event := range events {
-		prep, err := PrepareRecord(event)
+		prep, err := PrepareRecord(event, w.termForEvent(event))
 		if err != nil {
 			for j := 0; j < i; j++ {
 				if len(prepared[j].Buf) <= 4096 {
@@ -513,7 +554,9 @@ func (w *WAL) AppendReplicatedBatch(events []*types.Event) error {
 
 	for _, prep := range prepared {
 		prep.Event.PartitionId = w.partitionID
-		binary.BigEndian.PutUint64(prep.Buf[8:16], uint64(prep.Event.Offset))
+		// Fill offset (bytes 16-24)
+		binary.BigEndian.PutUint64(prep.Buf[16:24], uint64(prep.Event.Offset))
+		// Compute and fill CRC32 (bytes 4-8)
 		crc := crc32.ChecksumIEEE(prep.Buf[8:])
 		binary.BigEndian.PutUint32(prep.Buf[4:8], crc)
 		w.nextOffset = prep.Event.Offset + 1
@@ -643,7 +686,7 @@ func (w *WAL) AppendEvent(event *types.Event) error {
 	}()
 
 	// Prepare record outside the lock
-	prep, err := PrepareRecord(event)
+	prep, err := PrepareRecord(event, w.termForEvent(event))
 	if err != nil {
 		return err
 	}
@@ -655,8 +698,8 @@ func (w *WAL) AppendEvent(event *types.Event) error {
 	event.PartitionId = w.partitionID
 	w.nextOffset++
 
-	// Fill offset (bytes 8-16)
-	binary.BigEndian.PutUint64(prep.Buf[8:16], uint64(event.Offset))
+	// Fill offset (bytes 16-24)
+	binary.BigEndian.PutUint64(prep.Buf[16:24], uint64(event.Offset))
 
 	// Compute and fill CRC32 (bytes 4-8)
 	crc := crc32.ChecksumIEEE(prep.Buf[8:])
@@ -1123,7 +1166,14 @@ func (w *WAL) GetNextOffset() int64 {
 	return w.nextOffset
 }
 
-// GetHighWatermark returns high watermark
+// GetTermForOffset returns the Raft term stored for the entry at the given offset.
+func (w *WAL) GetTermForOffset(offset int64) (int64, error) {
+	event, err := w.ReadEvent(offset)
+	if err != nil {
+		return 0, err
+	}
+	return event.GetTerm(), nil
+}
 func (w *WAL) GetHighWatermark() int64 {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
