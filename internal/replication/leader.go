@@ -35,6 +35,7 @@ type Leader struct {
 	replicateTimeout  time.Duration
 	minInSyncReplicas int // minimum ISR size (including leader) required to ack a write
 	quit              chan struct{}
+	quitOnce          sync.Once
 	transports        map[string]*Transport
 	wal               *storage.WAL
 	tlsConfig         *MTLSConfig // optional mTLS for replication connections
@@ -587,9 +588,9 @@ func (l *Leader) flushAllFollowers() {
 	}
 }
 
-// Stop stops the leader
+// Stop stops the leader. Safe to call multiple times.
 func (l *Leader) Stop() {
-	close(l.quit)
+	l.quitOnce.Do(func() { close(l.quit) })
 
 	// Close all connections
 	l.mu.Lock()

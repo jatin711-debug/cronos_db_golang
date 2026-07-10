@@ -5,7 +5,9 @@
 [![Go](https://img.shields.io/badge/Go-1.25+-blue.svg)](https://golang.org)
 [![Rust](https://img.shields.io/badge/Rust-FFI-dea584.svg)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-Production--Ready-brightgreen.svg)](#status)
+[![Status](https://img.shields.io/badge/status-Beta-yellow.svg)](#status)
+
+> **Production Readiness:** The core storage and scheduling paths are implemented and tested, but several operational hardening items (TLS/mTLS enforcement, consumer-group metadata persistence, and chaos testing) are still being finalized. Run production workloads only after enabling TLS, auth, encryption, and RF≥3/minISR≥2.
 
 CronosDB is a distributed database purpose-built for **timestamp-triggered event processing**. Publish events with a future timestamp — CronosDB stores them durably and delivers them precisely when the time arrives.
 
@@ -13,16 +15,19 @@ It combines the durability of a write-ahead log, the precision of a hierarchical
 
 ## Key Numbers
 
+All numbers below are from single-machine benchmarks (3 nodes on one host, AMD Ryzen 7 6800H, NVMe SSD) and depend heavily on fsync mode, payload size, and batch size.
+
 | Metric | Value |
 |--------|-------|
-| **Cluster Throughput** | **Up to ~1.0M events/sec** (max profile, single machine) |
-| **Publish Latency P50** | **~100-150µs** (batch mode) |
-| **Publish Latency P99** | **<1ms** (batch mode) |
+| **Cluster Throughput** | **Up to ~1.0M events/sec** (`periodic` fsync, 256B payload, batch=4000, single machine) |
+| **Durable Throughput** | **~50–100K events/sec** (`batch` fsync, 256B payload, batch=4000, single machine) |
+| **Publish Latency P50** | **~100–150µs** (`batch` fsync, small payload, no cross-node replication) |
+| **Publish Latency P99** | **~1–5ms** (`batch` fsync, single machine; real networks add tail latency) |
 | **Success Rate** | **99.9-100%** in batch benchmark profiles |
 | **Timer Precision** | 100ms tick (configurable) |
 | **Dedup False Positive Rate** | <1% (Rust bloom filter) |
 
-> Benchmarked on a **single machine** running all 3 cluster nodes simultaneously.
+> Benchmarked on a **single machine** running all 3 cluster nodes simultaneously. Numbers will be lower with replication (RF≥3) and higher-latency storage.
 
 ---
 
@@ -58,7 +63,7 @@ It combines the durability of a write-ahead log, the precision of a hierarchical
 - **Multi-Node Clustering** — 3+ nodes with automatic partition distribution
 - **Raft Consensus** — Metadata consistency (HashiCorp Raft)
 - **Pluggable Gossip** — Choose custom TCP heartbeats or HashiCorp Memberlist (SWIM protocol) via config
-- **Consistent Hashing** — SHA-256 ring with configurable virtual nodes (`-virtual-nodes`, default 150)
+- **Consistent Hashing** — FNV-1a ring with configurable virtual nodes (`-virtual-nodes`, default 150)
 - **Binary Replication Protocol** — Custom wire format (0xCAFEBABE magic)
 - **Bulk File Sync** — Segment-level transfer for new node bootstrap
 - **Clock Skew Detection** — Cross-node heartbeat timestamp comparison; warns if absolute skew exceeds 5 seconds
@@ -361,7 +366,7 @@ Representative latency in batch mode is typically P50 ~100-150µs and P99 under 
 | `-http-addr` | `:8080` | HTTP health + metrics address |
 | `-partition-count` | `1` | Number of partitions (use 8-16 for clusters) |
 | `-segment-size` | `512MB` | WAL segment size before rotation |
-| `-fsync-mode` | `periodic` | `every_event` \| `batch` \| `periodic` |
+| `-fsync-mode` | `every_event` | `every_event` \| `batch` \| `periodic` — use `batch` for durable throughput; `periodic` for max throughput with a small loss window |
 | `-flush-interval` | `1000` | Background flush interval (ms) |
 | `-tick-ms` | `100` | Timing wheel tick duration |
 | `-wheel-size` | `60` | Slots per timing wheel level |
@@ -510,8 +515,9 @@ See [proto/events.proto](proto/events.proto) for the complete specification.
 - [x] Bulk segment file sync for new node bootstrap
 - [x] Partition leader election on failure
 
-### Performance ✅ Optimized
-- [x] 1M+ events/sec (3-node cluster, batch mode, single machine)
+### Performance ✅ Optimized (single-machine)
+- [x] Up to 1M+ events/sec (`periodic` fsync, batch mode, single machine)
+- [x] Durable throughput validated with `batch` fsync
 - [x] Lock-free Rust bloom filter via CGO FFI
 - [x] sync.Pool for timers, record buffers, transport buffers
 - [x] Batch WAL writes (single buffered write per batch)
@@ -528,7 +534,7 @@ See [proto/events.proto](proto/events.proto) for the complete specification.
 - [x] OpenTelemetry tracing integration (provider + interceptor)
 - [x] Per-IP rate limiting with token bucket
 
-### Production Hardening ✅ Complete
+### Production Hardening 🔄 In Progress
 - [x] Graceful shutdown with drain (gRPC → partitions → cluster)
 - [x] Docker multi-stage build (Rust + Go + Debian slim)
 - [x] Docker Compose for single + cluster deployments
@@ -543,10 +549,16 @@ See [proto/events.proto](proto/events.proto) for the complete specification.
 - [x] Pluggable memberlist gossip (HashiCorp Memberlist / SWIM)
 - [x] Append-only DLQ segments (binary format, CRC32, rotation)
 - [x] Clock skew detection (cross-node heartbeat comparison)
+- [x] TLS/mTLS support (enable in production)
+- [x] JWT auth support (enable in production)
+- [x] At-rest encryption support (enable in production)
+- [ ] Consumer-group metadata persistence across restarts
+- [ ] Replication wire checksums
+- [ ] Per-entry terms in WAL
+- [ ] Chaos testing suite
 
 ### Remaining 🚧
 - [ ] Admin CLI & dashboard
-- [ ] TLS/mTLS between nodes
 - [ ] Topic-level ACLs
 
 ---

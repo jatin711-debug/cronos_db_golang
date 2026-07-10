@@ -26,6 +26,7 @@ type TimingWheel struct {
 	timers        map[int64]*Timer
 	expired       chan []*Timer
 	quit          chan struct{}
+	quitOnce      sync.Once
 	timerPool     *sync.Pool
 	expiredBuf    []*Timer   // Reusable scratch buffer for tick processing
 	cascadeBuf    [][]*Timer // Reusable bucket buffer for cascade operations
@@ -413,9 +414,9 @@ func (tw *TimingWheel) getStatsLocked() *SchedulerStats {
 	}
 }
 
-// Close closes the timing wheel
+// Close closes the timing wheel. Safe to call multiple times.
 func (tw *TimingWheel) Close() {
-	close(tw.quit)
+	tw.quitOnce.Do(func() { close(tw.quit) })
 	if tw.overflowWheel != nil {
 		tw.overflowWheel.Close()
 	}

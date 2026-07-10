@@ -23,6 +23,7 @@ type Dispatcher struct {
 	config     *Config
 	dlq        *DeadLetterQueue
 	quit       chan struct{}
+	quitOnce   sync.Once
 	wg         sync.WaitGroup
 
 	// Partition-to-subscribers index for O(1) lookup instead of scanning all shards.
@@ -979,9 +980,9 @@ func (d *Dispatcher) Drain(timeout time.Duration) error {
 	return fmt.Errorf("drain timeout: %d deliveries still active", d.GetStats().ActiveDeliveries)
 }
 
-// Close closes the dispatcher and cleans up all resources.
+// Close closes the dispatcher and cleans up all resources. Safe to call multiple times.
 func (d *Dispatcher) Close() {
-	close(d.quit)
+	d.quitOnce.Do(func() { close(d.quit) })
 	d.wg.Wait()
 
 	for _, shard := range d.shards {
