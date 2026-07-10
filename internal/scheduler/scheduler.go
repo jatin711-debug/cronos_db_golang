@@ -83,9 +83,9 @@ type Scheduler struct {
 	startTimeMs      int64 // Scheduler start time (Unix ms)
 
 	// Two-tier scheduling: cold store for far-future events
-	coldStore    *ColdStore
-	eventReader  EventReader
-	hotWindowMs  int64
+	coldStore   *ColdStore
+	eventReader EventReader
+	hotWindowMs int64
 
 	// Adaptive hydrator state
 	hydratorMinInterval time.Duration

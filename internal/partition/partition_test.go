@@ -365,4 +365,3 @@ func TestWalDiskSize_Empty(t *testing.T) {
 		t.Errorf("expected size 0, got %d", size)
 	}
 }
-

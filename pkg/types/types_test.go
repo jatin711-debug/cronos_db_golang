@@ -167,9 +167,9 @@ func TestConsumerMember_Fields(t *testing.T) {
 
 func TestConfig_Fields(t *testing.T) {
 	cfg := &Config{
-		NodeID:      "node-1",
-		DataDir:     "/data",
-		GPRCAddress: "localhost:50051",
+		NodeID:         "node-1",
+		DataDir:        "/data",
+		GPRCAddress:    "localhost:50051",
 		PartitionCount: 8,
 	}
 	if cfg.NodeID != "node-1" {
@@ -233,7 +233,7 @@ func TestEvent_Getters(t *testing.T) {
 
 func TestPublishRequest_Getters(t *testing.T) {
 	req := &PublishRequest{
-		Event:         e,
+		Event:          e,
 		AllowDuplicate: true,
 	}
 	if req.GetEvent() == nil {
@@ -264,11 +264,11 @@ func TestPublishResponse_Getters(t *testing.T) {
 
 func TestDelivery_Getters(t *testing.T) {
 	d := &Delivery{
-		Event:       e,
-		DeliveryId:  "d-1",
-		Attempt:     3,
+		Event:        e,
+		DeliveryId:   "d-1",
+		Attempt:      3,
 		AckTimeoutMs: 5000,
-		Batch:       []*Event{e},
+		Batch:        []*Event{e},
 	}
 	if d.GetDeliveryId() != "d-1" {
 		t.Error("GetDeliveryId mismatch")
@@ -303,13 +303,13 @@ func TestReplayRequest_Getters(t *testing.T) {
 
 func TestPartitionInfo_Getters(t *testing.T) {
 	pi := &PartitionInfo{
-		PartitionId:   0,
-		Topic:         "orders",
-		LeaderId:      "node-1",
-		ReplicaIds:    []string{"node-2"},
-		HighWatermark: 100,
-		LastOffset:    99,
-		SegmentCount:  2,
+		PartitionId:    0,
+		Topic:          "orders",
+		LeaderId:       "node-1",
+		ReplicaIds:     []string{"node-2"},
+		HighWatermark:  100,
+		LastOffset:     99,
+		SegmentCount:   2,
 		DiskUsageBytes: 1024,
 	}
 	if pi.GetLeaderId() != "node-1" {
@@ -351,7 +351,7 @@ func TestRegionReplicateResponse_Getters(t *testing.T) {
 
 func TestTransactionRequests_Getters(t *testing.T) {
 	begin := &BeginTransactionRequest{
-		TransactionId:          "tx-1",
+		TransactionId:           "tx-1",
 		ParticipantPartitionIds: []int32{0, 1},
 	}
 	if begin.GetTransactionId() != "tx-1" {

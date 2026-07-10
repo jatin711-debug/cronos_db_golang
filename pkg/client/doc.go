@@ -10,11 +10,11 @@
 //
 // # Core workflow
 //
-//	1. Dial the cluster with DefaultConfig + security settings.
-//	2. Create a Producer and publish Message values (Payload bytes or Value+Codec).
-//	3. Start a Consumer with Subscribe(topic, group, handler).
-//	4. Ack automatically (default) or manually for custom commit control.
-//	5. Use Replay/Seek APIs for backfill and replay-to-live scenarios.
+//  1. Dial the cluster with DefaultConfig + security settings.
+//  2. Create a Producer and publish Message values (Payload bytes or Value+Codec).
+//  3. Start a Consumer with Subscribe(topic, group, handler).
+//  4. Ack automatically (default) or manually for custom commit control.
+//  5. Use Replay/Seek APIs for backfill and replay-to-live scenarios.
 //
 // # Routing and partitioning
 //

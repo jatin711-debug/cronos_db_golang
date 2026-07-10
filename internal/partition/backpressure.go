@@ -10,9 +10,9 @@ import (
 
 // TokenBucket implements a simple token bucket rate limiter.
 type TokenBucket struct {
-	tokens    atomic.Int64
-	maxTokens int64
-	refillRate int64     // tokens per second
+	tokens     atomic.Int64
+	maxTokens  int64
+	refillRate int64        // tokens per second
 	lastRefill atomic.Int64 // Unix nano timestamp
 	mu         sync.Mutex
 }
@@ -61,10 +61,10 @@ func (tb *TokenBucket) TryConsume(n int64) bool {
 
 // MemoryMonitor tracks memory usage and provides backpressure signals.
 type MemoryMonitor struct {
-	maxPercent   float64
+	maxPercent    float64
 	checkInterval time.Duration
-	lastCheck    atomic.Int64
-	overLimit    atomic.Bool
+	lastCheck     atomic.Int64
+	overLimit     atomic.Bool
 }
 
 // NewMemoryMonitor creates a memory monitor.

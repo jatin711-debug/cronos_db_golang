@@ -46,12 +46,12 @@ type Event struct {
 // gRPC handler path never blocks on disk I/O. If the buffer fills up, new events
 // are dropped and a warning is logged.
 type Logger struct {
-	mu         sync.Mutex
-	file       *os.File
-	bufWriter  *bufio.Writer
-	encoder    *json.Encoder
-	logDir     string
-	unflushed  int
+	mu        sync.Mutex
+	file      *os.File
+	bufWriter *bufio.Writer
+	encoder   *json.Encoder
+	logDir    string
+	unflushed int
 
 	events  chan Event
 	quit    chan struct{}
