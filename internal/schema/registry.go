@@ -166,7 +166,7 @@ func (r *Registry) Validate(topic string, payload []byte) error {
 
 	switch schema.Type {
 	case TypeJSON:
-		return validateJSON(payload)
+		return validateJSONSchema(schema.Definition, payload)
 	case TypeAvro:
 		return validateAvro(schema.Definition, payload)
 	case TypeProtobuf:
@@ -174,11 +174,6 @@ func (r *Registry) Validate(topic string, payload []byte) error {
 	default:
 		return nil // Unknown schema type — allow by default
 	}
-}
-
-func validateJSON(payload []byte) error {
-	var v interface{}
-	return json.Unmarshal(payload, &v)
 }
 
 // Load restores schemas from disk.
