@@ -72,7 +72,7 @@ type WAL struct {
 	quitOnce           sync.Once
 	wg                 sync.WaitGroup
 	cipher             *SegmentCipher
-	currentTerm        int64       // Raft term used for new records
+	currentTerm        int64                    // Raft term used for new records
 	appendHook         func(event *types.Event) // Called after successful append (e.g. CDC)
 }
 
@@ -649,12 +649,12 @@ func (w *WAL) maybePreCreateNextSegment(nextOffset int64) {
 	w.nextSegMu.Lock()
 	if w.nextSegment == nil {
 		w.nextSegment = seg
-		} else {
-			if err := seg.Close(); err != nil {
-				log.Printf("[WAL-%d] failed to close unused pre-created segment: %v", w.partitionID, err)
-			}
+	} else {
+		if err := seg.Close(); err != nil {
+			log.Printf("[WAL-%d] failed to close unused pre-created segment: %v", w.partitionID, err)
 		}
-		w.nextSegMu.Unlock()
+	}
+	w.nextSegMu.Unlock()
 }
 
 // openActiveSegment opens or creates active segment
@@ -962,26 +962,25 @@ func (w *WAL) periodicFlushLoop() {
 				continue
 			}
 
-		// Sync OUTSIDE the lock — fsync doesn't need to block writers
-		// Writers can continue appending to the bufio.Writer while we sync.
-		if w.fsyncMode == FsyncPeriodic || w.fsyncMode == FsyncBatch {
-			if err := seg.Sync(); err != nil {
-				w.recordFlushError()
-				log.Printf("[WAL-%d] background sync error: %v", w.partitionID, err)
-				continue
+			// Sync OUTSIDE the lock — fsync doesn't need to block writers
+			// Writers can continue appending to the bufio.Writer while we sync.
+			if w.fsyncMode == FsyncPeriodic || w.fsyncMode == FsyncBatch {
+				if err := seg.Sync(); err != nil {
+					w.recordFlushError()
+					log.Printf("[WAL-%d] background sync error: %v", w.partitionID, err)
+					continue
+				}
 			}
-		}
 
-		// The index is reconstructable from the segment, so we do not need to
-		// sync it on every entry. Flushing it here (outside the WAL lock) moves
-		// the index fsync out of the write hot path.
-		if seg.index != nil {
-			if err := seg.index.Flush(); err != nil {
-				w.recordFlushError()
-				log.Printf("[WAL-%d] background index flush error: %v", w.partitionID, err)
+			// The index is reconstructable from the segment, so we do not need to
+			// sync it on every entry. Flushing it here (outside the WAL lock) moves
+			// the index fsync out of the write hot path.
+			if seg.index != nil {
+				if err := seg.index.Flush(); err != nil {
+					w.recordFlushError()
+					log.Printf("[WAL-%d] background index flush error: %v", w.partitionID, err)
+				}
 			}
-		}
-
 
 		case <-w.quit:
 			return

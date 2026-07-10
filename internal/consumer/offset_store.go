@@ -23,10 +23,10 @@ type offsetKey struct {
 }
 
 const (
-	offsetKeyPrefix     = "off:"
-	commitIDKeyPrefix   = "cid:"
-	groupMetaKeyPrefix  = "grp:"
-	commitIDCapacity    = 1_000_000
+	offsetKeyPrefix    = "off:"
+	commitIDKeyPrefix  = "cid:"
+	groupMetaKeyPrefix = "grp:"
+	commitIDCapacity   = 1_000_000
 )
 
 // commitIDEntryValue returns an 8-byte big-endian Unix-nano timestamp.
@@ -120,12 +120,12 @@ type OffsetStore struct {
 
 	// Exactly-once commit dedup: in-memory LRU of recent commit IDs.
 	// Protected by commitMu. Capacity ~1M entries per partition.
-	exactlyOnce   bool
-	commitMu      sync.RWMutex
-	recentCommits map[string]struct{}
-	commitQueue   []string // FIFO for eviction
-	pendingCommitIDs   map[string]struct{} // commit IDs waiting to be persisted
-	pendingCommitDels  map[string]struct{} // commit IDs waiting to be deleted from DB
+	exactlyOnce       bool
+	commitMu          sync.RWMutex
+	recentCommits     map[string]struct{}
+	commitQueue       []string            // FIFO for eviction
+	pendingCommitIDs  map[string]struct{} // commit IDs waiting to be persisted
+	pendingCommitDels map[string]struct{} // commit IDs waiting to be deleted from DB
 
 	groupMu          sync.RWMutex
 	groups           map[string]*types.ConsumerGroup
@@ -155,18 +155,18 @@ func NewOffsetStore(dataDir string, partitionID int32, cache *pebble.Cache) (*Of
 	}
 
 	store := &OffsetStore{
-		db:                 db,
-		dataDir:            dataDir,
-		partitionID:        partitionID,
-		quit:               make(chan struct{}),
-		pending:            make(map[offsetKey]int64),
-		recentCommits:      make(map[string]struct{}),
-		commitQueue:        make([]string, 0, 1_000_000),
-		pendingCommitIDs:   make(map[string]struct{}),
-		pendingCommitDels:  make(map[string]struct{}),
-		groups:             make(map[string]*types.ConsumerGroup),
-		pendingGroups:      make(map[string]*types.ConsumerGroup),
-		pendingGroupDels:   make(map[string]struct{}),
+		db:                db,
+		dataDir:           dataDir,
+		partitionID:       partitionID,
+		quit:              make(chan struct{}),
+		pending:           make(map[offsetKey]int64),
+		recentCommits:     make(map[string]struct{}),
+		commitQueue:       make([]string, 0, 1_000_000),
+		pendingCommitIDs:  make(map[string]struct{}),
+		pendingCommitDels: make(map[string]struct{}),
+		groups:            make(map[string]*types.ConsumerGroup),
+		pendingGroups:     make(map[string]*types.ConsumerGroup),
+		pendingGroupDels:  make(map[string]struct{}),
 	}
 
 	// Load persisted state so in-memory maps are consistent after restart.
@@ -219,8 +219,8 @@ func (s *OffsetStore) loadPersistedCommitIDs() error {
 	defer iter.Close()
 
 	type entry struct {
-		id  string
-		ts  int64
+		id string
+		ts int64
 	}
 	var entries []entry
 	for iter.First(); iter.Valid(); iter.Next() {

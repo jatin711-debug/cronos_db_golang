@@ -280,14 +280,14 @@ func (c *Coordinator) RecoverPreparedLocks() {
 			}
 		}
 
-	// Re-acquire locks for any prepared transactions
-	for txID := range activePrepared {
-		slog.Info("Recovered active prepared transaction from WAL; will re-drive resolution", "tx_id", txID, "partition", part.ID)
-		// Note: we intentionally do NOT lock the partition here. The recovery
-		// loop (and any explicit Commit/Abort) will acquire locks via
-		// acquireLocks(), which is deadlock-free because it sorts by partition
-		// ID. Locking here without ever releasing caused a permanent lock leak.
-	}
+		// Re-acquire locks for any prepared transactions
+		for txID := range activePrepared {
+			slog.Info("Recovered active prepared transaction from WAL; will re-drive resolution", "tx_id", txID, "partition", part.ID)
+			// Note: we intentionally do NOT lock the partition here. The recovery
+			// loop (and any explicit Commit/Abort) will acquire locks via
+			// acquireLocks(), which is deadlock-free because it sorts by partition
+			// ID. Locking here without ever releasing caused a permanent lock leak.
+		}
 	}
 }
 

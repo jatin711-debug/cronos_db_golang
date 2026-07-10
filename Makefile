@@ -341,6 +341,7 @@ clean-data:
 # Start Node 1 (Bootstrap/Leader)
 node1: build
 	$(GO_RUNTIME_PREFIX) $(BUILD_DIR)/$(BINARY)$(EXE_EXT) \
+		--dev \
 		--node-id=node1 \
 		--auth-enabled=false \
 		--cluster \
@@ -368,6 +369,7 @@ node1: build
 # Start Node 2 (joins Node 1)
 node2: build
 	$(GO_RUNTIME_PREFIX) $(BUILD_DIR)/$(BINARY)$(EXE_EXT) \
+		--dev \
 		--node-id=node2 \
 		--auth-enabled=false \
 		--cluster \
@@ -396,6 +398,7 @@ node2: build
 # Start Node 3 (joins Node 1)
 node3: build
 	$(GO_RUNTIME_PREFIX) $(BUILD_DIR)/$(BINARY)$(EXE_EXT) \
+		--dev \
 		--node-id=node3 \
 		--auth-enabled=false \
 		--cluster \

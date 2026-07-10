@@ -95,14 +95,17 @@ func TestEnforcer_Run_Size(t *testing.T) {
 	os.MkdirAll(segmentsDir, 0755)
 	file1 := filepath.Join(segmentsDir, "00000000000000000001.log")
 	file2 := filepath.Join(segmentsDir, "00000000000000000002.log")
+	file3 := filepath.Join(segmentsDir, "00000000000000000003.log")
 
-	// Write files with known sizes
+	// Write files with known sizes. file3 is the active (highest offset) segment.
 	os.WriteFile(file1, make([]byte, 100), 0644)
 	os.WriteFile(file2, make([]byte, 100), 0644)
+	os.WriteFile(file3, make([]byte, 100), 0644)
 
-	// Make file1 older
+	// Make file1 older than file2 so it is deleted first.
 	oldTime := time.Now().Add(-2 * time.Hour)
 	os.Chtimes(file1, oldTime, oldTime)
+	os.Chtimes(file2, time.Now(), time.Now())
 
 	policy := RetentionPolicy{MaxSizeBytes: 150}
 	e := NewEnforcer(tmpDir, policy)
@@ -110,12 +113,15 @@ func TestEnforcer_Run_Size(t *testing.T) {
 		t.Fatalf("Run failed: %v", err)
 	}
 
-	// Oldest file should be deleted to get under 150 bytes
+	// Oldest non-active file should be deleted to get non-active total under 150 bytes
 	if _, err := os.Stat(file1); !os.IsNotExist(err) {
-		t.Error("oldest file should be deleted")
+		t.Error("oldest non-active file should be deleted")
 	}
 	if _, err := os.Stat(file2); os.IsNotExist(err) {
-		t.Error("newest file should still exist")
+		t.Error("newer non-active file should still exist")
+	}
+	if _, err := os.Stat(file3); os.IsNotExist(err) {
+		t.Error("active segment should still exist")
 	}
 }
 
@@ -163,9 +169,11 @@ func TestEnforcer_Run_BothPolicies(t *testing.T) {
 	os.MkdirAll(segmentsDir, 0755)
 	oldFile := filepath.Join(segmentsDir, "00000000000000000001.log")
 	bigFile := filepath.Join(segmentsDir, "00000000000000000002.log")
+	activeFile := filepath.Join(segmentsDir, "00000000000000000003.log")
 
 	os.WriteFile(oldFile, []byte("old"), 0644)
 	os.WriteFile(bigFile, make([]byte, 200), 0644)
+	os.WriteFile(activeFile, []byte("active"), 0644)
 
 	oldTime := time.Now().Add(-48 * time.Hour)
 	os.Chtimes(oldFile, oldTime, oldTime)
@@ -185,6 +193,9 @@ func TestEnforcer_Run_BothPolicies(t *testing.T) {
 	if _, err := os.Stat(bigFile); !os.IsNotExist(err) {
 		t.Error("big file should be deleted by size policy")
 	}
+	if _, err := os.Stat(activeFile); os.IsNotExist(err) {
+		t.Error("active segment should still exist")
+	}
 }
 
 func TestEnforcer_enforceAge_SkipDirs(t *testing.T) {
@@ -193,7 +204,9 @@ func TestEnforcer_enforceAge_SkipDirs(t *testing.T) {
 	segmentsDir := filepath.Join(subDir, "segments")
 	os.MkdirAll(segmentsDir, 0755)
 	oldFile := filepath.Join(segmentsDir, "00000000000000000001.log")
+	activeFile := filepath.Join(segmentsDir, "00000000000000000002.log")
 	os.WriteFile(oldFile, []byte("old"), 0644)
+	os.WriteFile(activeFile, []byte("active"), 0644)
 	oldTime := time.Now().Add(-48 * time.Hour)
 	os.Chtimes(oldFile, oldTime, oldTime)
 
@@ -205,6 +218,9 @@ func TestEnforcer_enforceAge_SkipDirs(t *testing.T) {
 
 	if _, err := os.Stat(oldFile); !os.IsNotExist(err) {
 		t.Error("old file in subdir should be deleted")
+	}
+	if _, err := os.Stat(activeFile); os.IsNotExist(err) {
+		t.Error("active segment should still exist")
 	}
 }
 
@@ -229,11 +245,14 @@ func TestEnforcer_SafeExclusions(t *testing.T) {
 	os.MkdirAll(pebbleDir, 0755)
 	os.MkdirAll(indexDir, 0755)
 
-	// 2. Create actual WAL segments inside segments directory
+	// 2. Create actual WAL segments inside segments directory. Add an active segment
+	// with a higher offset so the old log file is eligible for deletion.
 	segmentsDir := filepath.Join(tmpDir, "segments")
 	os.MkdirAll(segmentsDir, 0755)
 	logFile := filepath.Join(segmentsDir, "00000000000000000001.log")
+	activeFile := filepath.Join(segmentsDir, "00000000000000000002.log")
 	os.WriteFile(logFile, make([]byte, 100), 0644)
+	os.WriteFile(activeFile, []byte("active"), 0644)
 
 	// 3. Create critical files in root and protected dirs
 	raftDb := filepath.Join(raftDir, "raft.db")
