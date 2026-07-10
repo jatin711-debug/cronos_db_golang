@@ -167,18 +167,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Build Rust dedup library
         run: make rust-dedup
-      - name: Bring up cluster
+      - name: Bring up server
         run: |
-          docker compose up -d cronos-node1 cronos-node2 cronos-node3
-          # Wait for node1 HTTP health endpoint to become healthy.
+          docker compose up -d cronos-single
+          # Wait for the HTTP health endpoint to become healthy.
           # Avoid IPv6 localhost resolution issues in CI by using the IPv4 loopback.
           for i in $(seq 1 60); do
             if curl -sf http://127.0.0.1:8080/health >/dev/null 2>&1; then
-              echo "Cluster healthy"; exit 0
+              echo "Server healthy"; exit 0
             fi
             sleep 2
           done
-          echo "Cluster did not become healthy in time"; docker compose logs; exit 1
+          echo "Server did not become healthy in time"; docker compose logs; exit 1
       - name: Run integration tests
         env:
           CRONOS_TEST_ADDR: 127.0.0.1:9000
