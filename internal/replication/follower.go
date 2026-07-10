@@ -365,6 +365,10 @@ func (f *Follower) SyncFilesFromLeader() error {
 				return err
 			}
 			if currentFile != nil {
+				if err := currentFile.Sync(); err != nil {
+					currentFile.Close()
+					return fmt.Errorf("sync segment file %s: %w", currentFilePath, err)
+				}
 				currentFile.Close()
 				currentFile = nil
 			}

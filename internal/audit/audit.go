@@ -1,6 +1,7 @@
 package audit
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -14,10 +15,18 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/internal/auth"
 )
 
-// DefaultBufferSize is the maximum number of audit events that can be queued
-// before new events are dropped. Tune this based on audit volume and tolerance
-// for loss under backpressure.
-const DefaultBufferSize = 4096
+const (
+	DefaultBufferSize = 4096
+
+	// auditSyncEvery is the number of encoded events after which the audit log
+	// file is explicitly flushed and fsynced. This keeps fsyncs off the gRPC
+	// hot path while bounding durability window.
+	auditSyncEvery = 100
+
+	// auditFlushInterval is the maximum time between fsyncs when events are
+	// trickling in slowly.
+	auditFlushInterval = 1 * time.Second
+)
 
 // Event represents a single audit log entry.
 type Event struct {
@@ -37,10 +46,12 @@ type Event struct {
 // gRPC handler path never blocks on disk I/O. If the buffer fills up, new events
 // are dropped and a warning is logged.
 type Logger struct {
-	mu      sync.Mutex
-	file    *os.File
-	encoder *json.Encoder
-	logDir  string
+	mu         sync.Mutex
+	file       *os.File
+	bufWriter  *bufio.Writer
+	encoder    *json.Encoder
+	logDir     string
+	unflushed  int
 
 	events  chan Event
 	quit    chan struct{}
@@ -63,12 +74,13 @@ func NewLogger(dataDir string) (*Logger, error) {
 	}
 
 	l := &Logger{
-		file:    f,
-		encoder: json.NewEncoder(f),
-		logDir:  logDir,
-		events:  make(chan Event, DefaultBufferSize),
-		quit:    make(chan struct{}),
+		file:      f,
+		bufWriter: bufio.NewWriterSize(f, 64*1024),
+		logDir:    logDir,
+		events:    make(chan Event, DefaultBufferSize),
+		quit:      make(chan struct{}),
 	}
+	l.encoder = json.NewEncoder(l.bufWriter)
 
 	l.wg.Add(1)
 	go l.worker()
@@ -140,11 +152,15 @@ func (l *Logger) Flush() error {
 // quit is closed, flushing any remaining queued events before returning.
 func (l *Logger) worker() {
 	defer l.wg.Done()
+	ticker := time.NewTicker(auditFlushInterval)
+	defer ticker.Stop()
 
 	for {
 		select {
 		case evt := <-l.events:
 			l.writeLocked(evt)
+		case <-ticker.C:
+			l.flushAndSyncLocked()
 		case <-l.quit:
 			// Drain the remaining buffered events before stopping.
 			for {
@@ -152,6 +168,7 @@ func (l *Logger) worker() {
 				case evt := <-l.events:
 					l.writeLocked(evt)
 				default:
+					l.flushAndSyncLocked()
 					return
 				}
 			}
@@ -165,7 +182,34 @@ func (l *Logger) writeLocked(evt Event) {
 	defer l.mu.Unlock()
 	if err := l.encoder.Encode(evt); err != nil {
 		slog.Warn("Audit log encode failed", "error", err)
+		return
 	}
+	l.unflushed++
+	if l.unflushed >= auditSyncEvery {
+		l.flushAndSyncLocked()
+	}
+}
+
+// flushAndSyncLocked flushes the buffered audit writer and fsyncs the file.
+// l.mu must NOT be held; it acquires the lock internally.
+func (l *Logger) flushAndSyncLocked() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.bufWriter == nil {
+		return
+	}
+	if l.unflushed == 0 {
+		return
+	}
+	if err := l.bufWriter.Flush(); err != nil {
+		slog.Warn("Audit log flush failed", "error", err)
+		return
+	}
+	if err := l.file.Sync(); err != nil {
+		slog.Warn("Audit log sync failed", "error", err)
+		return
+	}
+	l.unflushed = 0
 }
 
 // Close signals the background worker to stop, waits for queued events to be
@@ -184,5 +228,14 @@ func (l *Logger) Close() error {
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.bufWriter != nil && l.unflushed > 0 {
+		if err := l.bufWriter.Flush(); err != nil {
+			slog.Warn("Audit log flush on close failed", "error", err)
+		} else if err := l.file.Sync(); err != nil {
+			slog.Warn("Audit log sync on close failed", "error", err)
+		} else {
+			l.unflushed = 0
+		}
+	}
 	return l.file.Close()
 }

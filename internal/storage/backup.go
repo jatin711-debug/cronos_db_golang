@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 )
 
 // BackupCheckpoint tracks the last successfully backed-up offset.
@@ -119,15 +121,15 @@ func BackupWAL(walDir string, destDir string) error {
 		backedUpIndexes++
 	}
 
-	// Write backup manifest
+	// Write backup manifest atomically with fsync.
 	manifest := fmt.Sprintf("backup_time=%s\nsegments=%d\nindexes=%d\nlast_offset=%d\n",
 		time.Now().UTC().Format(time.RFC3339), backedUpSegments, backedUpIndexes, maxBackedUpOffset)
 	manifestPath := filepath.Join(destDir, "backup.manifest")
-	if err := os.WriteFile(manifestPath, []byte(manifest), 0644); err != nil {
+	if err := utils.AtomicWriteFile(manifestPath, []byte(manifest), 0644); err != nil {
 		return fmt.Errorf("write manifest: %w", err)
 	}
 
-	// Atomically update checkpoint
+	// Atomically update checkpoint with fsync.
 	newCkpt := BackupCheckpoint{LastOffset: maxBackedUpOffset, Timestamp: time.Now().UTC()}
 	if err := saveBackupCheckpoint(destDir, newCkpt); err != nil {
 		return fmt.Errorf("save checkpoint: %w", err)
@@ -162,15 +164,11 @@ func loadBackupCheckpoint(destDir string) (BackupCheckpoint, error) {
 
 func saveBackupCheckpoint(destDir string, ckpt BackupCheckpoint) error {
 	path := filepath.Join(destDir, "backup_checkpoint.json")
-	tmpPath := path + ".tmp"
 	data, err := json.Marshal(ckpt)
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
-		return err
-	}
-	return os.Rename(tmpPath, path)
+	return utils.AtomicWriteFile(path, data, 0644)
 }
 
 // RestoreWAL restores WAL segments and their indexes from a backup directory.
@@ -236,10 +234,17 @@ func copyFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer out.Close()
 
 	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
 		return err
 	}
-	return out.Close()
+	if err := out.Sync(); err != nil {
+		out.Close()
+		return err
+	}
+	if err := out.Close(); err != nil {
+		return err
+	}
+	return nil
 }

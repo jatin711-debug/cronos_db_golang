@@ -9,6 +9,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
+	"strings"
+
+	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 )
 
 // EncryptionConfig holds at-rest encryption settings.
@@ -18,18 +22,34 @@ type EncryptionConfig struct {
 	KeyFile    string // Path to file containing master key
 }
 
-// LoadMasterKey loads the encryption key from file or environment.
+// LoadMasterKey loads the encryption key from file. The key must be exactly 32
+// bytes (256 bits) for AES-256-GCM. On Unix, the file must not be readable or
+// writable by group or others.
 func LoadMasterKey(keyFile string) ([]byte, error) {
 	if keyFile == "" {
 		return nil, fmt.Errorf("encryption enabled but no key file specified")
 	}
+	info, err := os.Stat(keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("stat master key file: %w", err)
+	}
+	if runtime.GOOS != "windows" {
+		mode := info.Mode().Perm()
+		if mode&077 != 0 {
+			return nil, fmt.Errorf("master key file %s must not be readable or writable by group or others (mode %#o)", keyFile, mode)
+		}
+	}
+
 	data, err := os.ReadFile(keyFile)
 	if err != nil {
 		return nil, fmt.Errorf("read master key: %w", err)
 	}
-	// Trim whitespace/newlines
+	trimmed := strings.TrimSpace(string(data))
+	if len(trimmed) != 32 {
+		return nil, fmt.Errorf("master key must be exactly 32 bytes, got %d", len(trimmed))
+	}
 	key := make([]byte, 32)
-	copy(key, data)
+	copy(key, trimmed)
 	return key, nil
 }
 
@@ -182,9 +202,5 @@ func (ef *EncryptedFile) WriteAll(plaintext []byte) error {
 	out = append(out, encryptedFileVersion)
 	out = append(out, encrypted...)
 
-	tmp := ef.path + ".tmp"
-	if err := os.WriteFile(tmp, out, 0640); err != nil {
-		return err
-	}
-	return os.Rename(tmp, ef.path)
+	return utils.AtomicWriteFile(ef.path, out, 0640)
 }

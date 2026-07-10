@@ -118,7 +118,7 @@ func (s *OffsetStore) flushPending() {
 		}
 	}
 
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := batch.Commit(pebble.Sync); err != nil {
 		fmt.Printf("[OFFSET_STORE] Failed to commit batch: %v\n", err)
 	}
 

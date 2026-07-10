@@ -13,6 +13,7 @@ import (
 
 	"github.com/jatin711-debug/cronos_db_golang/internal/partition"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 )
 
 // TxID is a unique transaction identifier.
@@ -141,46 +142,7 @@ func (tl *txLog) persistLocked() error {
 		return fmt.Errorf("marshal tx records: %w", err)
 	}
 
-	return atomicWriteFile(tl.path, data, 0644)
-}
-
-// atomicWriteFile writes data to path atomically using temp-file + fsync +
-// rename + dir-fsync. This protects against torn writes on crash.
-func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
-	dir := filepath.Dir(path)
-	tmpPath := path + ".tmp"
-
-	tmp, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
-	if err != nil {
-		return fmt.Errorf("create temp file: %w", err)
-	}
-	// Clean up temp file if we leave it behind; ignore errors on Windows where
-	// the file may still be locked.
-	defer os.Remove(tmpPath)
-
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return fmt.Errorf("write temp file: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return fmt.Errorf("fsync temp file: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close temp file: %w", err)
-	}
-
-	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("rename temp file: %w", err)
-	}
-
-	// Fsync the parent directory so the rename is durable on POSIX.
-	if dirFile, err := os.Open(dir); err == nil {
-		_ = dirFile.Sync()
-		_ = dirFile.Close()
-	}
-
-	return nil
+	return utils.AtomicWriteFile(tl.path, data, 0644)
 }
 
 // Coordinator manages 2PC across partitions.
@@ -391,7 +353,9 @@ func (c *Coordinator) Begin(txID TxID, participants []Participant) (*Transaction
 
 	// Persist pending state
 	partitionIDs := extractPartitionIDs(participants)
-	_ = c.txLog.write(txID, StatusPending, partitionIDs, tx.CreatedAt)
+	if err := c.txLog.write(txID, StatusPending, partitionIDs, tx.CreatedAt); err != nil {
+		return nil, fmt.Errorf("persist pending transaction: %w", err)
+	}
 
 	return tx, nil
 }
@@ -441,7 +405,9 @@ func (c *Coordinator) Prepare(ctx context.Context, txID TxID) error {
 	c.mu.Unlock()
 
 	partitionIDs := extractPartitionIDs(tx.Participants)
-	_ = c.txLog.write(txID, StatusPrepared, partitionIDs, tx.CreatedAt)
+	if err := c.txLog.write(txID, StatusPrepared, partitionIDs, tx.CreatedAt); err != nil {
+		return fmt.Errorf("persist prepared transaction: %w", err)
+	}
 
 	return nil
 }
@@ -484,7 +450,9 @@ func (c *Coordinator) Commit(ctx context.Context, txID TxID) error {
 
 		// Persist prepared state
 		partitionIDs := extractPartitionIDs(tx.Participants)
-		_ = c.txLog.write(txID, StatusPrepared, partitionIDs, tx.CreatedAt)
+		if err := c.txLog.write(txID, StatusPrepared, partitionIDs, tx.CreatedAt); err != nil {
+			return fmt.Errorf("persist prepared transaction: %w", err)
+		}
 	}
 	// StatusPrepared or StatusCommitting means Prepare already succeeded; skip
 	// to Phase 2.
@@ -506,7 +474,9 @@ func (c *Coordinator) Commit(ctx context.Context, txID TxID) error {
 		c.mu.Unlock()
 
 		partitionIDs := extractPartitionIDs(tx.Participants)
-		_ = c.txLog.write(txID, StatusCommitting, partitionIDs, tx.CreatedAt)
+		if err := c.txLog.write(txID, StatusCommitting, partitionIDs, tx.CreatedAt); err != nil {
+			return fmt.Errorf("commit partially failed (%v) and could not persist committing state: %w", commitErr, err)
+		}
 		return fmt.Errorf("commit partially failed: %w", commitErr)
 	}
 
@@ -516,8 +486,12 @@ func (c *Coordinator) Commit(ctx context.Context, txID TxID) error {
 	c.mu.Unlock()
 
 	partitionIDs := extractPartitionIDs(tx.Participants)
-	_ = c.txLog.write(txID, StatusCommitted, partitionIDs, tx.CreatedAt)
-	_ = c.txLog.delete(txID)
+	if err := c.txLog.write(txID, StatusCommitted, partitionIDs, tx.CreatedAt); err != nil {
+		return fmt.Errorf("persist committed transaction: %w", err)
+	}
+	if err := c.txLog.delete(txID); err != nil {
+		return fmt.Errorf("delete committed transaction log: %w", err)
+	}
 	return nil
 }
 
@@ -554,8 +528,12 @@ func (c *Coordinator) abortInternal(ctx context.Context, tx *Transaction) error 
 	c.mu.Unlock()
 
 	partitionIDs := extractPartitionIDs(tx.Participants)
-	_ = c.txLog.write(tx.ID, StatusAborted, partitionIDs, tx.CreatedAt)
-	_ = c.txLog.delete(tx.ID)
+	if err := c.txLog.write(tx.ID, StatusAborted, partitionIDs, tx.CreatedAt); err != nil {
+		return fmt.Errorf("persist aborted transaction: %w", err)
+	}
+	if err := c.txLog.delete(tx.ID); err != nil {
+		return fmt.Errorf("delete aborted transaction log: %w", err)
+	}
 
 	return nil
 }
