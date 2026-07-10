@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jatin711-debug/cronos_db_golang/pkg/client/internal/circuitbreaker"
 	"google.golang.org/grpc/credentials"
 )
 
@@ -75,6 +76,10 @@ type Config struct {
 	Metadata MetadataConfig
 	Security SecurityConfig
 	Hooks    Hooks
+
+	// CircuitBreaker controls per-address resilience gates for requests issued
+	// through this client (e.g. by Producer). Threshold of 0 disables breakers.
+	CircuitBreaker circuitbreaker.Config
 }
 
 // DefaultConfig returns a config with throughput-safe defaults.
@@ -99,6 +104,11 @@ func DefaultConfig(bootstrapAddresses ...string) Config {
 			Insecure: true,
 		},
 		Hooks: NopHooks{},
+		CircuitBreaker: circuitbreaker.Config{
+			FailureThreshold: 5,
+			SuccessThreshold: 2,
+			Timeout:          10 * time.Second,
+		},
 	}
 }
 
@@ -146,6 +156,9 @@ func (c Config) withDefaults() Config {
 	}
 	if out.Hooks == nil {
 		out.Hooks = NopHooks{}
+	}
+	if out.CircuitBreaker.Timeout <= 0 {
+		out.CircuitBreaker.Timeout = 10 * time.Second
 	}
 
 	return out

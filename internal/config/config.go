@@ -25,6 +25,8 @@ func LoadConfig() (*types.Config, error) {
 	config.IndexInterval = DefaultIndexInterval
 	config.FsyncMode = DefaultFsyncMode
 	config.FlushIntervalMS = DefaultFlushIntervalMS
+	config.RetentionMaxAgeHours = DefaultRetentionMaxAgeHours
+	config.RetentionMaxSizeGB = DefaultRetentionMaxSizeGB
 	config.TickMS = DefaultTickMS
 	config.WheelSize = DefaultWheelSize
 	config.DefaultAckTimeout = 30 * time.Second
@@ -36,6 +38,7 @@ func LoadConfig() (*types.Config, error) {
 	config.BloomCapacity = DefaultBloomCapacity
 	config.ReplicationBatchSize = DefaultReplicationBatchSize
 	config.ReplicationTimeout = 10 * time.Second
+	config.MinInSyncReplicas = DefaultMinInSyncReplicas
 	config.RaftDir = DefaultRaftDir
 	config.StatsPrintInterval = DefaultStatsPrintInterval
 	config.CheckpointInterval = DefaultCheckpointInterval
@@ -117,6 +120,11 @@ func LoadConfig() (*types.Config, error) {
 	flag.StringVar(&config.FsyncMode, "fsync-mode", DefaultFsyncMode, "fsync mode: every_event, batch, periodic")
 	var flushInterval int
 	flag.IntVar(&flushInterval, "flush-interval", DefaultFlushIntervalMS, "Flush interval in milliseconds")
+	flag.IntVar(&config.RetentionMaxAgeHours, "retention-max-age-hours", DefaultRetentionMaxAgeHours, "Delete WAL segments older than this many hours (0 = disable)")
+	flag.Int64Var(&config.RetentionMaxSizeGB, "retention-max-size-gb", DefaultRetentionMaxSizeGB, "Keep WAL segments within this many GB by deleting oldest (0 = disable)")
+
+	// Security / dev mode
+	flag.BoolVar(&config.DevMode, "dev", false, "Developer mode: disables production security requirements")
 
 	// Scheduler configuration
 	flag.IntVar(&config.TickMS, "tick-ms", DefaultTickMS, "Scheduler tick duration in milliseconds")
@@ -146,6 +154,7 @@ func LoadConfig() (*types.Config, error) {
 	// Replication configuration
 	flag.IntVar(&config.ReplicationBatchSize, "replication-batch", DefaultReplicationBatchSize, "Replication batch size")
 	flag.DurationVar(&config.ReplicationTimeout, "replication-timeout", 10*time.Second, "Replication timeout")
+	flag.IntVar(&config.MinInSyncReplicas, "min-insync-replicas", DefaultMinInSyncReplicas, "Minimum in-sync replicas (incl. leader) required to ack a write; 0 = 1")
 
 	// Raft configuration
 	flag.StringVar(&config.RaftDir, "raft-dir", DefaultRaftDir, "Raft data directory")
@@ -169,6 +178,12 @@ func LoadConfig() (*types.Config, error) {
 	flag.StringVar(&config.TLSCertFile, "tls-cert-file", "", "Path to TLS certificate file")
 	flag.StringVar(&config.TLSKeyFile, "tls-key-file", "", "Path to TLS private key file")
 	flag.BoolVar(&config.TLSClientAuth, "tls-client-auth", false, "Require client certificates (mTLS)")
+
+	// Internal replication mTLS flags
+	flag.BoolVar(&config.ReplicationTLSEnabled, "replication-tls-enabled", false, "Enable mTLS for internal replication traffic")
+	flag.StringVar(&config.ReplicationTLSCAFile, "replication-tls-ca-file", "", "Path to internal replication CA certificate file")
+	flag.StringVar(&config.ReplicationTLSCertFile, "replication-tls-cert-file", "", "Path to internal replication certificate file")
+	flag.StringVar(&config.ReplicationTLSKeyFile, "replication-tls-key-file", "", "Path to internal replication private key file")
 
 	// Auth flags
 	flag.BoolVar(&config.AuthEnabled, "auth-enabled", false, "Enable JWT authentication")
@@ -197,6 +212,14 @@ func LoadConfig() (*types.Config, error) {
 	// Topic rate limit flags
 	flag.Float64Var(&config.TopicRateLimitPerSecond, "topic-rate-limit", DefaultTopicRateLimitPerSecond, "Per-subject per-topic rate limit (events/sec, 0 = disabled)")
 	flag.Float64Var(&config.TopicRateLimitBurst, "topic-rate-burst", DefaultTopicRateLimitBurst, "Per-subject per-topic rate limit burst (0 = disabled)")
+
+	// Memory-based backpressure flags
+	flag.Float64Var(&config.MaxMemoryUsagePercent, "max-memory-percent", DefaultMaxMemoryUsagePercent, "Max memory usage %% before rejecting publishes (0 = disabled)")
+	flag.Int64Var(&config.MemoryCheckIntervalMs, "memory-check-interval", DefaultMemoryCheckIntervalMs, "Memory check interval in milliseconds")
+
+	// Ingest rate limiting per partition
+	flag.Int64Var(&config.MaxIngestRatePerPartition, "max-ingest-rate", DefaultMaxIngestRatePerPartition, "Max events/sec per partition (0 = unlimited)")
+	flag.Int64Var(&config.IngestRateBurstSize, "ingest-burst-size", DefaultIngestRateBurstSize, "Token bucket burst size for ingest rate limit")
 
 	var clusterSeeds string
 	flag.StringVar(&clusterSeeds, "cluster-seeds", "", "Comma-separated list of seed node addresses")
@@ -231,6 +254,11 @@ func LoadConfig() (*types.Config, error) {
 	}
 	if httpAddr := os.Getenv("CRONOS_HTTP_ADDR"); httpAddr != "" && config.HTTPAddress == DefaultHTTPAddress {
 		config.HTTPAddress = httpAddr
+	}
+	if devMode := os.Getenv("CRONOS_DEV"); devMode != "" {
+		if parsed, err := strconv.ParseBool(devMode); err == nil {
+			config.DevMode = parsed
+		}
 	}
 	if clusterEnabled := os.Getenv("CRONOS_CLUSTER"); clusterEnabled == "true" {
 		config.ClusterEnabled = true
@@ -279,14 +307,64 @@ func LoadConfig() (*types.Config, error) {
 		config.TLSKeyFile = keyFile
 	}
 
-	// Auth environment overrides
-	if authEnabled := os.Getenv("CRONOS_AUTH_ENABLED"); authEnabled != "" {
-		if parsed, err := strconv.ParseBool(authEnabled); err == nil {
-			config.AuthEnabled = parsed
+	// Internal replication mTLS environment overrides
+	if replicationTLSEnabled := os.Getenv("CRONOS_REPLICATION_TLS_ENABLED"); replicationTLSEnabled != "" {
+		if parsed, err := strconv.ParseBool(replicationTLSEnabled); err == nil {
+			config.ReplicationTLSEnabled = parsed
+		}
+	}
+	if caFile := os.Getenv("CRONOS_REPLICATION_TLS_CA_FILE"); caFile != "" {
+		config.ReplicationTLSCAFile = caFile
+	}
+	if certFile := os.Getenv("CRONOS_REPLICATION_TLS_CERT_FILE"); certFile != "" {
+		config.ReplicationTLSCertFile = certFile
+	}
+	if keyFile := os.Getenv("CRONOS_REPLICATION_TLS_KEY_FILE"); keyFile != "" {
+		config.ReplicationTLSKeyFile = keyFile
+	}
+
+	// Auth environment overrides. We only honor CRONOS_AUTH_ENABLED when the
+	// --auth-enabled flag was not explicitly provided on the command line, so
+	// that flags always take precedence over environment variables.
+	authEnabledExplicit := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "auth-enabled" {
+			authEnabledExplicit = true
+		}
+	})
+	if !authEnabledExplicit {
+		if authEnabled := os.Getenv("CRONOS_AUTH_ENABLED"); authEnabled != "" {
+			if parsed, err := strconv.ParseBool(authEnabled); err == nil {
+				config.AuthEnabled = parsed
+			}
 		}
 	}
 	if jwtSecret := os.Getenv("CRONOS_AUTH_JWT_SECRET"); jwtSecret != "" {
 		config.AuthJWTSecret = jwtSecret
+	}
+
+	// Replication environment overrides
+	if minISR := os.Getenv("CRONOS_MIN_IN_SYNC_REPLICAS"); minISR != "" {
+		if parsed, err := strconv.Atoi(minISR); err == nil {
+			config.MinInSyncReplicas = parsed
+		}
+	}
+
+	// Exactly-once commits
+	if eo := os.Getenv("CRONOS_EXACTLY_ONCE_COMMITS"); eo != "" {
+		if parsed, err := strconv.ParseBool(eo); err == nil {
+			config.ExactlyOnceCommits = parsed
+		}
+	}
+
+	// Encryption at rest environment overrides
+	if encEnabled := os.Getenv("CRONOS_ENCRYPTION_ENABLED"); encEnabled != "" {
+		if parsed, err := strconv.ParseBool(encEnabled); err == nil {
+			config.EncryptionEnabled = parsed
+		}
+	}
+	if encKeyFile := os.Getenv("CRONOS_ENCRYPTION_KEY_FILE"); encKeyFile != "" {
+		config.EncryptionKeyFile = encKeyFile
 	}
 
 	// Topology environment overrides
@@ -333,6 +411,12 @@ func ValidateConfig(c *types.Config) error {
 	if c.ReplicationFactor <= 0 {
 		return fmt.Errorf("replication-factor must be > 0")
 	}
+	if c.MinInSyncReplicas < 0 {
+		return fmt.Errorf("min-insync-replicas must be >= 0")
+	}
+	if c.MinInSyncReplicas > c.ReplicationFactor {
+		return fmt.Errorf("min-insync-replicas (%d) cannot exceed replication-factor (%d)", c.MinInSyncReplicas, c.ReplicationFactor)
+	}
 	if c.DataDir == "" {
 		return fmt.Errorf("data-dir is required")
 	}
@@ -345,5 +429,38 @@ func ValidateConfig(c *types.Config) error {
 	if c.FlushIntervalMS <= 0 {
 		return fmt.Errorf("flush-interval must be > 0")
 	}
+
+	// Production hardening: require TLS, auth, encryption, and replication safety
+	// unless the operator explicitly opts into developer mode.
+	if !c.DevMode {
+		if c.ReplicationFactor < 3 {
+			return fmt.Errorf("production mode requires replication-factor >= 3 (use --dev to bypass)")
+		}
+		if c.MinInSyncReplicas < 2 {
+			return fmt.Errorf("production mode requires min-insync-replicas >= 2 (use --dev to bypass)")
+		}
+		if !c.TLSEnabled {
+			return fmt.Errorf("production mode requires TLS to be enabled (use --dev to bypass)")
+		}
+		if c.TLSCertFile == "" || c.TLSKeyFile == "" {
+			return fmt.Errorf("production mode requires tls-cert-file and tls-key-file")
+		}
+		if !c.AuthEnabled {
+			return fmt.Errorf("production mode requires auth to be enabled (use --dev to bypass)")
+		}
+		if c.AuthJWTSecret == "" && c.AuthJWTPublicKey == "" {
+			return fmt.Errorf("production mode requires auth-jwt-secret or auth-jwt-public-key")
+		}
+		if !c.EncryptionEnabled {
+			return fmt.Errorf("production mode requires encryption at rest to be enabled (use --dev to bypass)")
+		}
+		if c.EncryptionKeyFile == "" {
+			return fmt.Errorf("production mode requires encryption-key-file")
+		}
+		if !c.ReplicationTLSEnabled {
+			return fmt.Errorf("production mode requires replication TLS to be enabled (use --dev to bypass)")
+		}
+	}
+
 	return nil
 }

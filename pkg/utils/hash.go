@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"slices"
 	"crypto/sha1"
 	"encoding/hex"
 	"hash"
@@ -117,13 +118,7 @@ func (c *ConsistentHash) GetN(key string, n int) []string {
 			if hash <= ringHash {
 				node := c.ring[ringHash]
 				// Check if node is already in result
-				exists := false
-				for _, n := range result {
-					if n == node {
-						exists = true
-						break
-					}
-				}
+				exists := slices.Contains(result, node)
 				if !exists {
 					result = append(result, node)
 					break

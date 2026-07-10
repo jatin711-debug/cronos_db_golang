@@ -48,24 +48,30 @@ func (h *ReplicationServiceHandler) Append(ctx context.Context, req *types.Repli
 		return nil, status.Errorf(codes.Internal, "partition %d WAL not initialized", req.GetPartitionId())
 	}
 
-	expectedNext := req.GetExpectedNextOffset()
-	localNext := p.Wal.GetNextOffset()
-	if expectedNext > 0 && expectedNext != localNext {
-		return &types.ReplicationAppendResponse{
-			Success:    false,
-			Error:      fmt.Sprintf("offset mismatch: expected %d, local %d", expectedNext, localNext),
-			LastOffset: p.Wal.GetLastOffset(),
-			NextOffset: localNext,
-		}, nil
+	// Term validation: reject stale leaders, step up on newer term.
+	if req.GetTerm() != 0 {
+		if req.GetTerm() < p.Epoch {
+			return &types.ReplicationAppendResponse{
+				Success:    false,
+				Error:      fmt.Sprintf("stale term: got %d, current %d", req.GetTerm(), p.Epoch),
+				LastOffset: p.Wal.GetLastOffset(),
+				NextOffset: p.Wal.GetNextOffset(),
+				Term:       p.Epoch,
+			}, nil
+		}
+		if req.GetTerm() > p.Epoch {
+			p.Epoch = req.GetTerm()
+		}
 	}
 
 	if len(req.GetEvents()) > 0 {
-		if err := p.Wal.AppendBatch(req.GetEvents()); err != nil {
+		if err := p.Wal.AppendReplicatedBatch(req.GetEvents()); err != nil {
 			return &types.ReplicationAppendResponse{
 				Success:    false,
-				Error:      fmt.Sprintf("append batch: %v", err),
+				Error:      fmt.Sprintf("append replicated batch: %v", err),
 				LastOffset: p.Wal.GetLastOffset(),
 				NextOffset: p.Wal.GetNextOffset(),
+				Term:       p.Epoch,
 			}, nil
 		}
 	}
@@ -74,6 +80,7 @@ func (h *ReplicationServiceHandler) Append(ctx context.Context, req *types.Repli
 		Success:    true,
 		LastOffset: p.Wal.GetLastOffset(),
 		NextOffset: p.Wal.GetNextOffset(),
+		Term:       p.Epoch,
 	}, nil
 }
 

@@ -11,6 +11,7 @@ import (
 
 	"github.com/cockroachdb/pebble"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
@@ -268,6 +269,8 @@ func (s *Scheduler) drainExpiredToReady() {
 				localBuf = append(localBuf, timer.Event)
 				s.timingWheel.PutTimer(timer)
 			}
+			// Return the slice to the pool after processing
+			expiredSlicePool.Put(expiredTimers)
 		default:
 			goto done
 		}
@@ -311,9 +314,9 @@ func (s *Scheduler) Start() {
 	}
 
 	s.active = true
-	go s.worker()
-	go s.checkpointLoop()
-	go s.hydratorLoop()
+	utils.GoSafe("scheduler-worker", s.worker)
+	utils.GoSafe("scheduler-checkpoint", s.checkpointLoop)
+	utils.GoSafe("scheduler-hydrator", s.hydratorLoop)
 }
 
 // worker is the scheduler worker loop

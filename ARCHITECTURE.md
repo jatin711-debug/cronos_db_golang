@@ -2,6 +2,8 @@
 
 > A distributed, timestamp-triggered event database with built-in scheduling, pub/sub messaging, and WAL-based persistence.
 
+> **Production readiness note:** CronosDB supports both development and production run modes. The `--dev` flag disables production security requirements for local testing. Production deployments require TLS, authentication, encryption at rest, replication mTLS, `--replication-factor>=3`, and `--min-insync-replicas>=2`. See [Security](#security) and [Configuration Reference](#configuration-reference) for details.
+
 Quick navigation:
 
 - Feature-by-feature architecture docs: [docs/architecture/README.md](docs/architecture/README.md)
@@ -20,6 +22,7 @@ Quick navigation:
 - [Deduplication Engine](#deduplication-engine)
 - [Delivery Pipeline](#delivery-pipeline)
 - [Consumer Groups](#consumer-groups)
+- [Change Data Capture](#change-data-capture)
 - [Cluster Architecture](#cluster-architecture)
 - [Replication Protocol](#replication-protocol)
 - [Replay Engine](#replay-engine)
@@ -309,25 +312,30 @@ graph LR
         H5[CRC32 Checksum]
     end
 
-    subgraph Record Format
+    subgraph Record Format v2
         RF1[Length - 4B]
         RF2[CRC32 - 4B]
         RF3[Offset - 8B]
-        RF4[Schedule TS - 8B]
-        RF5[MsgID Len + Data]
-        RF6[Topic Len + Data]
-        RF7[Payload Len + Data]
-        RF8[Meta Count + Entries]
+        RF4[Raft Term - 8B]
+        RF5[Schedule TS - 8B]
+        RF6[MsgID Len + Data]
+        RF7[Topic Len + Data]
+        RF8[Payload Len + Data]
+        RF9[Meta Count + Entries]
+        RF10[Trailing Checksum - 4B]
     end
 ```
 
 ### Record Binary Format
 
+WAL records use **format v2**. Each record carries an 8-byte Raft term and a 4-byte trailing checksum in addition to the existing fields. Upgrading from older builds requires a clean `--data-dir`.
+
 | Field | Size | Description |
 |-------|------|-------------|
 | Length | 4 bytes | Total record size including this field |
-| CRC32 | 4 bytes | IEEE CRC32 of all bytes after this field |
+| CRC32 | 4 bytes | IEEE CRC32 of all bytes after this field (up to trailing checksum) |
 | Offset | 8 bytes | Monotonically increasing event offset |
+| Raft Term | 8 bytes | Raft term of the leader that authored the record |
 | Schedule TS | 8 bytes | Unix millisecond timestamp for trigger |
 | MsgID Len | 2 bytes | Length of message_id string |
 | MsgID | N bytes | Unique message identifier |
@@ -337,6 +345,9 @@ graph LR
 | Payload | N bytes | Arbitrary event data |
 | Meta Count | 2 bytes | Number of metadata key-value pairs |
 | Meta Entries | Variable | key_len(2) + key + val_len(2) + val per entry |
+| Trailing Checksum | 4 bytes | IEEE CRC32 covering the full record for end-to-end integrity |
+
+**Upgrade note:** WAL v2 is not backward-compatible with older segment files. Remove or move the old `--data-dir` before starting a newer binary.
 
 ### WAL Architecture
 
@@ -358,8 +369,8 @@ graph TB
 
     subgraph Flush Modes
         FM1[every_event - fsync per write]
-        FM2[periodic - background flush loop]
-        FM3[batch - flush on interval]
+        FM2[batch - group-commit per batch (default)]
+        FM3[periodic - background flush loop]
     end
 
     BW --> S3
@@ -377,9 +388,33 @@ graph TB
 | **Pre-created next segment** | Triggered at 90% capacity; eliminates rotation latency |
 | **Sparse index every 1000 events** | Binary search for O(log N) seeks without full index overhead |
 | **Memory-mapped reads** | Zero-copy reads on supported platforms |
-| **CRC32 per record** | Detects corruption; tail truncation on recovery |
+| **CRC32 per record + trailing checksum + Raft term** | Detects corruption; enables term-aware replication; tail truncation on recovery |
 | **Prepared records outside lock** | Serialization happens lock-free; only offset assignment needs mutex |
 | **sync.Pool for record buffers** | Reduces GC pressure under high throughput |
+| **Atomic file writes via `utils.AtomicWriteFile`** | Temp file + fsync + rename + parent-dir fsync for tx logs, encryption key files, etc. |
+
+### Retention Enforcement
+
+The retention enforcer periodically removes aged or oversized WAL segments while protecting the active segment and system directories.
+
+```mermaid
+flowchart LR
+    A[Retention Scanner] --> B[Parse 64-byte segment header]
+    B --> C[Read firstOffset and createdTS]
+    C --> D{Segment active?}
+    D -->|Yes| Z[Skip - protected]
+    D -->|No| E{Age > max-age OR size > max-size?}
+    E -->|No| Z
+    E -->|Yes| F[Delete segment file]
+    F --> G[Delete matching .index file]
+    G --> H[Skip protected system directories]
+```
+
+**Rules:**
+- Parses the 64-byte segment header for `firstOffset` and `createdTS`.
+- Preserves the active segment per partition.
+- Deletes aged/size-eligible non-active segments and their matching `.index` files.
+- Skips protected system directories (`raft/`, `pebble/`, `keys/`, etc.).
 
 ### Compaction Flow
 
@@ -781,7 +816,7 @@ The Dead Letter Queue uses **append-only binary segments** instead of JSON files
 
 ## Consumer Groups
 
-Kafka-style consumer groups with persistent offset tracking.
+Kafka-style consumer groups with persistent offset tracking, group metadata, and exactly-once commit IDs.
 
 ### Consumer Group Model
 
@@ -797,6 +832,8 @@ graph TB
         O1[order-processors:P0 = offset 45230]
         O2[order-processors:P1 = offset 12891]
         O3[order-processors:P2 = offset 78432]
+        O4[order-processors:meta = group metadata + assignments]
+        O5[order-processors:txn:ID = exactly-once commit ID]
     end
 
     subgraph Offset Commit Pipeline
@@ -811,6 +848,11 @@ graph TB
     PEN -->|dirty flag| FL
     FL -->|batch.Commit NoSync| DB
 ```
+
+**Persisted state in `OffsetStore`:**
+- **Offsets:** per-group, per-partition committed offsets.
+- **Group metadata and assignments:** rebalanced partition assignments and member metadata survive restarts.
+- **Exactly-once commit IDs:** transaction-scoped commit IDs for idempotent consumer commits.
 
 ### Rebalancing
 
@@ -828,6 +870,26 @@ sequenceDiagram
     GM-->>M2: Assigned Partition 1, 3, 5
     Note over M1,M2: Each member subscribes to assigned partitions
 ```
+
+---
+
+## Change Data Capture
+
+CDC forwards committed WAL events to external sinks using a bounded worker pool for predictable resource usage.
+
+```mermaid
+graph LR
+    WAL[WAL Commit] -->|New event| CDC[CDC Dispatcher]
+    CDC --> Q[Bounded Queue - size 10000]
+    Q --> W[Worker Pool - DefaultCDCWorkers=4]
+    W --> S1[Sink A]
+    W --> S2[Sink B]
+```
+
+**Behavior:**
+- `Emit` is non-blocking.
+- Events are dropped with a warning if the queue is full.
+- `Close` drains workers and sinks gracefully.
 
 ---
 
@@ -1039,10 +1101,13 @@ sequenceDiagram
 
     loop Replication Loop at flush interval
         L->>L: Buffer events up to batch_size 100
-        L->>F: AppendEntries with partition events and term
+        L->>L: Compute batch CRC32 checksum
+        L->>F: AppendEntries with partition events, term, and batch CRC32
         Note over L,F: Protobuf-encoded single TCP write
-        F->>F: WAL.AppendBatch events
+        F->>F: Verify batch CRC32 and stamp each event with term/checksum
+        F->>F: WAL.AppendReplicatedBatch events
         F->>L: AppendAck with success and last_offset
+        L->>L: Advance follower NextOffset only on success
         L->>L: Update follower HighWatermark
     end
 
@@ -1051,6 +1116,12 @@ sequenceDiagram
         F->>L: HeartbeatAck with last_offset
     end
 ```
+
+**Replication reliability improvements:**
+- AppendEntries includes a batch CRC32 checksum; followers verify it before appending.
+- Followers stamp each replicated event with the leader's Raft term and checksum before `WAL.AppendReplicatedBatch`.
+- The leader advances `NextOffset` only on successful writes.
+- Each follower has a dedicated transport connection stored by the leader.
 
 ### Bulk File Sync for New Node Join
 
@@ -1253,14 +1324,20 @@ flowchart TD
 ```mermaid
 flowchart TD
     A[SIGINT or SIGTERM received] --> B[Cancel context]
-    B --> C[gRPC GracefulStop with 10s timeout]
-    C --> D[HTTP server Shutdown]
-    D --> E[StopAllPartitions in parallel]
-    E --> F[Per partition: close delivery + stop scheduler + drain dispatcher + flush WAL]
-    F --> G[Stop cluster manager]
-    G --> H[Raft shutdown + Gossip stop]
-    H --> I[Exit]
+    B --> C[gRPC GracefulStopWithTimeout]
+    C --> D{Graceful drain within timeout?}
+    D -->|Yes| E[HTTP server Shutdown]
+    D -->|No| F[Forced gRPC Stop]
+    F --> E
+    E --> G[HTTP health server Shutdown]
+    G --> H[StopAllPartitions in parallel]
+    H --> I[Per partition: close delivery + stop scheduler + drain dispatcher + flush WAL]
+    I --> J[Stop cluster manager]
+    J --> K[Raft shutdown + Gossip stop]
+    K --> L[Exit]
 ```
+
+`Start()` exposes `ServeError()` so callers can observe unexpected gRPC server exits, and health-server startup errors are propagated.
 
 ---
 
@@ -1296,9 +1373,11 @@ flowchart TD
 | Lock Reduction | Scheduler: batch AddTimers single lock | One lock per N events |
 | Lock Reduction | Index: O_APPEND eliminates Seek | No seek syscall per write |
 | I/O | 4MB segment write buffer | Amortized syscalls |
-| I/O | Background periodic flush | Not per-write fsync |
+| I/O | Default `batch` fsync mode | Group-commit durability without per-write cost |
+| I/O | Background periodic flush optional | For low-latency tolerance configurations |
 | I/O | PebbleDB: NoSync + disabled internal WAL | Our WAL is truth |
 | I/O | Pre-created next segment at 90% capacity | Zero-latency rotation |
+| I/O | Atomic file writes for metadata | Crash-safe tx logs and key files |
 | Algorithmic | Timing wheel: O(1) add/remove/tick | Constant time scheduling |
 | Algorithmic | Sparse index: O(log N) seeks | Binary search |
 | Algorithmic | FNV-1a partition routing | ~5ns vs ~400ns SHA-256 |
@@ -1319,10 +1398,11 @@ flowchart TD
 | Node | `-grpc-addr` | `:9000` | gRPC listen address |
 | Node | `-http-addr` | `:8080` | HTTP health + metrics |
 | Node | `-partition-count` | `1` | Number of partitions |
+| Node | `--dev` | `false` | Disable production security requirements for local development |
 | WAL | `-segment-size` | `512MB` | Segment size before rotation |
 | WAL | `-index-interval` | `1000` | Sparse index interval |
-| WAL | `-fsync-mode` | `periodic` | every_event, batch, periodic |
-| WAL | `-flush-interval` | `1000` | Background flush interval ms |
+| WAL | `-fsync-mode` | `batch` | `every_event`, `batch` (default), or `periodic` |
+| WAL | `-flush-interval` | `1000` | Background flush interval ms (used by `periodic`) |
 | Scheduler | `-tick-ms` | `100` | Timing wheel tick duration |
 | Scheduler | `-wheel-size` | `60` | Slots per timing wheel level |
 | Scheduler | `-hot-window-minutes` | `60` | Events beyond this go to cold store (0 = disabled) |
@@ -1339,12 +1419,28 @@ flowchart TD
 | Admission | `-max-in-flight` | `500000` | Max in-flight deliveries per partition |
 | Dedup | `-dedup-ttl` | `168` | Dedup TTL in hours (7 days) |
 | Dedup | `-bloom-capacity` | `100000000` | Bloom filter capacity |
+| Retention | `--retention-max-age-hours` | `0` | Max segment age before deletion (0 = disabled) |
+| Retention | `--retention-max-size-gb` | `0` | Max total segment size before deletion (0 = disabled) |
+| Security | `--tls-cert-file` | `` | Server TLS certificate |
+| Security | `--tls-key-file` | `` | Server TLS key |
+| Security | `--tls-ca-file` | `` | TLS CA for client cert verification |
+| Security | `--auth-enabled` | `false` | Enable authentication |
+| Security | `--auth-token` | `` | Static auth token (when auth enabled) |
+| Security | `--encryption-enabled` | `false` | Enable encryption at rest |
+| Security | `--encryption-key-file` | `` | Path to encryption key file |
+| Replication | `--replication-factor` | `1` | Required replica count |
+| Replication | `--min-insync-replicas` | `1` | Minimum in-sync replicas for acked writes |
+| Replication | `--replication-tls-cert-file` | `` | Replication mTLS certificate |
+| Replication | `--replication-tls-key-file` | `` | Replication mTLS key |
+| Replication | `--replication-tls-ca-file` | `` | Replication mTLS CA |
 | Cluster | `-cluster` | `false` | Enable cluster mode |
 | Cluster | `-cluster-seeds` | empty | Comma-separated seed nodes |
 | Cluster | `-virtual-nodes` | `150` | Virtual nodes per physical node |
 | Cluster | `-use-memberlist` | `false` | Use HashiCorp Memberlist (SWIM) instead of custom TCP gossip |
 | Cluster | `-heartbeat-interval` | `1s` | Gossip heartbeat interval |
 | Cluster | `-failure-timeout` | `5s` | Node failure detection timeout |
+
+**Environment variables:** `CRONOS_DEV`, `CRONOS_MIN_IN_SYNC_REPLICAS`, `CRONOS_EXACTLY_ONCE_COMMITS`, `CRONOS_ENCRYPTION_ENABLED`, `CRONOS_ENCRYPTION_KEY_FILE`.
 
 ---
 
@@ -1397,14 +1493,15 @@ graph TB
 | Property | Guarantee | Mechanism |
 |----------|-----------|-----------|
 | **Metadata** | Strong consistency | Raft consensus |
-| **WAL writes** | Eventual consistency | Async leader to follower replication |
+| **WAL writes** | Eventual consistency | Async leader to follower replication with batch CRC32 and term stamping |
 | **Delivery** | At-least-once | Ack-based with retry + DLQ |
 | **Ordering** | Per-partition, per-consumer-group | Offset-based sequential delivery |
 | **Dedup** | Best-effort 7-day window | Bloom + PebbleDB with TTL |
 | **Admission** | Reject under overload | ReadyQueue / timingWheel / in-flight limits return `ResourceExhausted` |
 | **Resilience** | Dead subscriber isolation | Per-subscription circuit breaker (Closed→Open→HalfOpen) |
-| **Durability** | Configurable | fsync mode: every_event / periodic / batch |
+| **Durability** | Configurable | fsync mode: `every_event` / `batch` (default) / `periodic`; atomic file writes for critical metadata |
 | **Availability** | Partition-tolerant | Leader election on failure |
+| **Security** | Production hardening | TLS, auth, encryption at rest, replication mTLS; `--dev` disables requirements |
 
 ---
 
@@ -1412,11 +1509,16 @@ graph TB
 
 | Layer | Mechanism |
 |-------|-----------|
+| **Transport** | gRPC TLS (`--tls-cert-file`, `--tls-key-file`, `--tls-ca-file`) |
+| **Authentication** | Token-based auth (`--auth-enabled`, `--auth-token`) |
+| **Encryption at rest** | AES-GCM encryption (`--encryption-enabled`, `--encryption-key-file`) |
+| **Replication** | mTLS between nodes (`--replication-tls-cert-file`, `--replication-tls-key-file`, `--replication-tls-ca-file`) |
+| **Run mode** | `--dev` disables production security requirements; production requires TLS, auth, encryption, replication mTLS, `--replication-factor>=3`, `--min-insync-replicas>=2` |
 | **Rate Limiting** | Per-IP token bucket (1M req/s default) |
 | **gRPC** | Max message size 16MB, max 10K concurrent streams |
 | **Keepalive** | 10s interval, 20s timeout, enforcement policy |
 | **Container** | Non-root user, minimal Debian slim image |
-| **Data** | CRC32 integrity checks on every WAL record |
+| **Data** | CRC32 integrity checks on every WAL record; trailing checksum and Raft term in v2 format; atomic file writes for tx logs and key files |
 
 ---
 

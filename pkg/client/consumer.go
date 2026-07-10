@@ -14,6 +14,7 @@ import (
 
 	"github.com/jatin711-debug/cronos_db_golang/pkg/client/internal/errs"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 
 	"google.golang.org/grpc"
 )
@@ -568,30 +569,30 @@ func (c *Consumer) consumeFromNode(ctx context.Context, addr string) error {
 
 	var infraWG sync.WaitGroup
 	infraWG.Add(1)
-	go func() {
+	utils.GoSafe("consumer-heartbeat", func() {
 		defer infraWG.Done()
 		c.heartbeatLoop(subCtx, assignmentState)
-	}()
+	})
 	infraWG.Add(1)
-	go func() {
+	utils.GoSafe("consumer-ack-sender", func() {
 		defer infraWG.Done()
 		c.ackSender(subCtx, addr, ackStream, ackQueue)
-	}()
+	})
 	if c.cfg.CommitStrategy == CommitStrategyAsync {
 		infraWG.Add(1)
-		go func() {
+		utils.GoSafe("consumer-ack-drain", func() {
 			defer infraWG.Done()
 			c.drainAckResponses(subCtx, addr, ackStream)
-		}()
+		})
 	}
 
 	var workerWG sync.WaitGroup
 	workerWG.Add(c.cfg.WorkerConcurrency)
 	for i := 0; i < c.cfg.WorkerConcurrency; i++ {
-		go func() {
+		utils.GoSafe("consumer-worker", func() {
 			defer workerWG.Done()
 			c.worker(subCtx, deliveries, ackQueue)
-		}()
+		})
 	}
 
 	recvErr := c.recvLoop(subCtx, addr, subscribeStream, assignmentState, deliveries)

@@ -57,6 +57,9 @@ func TestLogger_Log(t *testing.T) {
 		SourceIP: "127.0.0.1",
 	}
 	l.Log(evt)
+	if err := l.Flush(); err != nil {
+		t.Fatalf("Flush failed: %v", err)
+	}
 
 	// Verify log file exists
 	files, err := os.ReadDir(l.logDir)
@@ -99,6 +102,9 @@ func TestLogger_LogGRPC_Anonymous(t *testing.T) {
 
 	ctx := context.Background()
 	l.LogGRPC(ctx, "publish", "topic/orders", "success", "detail")
+	if err := l.Flush(); err != nil {
+		t.Fatalf("Flush failed: %v", err)
+	}
 
 	files, _ := os.ReadDir(l.logDir)
 	if len(files) != 1 {
@@ -121,6 +127,9 @@ func TestLogger_LogGRPC_WithClaims(t *testing.T) {
 	claims := auth.ClaimsWithSubject("user-42")
 	ctx := auth.WithClaims(context.Background(), claims)
 	l.LogGRPC(ctx, "subscribe", "topic/orders", "denied", "quota exceeded")
+	if err := l.Flush(); err != nil {
+		t.Fatalf("Flush failed: %v", err)
+	}
 
 	files, _ := os.ReadDir(l.logDir)
 	data, _ := os.ReadFile(filepath.Join(l.logDir, files[0].Name()))
@@ -145,6 +154,9 @@ func TestEvent_Timestamp(t *testing.T) {
 	defer l.Close()
 
 	l.Log(Event{Action: "test"})
+	if err := l.Flush(); err != nil {
+		t.Fatalf("Flush failed: %v", err)
+	}
 
 	files, _ := os.ReadDir(l.logDir)
 	data, _ := os.ReadFile(filepath.Join(l.logDir, files[0].Name()))

@@ -19,6 +19,7 @@ The auth module handles authentication and authorization policy enforcement befo
 
 ## Production Decisions
 
+- Authentication is required in production; `--dev` bypasses auth and must not be used in production.
 - Supports multiple JWT verification modes and external policy loading.
 - Fails closed when explicitly configured with strict policy inputs.
 - Runs early in interceptor chain to minimize wasted work for rejected requests.

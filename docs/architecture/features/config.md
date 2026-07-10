@@ -19,6 +19,11 @@ The config module defines defaults, merges runtime settings, and supports safe i
 
 ## Production Decisions
 
+- `--dev` disables production security requirements and is intended for local development only.
+- Production validation requires TLS, auth, encryption at rest, replication mTLS, `--replication-factor>=3`, and `--min-insync-replicas>=2`.
+- New environment variables: `CRONOS_DEV`, `CRONOS_MIN_IN_SYNC_REPLICAS`, `CRONOS_EXACTLY_ONCE_COMMITS`, `CRONOS_ENCRYPTION_ENABLED`, `CRONOS_ENCRYPTION_KEY_FILE`.
+- New flags include retention settings and all security/TLS/auth flags.
+- Helm `config.dev` defaults to `true`; `values-production.yaml` disables dev and requires TLS/auth/encryption/replication-mTLS secrets.
 - Strong defaults favor stability and durability.
 - Feature flags gate potentially risky behavior changes.
 - Reload support avoids full process restart for selected runtime updates.

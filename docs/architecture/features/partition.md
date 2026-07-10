@@ -20,6 +20,7 @@ The partition module is the core execution unit that groups WAL, scheduler, dedu
 ## Production Decisions
 
 - Partition-level encapsulation limits blast radius.
+- Partition storage consumes WAL v2 records (Raft term + trailing checksum) and uses the production fsync default of `batch`.
 - Epoch handling supports leader fencing.
 - Admission control prevents overload per partition.
 - Disk monitor can trigger emergency compaction under pressure.

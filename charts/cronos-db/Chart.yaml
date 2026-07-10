@@ -1,0 +1,16 @@
+apiVersion: v2
+name: cronos-db
+description: A Helm chart for CronosDB, a distributed event database.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - cronos
+  - database
+  - event-store
+  - distributed
+home: https://github.com/jatin711-debug/cronos_db_golang
+sources:
+  - https://github.com/jatin711-debug/cronos_db_golang
+maintainers:
+  - name: CronosDB Maintainers

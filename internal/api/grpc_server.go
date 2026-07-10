@@ -2,7 +2,9 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"time"
 
@@ -24,6 +26,7 @@ type GRPCServer struct {
 	listener  net.Listener
 	config    *Config
 	txHandler *tx.Handler
+	serveErr  chan error
 }
 
 // Config represents gRPC server configuration
@@ -63,8 +66,9 @@ func DefaultConfig() *Config {
 	}
 }
 
-// NewGRPCServer creates a new gRPC server
-func NewGRPCServer(config *Config) *GRPCServer {
+// NewGRPCServer creates a new gRPC server.
+// Returns an error if TLS is requested but cannot be configured.
+func NewGRPCServer(config *Config) (*GRPCServer, error) {
 	opts := []grpc.ServerOption{
 		grpc.MaxRecvMsgSize(config.MaxRecvMsgSize),
 		grpc.MaxSendMsgSize(config.MaxSendMsgSize),
@@ -93,19 +97,22 @@ func NewGRPCServer(config *Config) *GRPCServer {
 			RateLimitInterceptor(1000000.0, 2000000.0),
 		),
 		grpc.ChainStreamInterceptor(
+			tracing.GRPCStreamServerInterceptor(),
+			SLOStreamInterceptor(config.SLORecorder),
+			VersionStreamInterceptor(config.VersionGate),
 			auth.StreamInterceptor(config.Auth),
 			AuditStreamInterceptor(config.AuditLogger),
+			MetricsStreamInterceptor(),
+			RateLimitStreamInterceptor(1000000.0, 2000000.0),
 		),
 	}
 
 	if config.TLS != nil && config.TLS.Enabled {
 		tlsCfg, err := BuildServerTLSConfig(config.TLS)
 		if err != nil {
-			// Log and continue without TLS rather than panic
-			fmt.Printf("[GRPC] TLS config error: %v; starting without TLS\n", err)
-		} else if tlsCfg != nil {
-			opts = append(opts, grpc.Creds(credentials.NewTLS(tlsCfg)))
+			return nil, fmt.Errorf("TLS requested but config failed: %w", err)
 		}
+		opts = append(opts, grpc.Creds(credentials.NewTLS(tlsCfg)))
 	}
 
 	server := grpc.NewServer(opts...)
@@ -113,7 +120,7 @@ func NewGRPCServer(config *Config) *GRPCServer {
 	return &GRPCServer{
 		server: server,
 		config: config,
-	}
+	}, nil
 }
 
 // SLOUnaryInterceptor records request latency and error status for SLO tracking.
@@ -167,7 +174,9 @@ func (g *GRPCServer) RegisterRaftServer(srv types.RaftServiceServer) {
 	types.RegisterRaftServiceServer(g.server, srv)
 }
 
-// Start starts the gRPC server
+// Start starts the gRPC server.
+// The returned error is only from net.Listen; server-serve errors can be read
+// from ServeError().
 func (g *GRPCServer) Start() error {
 	lis, err := net.Listen("tcp", g.config.Address)
 	if err != nil {
@@ -175,31 +184,70 @@ func (g *GRPCServer) Start() error {
 	}
 
 	g.listener = lis
+	g.serveErr = make(chan error, 1)
 
 	reflection.Register(g.server)
 
 	go func() {
-		if err := g.server.Serve(lis); err != nil {
-			// Log error
+		err := g.server.Serve(lis)
+		if err != nil && !errors.Is(err, grpc.ErrServerStopped) {
+			g.serveErr <- err
 		}
+		close(g.serveErr)
 	}()
 
 	return nil
 }
 
-// Stop stops the gRPC server
+// ServeError returns a channel that receives a non-nil error if the gRPC
+// server exits unexpectedly. It is closed when the server stops.
+func (g *GRPCServer) ServeError() <-chan error {
+	return g.serveErr
+}
+
+// Address returns the address the server is listening on, or an empty string
+// if the server has not been started.
+func (g *GRPCServer) Address() string {
+	if g.listener != nil {
+		return g.listener.Addr().String()
+	}
+	return ""
+}
+
+// Stop stops the gRPC server immediately.
 func (g *GRPCServer) Stop() {
 	if g.server != nil {
 		g.server.Stop()
 	}
 	if g.listener != nil {
-		g.listener.Close()
+		_ = g.listener.Close()
 	}
 }
 
-// GracefulStop performs graceful shutdown
+// GracefulStop performs graceful shutdown.
 func (g *GRPCServer) GracefulStop() {
 	if g.server != nil {
 		g.server.GracefulStop()
+	}
+}
+
+// GracefulStopWithTimeout performs a graceful shutdown and falls back to a
+// forced Stop if the supplied context expires before the server drains.
+func (g *GRPCServer) GracefulStopWithTimeout(ctx context.Context) {
+	if g.server == nil {
+		return
+	}
+	done := make(chan struct{})
+	go func() {
+		g.server.GracefulStop()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-ctx.Done():
+		slog.Warn("gRPC graceful stop timed out, forcing stop")
+		g.server.Stop()
+		<-done
 	}
 }

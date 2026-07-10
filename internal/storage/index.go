@@ -111,7 +111,7 @@ func (idx *Index) load() error {
 	return nil
 }
 
-// AddEntry adds an index entry (thread-safe, acquires lock)
+// AddEntry adds an index entry (thread-safe, acquires lock).
 func (idx *Index) AddEntry(timestamp, offset, filePosition int64) error {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
@@ -119,14 +119,18 @@ func (idx *Index) AddEntry(timestamp, offset, filePosition int64) error {
 	return idx.addEntryLocked(timestamp, offset, filePosition)
 }
 
-// AddEntryUnsafe adds an index entry without acquiring the lock.
-// The caller MUST guarantee exclusive access (e.g. parent WAL.mu is held).
-// This eliminates the triple-nested lock hierarchy WAL→Segment→Index.
+// AddEntryUnsafe adds an index entry. The caller must hold the parent WAL lock
+// to ensure ordering, but this function acquires the index's own mutex for the
+// short in-memory+write step. Keeping the index mutex separate lets the
+// background flush loop sync the index file without holding WAL.mu.
 func (idx *Index) AddEntryUnsafe(timestamp, offset, filePosition int64) error {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+
 	return idx.addEntryLocked(timestamp, offset, filePosition)
 }
 
-// addEntryLocked is the internal implementation (caller must ensure exclusion)
+// addEntryLocked is the internal implementation. Caller must hold idx.mu.
 func (idx *Index) addEntryLocked(timestamp, offset, filePosition int64) error {
 	entry := IndexEntry{
 		Timestamp:    timestamp,
@@ -147,13 +151,6 @@ func (idx *Index) addEntryLocked(timestamp, offset, filePosition int64) error {
 		return fmt.Errorf("write entry: %w", err)
 	}
 
-	// Batch sync: sync every N entries instead of every entry for performance
-	if len(idx.entries)%indexSyncInterval == 0 {
-		if err := idx.writer.Flush(); err != nil {
-			return err
-		}
-		return idx.file.Sync()
-	}
 	return nil
 }
 
@@ -210,6 +207,95 @@ func (idx *Index) GetEntries() []IndexEntry {
 	entries := make([]IndexEntry, len(idx.entries))
 	copy(entries, idx.entries)
 	return entries
+}
+
+// Truncate drops every index entry whose Offset is strictly greater than
+// maxOffset, and rewrites the on-disk index file to match. This is called
+// during segment recovery (Segment.scan) after a corrupt tail has truncated
+// the segment file: without it, the index can still contain entries whose
+// FilePosition points past the new (shorter) segment EOF, causing later reads
+// to dereference uninitialized/garbage bytes.
+//
+// The rewrite is atomic (write .tmp, fsync, rename) so a crash mid-rewrite
+// cannot corrupt the index; a leftover stale index would only make reads
+// slower (they'd re-scan from the previous good entry), never incorrect.
+func (idx *Index) Truncate(maxOffset int64) error {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+
+	// Find the first entry to drop. Entries are appended in offset order, so
+	// the slice is sorted by Offset and we can binary-search the cut point.
+	cut := sort.Search(len(idx.entries), func(i int) bool {
+		return idx.entries[i].Offset > maxOffset
+	})
+	if cut >= len(idx.entries) {
+		// Nothing to drop — no entries beyond maxOffset.
+		return nil
+	}
+
+	idx.entries = append(idx.entries[:0:0], idx.entries[:cut]...) // truncate to first `cut` entries
+
+	// Rewrite the index file from scratch. We must reopen it without O_APPEND
+	// so the rewrite truncates the old contents.
+	if err := idx.rewriteLocked(); err != nil {
+		return fmt.Errorf("rewrite index after truncate: %w", err)
+	}
+	return nil
+}
+
+// rewriteLocked rewrites the entire index file from the in-memory entries.
+// Caller must hold idx.mu. The write is atomic: a temp file is fsynced and
+// renamed over the index path, then the index's file handle is reopened.
+func (idx *Index) rewriteLocked() error {
+	tmpPath := idx.filePath + ".tmp"
+
+	// Flush any buffered writes on the old handle first so we don't lose them,
+	// then close it so the rename can succeed on Windows.
+	if idx.writer != nil {
+		_ = idx.writer.Flush()
+	}
+	oldFile := idx.file
+	if oldFile != nil {
+		_ = oldFile.Close()
+	}
+
+	// Write all entries to a fresh temp file (O_TRUNC ensures no stale tail).
+	tmpFile, err := os.OpenFile(tmpPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC|os.O_APPEND, 0644)
+	if err != nil {
+		return fmt.Errorf("create temp index: %w", err)
+	}
+
+	var entryBytes [indexEntrySize]byte
+	for _, e := range idx.entries {
+		binary.BigEndian.PutUint64(entryBytes[0:8], uint64(e.Timestamp))
+		binary.BigEndian.PutUint64(entryBytes[8:16], uint64(e.Offset))
+		binary.BigEndian.PutUint64(entryBytes[16:24], uint64(e.FilePosition))
+		if _, err := tmpFile.Write(entryBytes[:]); err != nil {
+			tmpFile.Close()
+			return fmt.Errorf("write temp index: %w", err)
+		}
+	}
+	if err := tmpFile.Sync(); err != nil {
+		tmpFile.Close()
+		return fmt.Errorf("fsync temp index: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("close temp index: %w", err)
+	}
+
+	// Atomic replace.
+	if err := os.Rename(tmpPath, idx.filePath); err != nil {
+		return fmt.Errorf("rename temp index: %w", err)
+	}
+
+	// Reopen the (now replaced) index file with the same flags as NewIndex.
+	newFile, err := os.OpenFile(idx.filePath, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
+	if err != nil {
+		return fmt.Errorf("reopen index: %w", err)
+	}
+	idx.file = newFile
+	idx.writer = bufio.NewWriterSize(newFile, 64*1024)
+	return nil
 }
 
 // Count returns the number of index entries

@@ -5,7 +5,9 @@
 [![Go](https://img.shields.io/badge/Go-1.25+-blue.svg)](https://golang.org)
 [![Rust](https://img.shields.io/badge/Rust-FFI-dea584.svg)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-Production--Ready-brightgreen.svg)](#status)
+[![Status](https://img.shields.io/badge/status-Beta-yellow.svg)](#status)
+
+> **Production Readiness:** The core storage, scheduling, replication, and consumer-group paths are implemented and tested. Production deployments require TLS, auth, encryption at rest, replication mTLS, RF≥3, and minISR≥2. Use `--dev` only for local development/CI. Run production workloads only after configuring all security controls.
 
 CronosDB is a distributed database purpose-built for **timestamp-triggered event processing**. Publish events with a future timestamp — CronosDB stores them durably and delivers them precisely when the time arrives.
 
@@ -13,28 +15,30 @@ It combines the durability of a write-ahead log, the precision of a hierarchical
 
 ## Key Numbers
 
+All numbers below are from single-machine benchmarks (3 nodes on one host, AMD Ryzen 7 6800H, NVMe SSD) and depend heavily on fsync mode, payload size, and batch size.
+
 | Metric | Value |
 |--------|-------|
-| **Cluster Throughput** | **Up to ~1.0M events/sec** (max profile, single machine) |
-| **Publish Latency P50** | **~100-150µs** (batch mode) |
-| **Publish Latency P99** | **<1ms** (batch mode) |
+| **Cluster Throughput** | **Up to ~1.0M events/sec** (`periodic` fsync, 256B payload, batch=4000, single machine) |
+| **Durable Throughput** | **~50–100K events/sec** (`batch` fsync, 256B payload, batch=4000, single machine) |
+| **Publish Latency P50** | **~100–150µs** (`batch` fsync, small payload, no cross-node replication) |
+| **Publish Latency P99** | **~1–5ms** (`batch` fsync, single machine; real networks add tail latency) |
 | **Success Rate** | **99.9-100%** in batch benchmark profiles |
 | **Timer Precision** | 100ms tick (configurable) |
 | **Dedup False Positive Rate** | <1% (Rust bloom filter) |
 
-> Benchmarked on a **single machine** running all 3 cluster nodes simultaneously.
+> Benchmarked on a **single machine** running all 3 cluster nodes simultaneously. Numbers will be lower with replication (RF≥3) and higher-latency storage.
 
 ---
 
 ## Features
 
 ### Storage & Durability
-- **Append-Only WAL** — Segmented logs (512MB), CRC32 integrity, sparse indexing
+- **Append-Only WAL v2** — Segmented logs (512MB), per-entry Raft term + CRC32 integrity, sparse indexing. Upgrading from earlier builds requires a clean data directory.
 - **Memory-Mapped Reads** — Zero-copy segment reads on Linux/Windows
-- **Configurable Fsync** — `every_event` | `batch` | `periodic` modes
+- **Configurable Fsync** — `every_event` | `batch` (default) | `periodic` modes
 - **Automatic Compaction** — Removes segments below min consumer offset
-
-### Scheduling
+- **Retention Enforcer** — Time-based and size-based cleanup preserving the active segment per partition
 - **Hierarchical Timing Wheel** — O(1) timer add/remove/tick for millions of events
 - **Two-Tier Cold/Hot Scheduler** — PebbleDB cold store for far-future events (>1hr); adaptive hydrator adjusts scan frequency based on load (5s–5min). Keeps hot memory bounded.
 - **Absolute Time Tracking** — No drift across overflow wheel cascades
@@ -58,7 +62,7 @@ It combines the durability of a write-ahead log, the precision of a hierarchical
 - **Multi-Node Clustering** — 3+ nodes with automatic partition distribution
 - **Raft Consensus** — Metadata consistency (HashiCorp Raft)
 - **Pluggable Gossip** — Choose custom TCP heartbeats or HashiCorp Memberlist (SWIM protocol) via config
-- **Consistent Hashing** — SHA-256 ring with configurable virtual nodes (`-virtual-nodes`, default 150)
+- **Consistent Hashing** — FNV-1a ring with configurable virtual nodes (`-virtual-nodes`, default 150)
 - **Binary Replication Protocol** — Custom wire format (0xCAFEBABE magic)
 - **Bulk File Sync** — Segment-level transfer for new node bootstrap
 - **Clock Skew Detection** — Cross-node heartbeat timestamp comparison; warns if absolute skew exceeds 5 seconds
@@ -66,7 +70,7 @@ It combines the durability of a write-ahead log, the precision of a hierarchical
 ### API
 - **gRPC Streaming** — Bidirectional subscribe, streaming replay
 - **Batch Publish** — 100-4000 events per call for maximum throughput
-- **Consumer Groups** — Kafka-style offset tracking with persistent PebbleDB store
+- **Consumer Groups** — Kafka-style offset tracking with persistent PebbleDB store for offsets, group metadata, and exactly-once commit IDs
 - **Replay Engine** — Time-range or offset-based historical replay
 
 ---
@@ -143,12 +147,14 @@ go build -o bin/cronos-api ./cmd/api/main.go
 ### Run Single Node
 
 ```bash
-./bin/cronos-api -node-id=node1 -data-dir=./data
+# Development mode (disables production security requirements)
+./bin/cronos-api --dev -node-id=node1 -data-dir=./data
 ```
 
 ### Run 3-Node Cluster
 
 ```bash
+# Makefile targets start nodes in developer mode for local benchmarking.
 # Terminal 1: Bootstrap leader
 make node1
 
@@ -181,15 +187,59 @@ make loadtest-batch PUBLISHERS=32 EVENTS=100000 BATCH_SIZE=4000
 # Build image (multi-stage: Rust → Go → Debian slim)
 make docker
 
-# Single node
+# Single node (developer mode)
 make docker-single
 
-# 3-node cluster
+# 3-node cluster (developer mode)
 make docker-cluster
 
 # View logs
 make docker-logs
 ```
+
+### Production Deployment & Security
+
+Do **not** use `--dev` for production. A production-ready configuration requires:
+
+| Requirement | Flag / Config | Recommended Value |
+|-------------|---------------|-------------------|
+| Replication factor | `--replication-factor` | ≥ 3 |
+| Min in-sync replicas | `--min-insync-replicas` | ≥ 2 |
+| gRPC TLS | `--tls-enabled`, `--tls-cert-file`, `--tls-key-file` | Enabled |
+| Authentication | `--auth-enabled`, `--auth-jwt-secret` or `--auth-jwt-public-key` | Enabled |
+| Encryption at rest | `--encryption-enabled`, `--encryption-key-file` | Enabled |
+| Replication mTLS | `--replication-tls-enabled`, `--replication-tls-*` | Enabled |
+| Fsync mode | `--fsync-mode` | `batch` or `every_event` |
+
+Example production startup:
+
+```bash
+./bin/cronos-api \
+  --node-id=node1 \
+  --data-dir=./data \
+  --cluster \
+  --replication-factor=3 \
+  --min-insync-replicas=2 \
+  --fsync-mode=batch \
+  --tls-enabled \
+  --tls-cert-file=/etc/cronos/tls/tls.crt \
+  --tls-key-file=/etc/cronos/tls/tls.key \
+  --auth-enabled \
+  --auth-jwt-secret="${CRONOS_JWT_SECRET}" \
+  --encryption-enabled \
+  --encryption-key-file=/etc/cronos/encryption/master.key \
+  --replication-tls-enabled \
+  --replication-tls-cert-file=/etc/cronos/replication-tls/tls.crt \
+  --replication-tls-key-file=/etc/cronos/replication-tls/tls.key
+```
+
+For Kubernetes, use `values-production.yaml` and create the referenced TLS/auth/encryption secrets before installing:
+
+```bash
+helm install cronos-db ./charts/cronos-db -f ./charts/cronos-db/values-production.yaml
+```
+
+**Note:** The on-disk WAL segment format was upgraded to v2 (per-entry terms). Upgrading from older builds requires a clean `--data-dir`.
 
 ### Test with grpcurl
 
@@ -361,7 +411,7 @@ Representative latency in batch mode is typically P50 ~100-150µs and P99 under 
 | `-http-addr` | `:8080` | HTTP health + metrics address |
 | `-partition-count` | `1` | Number of partitions (use 8-16 for clusters) |
 | `-segment-size` | `512MB` | WAL segment size before rotation |
-| `-fsync-mode` | `periodic` | `every_event` \| `batch` \| `periodic` |
+| `-fsync-mode` | `every_event` | `every_event` \| `batch` \| `periodic` — use `batch` for durable throughput; `periodic` for max throughput with a small loss window |
 | `-flush-interval` | `1000` | Background flush interval (ms) |
 | `-tick-ms` | `100` | Timing wheel tick duration |
 | `-wheel-size` | `60` | Slots per timing wheel level |
@@ -510,8 +560,9 @@ See [proto/events.proto](proto/events.proto) for the complete specification.
 - [x] Bulk segment file sync for new node bootstrap
 - [x] Partition leader election on failure
 
-### Performance ✅ Optimized
-- [x] 1M+ events/sec (3-node cluster, batch mode, single machine)
+### Performance ✅ Optimized (single-machine)
+- [x] Up to 1M+ events/sec (`periodic` fsync, batch mode, single machine)
+- [x] Durable throughput validated with `batch` fsync
 - [x] Lock-free Rust bloom filter via CGO FFI
 - [x] sync.Pool for timers, record buffers, transport buffers
 - [x] Batch WAL writes (single buffered write per batch)
@@ -528,7 +579,7 @@ See [proto/events.proto](proto/events.proto) for the complete specification.
 - [x] OpenTelemetry tracing integration (provider + interceptor)
 - [x] Per-IP rate limiting with token bucket
 
-### Production Hardening ✅ Complete
+### Production Hardening 🔄 In Progress
 - [x] Graceful shutdown with drain (gRPC → partitions → cluster)
 - [x] Docker multi-stage build (Rust + Go + Debian slim)
 - [x] Docker Compose for single + cluster deployments
@@ -543,10 +594,16 @@ See [proto/events.proto](proto/events.proto) for the complete specification.
 - [x] Pluggable memberlist gossip (HashiCorp Memberlist / SWIM)
 - [x] Append-only DLQ segments (binary format, CRC32, rotation)
 - [x] Clock skew detection (cross-node heartbeat comparison)
+- [x] TLS/mTLS support (enable in production)
+- [x] JWT auth support (enable in production)
+- [x] At-rest encryption support (enable in production)
+- [ ] Consumer-group metadata persistence across restarts
+- [ ] Replication wire checksums
+- [ ] Per-entry terms in WAL
+- [ ] Chaos testing suite
 
 ### Remaining 🚧
 - [ ] Admin CLI & dashboard
-- [ ] TLS/mTLS between nodes
 - [ ] Topic-level ACLs
 
 ---

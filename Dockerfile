@@ -5,7 +5,7 @@
 # -----------------------------------------------------------------------------
 # Stage 1: Build Rust bloom filter
 # -----------------------------------------------------------------------------
-FROM rust:1.94 AS rust-builder
+FROM rust:1.86 AS rust-builder
 
 WORKDIR /build/rust-dedup
 
@@ -64,6 +64,7 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     tzdata \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user for security
@@ -76,7 +77,7 @@ WORKDIR /app
 COPY --from=go-builder /cronos-api /app/cronos-api
 
 # Copy Rust library (must be in same directory as binary or in library path)
-COPY --from=rust-builder /build/libcronos_dedup.so /app/cronos_dedup.so
+COPY --from=rust-builder /build/libcronos_dedup.so /app/libcronos_dedup.so
 
 # Also copy to system library path
 COPY --from=rust-builder /build/libcronos_dedup.so /usr/lib/x86_64-linux-gnu/libcronos_dedup.so

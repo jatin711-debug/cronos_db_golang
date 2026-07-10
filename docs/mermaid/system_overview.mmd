@@ -37,6 +37,13 @@ flowchart TB
       Compliance[Retention and Backup]
     end
 
+    subgraph Security[Production Security]
+      TLS[TLS for gRPC]
+      EncAtRest[Encryption at rest]
+      ReplMTLS[Replication mTLS]
+      DevMode[--dev bypass]
+    end
+
     Producer --> APIGW
     Consumer --> APIGW
     Admin --> APIGW
@@ -52,6 +59,7 @@ flowchart TB
     Disp --> Group
     Disp --> DLQ
 
+    APIGW --> TLS
     EventH --> Dedup
     EventH --> Auth
     EventH --> Schema
@@ -64,5 +72,7 @@ flowchart TB
     ClusterM --> Membership
     ClusterM --> Raft
     Partition --> Replication
+    Replication --> ReplMTLS
     Partition --> CrossRegion
     Compliance --> WAL
+    TLS --> EncAtRest

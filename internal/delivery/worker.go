@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 )
 
 // Worker processes ready events from scheduler
@@ -70,7 +71,7 @@ func (w *Worker) Start() {
 	}
 
 	w.processing = true
-	go w.loop()
+	utils.GoSafe("delivery-worker", w.loop)
 	w.signal()
 }
 

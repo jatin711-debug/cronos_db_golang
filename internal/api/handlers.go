@@ -14,17 +14,29 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/internal/auth"
 	"github.com/jatin711-debug/cronos_db_golang/internal/consumer"
 	"github.com/jatin711-debug/cronos_db_golang/internal/delivery"
+	"github.com/jatin711-debug/cronos_db_golang/internal/metrics"
 	"github.com/jatin711-debug/cronos_db_golang/internal/partition"
 	"github.com/jatin711-debug/cronos_db_golang/internal/replay"
 	"github.com/jatin711-debug/cronos_db_golang/internal/schema"
 	"github.com/jatin711-debug/cronos_db_golang/internal/tenant"
 	"github.com/jatin711-debug/cronos_db_golang/internal/tracing"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+// durableAckEnabled returns true if the event explicitly requests a durable fsync
+// before the publish response is returned. This lets clients opt into stronger
+// durability guarantees per event without changing the gRPC API.
+func durableAckEnabled(e *types.Event) bool {
+	if e == nil || e.Meta == nil {
+		return false
+	}
+	return e.Meta["cronos.durable_ack"] == "true"
+}
 
 // EventServiceHandler implements the EventService handler
 type EventServiceHandler struct {
@@ -37,6 +49,7 @@ type EventServiceHandler struct {
 	schemaRegistry   *schema.Registry
 	tenantAccountant *tenant.Accountant
 	auditLogger      *audit.Logger
+	authPolicy       *auth.Policy
 }
 
 // DedupManager interface
@@ -124,6 +137,12 @@ func (h *EventServiceHandler) SetAuditLogger(l *audit.Logger) {
 	h.auditLogger = l
 }
 
+// SetAuthPolicy sets the RBAC policy for topic-level authorization.
+// A nil policy disables topic authorization.
+func (h *EventServiceHandler) SetAuthPolicy(p *auth.Policy) {
+	h.authPolicy = p
+}
+
 // ensureClusterPartitionWritable validates that this node should accept writes
 // for the target partition when running in cluster mode or under active splits.
 func (h *EventServiceHandler) ensureClusterPartitionWritable(partitionID int32) error {
@@ -208,6 +227,11 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 		}, nil
 	}
 
+	// Topic-level authorization
+	if err := auth.CheckTopicPermission(ctx, event.Topic, "publish", h.authPolicy); err != nil {
+		return nil, err
+	}
+
 	// Schema validation
 	if h.schemaRegistry != nil && event.Topic != "" {
 		if err := h.schemaRegistry.Validate(event.Topic, event.Payload); err != nil {
@@ -229,7 +253,7 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 
 	// Admission control: reject if partition is overloaded
 	if !h.partitionManager.CanAccept(partitionID) {
-		IncAdmissionRejected()
+		metrics.IncAdmissionRejected()
 		return nil, status.Errorf(codes.ResourceExhausted,
 			"partition %d is at capacity; retry with backoff", partitionID)
 	}
@@ -244,7 +268,7 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 
 		// Check admission on fallback partition too
 		if !h.partitionManager.CanAccept(topicPartitionID) {
-			IncAdmissionRejected()
+			metrics.IncAdmissionRejected()
 			return nil, status.Errorf(codes.ResourceExhausted,
 				"partition %d is at capacity; retry with backoff", topicPartitionID)
 		}
@@ -302,12 +326,20 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 		event.Meta["tenant_id"] = string(tenantID)
 	}
 
-	// Append to WAL (no sync on every write for performance - WAL handles periodic flush)
+	// Append to WAL (sync behavior depends on fsync mode; durable_ack forces an fsync)
 	if err := partitionInternal.Wal.AppendEvent(event); err != nil {
 		return &types.PublishResponse{
 			Success: false,
 			Error:   fmt.Sprintf("append to WAL: %v", err),
 		}, nil
+	}
+	if durableAckEnabled(event) {
+		if err := partitionInternal.Wal.Flush(); err != nil {
+			return &types.PublishResponse{
+				Success: false,
+				Error:   fmt.Sprintf("durable fsync: %v", err),
+			}, nil
+		}
 	}
 
 	// Schedule the event in timing wheel
@@ -327,6 +359,40 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 	}, nil
 }
 
+// anyDurableAck returns true if any event in the batch requests a durable fsync.
+func anyDurableAck(events []*types.Event) bool {
+	for _, e := range events {
+		if durableAckEnabled(e) {
+			return true
+		}
+	}
+	return false
+}
+
+// partitionEventsPool recycles the map[int32][]*types.Event used to group events
+// by partition in PublishBatch. This removes one allocation per publish request.
+var partitionEventsPool = sync.Pool{
+	New: func() interface{} {
+		return make(map[int32][]*types.Event, 8)
+	},
+}
+
+func acquirePartitionEventsMap() map[int32][]*types.Event {
+	m := partitionEventsPool.Get().(map[int32][]*types.Event)
+	// Maps from the pool are returned empty, but guard against misuse.
+	for k := range m {
+		delete(m, k)
+	}
+	return m
+}
+
+func releasePartitionEventsMap(m map[int32][]*types.Event) {
+	for k := range m {
+		delete(m, k)
+	}
+	partitionEventsPool.Put(m)
+}
+
 // PublishBatch handles batch publish requests for high-throughput ingestion
 func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.PublishBatchRequest) (*types.PublishBatchResponse, error) {
 	if len(req.Events) == 0 {
@@ -343,8 +409,10 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 	var firstOffset, lastOffset int64 = -1, -1
 	var lastError string
 
-	// Group events by partition for batch WAL writes
-	partitionEvents := make(map[int32][]*types.Event)
+	// Group events by partition for batch WAL writes. Reuse a pooled map to
+	// avoid one allocation per request.
+	partitionEvents := acquirePartitionEventsMap()
+	defer releasePartitionEventsMap(partitionEvents)
 
 	for _, event := range req.Events {
 		// Basic validation
@@ -353,6 +421,15 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 			if lastError == "" {
 				lastError = fmt.Sprintf("validation failed: msgId=%q, scheduleTs=%d, payloadLen=%d",
 					event.GetMessageId(), event.GetScheduleTs(), len(event.Payload))
+			}
+			continue
+		}
+
+		// Topic-level authorization
+		if err := auth.CheckTopicPermission(ctx, event.Topic, "publish", h.authPolicy); err != nil {
+			atomic.AddInt32(&errorCount, 1)
+			if lastError == "" {
+				lastError = err.Error()
 			}
 			continue
 		}
@@ -385,28 +462,12 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 
 		// Admission control
 		if !h.partitionManager.CanAccept(partitionID) {
-			IncAdmissionRejected()
+			metrics.IncAdmissionRejected()
 			atomic.AddInt32(&errorCount, 1)
 			if lastError == "" {
 				lastError = fmt.Sprintf("partition %d is at capacity", partitionID)
 			}
 			continue
-		}
-
-		// Check dedup
-		if !req.AllowDuplicate {
-			isDuplicate, err := h.dedupManager.IsDuplicate(event.GetMessageId(), 0)
-			if err != nil {
-				atomic.AddInt32(&errorCount, 1)
-				if lastError == "" {
-					lastError = fmt.Sprintf("dedup check failed for %s: %v", event.GetMessageId(), err)
-				}
-				continue
-			}
-			if isDuplicate {
-				atomic.AddInt32(&duplicateCount, 1)
-				continue
-			}
 		}
 
 		// Tenant quota check
@@ -430,6 +491,43 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 		}
 
 		partitionEvents[partitionID] = append(partitionEvents[partitionID], event)
+	}
+
+	// Batch dedup per partition. This turns N point lookups into one batched
+	// bloom-filter + Pebble write-batch operation, which is much cheaper under
+	// concurrent publish load.
+	if !req.AllowDuplicate && h.dedupManager != nil {
+		for pid, evts := range partitionEvents {
+			messageIDs := make([]string, len(evts))
+			offsets := make([]int64, len(evts))
+			for i, e := range evts {
+				messageIDs[i] = e.GetMessageId()
+				offsets[i] = 0
+			}
+			duplicates, err := h.dedupManager.IsDuplicateBatch(messageIDs, offsets)
+			if err != nil {
+				// Treat a failed dedup check as an error for the whole partition batch.
+				atomic.AddInt32(&errorCount, int32(len(evts)))
+				if lastError == "" {
+					lastError = fmt.Sprintf("dedup check failed for partition %d: %v", pid, err)
+				}
+				delete(partitionEvents, pid)
+				continue
+			}
+			kept := evts[:0]
+			for i, e := range evts {
+				if duplicates[i] {
+					atomic.AddInt32(&duplicateCount, 1)
+					continue
+				}
+				kept = append(kept, e)
+			}
+			if len(kept) == 0 {
+				delete(partitionEvents, pid)
+			} else {
+				partitionEvents[pid] = kept
+			}
+		}
 	}
 
 	// Parallel batch write to each partition's WAL and schedule
@@ -500,6 +598,19 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 				return
 			}
 
+			// Force fsync if any event in the batch requested durable acknowledgement.
+			if anyDurableAck(evts) {
+				if err := partitionInternal.Wal.Flush(); err != nil {
+					atomic.AddInt32(&errorCount, int32(len(evts)))
+					mu.Lock()
+					if lastError == "" {
+						lastError = fmt.Sprintf("durable fsync for partition %d: %v", pid, err)
+					}
+					mu.Unlock()
+					return
+				}
+			}
+
 			// Batch schedule all events (single lock acquisition)
 			if err := partitionInternal.Scheduler.ScheduleBatch(evts); err != nil {
 				// Events are in WAL, just log scheduling error
@@ -559,6 +670,11 @@ func (h *EventServiceHandler) Subscribe(stream grpc.BidiStreamingServer[types.Su
 	// Receive subscription request
 	req, err := stream.Recv()
 	if err != nil {
+		return err
+	}
+
+	// Topic-level authorization
+	if err := auth.CheckTopicPermission(ctx, req.GetTopic(), "subscribe", h.authPolicy); err != nil {
 		return err
 	}
 
@@ -776,9 +892,9 @@ func (h *EventServiceHandler) Replay(req *types.ReplayRequest, stream types.Even
 
 	// Start replay in goroutine
 	errCh := make(chan error, 1)
-	go func() {
+	utils.GoSafe("replay-stream", func() {
 		errCh <- replayEngine.ReplayStream(stream.Context(), replayReq, eventCh)
-	}()
+	})
 
 	// Stream events to client
 	for event := range eventCh {

@@ -14,16 +14,17 @@ Storage module provides durable append-only event persistence with indexed reads
 
 ## Main Flow
 
-1. Append assigns offsets and writes records to active segment.
+1. Append assigns offsets and writes WAL v2 records (8-byte Raft term + 4-byte trailing checksum) to the active segment.
 2. Sparse index tracks offsets for read and replay efficiency.
 3. Segment rotation and compaction manage long-running storage footprint.
 4. Backup scheduler periodically snapshots WAL state.
 
 ## Production Decisions
 
-- CRC checks protect record integrity.
-- Configurable fsync modes expose throughput and durability tradeoff.
-- Segment-level compaction supports retention and admin operations.
+- WAL records use format v2: each record carries an 8-byte Raft term and a 4-byte trailing checksum. Upgrading from older builds requires a clean `--data-dir`.
+- CRC checks protect record integrity, and persistence uses `utils.AtomicWriteFile` for durable atomic file writes.
+- Default fsync mode is `batch` (`every_event`, `batch`, `periodic`).
+- Segment-level compaction supports retention and admin operations; retention cleanup deletes matching `.index` files and preserves the active segment per partition.
 - Optional encryption secures data at rest.
 
 ## Debug Pointers

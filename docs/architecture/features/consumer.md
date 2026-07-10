@@ -15,12 +15,13 @@ The consumer module manages group membership and committed offsets for ordered, 
 
 1. Subscribe requests create or join group members.
 2. Delivery and Ack flow updates committed offsets per group and partition.
-3. Persistent offset store recovers positions on restart when configured.
+3. Offsets, group metadata/assignments, and exactly-once commit IDs are persisted in PebbleDB (`OffsetStore`) and recovered on restart.
 
 ## Production Decisions
 
 - Ack parsing extracts partition context from delivery identifiers.
 - Offset commits are guarded by synchronization in group manager.
+- Offsets, group metadata/assignments, and exactly-once commit IDs are persisted in PebbleDB (`OffsetStore`).
 - Optional strict monotonic commit checks can be enabled by config.
 
 ## Debug Pointers

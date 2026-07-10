@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jatin711-debug/cronos_db_golang/internal/consumer"
@@ -25,24 +26,60 @@ import (
 
 // Partition represents a data partition
 type Partition struct {
-	ID            int32
-	Topic         string
-	DataDir       string
-	Wal           *storage.WAL
-	Scheduler     *scheduler.Scheduler
-	ConsumerGroup *consumer.GroupManager
-	DedupStore    *dedup.Manager
-	Dispatcher    *delivery.Dispatcher
-	Worker        *delivery.Worker
-	Follower      *replication.Follower // For receiving replicated data
-	ReplLeader    *replication.Leader   // For sending replication to followers
-	Leader        bool
-	Epoch         int64  // Cluster-assigned epoch for split-brain fencing
-	MinKey        string // Minimum key boundary (inclusive)
-	MaxKey        string // Maximum key boundary (exclusive)
-	CreatedTS     time.Time
-	UpdatedTS     time.Time
-	deliveryQuit  chan struct{} // Quit channel for delivery goroutine
+	ID               int32
+	Topic            string
+	DataDir          string
+	Wal              *storage.WAL
+	Scheduler        *scheduler.Scheduler
+	ConsumerGroup    *consumer.GroupManager
+	DedupStore       *dedup.Manager
+	Dispatcher       *delivery.Dispatcher
+	Worker           *delivery.Worker
+	Follower         *replication.Follower // For receiving replicated data
+	ReplLeader       *replication.Leader   // For sending replication to followers
+	Leader           bool
+	Epoch            int64  // Cluster-assigned epoch for split-brain fencing
+	MinKey           string // Minimum key boundary (inclusive)
+	MaxKey           string // Maximum key boundary (exclusive)
+	CreatedTS        time.Time
+	UpdatedTS        time.Time
+	deliveryQuit     chan struct{} // Quit channel for delivery goroutine
+	deliveryQuitOnce sync.Once
+	replayErr        atomic.Pointer[error]
+}
+
+// GetReplayError returns the last WAL replay error for this partition, if any.
+func (p *Partition) GetReplayError() error {
+	if err := p.replayErr.Load(); err != nil {
+		return *err
+	}
+	return nil
+}
+
+// setReplayError stores the last WAL replay error.
+func (p *Partition) setReplayError(err error) {
+	p.replayErr.Store(&err)
+}
+
+// toTypesPartition converts an internal Partition to the public API representation,
+// populating NextOffset and HighWatermark from the WAL when available.
+// The caller must hold pm.mu (at least read-locked) while partition is valid.
+func (pm *PartitionManager) toTypesPartition(partition *Partition) *types.Partition {
+	if partition == nil {
+		return nil
+	}
+	tp := &types.Partition{
+		ID:        partition.ID,
+		Topic:     partition.Topic,
+		Active:    true,
+		CreatedTS: partition.CreatedTS.UnixMilli(),
+		UpdatedTS: partition.UpdatedTS.UnixMilli(),
+	}
+	if partition.Wal != nil {
+		tp.NextOffset = partition.Wal.GetNextOffset()
+		tp.HighWatermark = partition.Wal.GetHighWatermark()
+	}
+	return tp
 }
 
 // IsKeyInBounds returns true if key falls within the partition bounds [MinKey, MaxKey).
@@ -59,14 +96,15 @@ func (p *Partition) IsKeyInBounds(key string) bool {
 
 // PartitionManager manages all partitions
 type PartitionManager struct {
-	mu               sync.RWMutex
-	partitions       map[int32]*Partition
-	nodeID           string
-	config           *types.Config
-	pebbleCache      *pebble.Cache
-	tenantAccountant tenantAccountant
-	splitting        map[int32]bool // tracks partitions currently undergoing split
-	splittingMu      sync.RWMutex
+	mu                sync.RWMutex
+	partitions        map[int32]*Partition
+	nodeID            string
+	config            *types.Config
+	pebbleCache       *pebble.Cache
+	tenantAccountant  tenantAccountant
+	splitting         map[int32]bool // tracks partitions currently undergoing split
+	splittingMu       sync.RWMutex
+	backpressureMgr   *BackpressureManager
 }
 
 // tenantAccountant is the minimal interface needed for delivery callbacks.
@@ -77,10 +115,11 @@ type tenantAccountant interface {
 // NewPartitionManager creates a new partition manager
 func NewPartitionManager(nodeID string, config *types.Config) *PartitionManager {
 	return &PartitionManager{
-		partitions: make(map[int32]*Partition),
-		nodeID:     nodeID,
-		config:     config,
-		splitting:  make(map[int32]bool),
+		partitions:      make(map[int32]*Partition),
+		nodeID:          nodeID,
+		config:          config,
+		splitting:       make(map[int32]bool),
+		backpressureMgr: NewBackpressureManager(config.MaxMemoryUsagePercent, config.MemoryCheckIntervalMs),
 	}
 }
 
@@ -129,7 +168,7 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 		if err != nil {
 			return fmt.Errorf("load encryption key: %w", err)
 		}
-		cipher, err = storage.NewSegmentCipher(key)
+		cipher, err = storage.NewSegmentCipher(key, partitionID)
 		if err != nil {
 			return fmt.Errorf("create cipher: %w", err)
 		}
@@ -209,6 +248,12 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 	}
 
 	pm.partitions[partitionID] = partition
+
+	// Set up rate limiter for this partition if configured
+	if pm.backpressureMgr != nil && pm.config.MaxIngestRatePerPartition > 0 && pm.config.IngestRateBurstSize > 0 {
+		pm.backpressureMgr.SetRateLimiter(partitionID, pm.config.MaxIngestRatePerPartition, pm.config.IngestRateBurstSize)
+	}
+
 	return nil
 }
 
@@ -227,15 +272,7 @@ func (pm *PartitionManager) GetPartition(partitionID int32) (*types.Partition, e
 		return nil, err
 	}
 
-	return &types.Partition{
-		ID:            partition.ID,
-		Topic:         partition.Topic,
-		NextOffset:    0, // Would get from WAL
-		HighWatermark: 0, // Would get from WAL
-		Active:        true,
-		CreatedTS:     partition.CreatedTS.UnixMilli(),
-		UpdatedTS:     partition.UpdatedTS.UnixMilli(),
-	}, nil
+	return pm.toTypesPartition(partition), nil
 }
 
 // GetInternalPartition gets the internal partition object
@@ -274,15 +311,7 @@ func (pm *PartitionManager) GetPartitionForTopic(topic string) (*types.Partition
 	pm.mu.RLock()
 	if partition, exists := pm.partitions[partitionID]; exists {
 		pm.mu.RUnlock()
-		return &types.Partition{
-			ID:            partition.ID,
-			Topic:         partition.Topic,
-			NextOffset:    0,
-			HighWatermark: 0,
-			Active:        true,
-			CreatedTS:     partition.CreatedTS.UnixMilli(),
-			UpdatedTS:     partition.UpdatedTS.UnixMilli(),
-		}, nil
+		return pm.toTypesPartition(partition), nil
 	}
 	pm.mu.RUnlock()
 
@@ -292,15 +321,7 @@ func (pm *PartitionManager) GetPartitionForTopic(topic string) (*types.Partition
 
 	// Check if the computed partition already exists locally
 	if partition, exists := pm.partitions[partitionID]; exists {
-		return &types.Partition{
-			ID:            partition.ID,
-			Topic:         partition.Topic,
-			NextOffset:    0,
-			HighWatermark: 0,
-			Active:        true,
-			CreatedTS:     partition.CreatedTS.UnixMilli(),
-			UpdatedTS:     partition.UpdatedTS.UnixMilli(),
-		}, nil
+		return pm.toTypesPartition(partition), nil
 	}
 
 	// Auto-create the partition with the CORRECT hash-derived ID
@@ -339,15 +360,7 @@ func (pm *PartitionManager) GetPartitionForKey(key string) (*types.Partition, er
 	pm.mu.RLock()
 	if partition, exists := pm.partitions[partitionID]; exists {
 		pm.mu.RUnlock()
-		return &types.Partition{
-			ID:            partition.ID,
-			Topic:         partition.Topic,
-			NextOffset:    0,
-			HighWatermark: 0,
-			Active:        true,
-			CreatedTS:     partition.CreatedTS.UnixMilli(),
-			UpdatedTS:     partition.UpdatedTS.UnixMilli(),
-		}, nil
+		return pm.toTypesPartition(partition), nil
 	}
 	pm.mu.RUnlock()
 
@@ -357,15 +370,7 @@ func (pm *PartitionManager) GetPartitionForKey(key string) (*types.Partition, er
 
 	// Check if the computed partition already exists locally
 	if partition, exists := pm.partitions[partitionID]; exists {
-		return &types.Partition{
-			ID:            partition.ID,
-			Topic:         partition.Topic,
-			NextOffset:    0,
-			HighWatermark: 0,
-			Active:        true,
-			CreatedTS:     partition.CreatedTS.UnixMilli(),
-			UpdatedTS:     partition.UpdatedTS.UnixMilli(),
-		}, nil
+		return pm.toTypesPartition(partition), nil
 	}
 
 	// Auto-create the partition with the CORRECT hash-derived ID
@@ -393,6 +398,11 @@ func (pm *PartitionManager) GetPartitionForKey(key string) (*types.Partition, er
 
 // CanAccept returns true if the partition can accept new publishes without exceeding capacity limits.
 func (pm *PartitionManager) CanAccept(partitionID int32) bool {
+	// Check backpressure first (memory + rate limiting)
+	if pm.backpressureMgr != nil && !pm.backpressureMgr.CanAccept(partitionID) {
+		return false
+	}
+
 	pm.mu.RLock()
 	partition, exists := pm.partitions[partitionID]
 	pm.mu.RUnlock()
@@ -489,8 +499,36 @@ func (pm *PartitionManager) startPartitionLocked(partitionID int32) error {
 
 // startPartitionInternal starts a partition's background workers
 func (pm *PartitionManager) startPartitionInternal(partition *Partition) error {
-	// Replay WAL to recover scheduled timers that haven't fired yet
-	pm.replayWALTimers(partition)
+	// Try to load snapshot for fast recovery
+	snapshotMgr := NewSnapshotManager(partition.DataDir, partition.ID)
+	snapshot, err := snapshotMgr.LoadSnapshot()
+	if err != nil {
+		log.Printf("[Partition %d] Failed to load snapshot: %v", partition.ID, err)
+	}
+
+	if snapshot != nil {
+		// Fast recovery: skip WAL replay up to snapshot point
+		log.Printf("[Partition %d] Fast recovery from snapshot: HWM=%d, scheduled=%d",
+			partition.ID, snapshot.HighWatermark, snapshot.LastScheduledOffset)
+
+		// Restore consumer offsets
+		for groupID, offset := range snapshot.ConsumerOffsets {
+			if partition.ConsumerGroup != nil {
+				// Create or update consumer group with restored offset
+				_ = partition.ConsumerGroup.CommitOffset(groupID, int64(partition.ID), offset)
+			}
+		}
+
+		// Replay only from snapshot point forward
+		if snapshot.LastScheduledOffset < partition.Wal.GetLastOffset() {
+			pm.replayWALTimersFromOffset(partition, snapshot.LastScheduledOffset+1)
+		} else {
+			log.Printf("[Partition %d] No new events since snapshot, skipping replay", partition.ID)
+		}
+	} else {
+		// Full WAL replay (slow path)
+		pm.replayWALTimers(partition)
+	}
 
 	// Start scheduler
 	partition.Scheduler.Start()
@@ -500,7 +538,7 @@ func (pm *PartitionManager) startPartitionInternal(partition *Partition) error {
 
 	// Start delivery loop (event-driven): consume scheduler ready signals and
 	// immediately hand over batches to the worker.
-	go func() {
+	utils.GoSafe("partition-delivery-loop", func() {
 		for {
 			select {
 			case <-partition.Scheduler.ReadySignal():
@@ -515,11 +553,11 @@ func (pm *PartitionManager) startPartitionInternal(partition *Partition) error {
 				return
 			}
 		}
-	}()
+	})
 
 	// Start compaction loop (runs every 10 minutes)
 	compactionInterval := 10 * time.Minute
-	go func() {
+	utils.GoSafe("partition-compaction-loop", func() {
 		ticker := time.NewTicker(compactionInterval)
 		defer ticker.Stop()
 
@@ -531,10 +569,10 @@ func (pm *PartitionManager) startPartitionInternal(partition *Partition) error {
 				return
 			}
 		}
-	}()
+	})
 
 	// Start dedup pruning loop (runs every hour)
-	go func() {
+	utils.GoSafe("partition-dedup-prune-loop", func() {
 		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()
 
@@ -553,7 +591,12 @@ func (pm *PartitionManager) startPartitionInternal(partition *Partition) error {
 				return
 			}
 		}
-	}()
+	})
+
+	// Start periodic snapshot creation (every 5 minutes)
+	utils.GoSafe("partition-snapshot-loop", func() {
+		snapshotMgr.StartPeriodicSnapshots(partition, 5*time.Minute)
+	})
 
 	return nil
 }
@@ -592,6 +635,8 @@ func (pm *PartitionManager) replayWALTimers(partition *Partition) {
 
 		events, err := partition.Wal.ReadEvents(batchStart, batchEnd)
 		if err != nil {
+			err = fmt.Errorf("WAL replay failed at offsets %d-%d: %w", batchStart, batchEnd, err)
+			partition.setReplayError(err)
 			log2.Warn("WAL replay failed", "partition", partition.ID, "start_offset", batchStart, "end_offset", batchEnd, "error", err)
 			return
 		}
@@ -600,7 +645,7 @@ func (pm *PartitionManager) replayWALTimers(partition *Partition) {
 			if event.GetScheduleTs() > now {
 				// Future event — re-schedule it
 				if err := partition.Scheduler.Schedule(event); err != nil {
-					// Timer may already exist if recovery runs twice; skip silently
+					log2.Warn("WAL replay scheduler error", "partition", partition.ID, "offset", event.Offset, "error", err)
 					continue
 				}
 				scheduledCount++
@@ -616,6 +661,58 @@ func (pm *PartitionManager) replayWALTimers(partition *Partition) {
 
 	log.Printf("[Partition %d] WAL replay complete: %d future events re-scheduled, %d already expired (offsets %d-%d)",
 		partition.ID, scheduledCount, expiredCount, startOffset, lastScheduled)
+}
+
+// replayWALTimersFromOffset replays WAL events starting from a specific offset
+// (used for snapshot recovery to avoid full WAL replay).
+func (pm *PartitionManager) replayWALTimersFromOffset(partition *Partition, startOffset int64) {
+	lastOffset := partition.Wal.GetLastOffset()
+	if lastOffset < 0 {
+		return // Empty WAL, nothing to replay
+	}
+
+	if startOffset > lastOffset {
+		log.Printf("[Partition %d] Timer replay from offset %d: already up to date at offset %d", partition.ID, startOffset, lastOffset)
+		return
+	}
+
+	now := time.Now().UnixMilli()
+	scheduledCount := 0
+	expiredCount := 0
+	lastScheduled := startOffset - 1
+
+	const replayBatchSize int64 = 10000
+	for batchStart := startOffset; batchStart <= lastOffset; batchStart += replayBatchSize {
+		batchEnd := min(batchStart+replayBatchSize-1, lastOffset)
+
+		events, err := partition.Wal.ReadEvents(batchStart, batchEnd)
+		if err != nil {
+			err = fmt.Errorf("WAL replay from offset %d failed at offsets %d-%d: %w", startOffset, batchStart, batchEnd, err)
+			partition.setReplayError(err)
+			log2.Warn("WAL replay from offset failed", "partition", partition.ID, "start_offset", batchStart, "end_offset", batchEnd, "error", err)
+			return
+		}
+
+		for _, event := range events {
+			if event.GetScheduleTs() > now {
+				// Future event — re-schedule it
+				if err := partition.Scheduler.Schedule(event); err != nil {
+					log2.Warn("WAL replay scheduler error", "partition", partition.ID, "offset", event.Offset, "error", err)
+					continue
+				}
+				scheduledCount++
+			} else {
+				expiredCount++
+			}
+			lastScheduled = event.Offset
+		}
+	}
+
+	// Update checkpoint incrementally
+	pm.writeTimerCheckpoint(partition, lastScheduled)
+
+	log.Printf("[Partition %d] WAL replay from offset %d complete: %d future events re-scheduled, %d already expired (offsets %d-%d)",
+		partition.ID, startOffset, scheduledCount, expiredCount, startOffset, lastScheduled)
 }
 
 // TimerCheckpoint stores the incremental replay progress
@@ -744,12 +841,7 @@ func (pm *PartitionManager) StopPartition(partitionID int32) error {
 
 	// Signal delivery goroutines to stop FIRST to avoid circular lock deadlock
 	// Delivery goroutines read from deliveryQuit channel - closing it allows them to exit
-	select {
-	case <-partition.deliveryQuit:
-		// already closed
-	default:
-		close(partition.deliveryQuit)
-	}
+	partition.deliveryQuitOnce.Do(func() { close(partition.deliveryQuit) })
 
 	// Stop scheduler: no new events will be added to the ready queue
 	if partition.Scheduler != nil {
@@ -853,6 +945,20 @@ func (pm *PartitionManager) GetOrCreatePartition(partitionID int32) error {
 	return pm.createPartitionLocked(partitionID, fmt.Sprintf("partition-%d", partitionID))
 }
 
+// replicationTLSConfig builds the internal replication mTLS config from the
+// global node configuration. It returns nil when replication TLS is disabled.
+func (pm *PartitionManager) replicationTLSConfig() *replication.MTLSConfig {
+	if pm.config == nil {
+		return nil
+	}
+	return &replication.MTLSConfig{
+		Enabled:  pm.config.ReplicationTLSEnabled,
+		CAFile:   pm.config.ReplicationTLSCAFile,
+		CertFile: pm.config.ReplicationTLSCertFile,
+		KeyFile:  pm.config.ReplicationTLSKeyFile,
+	}
+}
+
 // SyncPartitionFromLeader syncs a partition from its leader via bulk transfer
 func (pm *PartitionManager) SyncPartitionFromLeader(partitionID int32, leaderAddr string) error {
 	pm.mu.RLock()
@@ -866,7 +972,7 @@ func (pm *PartitionManager) SyncPartitionFromLeader(partitionID int32, leaderAdd
 	// Get or create follower
 	pm.mu.Lock()
 	if partition.Follower == nil {
-		partition.Follower = replication.NewFollower(partitionID, partition.Wal, pm.nodeID)
+		partition.Follower = replication.NewFollower(partitionID, partition.Wal, pm.nodeID, pm.replicationTLSConfig())
 	}
 	pm.mu.Unlock()
 
@@ -898,7 +1004,7 @@ func (pm *PartitionManager) PromoteToLeader(partitionID int32, epoch int64) erro
 		return nil // Already leader, just update epoch
 	}
 
-	leader := replication.NewLeader(partitionID, int32(pm.config.ReplicationBatchSize), pm.config.ReplicationTimeout, partition.Wal)
+	leader := replication.NewLeader(partitionID, int32(pm.config.ReplicationBatchSize), pm.config.ReplicationTimeout, partition.Wal, pm.config.MinInSyncReplicas, pm.nodeID, pm.replicationTLSConfig())
 	leader.Start()
 	partition.ReplLeader = leader
 	partition.Leader = true
@@ -959,6 +1065,30 @@ func (pm *PartitionManager) GetPartitionEpoch(partitionID int32) int64 {
 		return partition.Epoch
 	}
 	return 0
+}
+
+// GetPartitionReplicaOffsets returns the latest high-watermark offsets for a partition's
+// replicas, including the local WAL high watermark for this node if it leads the partition.
+func (pm *PartitionManager) GetPartitionReplicaOffsets(partitionID int32) map[string]int64 {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+
+	partition, exists := pm.partitions[partitionID]
+	if !exists || partition == nil {
+		return nil
+	}
+
+	offsets := make(map[string]int64)
+	if partition.Wal != nil {
+		// Local replica offset is the WAL high watermark (last durable offset).
+		offsets[pm.nodeID] = partition.Wal.GetHighWatermark()
+	}
+	if partition.ReplLeader != nil {
+		for followerID, offset := range partition.ReplLeader.GetFollowerOffsets() {
+			offsets[followerID] = offset
+		}
+	}
+	return offsets
 }
 
 // PartitionLoadStatus exposes backpressure signals for a partition.

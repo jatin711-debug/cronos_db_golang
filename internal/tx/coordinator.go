@@ -7,11 +7,13 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
 	"github.com/jatin711-debug/cronos_db_golang/internal/partition"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 )
 
 // TxID is a unique transaction identifier.
@@ -23,6 +25,7 @@ type Status int
 const (
 	StatusPending Status = iota
 	StatusPrepared
+	StatusCommitting
 	StatusCommitted
 	StatusAborted
 )
@@ -33,6 +36,8 @@ func (s Status) String() string {
 		return "pending"
 	case StatusPrepared:
 		return "prepared"
+	case StatusCommitting:
+		return "committing"
 	case StatusCommitted:
 		return "committed"
 	case StatusAborted:
@@ -112,16 +117,7 @@ func (tl *txLog) write(txID TxID, status Status, partitionIDs []int32, createdAt
 		CommittedAt:  committedAt,
 	}
 
-	records := make([]txRecord, 0, len(tl.records))
-	for _, r := range tl.records {
-		records = append(records, r)
-	}
-
-	data, err := json.Marshal(records)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(tl.path, data, 0644)
+	return tl.persistLocked()
 }
 
 func (tl *txLog) delete(txID TxID) error {
@@ -129,7 +125,13 @@ func (tl *txLog) delete(txID TxID) error {
 	defer tl.mu.Unlock()
 
 	delete(tl.records, txID)
+	return tl.persistLocked()
+}
 
+// persistLocked writes the current records to disk atomically: write to a temp
+// file, fsync the temp file, rename it over the real path, then fsync the
+// parent directory so the rename is durable. tl.mu must be held.
+func (tl *txLog) persistLocked() error {
 	records := make([]txRecord, 0, len(tl.records))
 	for _, r := range tl.records {
 		records = append(records, r)
@@ -137,9 +139,10 @@ func (tl *txLog) delete(txID TxID) error {
 
 	data, err := json.Marshal(records)
 	if err != nil {
-		return err
+		return fmt.Errorf("marshal tx records: %w", err)
 	}
-	return os.WriteFile(tl.path, data, 0644)
+
+	return utils.AtomicWriteFile(tl.path, data, 0644)
 }
 
 // Coordinator manages 2PC across partitions.
@@ -279,9 +282,11 @@ func (c *Coordinator) RecoverPreparedLocks() {
 
 		// Re-acquire locks for any prepared transactions
 		for txID := range activePrepared {
-			slog.Info("Recovered active prepared transaction from WAL; locking partition", "tx_id", txID, "partition", part.ID)
-			m := c.getTxLock(part.ID)
-			m.Lock() // Re-acquire the write lock!
+			slog.Info("Recovered active prepared transaction from WAL; will re-drive resolution", "tx_id", txID, "partition", part.ID)
+			// Note: we intentionally do NOT lock the partition here. The recovery
+			// loop (and any explicit Commit/Abort) will acquire locks via
+			// acquireLocks(), which is deadlock-free because it sorts by partition
+			// ID. Locking here without ever releasing caused a permanent lock leak.
 		}
 	}
 }
@@ -299,15 +304,24 @@ func (c *Coordinator) getTxLock(partitionID int32) *sync.Mutex {
 }
 
 // acquireLocks tries to acquire locks for all participant partitions.
-// Returns the list of acquired locks and an error if any lock fails.
+// Locks are acquired in a globally consistent order (sorted by partition ID)
+// to prevent deadlocks between concurrent transactions touching overlapping
+// partition sets. The returned error is currently always nil.
 func (c *Coordinator) acquireLocks(participants []Participant) ([]*sync.Mutex, error) {
-	var acquired []*sync.Mutex
+	// Extract partition IDs and sort to guarantee a global locking order.
+	ids := make([]int32, 0, len(participants))
 	for _, p := range participants {
 		pp, ok := p.(PartitionParticipant)
 		if !ok {
 			continue // Non-partition participants don't need locks
 		}
-		m := c.getTxLock(pp.PartitionID)
+		ids = append(ids, pp.PartitionID)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+
+	var acquired []*sync.Mutex
+	for _, id := range ids {
+		m := c.getTxLock(id)
 		m.Lock()
 		acquired = append(acquired, m)
 	}
@@ -339,7 +353,9 @@ func (c *Coordinator) Begin(txID TxID, participants []Participant) (*Transaction
 
 	// Persist pending state
 	partitionIDs := extractPartitionIDs(participants)
-	_ = c.txLog.write(txID, StatusPending, partitionIDs, tx.CreatedAt)
+	if err := c.txLog.write(txID, StatusPending, partitionIDs, tx.CreatedAt); err != nil {
+		return nil, fmt.Errorf("persist pending transaction: %w", err)
+	}
 
 	return tx, nil
 }
@@ -389,7 +405,9 @@ func (c *Coordinator) Prepare(ctx context.Context, txID TxID) error {
 	c.mu.Unlock()
 
 	partitionIDs := extractPartitionIDs(tx.Participants)
-	_ = c.txLog.write(txID, StatusPrepared, partitionIDs, tx.CreatedAt)
+	if err := c.txLog.write(txID, StatusPrepared, partitionIDs, tx.CreatedAt); err != nil {
+		return fmt.Errorf("persist prepared transaction: %w", err)
+	}
 
 	return nil
 }
@@ -432,8 +450,12 @@ func (c *Coordinator) Commit(ctx context.Context, txID TxID) error {
 
 		// Persist prepared state
 		partitionIDs := extractPartitionIDs(tx.Participants)
-		_ = c.txLog.write(txID, StatusPrepared, partitionIDs, tx.CreatedAt)
+		if err := c.txLog.write(txID, StatusPrepared, partitionIDs, tx.CreatedAt); err != nil {
+			return fmt.Errorf("persist prepared transaction: %w", err)
+		}
 	}
+	// StatusPrepared or StatusCommitting means Prepare already succeeded; skip
+	// to Phase 2.
 
 	// Phase 2: Commit
 	var commitErr error
@@ -444,20 +466,32 @@ func (c *Coordinator) Commit(ctx context.Context, txID TxID) error {
 		}
 	}
 
+	if commitErr != nil {
+		// Partial failure: stay in Committing so recovery re-drives the commit.
+		// Do NOT transition to Committed or delete the log record yet.
+		c.mu.Lock()
+		tx.Status = StatusCommitting
+		c.mu.Unlock()
+
+		partitionIDs := extractPartitionIDs(tx.Participants)
+		if err := c.txLog.write(txID, StatusCommitting, partitionIDs, tx.CreatedAt); err != nil {
+			return fmt.Errorf("commit partially failed (%v) and could not persist committing state: %w", commitErr, err)
+		}
+		return fmt.Errorf("commit partially failed: %w", commitErr)
+	}
+
+	// Full success: now safe to mark committed and remove the log.
 	c.mu.Lock()
 	tx.Status = StatusCommitted
 	c.mu.Unlock()
 
-	// Persist committed state
 	partitionIDs := extractPartitionIDs(tx.Participants)
-	_ = c.txLog.write(txID, StatusCommitted, partitionIDs, tx.CreatedAt)
-
-	if commitErr != nil {
-		return fmt.Errorf("commit partially failed: %w", commitErr)
+	if err := c.txLog.write(txID, StatusCommitted, partitionIDs, tx.CreatedAt); err != nil {
+		return fmt.Errorf("persist committed transaction: %w", err)
 	}
-
-	// Only delete from log if all commits succeeded
-	_ = c.txLog.delete(txID)
+	if err := c.txLog.delete(txID); err != nil {
+		return fmt.Errorf("delete committed transaction log: %w", err)
+	}
 	return nil
 }
 
@@ -494,8 +528,12 @@ func (c *Coordinator) abortInternal(ctx context.Context, tx *Transaction) error 
 	c.mu.Unlock()
 
 	partitionIDs := extractPartitionIDs(tx.Participants)
-	_ = c.txLog.write(tx.ID, StatusAborted, partitionIDs, tx.CreatedAt)
-	_ = c.txLog.delete(tx.ID)
+	if err := c.txLog.write(tx.ID, StatusAborted, partitionIDs, tx.CreatedAt); err != nil {
+		return fmt.Errorf("persist aborted transaction: %w", err)
+	}
+	if err := c.txLog.delete(tx.ID); err != nil {
+		return fmt.Errorf("delete aborted transaction log: %w", err)
+	}
 
 	return nil
 }
@@ -583,6 +621,21 @@ func (c *Coordinator) recover() {
 			ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
 			err = c.Commit(ctx, txID)
 			cancel()
+		case "committing":
+			if inMemStatus != StatusCommitting && inMemStatus != StatusPrepared {
+				continue
+			}
+			// Re-run commit for transactions that were in the middle of commit
+			// when the process crashed. If the in-memory status is still
+			// Prepared, we advance it first so Commit can proceed normally.
+			if inMemStatus == StatusPrepared {
+				c.mu.Lock()
+				tx.Status = StatusCommitting
+				c.mu.Unlock()
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
+			err = c.Commit(ctx, txID)
+			cancel()
 		case "committed":
 			if inMemStatus != StatusCommitted {
 				continue // Already fully committed or deleted
@@ -624,6 +677,8 @@ func parseStatus(s string) Status {
 		return StatusPending
 	case "prepared":
 		return StatusPrepared
+	case "committing":
+		return StatusCommitting
 	case "committed":
 		return StatusCommitted
 	case "aborted":
