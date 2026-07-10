@@ -668,6 +668,7 @@ func BenchmarkSegment_AppendEvent(b *testing.B) {
 func BenchmarkSegment_ReadEvent(b *testing.B) {
 	tmpDir := b.TempDir()
 	seg, _ := NewSegment(tmpDir, 0, true, nil)
+	defer seg.Close()
 
 	// Populate
 	for i := 0; i < 1000; i++ {
