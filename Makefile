@@ -431,7 +431,7 @@ loadtest-max: build
 	$(BUILD_DIR)/cluster_loadtest$(EXE_EXT) -nodes=3 -publishers=32 -events=200000 -payload=256 -delay=0 -topic=cluster-loadtest -round-robin=true -batch -batch-size=4000 -partition-count=16
 
 loadtest-throughput: build
-	$(BUILD_DIR)/cluster_loadtest$(EXE_EXT) -nodes=3 -publishers=48 -events=200000 -payload=4096 -delay=0 -topic=cluster-loadtest -round-robin=true -batch -batch-size=4000 -partition-count=24
+	$(BUILD_DIR)/cluster_loadtest$(EXE_EXT) -nodes=3 -publishers=48 -events=200000 -payload=4096 -delay=0 -topic=cluster-loadtest -round-robin=true -batch -batch-size=4000 -partition-count=$(PARTITION_COUNT)
 
 loadtest-small: build
 	$(BUILD_DIR)/cluster_loadtest$(EXE_EXT) -publishers=10 -events=1000
