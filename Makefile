@@ -82,7 +82,7 @@ REQUIRE_VERSION_CMD = powershell -NoProfile -Command "if ([string]::IsNullOrWhit
 VALIDATE_VERSION_CMD = powershell -NoProfile -Command "if ('$(VERSION)' -notmatch '^v\d+\.\d+\.\d+([.-][0-9A-Za-z.-]+)?$$') { Write-Error 'VERSION must look like vMAJOR.MINOR.PATCH'; exit 1 }"
 VERIFY_GIT_CLEAN_CMD = powershell -NoProfile -Command '$$s = git status --porcelain; if ($$s) { Write-Error "Working tree not clean. Commit or stash changes before tagging."; exit 1 }'
 VERIFY_TAG_EXISTS_LOCAL_CMD = powershell -NoProfile -Command 'git rev-parse -q --verify refs/tags/$(VERSION) 2>$$null >$$null; if ($$LASTEXITCODE -ne 0) { Write-Error "Missing local tag $(VERSION). Run make tag VERSION=$(VERSION) first."; exit 1 }'
-VERIFY_TAG_ABSENT_LOCAL_CMD = powershell -NoProfile -Command 'git rev-parse -q --verify refs/tags/$(VERSION) 2>$$null >$$null; if ($$LASTEXITCODE -eq 0) { Write-Error "Tag already exists locally: $(VERSION)"; exit 1 }'
+VERIFY_TAG_ABSENT_LOCAL_CMD = powershell -NoProfile -Command 'git rev-parse -q --verify refs/tags/$(VERSION) 2>$$null >$$null; if ($$LASTEXITCODE -eq 0) { Write-Error "Tag already exists locally: $(VERSION)"; exit 1 }; exit 0'
 VERIFY_TAG_EXISTS_REMOTE_CMD = powershell -NoProfile -Command '$$r = git ls-remote --tags $(REMOTE) refs/tags/$(VERSION); if (-not $$r) { Write-Error "Tag $(VERSION) not found on remote $(REMOTE). Run make tag-push VERSION=$(VERSION)."; exit 1 }'
 VERIFY_TAG_ABSENT_REMOTE_CMD = powershell -NoProfile -Command '$$r = git ls-remote --tags $(REMOTE) refs/tags/$(VERSION); if ($$r) { Write-Error "Tag already exists on remote $(REMOTE): $(VERSION)"; exit 1 }'
 
