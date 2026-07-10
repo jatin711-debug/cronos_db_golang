@@ -26,6 +26,13 @@ type Config struct {
 	BloomCapacity        uint64
 	ReplicationBatchSize int
 	ReplicationTimeout   time.Duration
+	// MinInSyncReplicas is the minimum number of in-sync replicas (including the
+	// leader) required to acknowledge a write before it is considered durable.
+	// A write is rejected with a NotEnoughReplicas error if fewer than this
+	// number of replicas are in the ISR. 0 means derive a default of 1 (i.e.
+	// only the leader is required), preserving the historical single-replica
+	// behavior. Equivalent to Kafka's min.insync.replicas.
+	MinInSyncReplicas int
 	RaftDir              string
 	RaftJoinAddr         string
 	StatsPrintInterval   time.Duration
@@ -79,6 +86,12 @@ type Config struct {
 	TLSKeyFile     string
 	TLSClientAuth  bool // require client certs (mTLS)
 
+	// Internal replication mTLS configuration (leader <-> follower traffic)
+	ReplicationTLSEnabled  bool
+	ReplicationTLSCAFile   string
+	ReplicationTLSCertFile string
+	ReplicationTLSKeyFile  string
+
 	// Auth configuration
 	AuthEnabled       bool
 	AuthJWTSecret     string // HMAC secret for JWT verification
@@ -89,6 +102,13 @@ type Config struct {
 	NodeRack   string
 	NodeZone   string
 	NodeRegion string
+
+	// Dev mode disables production security requirements for local development.
+	DevMode bool
+
+	// Retention policy (0 = disabled)
+	RetentionMaxAgeHours int
+	RetentionMaxSizeGB   int64
 
 	// Exactly-once delivery option
 	ExactlyOnceCommits bool
@@ -106,6 +126,14 @@ type Config struct {
 	// Topic rate limiting (0 = disabled)
 	TopicRateLimitPerSecond float64
 	TopicRateLimitBurst     float64
+
+	// Memory-based backpressure (0 = disabled)
+	MaxMemoryUsagePercent float64 // Max memory usage % before rejecting publishes (e.g., 80.0)
+	MemoryCheckIntervalMs int64   // How often to check memory in ms
+
+	// Ingest rate limiting (0 = disabled)
+	MaxIngestRatePerPartition int64 // Max events/sec per partition (0 = unlimited)
+	IngestRateBurstSize       int64 // Token bucket burst size
 }
 
 // Partition represents a data partition

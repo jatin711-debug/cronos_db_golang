@@ -6,6 +6,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
+
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/peer"
@@ -31,12 +33,12 @@ func newRateLimiter(rate float64, capacity float64) *rateLimiter {
 	}
 
 	// Cleanup routine to prevent memory leaks from inactive IPs
-	go func() {
+	utils.GoSafe("rate-limiter-cleanup", func() {
 		for {
 			time.Sleep(5 * time.Minute)
 			rl.cleanup()
 		}
-	}()
+	})
 
 	return rl
 }

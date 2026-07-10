@@ -10,7 +10,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jatin711-debug/cronos_db_golang/internal/metrics"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 )
 
 // Dispatcher manages event delivery to subscribers.
@@ -21,6 +23,7 @@ type Dispatcher struct {
 	config     *Config
 	dlq        *DeadLetterQueue
 	quit       chan struct{}
+	quitOnce   sync.Once
 	wg         sync.WaitGroup
 
 	// Partition-to-subscribers index for O(1) lookup instead of scanning all shards.
@@ -162,7 +165,7 @@ func NewDispatcher(config *Config) *Dispatcher {
 	}
 
 	d.wg.Add(1)
-	go d.timeoutLoop()
+	utils.GoSafe("dispatcher-timeout", d.timeoutLoop)
 
 	return d
 }
@@ -341,6 +344,11 @@ func (d *Dispatcher) pickSubscriber(groupSubs []*Subscription, startIdx int) *Su
 
 // Dispatch dispatches an event to subscribers.
 func (d *Dispatcher) Dispatch(event *types.Event) error {
+	start := time.Now()
+	defer func() {
+		metrics.ObserveDispatch(strconv.FormatInt(int64(event.GetPartitionId()), 10), time.Since(start))
+	}()
+
 	d.partitionsMu.RLock()
 	allSubs := d.partitionSubs[event.GetPartitionId()]
 	d.partitionsMu.RUnlock()
@@ -366,14 +374,15 @@ func (d *Dispatcher) Dispatch(event *types.Event) error {
 			continue
 		}
 
-		delivery := &DeliveryMessage{
-			Event:      event,
-			DeliveryID: makeDeliveryID(selectedSub.ID, event.Offset),
-			Attempt:    1,
-			AckTimeout: int32(d.config.DefaultAckTimeout / time.Millisecond),
-		}
+		delivery := deliveryMessagePool.Get().(*DeliveryMessage)
+		delivery.Event = event
+		delivery.DeliveryID = makeDeliveryID(selectedSub.ID, event.Offset)
+		delivery.Attempt = 1
+		delivery.AckTimeout = int32(d.config.DefaultAckTimeout / time.Millisecond)
+		delivery.Batch = nil
 
 		if !d.tryReserveInFlight(1) {
+			deliveryMessagePool.Put(delivery)
 			d.releaseCredit(selectedSub)
 			return fmt.Errorf("in-flight limit exceeded")
 		}
@@ -381,6 +390,7 @@ func (d *Dispatcher) Dispatch(event *types.Event) error {
 		if err := selectedSub.Stream.Send(delivery); err != nil {
 			if err := d.decInFlight(1); err != nil { log.Printf("[DISPATCHER] in-flight underflow: %v", err) }
 			d.releaseCredit(selectedSub)
+			deliveryMessagePool.Put(delivery)
 			log.Printf("[DISPATCHER] Failed to send to subscriber %s: %v", selectedSub.ID, err)
 			continue
 		}
@@ -403,14 +413,15 @@ func (d *Dispatcher) dispatchToSub(sub *Subscription, event *types.Event) error 
 		return nil // No credits available
 	}
 
-	delivery := &DeliveryMessage{
-		Event:      event,
-		DeliveryID: makeDeliveryID(sub.ID, event.Offset),
-		Attempt:    1,
-		AckTimeout: int32(d.config.DefaultAckTimeout / time.Millisecond),
-	}
+	delivery := deliveryMessagePool.Get().(*DeliveryMessage)
+	delivery.Event = event
+	delivery.DeliveryID = makeDeliveryID(sub.ID, event.Offset)
+	delivery.Attempt = 1
+	delivery.AckTimeout = int32(d.config.DefaultAckTimeout / time.Millisecond)
+	delivery.Batch = nil
 
 	if !d.tryReserveInFlight(1) {
+		deliveryMessagePool.Put(delivery)
 		d.releaseCredit(sub)
 		return fmt.Errorf("in-flight limit exceeded")
 	}
@@ -418,6 +429,7 @@ func (d *Dispatcher) dispatchToSub(sub *Subscription, event *types.Event) error 
 	if err := sub.Stream.Send(delivery); err != nil {
 		if err := d.decInFlight(1); err != nil { log.Printf("[DISPATCHER] in-flight underflow: %v", err) }
 		d.releaseCredit(sub)
+		deliveryMessagePool.Put(delivery)
 		if sub.circuitBreaker != nil {
 			sub.circuitBreaker.RecordFailure(
 				d.config.CircuitBreakerFailureThreshold,
@@ -458,6 +470,11 @@ func (d *Dispatcher) DispatchBatch(events []*types.Event) error {
 }
 
 func (d *Dispatcher) dispatchPartitionBatch(partitionID int32, events []*types.Event) error {
+	start := time.Now()
+	defer func() {
+		metrics.ObserveDispatch(strconv.FormatInt(int64(partitionID), 10), time.Since(start))
+	}()
+
 	d.partitionsMu.RLock()
 	allSubs := d.partitionSubs[partitionID]
 	d.partitionsMu.RUnlock()
@@ -498,15 +515,15 @@ func (d *Dispatcher) dispatchPartitionBatch(partitionID int32, events []*types.E
 			continue
 		}
 
-		delivery := &DeliveryMessage{
-			Event:      nil,
-			DeliveryID: makeDeliveryIDBatch(sub.ID, batchEvents[0].Offset, len(batchEvents)),
-			Attempt:    1,
-			AckTimeout: int32(d.config.DefaultAckTimeout / time.Millisecond),
-			Batch:      batchEvents,
-		}
+		delivery := deliveryMessagePool.Get().(*DeliveryMessage)
+		delivery.Event = nil
+		delivery.DeliveryID = makeDeliveryIDBatch(sub.ID, batchEvents[0].Offset, len(batchEvents))
+		delivery.Attempt = 1
+		delivery.AckTimeout = int32(d.config.DefaultAckTimeout / time.Millisecond)
+		delivery.Batch = batchEvents
 
 		if !d.tryReserveInFlight(1) {
+			deliveryMessagePool.Put(delivery)
 			// Credits were consumed per event while assigning.
 			d.releaseCredits(sub, int32(len(batchEvents)))
 			return fmt.Errorf("in-flight limit exceeded")
@@ -515,6 +532,7 @@ func (d *Dispatcher) dispatchPartitionBatch(partitionID int32, events []*types.E
 		if err := sub.Stream.Send(delivery); err != nil {
 			if err := d.decInFlight(1); err != nil { log.Printf("[DISPATCHER] in-flight underflow: %v", err) }
 			d.releaseCredits(sub, int32(len(batchEvents)))
+			deliveryMessagePool.Put(delivery)
 			if sub.circuitBreaker != nil {
 				sub.circuitBreaker.RecordFailure(
 					d.config.CircuitBreakerFailureThreshold,
@@ -558,24 +576,62 @@ func (d *Dispatcher) trackDelivery(delivery *DeliveryMessage, sub *Subscription)
 	shard.mu.Unlock()
 }
 
-// makeDeliveryID creates a delivery ID without fmt.Sprintf allocation.
-func makeDeliveryID(subID string, offset int64) string {
-	buf := make([]byte, 0, len(subID)+20)
-	buf = append(buf, subID...)
-	buf = append(buf, '-')
-	buf = strconv.AppendInt(buf, offset, 10)
-	return string(buf)
+// deliveryMessagePool pools DeliveryMessage structs to eliminate per-dispatch allocations.
+var deliveryMessagePool = sync.Pool{
+	New: func() interface{} {
+		return &DeliveryMessage{}
+	},
 }
 
-// makeDeliveryIDBatch creates a batch delivery ID without fmt.Sprintf allocation.
+// maxDeliveryIDBuf is the on-stack buffer size used to build delivery IDs
+// before copying them into a real string. It is intentionally not a
+// zero-allocation path: the returned string escapes (it is stored as a map key
+// in activeDeliveries and passed to the DLQ), so returning a view into a stack
+// buffer would be a use-after-free.
+const maxDeliveryIDBuf = 128
+
+// makeDeliveryID creates a delivery ID of the form "<subID>-<offset>".
+func makeDeliveryID(subID string, offset int64) string {
+	need := len(subID) + 1 + 20 // subID + '-' + max int64 digits
+	if need <= maxDeliveryIDBuf {
+		var buf [maxDeliveryIDBuf]byte
+		n := copy(buf[:], subID)
+		buf[n] = '-'
+		n++
+		b := strconv.AppendInt(buf[n:n], offset, 10)
+		n += len(b)
+		return string(buf[:n]) // one alloc; the previous unsafe.String here was unsound
+	}
+	b := make([]byte, 0, need)
+	b = append(b, subID...)
+	b = append(b, '-')
+	b = strconv.AppendInt(b, offset, 10)
+	return string(b)
+}
+
+// makeDeliveryIDBatch creates a batch delivery ID of the form
+// "<subID>-batch-<offset>-<count>".
 func makeDeliveryIDBatch(subID string, offset int64, count int) string {
-	buf := make([]byte, 0, len(subID)+30)
-	buf = append(buf, subID...)
-	buf = append(buf, "-batch-"...)
-	buf = strconv.AppendInt(buf, offset, 10)
-	buf = append(buf, '-')
-	buf = strconv.AppendInt(buf, int64(count), 10)
-	return string(buf)
+	need := len(subID) + 7 + 20 + 1 + 10 // subID + "-batch-" + offset + '-' + count
+	if need <= maxDeliveryIDBuf {
+		var buf [maxDeliveryIDBuf]byte
+		n := copy(buf[:], subID)
+		n += copy(buf[n:], "-batch-")
+		b := strconv.AppendInt(buf[n:n], offset, 10)
+		n += len(b)
+		buf[n] = '-'
+		n++
+		b2 := strconv.AppendInt(buf[n:n], int64(count), 10)
+		n += len(b2)
+		return string(buf[:n]) // one alloc; the previous unsafe.String here was unsound
+	}
+	b := make([]byte, 0, need)
+	b = append(b, subID...)
+	b = append(b, "-batch-"...)
+	b = strconv.AppendInt(b, offset, 10)
+	b = append(b, '-')
+	b = strconv.AppendInt(b, int64(count), 10)
+	return string(b)
 }
 
 func (d *Dispatcher) timeoutLoop() {
@@ -639,22 +695,23 @@ func (d *Dispatcher) processRetries(now time.Time) {
 		}
 
 		// Attempt redelivery without sleep
-		retryDelivery := &DeliveryMessage{
-			Event:      active.Delivery.Event,
-			DeliveryID: active.Delivery.DeliveryID,
-			Attempt:    active.Attempt + 1,
-			AckTimeout: active.Delivery.AckTimeout,
-			Batch:      active.Delivery.Batch,
-		}
+		retryDelivery := deliveryMessagePool.Get().(*DeliveryMessage)
+		retryDelivery.Event = active.Delivery.Event
+		retryDelivery.DeliveryID = active.Delivery.DeliveryID
+		retryDelivery.Attempt = active.Attempt + 1
+		retryDelivery.AckTimeout = active.Delivery.AckTimeout
+		retryDelivery.Batch = active.Delivery.Batch
 
 		if !d.tryReserveInFlight(1) {
 			// Re-queue with short backoff to try later
+			deliveryMessagePool.Put(retryDelivery)
 			d.retryHeap.PushEntry(NewRetryEntry(active, time.Second))
 			continue
 		}
 
 		if err := active.Subscription.Stream.Send(retryDelivery); err != nil {
 			if err := d.decInFlight(1); err != nil { log.Printf("[DISPATCHER] in-flight underflow: %v", err) }
+			deliveryMessagePool.Put(retryDelivery)
 			if active.Subscription.circuitBreaker != nil {
 				active.Subscription.circuitBreaker.RecordFailure(
 					d.config.CircuitBreakerFailureThreshold,
@@ -838,15 +895,15 @@ func (d *Dispatcher) sendToDLQ(active *ActiveDelivery, reason string) {
 
 // retryDelivery retries a failed delivery.
 func (d *Dispatcher) retryDelivery(active *ActiveDelivery) error {
-	retryDelivery := &DeliveryMessage{
-		Event:      active.Delivery.Event,
-		DeliveryID: active.Delivery.DeliveryID,
-		Attempt:    active.Attempt + 1,
-		AckTimeout: active.Delivery.AckTimeout,
-		Batch:      active.Delivery.Batch,
-	}
+	retryDelivery := deliveryMessagePool.Get().(*DeliveryMessage)
+	retryDelivery.Event = active.Delivery.Event
+	retryDelivery.DeliveryID = active.Delivery.DeliveryID
+	retryDelivery.Attempt = active.Attempt + 1
+	retryDelivery.AckTimeout = active.Delivery.AckTimeout
+	retryDelivery.Batch = active.Delivery.Batch
 
 	if !d.tryReserveInFlight(1) {
+		deliveryMessagePool.Put(retryDelivery)
 		return fmt.Errorf("in-flight limit exceeded on retry")
 	}
 
@@ -859,12 +916,14 @@ func (d *Dispatcher) retryDelivery(active *ActiveDelivery) error {
 		case <-d.quit:
 			timer.Stop()
 			if err := d.decInFlight(1); err != nil { log.Printf("[DISPATCHER] in-flight underflow: %v", err) }
+			deliveryMessagePool.Put(retryDelivery)
 			return fmt.Errorf("dispatcher closing")
 		}
 	}
 
 	if err := active.Subscription.Stream.Send(retryDelivery); err != nil {
 		if err := d.decInFlight(1); err != nil { log.Printf("[DISPATCHER] in-flight underflow: %v", err) }
+		deliveryMessagePool.Put(retryDelivery)
 		return fmt.Errorf("resend failed: %w", err)
 	}
 
@@ -921,9 +980,9 @@ func (d *Dispatcher) Drain(timeout time.Duration) error {
 	return fmt.Errorf("drain timeout: %d deliveries still active", d.GetStats().ActiveDeliveries)
 }
 
-// Close closes the dispatcher and cleans up all resources.
+// Close closes the dispatcher and cleans up all resources. Safe to call multiple times.
 func (d *Dispatcher) Close() {
-	close(d.quit)
+	d.quitOnce.Do(func() { close(d.quit) })
 	d.wg.Wait()
 
 	for _, shard := range d.shards {

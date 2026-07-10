@@ -1,0 +1,15 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "cronos-db.fullname" . }}
+  labels:
+    {{- include "cronos-db.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "cronos-db.selectorLabels" . | nindent 6 }}
+  # Ensure at least a majority of replicas stay available during disruptions.
+  # For replication factor RF, minAvailable = floor(RF/2) + 1.
+  minAvailable: {{ add (div (int .Values.config.replicationFactor) 2) 1 }}
+{{- end }}

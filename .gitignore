@@ -1,4 +1,6 @@
 .claude
 data
 target
+bin/
 *.dll
+.bench.*.txt

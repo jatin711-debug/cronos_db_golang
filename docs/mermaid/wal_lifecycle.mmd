@@ -1,13 +1,13 @@
 flowchart TB
-    Append[Append request] --> Active[Write active segment]
+    Append[Append request] --> Active[Write active segment<br/>record: data + 8-byte term + 4-byte trailing checksum]
     Active --> Index[Update sparse index]
     Index --> Flush{Fsync mode}
+    Flush -- batch --> BatchFlush[Batch boundary flush<br/>default]
     Flush -- periodic --> TimerFlush[Background flush]
-    Flush -- batch --> BatchFlush[Batch boundary flush]
     Flush -- every_event --> SyncNow[Immediate sync]
     Active --> Rotate{Segment full?}
     Rotate -- yes --> NewSegment[Rotate and create next segment]
     Rotate -- no --> Active
     NewSegment --> Compaction[Compaction by offset or timestamp]
-    Compaction --> Retention[Retention policy]
+    Compaction --> Retention[Retention policy<br/>preserve active segment per partition<br/>delete matching .index files]
     Retention --> Backup[Backup scheduler]

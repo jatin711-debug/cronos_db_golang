@@ -339,11 +339,14 @@ func TestStatus_Values(t *testing.T) {
 	if StatusPrepared != 1 {
 		t.Errorf("expected StatusPrepared=1, got %d", StatusPrepared)
 	}
-	if StatusCommitted != 2 {
-		t.Errorf("expected StatusCommitted=2, got %d", StatusCommitted)
+	if StatusCommitting != 2 {
+		t.Errorf("expected StatusCommitting=2, got %d", StatusCommitting)
 	}
-	if StatusAborted != 3 {
-		t.Errorf("expected StatusAborted=3, got %d", StatusAborted)
+	if StatusCommitted != 3 {
+		t.Errorf("expected StatusCommitted=3, got %d", StatusCommitted)
+	}
+	if StatusAborted != 4 {
+		t.Errorf("expected StatusAborted=4, got %d", StatusAborted)
 	}
 }
 
@@ -353,6 +356,9 @@ func TestStatus_String(t *testing.T) {
 	}
 	if StatusPrepared.String() != "prepared" {
 		t.Errorf("expected prepared, got %s", StatusPrepared.String())
+	}
+	if StatusCommitting.String() != "committing" {
+		t.Errorf("expected committing, got %s", StatusCommitting.String())
 	}
 	if StatusCommitted.String() != "committed" {
 		t.Errorf("expected committed, got %s", StatusCommitted.String())
@@ -443,23 +449,36 @@ func TestCoordinator_RecoverPreparedLocks(t *testing.T) {
 		t.Fatalf("AppendEvent failed: %v", err)
 	}
 
-	// Now register the PM on the coordinator which will run RecoverPreparedLocks
+	// Now register the PM on the coordinator which will run RecoverPreparedLocks.
+	// Note: RecoverPreparedLocks no longer locks partitions here; the lock leak
+	// caused by holding recovered locks forever was fixed. Recovery re-drives
+	// resolution, which acquires locks via the normal acquireLocks path.
 	c.SetPartitionManager(pm)
 
-	// Since it's prepared, the lock should be held on the coordinator
-	// Try to acquire lock in a non-blocking or timed way, but since it is locked, it should block.
-	// We can verify that the lock exists in coordinator's txLocks map
+	// The transaction should be recovered in memory so the recovery loop can
+	// re-drive Commit/Abort (which will acquire locks normally).
+	status, err := c.GetStatus("tx-100")
+	if err != nil {
+		t.Fatalf("GetStatus after recovery failed: %v", err)
+	}
+	if status != StatusPending {
+		// The log record is Pending unless a prepare log was written by the
+		// coordinator. RecoverPreparedLocks only detects the WAL prepare marker
+		// and does not change the in-memory status here.
+		t.Logf("status after recovery: %v", status)
+	}
+
+	// Lock must be acquirable: it was NOT held by RecoverPreparedLocks.
 	c.locksMu.Lock()
 	lock, exists := c.txLocks[0]
 	c.locksMu.Unlock()
 
 	if !exists {
-		t.Fatal("Expected partition lock to exist")
+		// Lock may be lazily created; that's fine.
+		return
 	}
 
-	// Lock should be locked. In Go, sync.Mutex doesn't expose a TryLock or IsLocked method.
-	// But we can check if we can acquire it with a channel timeout, confirming it is indeed locked!
-	lockAcquired := make(chan bool)
+	lockAcquired := make(chan bool, 1)
 	go func() {
 		lock.Lock()
 		lockAcquired <- true
@@ -468,9 +487,9 @@ func TestCoordinator_RecoverPreparedLocks(t *testing.T) {
 
 	select {
 	case <-lockAcquired:
-		t.Error("Expected partition lock to be held, but was able to acquire it")
+		// Lock is not held — correct behavior after the leak fix.
 	case <-time.After(100 * time.Millisecond):
-		// Lock is held, success!
+		t.Error("Expected partition lock to be acquirable after recovery, but it is still held")
 	}
 }
 
@@ -531,5 +550,100 @@ func TestCoordinator_RecoveryBackoff(t *testing.T) {
 	// Commit count should now be 3
 	if commitCount != 3 {
 		t.Errorf("Expected commitCount to be 3 after forcing retry, got %d", commitCount)
+	}
+}
+
+// TestTxLog_AtomicWrite verifies that txLog.write does not leave behind a
+// torn/partial tx_log.json even if the process crashes mid-write. We simulate
+// this by corrupting the temp file before rename; the on-disk log must either
+// be the previous version or the new version, never a partial JSON object.
+func TestTxLog_AtomicWrite(t *testing.T) {
+	tmpDir := t.TempDir()
+	log := newTxLog(tmpDir)
+
+	// Write an initial record.
+	if err := log.write("tx-1", StatusPending, []int32{1}, time.Now()); err != nil {
+		t.Fatalf("initial write failed: %v", err)
+	}
+
+	// Reload and verify it is parseable.
+	log2 := newTxLog(tmpDir)
+	if err := log2.load(); err != nil {
+		t.Fatalf("load after initial write failed: %v", err)
+	}
+	if _, ok := log2.records["tx-1"]; !ok {
+		t.Fatal("tx-1 missing after reload")
+	}
+
+	// Simulate a crash by writing garbage into the temp file path (which the
+	// implementation uses for atomic writes). The temp file must not remain or,
+	// if it does, the real tx_log.json must still be valid.
+	tmpPath := filepath.Join(tmpDir, "tx_log.json.tmp")
+	if err := os.WriteFile(tmpPath, []byte("{not valid json"), 0644); err != nil {
+		t.Fatalf("write fake temp file: %v", err)
+	}
+
+	// A successful write should replace the temp file and the final file must
+	// remain valid.
+	if err := log2.write("tx-2", StatusPrepared, []int32{1, 2}, time.Now()); err != nil {
+		t.Fatalf("second write failed: %v", err)
+	}
+
+	log3 := newTxLog(tmpDir)
+	if err := log3.load(); err != nil {
+		t.Fatalf("load after second write failed: %v", err)
+	}
+	if _, ok := log3.records["tx-1"]; !ok {
+		t.Error("tx-1 missing after atomic write")
+	}
+	if _, ok := log3.records["tx-2"]; !ok {
+		t.Error("tx-2 missing after atomic write")
+	}
+}
+
+// TestCoordinator_PartialCommit_StaysCommitting verifies that a Commit with
+// a partial participant failure transitions to StatusCommitting and persists
+// that state, rather than marking the transaction Committed (which would make
+// recovery ignore it).
+func TestCoordinator_PartialCommit_StaysCommitting(t *testing.T) {
+	tmpDir := t.TempDir()
+	c := NewCoordinator(30*time.Second, tmpDir)
+	defer c.Stop()
+
+	commitCalled := 0
+	participants := []Participant{
+		&mockParticipant{onCommit: func() error { commitCalled++; return nil }},
+		&mockParticipant{onCommit: func() error { return fmt.Errorf("disk full") }},
+	}
+
+	if _, err := c.Begin("tx-partial", participants); err != nil {
+		t.Fatalf("Begin failed: %v", err)
+	}
+	ctx := context.Background()
+	if err := c.Prepare(ctx, "tx-partial"); err != nil {
+		t.Fatalf("Prepare failed: %v", err)
+	}
+
+	err := c.Commit(ctx, "tx-partial")
+	if err == nil {
+		t.Fatal("expected partial commit to return error")
+	}
+
+	status, _ := c.GetStatus("tx-partial")
+	if status != StatusCommitting {
+		t.Errorf("expected StatusCommitting after partial commit, got %v", status)
+	}
+
+	// The on-disk log must also be "committing" so a restart will re-drive.
+	log := newTxLog(tmpDir)
+	if err := log.load(); err != nil {
+		t.Fatalf("load log: %v", err)
+	}
+	rec, ok := log.records["tx-partial"]
+	if !ok {
+		t.Fatal("tx-partial missing from log after partial commit")
+	}
+	if rec.Status != StatusCommitting.String() {
+		t.Errorf("expected log status 'committing', got %s", rec.Status)
 	}
 }

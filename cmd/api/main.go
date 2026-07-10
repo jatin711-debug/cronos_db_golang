@@ -19,6 +19,7 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/internal/cluster"
 	"github.com/jatin711-debug/cronos_db_golang/internal/compliance"
 	"github.com/jatin711-debug/cronos_db_golang/internal/config"
+	"github.com/jatin711-debug/cronos_db_golang/internal/metrics"
 	"github.com/jatin711-debug/cronos_db_golang/internal/partition"
 	"github.com/jatin711-debug/cronos_db_golang/internal/replication"
 	"github.com/jatin711-debug/cronos_db_golang/internal/schema"
@@ -28,6 +29,7 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/internal/tracing"
 	"github.com/jatin711-debug/cronos_db_golang/internal/tx"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 
 	"github.com/cockroachdb/pebble"
 	"github.com/prometheus/client_golang/prometheus"
@@ -45,6 +47,13 @@ func main() {
 		slog.Error("Failed to load config", "error", err)
 		os.Exit(1)
 	}
+
+	slog.Info("Configuration loaded",
+		"auth_enabled", cfg.AuthEnabled,
+		"auth_jwt_secret_set", cfg.AuthJWTSecret != "",
+		"auth_policy_file", cfg.AuthPolicyFile,
+		"auth_explicitly_disabled_by_flag", !cfg.AuthEnabled,
+	)
 
 	// Wrap config for hot reload
 	reloadableCfg := config.NewReloadableConfig(cfg)
@@ -159,10 +168,10 @@ func main() {
 
 	// Start compliance retention enforcer
 	retentionEnforcer := compliance.NewEnforcer(cfg.DataDir, compliance.RetentionPolicy{
-		MaxAge:       30 * 24 * time.Hour,
-		MaxSizeBytes: 100 << 30, // 100GB
+		MaxAge:       time.Duration(cfg.RetentionMaxAgeHours) * time.Hour,
+		MaxSizeBytes: cfg.RetentionMaxSizeGB << 30,
 	})
-	go func() {
+	utils.GoSafe("retention-enforcer", func() {
 		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()
 		for range ticker.C {
@@ -170,7 +179,7 @@ func main() {
 				slog.Warn("Retention enforcement failed", "error", err)
 			}
 		}
-	}()
+	})
 
 	// Create cluster manager (if enabled)
 	var clusterMgr *cluster.Manager
@@ -337,7 +346,11 @@ func main() {
 	grpcConfig.TopicRateLimiter = topicRateLimiter
 	grpcConfig.SLORecorder = sloRecorder
 
-	grpcServer := api.NewGRPCServer(grpcConfig)
+	grpcServer, err := api.NewGRPCServer(grpcConfig)
+	if err != nil {
+		slog.Error("Failed to create gRPC server", "error", err)
+		os.Exit(1)
+	}
 
 	// Create event service handler
 	var eventHandler *api.EventServiceHandler
@@ -367,6 +380,11 @@ func main() {
 	// Wire cluster router for partition-aware request routing
 	if clusterMgr != nil {
 		eventHandler.SetClusterRouter(clusterMgr)
+	}
+
+	// Wire topic-level RBAC policy (nil when auth is disabled)
+	if authConfig != nil {
+		eventHandler.SetAuthPolicy(authConfig.Policy)
 	}
 
 	// Create consumer group service handler
@@ -417,6 +435,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Propagate unexpected gRPC server exits as fatal.
+	utils.GoSafe("grpc-serve-monitor", func() {
+		if err := <-grpcServer.ServeError(); err != nil {
+			slog.Error("gRPC server exited unexpectedly", "error", err)
+			os.Exit(1)
+		}
+	})
+
 	// Health check endpoint with cluster status
 	mux := http.NewServeMux()
 
@@ -430,13 +456,21 @@ func main() {
 		Handler: mux,
 	}
 
-	go func() {
+	healthErr := make(chan error, 1)
+	utils.GoSafe("health-server", func() {
 		slog.Info("Starting health check server", "address", cfg.HTTPAddress)
 		if err := healthServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			slog.Error("Failed to start health server", "error", err)
+			healthErr <- err
+		}
+	})
+
+	// Fail fast if the health server cannot bind or starts serving errors.
+	utils.GoSafe("health-start-monitor", func() {
+		if err := <-healthErr; err != nil {
+			slog.Error("Health server failed", "error", err)
 			os.Exit(1)
 		}
-	}()
+	})
 
 	// Start auto-scaler with real system metrics
 	autoScaler := cluster.NewAutoScaler(cluster.NewSystemMetrics(cfg.DataDir))
@@ -456,7 +490,7 @@ func main() {
 		statsPrintInterval = 30 * time.Second
 	}
 
-	go func() {
+	utils.GoSafe("stats-printer", func() {
 		ticker := time.NewTicker(statsPrintInterval)
 		defer ticker.Stop()
 
@@ -474,7 +508,7 @@ func main() {
 
 					if p.Scheduler != nil {
 						schedulerStats := p.Scheduler.GetStats()
-						api.SetTimingWheelMetrics(partitionLabel, schedulerStats.ActiveTimers, int64(schedulerStats.OverflowLevel))
+						metrics.SetTimingWheelMetrics(partitionLabel, schedulerStats.ActiveTimers, int64(schedulerStats.OverflowLevel))
 					}
 
 					if p.Wal != nil {
@@ -482,7 +516,7 @@ func main() {
 						if activeSegment := p.Wal.GetActiveSegment(); activeSegment != nil {
 							activeSegmentSize = activeSegment.GetSize()
 						}
-						api.SetWALMetrics(partitionLabel, len(p.Wal.GetSegments()), activeSegmentSize, p.Wal.GetHighWatermark())
+						metrics.SetWALMetrics(partitionLabel, len(p.Wal.GetSegments()), activeSegmentSize, p.Wal.GetHighWatermark())
 					}
 
 					if p.DedupStore != nil {
@@ -492,7 +526,7 @@ func main() {
 							if totalBloomPositives > 0 {
 								falsePositiveRate = float64(dedupStats.BloomFalsePositives) / float64(totalBloomPositives)
 							}
-							api.SetDedupMetrics(partitionLabel, dedupStats.BloomMemoryBytes, falsePositiveRate, dedupStats.PebbleHits)
+							metrics.SetDedupMetrics(partitionLabel, dedupStats.BloomMemoryBytes, falsePositiveRate, dedupStats.PebbleHits)
 						}
 					}
 
@@ -502,7 +536,26 @@ func main() {
 						if p.Worker != nil {
 							workerQueueDepth = p.Worker.GetStats().QueueLength
 						}
-						api.SetDeliveryMetrics(partitionLabel, dispatcherStats.ActiveDeliveries, dispatcherStats.CreditsInUse, workerQueueDepth)
+						metrics.SetDeliveryMetrics(partitionLabel, dispatcherStats.ActiveDeliveries, dispatcherStats.CreditsInUse, workerQueueDepth)
+					}
+
+					if p.ConsumerGroup != nil && p.Wal != nil {
+						hwm := p.Wal.GetHighWatermark()
+						for _, group := range p.ConsumerGroup.ListGroups() {
+							var lag int64
+							for _, part := range group.Partitions {
+								committed := group.CommittedOffsets[part]
+								if committed < 0 {
+									committed = -1
+								}
+								partLag := hwm - committed
+								if partLag < 0 {
+									partLag = 0
+								}
+								lag += partLag
+								metrics.SetConsumerGroupMetrics(group.GroupID, strconv.FormatInt(int64(part), 10), partLag, len(group.Members))
+							}
+						}
 					}
 				}
 
@@ -510,7 +563,7 @@ func main() {
 				slog.Info("Stats", "stats", stats)
 				if cfg.ClusterEnabled && clusterMgr != nil {
 					clusterStats := clusterMgr.GetStats()
-					api.SetClusterMetrics(
+					metrics.SetClusterMetrics(
 						int64(clusterStats.TotalNodes),
 						int64(clusterStats.AliveNodes),
 						int64(clusterStats.NumPartitions),
@@ -518,47 +571,76 @@ func main() {
 					)
 					slog.Info("Cluster Stats", "stats", clusterStats)
 				} else {
-					api.SetClusterMetrics(1, 1, stats.TotalPartitions, stats.LeaderPartitions)
+					metrics.SetClusterMetrics(1, 1, stats.TotalPartitions, stats.LeaderPartitions)
 				}
 			case <-ctx.Done():
 				return
 			}
 		}
-	}()
+	})
 
 	// Wait for shutdown signal
 	<-sigChan
-	slog.Info("Shutting down...")
-	cancel() // Stop background tasks
+	slog.Info("Shutting down...", "node_id", cfg.NodeID)
+	cancel() // Stop background tasks (stats, etc.)
 
-	// 1. Graceful gRPC shutdown: stop accepting new requests but finish in-flight RPCs
-	grpcShutdownCtx, grpcShutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer grpcShutdownCancel()
-	go func() {
-		<-grpcShutdownCtx.Done()
-		grpcServer.Stop() // Force stop if graceful takes too long
-	}()
-	grpcServer.GracefulStop()
+	// Create an overall shutdown context with generous timeout
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer shutdownCancel()
 
-	// 2. Shutdown health server
-	healthShutdownCtx, healthShutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer healthShutdownCancel()
-	if err := healthServer.Shutdown(healthShutdownCtx); err != nil {
-		slog.Error("Health server shutdown error", "error", err)
-	}
+	shutdownDone := make(chan struct{})
+	utils.GoSafe("shutdown", func() {
+		defer close(shutdownDone)
 
-	// 3. Stop all partitions gracefully (drains in-flight deliveries, flushes WAL)
-	slog.Info("Stopping all partitions...")
-	if err := pm.StopAllPartitions(); err != nil {
-		slog.Error("Failed to cleanly stop all partitions", "error", err)
-	}
+		// 1. Stop accepting NEW requests first (drain phase)
+		slog.Info("Shutdown phase 1: Draining incoming requests...")
+		grpcDrainCtx, grpcDrainCancel := context.WithTimeout(shutdownCtx, 25*time.Second)
+		defer grpcDrainCancel()
+		grpcServer.GracefulStopWithTimeout(grpcDrainCtx) // stop accepting new gRPC connections
 
-	// 4. Shutdown cluster manager
-	if clusterMgr != nil {
-		if err := clusterMgr.Stop(); err != nil {
-			slog.Error("Failed to stop cluster manager", "error", err)
+		// 2. Shutdown health server to stop new HTTP health checks
+		healthShutdownCtx, healthShutdownCancel := context.WithTimeout(shutdownCtx, 5*time.Second)
+		defer healthShutdownCancel()
+		if err := healthServer.Shutdown(healthShutdownCtx); err != nil {
+			slog.Warn("Health server shutdown error", "error", err)
 		}
-	}
 
-	slog.Info("Shutdown complete")
+		// 3. Stop all partitions gracefully (drains in-flight deliveries, flushes WAL)
+		slog.Info("Shutdown phase 2: Stopping partitions (draining deliveries, flushing WAL)...")
+		if err := pm.StopAllPartitions(); err != nil {
+			slog.Error("Failed to cleanly stop all partitions", "error", err)
+		}
+
+		// 4. Shutdown cluster manager
+		if clusterMgr != nil {
+			slog.Info("Shutdown phase 3: Stopping cluster manager...")
+			if err := clusterMgr.Stop(); err != nil {
+				slog.Error("Failed to stop cluster manager", "error", err)
+			}
+		}
+
+		// 5. Final WAL flush for all partitions (extra safety)
+		slog.Info("Shutdown phase 4: Final WAL flush...")
+		for i := int32(0); i < int32(cfg.PartitionCount); i++ {
+			p, err := pm.GetInternalPartition(i)
+			if err != nil || p == nil || p.Wal == nil {
+				continue
+			}
+			if err := p.Wal.Flush(); err != nil {
+				slog.Warn("Final WAL flush failed", "partition", i, "error", err)
+			}
+		}
+
+		slog.Info("Shutdown complete", "node_id", cfg.NodeID)
+	})
+
+	// Wait for shutdown or timeout
+	select {
+	case <-shutdownDone:
+		slog.Info("Graceful shutdown completed successfully")
+	case <-shutdownCtx.Done():
+		slog.Error("Shutdown timed out after 60s, forcing exit")
+		// Force stop gRPC if still running
+		grpcServer.Stop()
+	}
 }

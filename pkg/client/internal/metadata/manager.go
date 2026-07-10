@@ -11,6 +11,7 @@ import (
 
 	"github.com/jatin711-debug/cronos_db_golang/pkg/client/internal/connpool"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 )
 
 // Config controls metadata refresh behavior.
@@ -56,7 +57,7 @@ func NewManager(pool *connpool.Pool, cfg Config) *Manager {
 // Start starts background metadata refresh loop.
 func (m *Manager) Start(ctx context.Context) {
 	m.wg.Add(1)
-	go func() {
+	utils.GoSafe("metadata-refresh", func() {
 		defer m.wg.Done()
 		ticker := time.NewTicker(m.cfg.RefreshInterval)
 		defer ticker.Stop()
@@ -73,7 +74,7 @@ func (m *Manager) Start(ctx context.Context) {
 				cancel()
 			}
 		}
-	}()
+	})
 }
 
 // Close stops background workers.

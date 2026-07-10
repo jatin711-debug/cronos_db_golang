@@ -175,7 +175,7 @@ func TestSegment_Encryption(t *testing.T) {
 	for i := range key {
 		key[i] = byte(i)
 	}
-	cipher, err := NewSegmentCipher(key)
+	cipher, err := NewSegmentCipher(key, 0)
 	if err != nil {
 		t.Fatalf("NewSegmentCipher failed: %v", err)
 	}
@@ -246,6 +246,100 @@ func TestSegment_OpenExisting(t *testing.T) {
 	}
 }
 
+// TestSegment_IndexTruncatedOnRecovery is a regression test: when scan()
+// truncates a corrupt segment tail, the sparse index must be reconciled so it
+// no longer contains entries whose FilePosition points past the new (shorter)
+// segment EOF. Without the fix in scan(), FindByOffset can hand back a
+// position into the truncated region and reads return garbage.
+func TestSegment_IndexTruncatedOnRecovery(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Build a segment with 5 events, indexing every event (interval=1) so the
+	// index has one entry per event at offsets 0..4.
+	seg, err := NewSegment(tmpDir, 0, true, nil)
+	if err != nil {
+		t.Fatalf("NewSegment failed: %v", err)
+	}
+	for i := 0; i < 5; i++ {
+		if err := seg.AppendEvent(makeEvent(int64(i), fmt.Sprintf("idx-%d", i), "idx-topic"), 1); err != nil {
+			t.Fatalf("AppendEvent %d failed: %v", i, err)
+		}
+	}
+	filename := seg.GetFilename()
+	seg.Flush()
+	seg.Close()
+
+	// Corrupt the tail: truncate the segment file to remove the last 2 events
+	// worth of bytes and write garbage. First find where event 3 starts.
+	// We reopen to find offsets, then corrupt the file directly.
+	segPath := filepath.Join(tmpDir, "segments", filename)
+	stat, err := os.Stat(segPath)
+	if err != nil {
+		t.Fatalf("stat segment: %v", err)
+	}
+	origSize := stat.Size()
+
+	// Determine the byte position of event offset 3 by reading back via a
+	// clean open, then truncate the file just past offset 2 and append junk.
+	clean, err := OpenSegment(tmpDir, filename, nil)
+	if err != nil {
+		t.Fatalf("OpenSegment clean: %v", err)
+	}
+	pos, found := clean.index.FindByOffset(3)
+	cleanSize := clean.sizeBytes
+	clean.Close()
+	if !found {
+		t.Fatalf("expected index entry for offset 3")
+	}
+	// Truncate to remove events 3 and 4, then write a corrupt partial record
+	// so scan() treats it as a truncated tail.
+	truncateAt := pos
+	if err := os.Truncate(segPath, truncateAt); err != nil {
+		t.Fatalf("truncate segment: %v", err)
+	}
+	// Append a junk partial record (bad length) to force scan to stop here.
+	f, err := os.OpenFile(segPath, os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		t.Fatalf("open segment for junk: %v", err)
+	}
+	junk := []byte{0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x01, 0x02} // impossible length + garbage
+	if _, err := f.Write(junk); err != nil {
+		f.Close()
+		t.Fatalf("write junk: %v", err)
+	}
+	f.Close()
+
+	_ = origSize
+	_ = cleanSize
+
+	// Reopen: scan() should detect the corrupt tail, truncate the segment, and
+	// — with the fix — also truncate the index so no entry points past EOF.
+	recovered, err := OpenSegment(tmpDir, filename, nil)
+	if err != nil {
+		t.Fatalf("OpenSegment after corruption failed: %v", err)
+	}
+	defer recovered.Close()
+
+	// Last good offset must be 2 (events 3 and 4 were removed).
+	if recovered.GetLastOffset() != 2 {
+		t.Fatalf("expected last offset 2 after recovery, got %d", recovered.GetLastOffset())
+	}
+
+	// The index must not contain any entry past the recovered segment size.
+	for _, e := range recovered.index.GetEntries() {
+		if e.FilePosition > recovered.sizeBytes {
+			t.Errorf("stale index entry: offset=%d filePos=%d > segmentSize=%d (index not truncated on recovery)",
+				e.Offset, e.FilePosition, recovered.sizeBytes)
+		}
+	}
+	// And FindByOffset must not hand back a position past EOF for a high offset.
+	if pos, found := recovered.index.FindByOffset(4); found {
+		if pos > recovered.sizeBytes {
+			t.Errorf("FindByOffset(4) returned filePos=%d past segmentSize=%d", pos, recovered.sizeBytes)
+		}
+	}
+}
+
 func TestSegment_OpenExistingWithEncryption(t *testing.T) {
 	tmpDir := t.TempDir()
 
@@ -253,7 +347,7 @@ func TestSegment_OpenExistingWithEncryption(t *testing.T) {
 	for i := range key {
 		key[i] = byte(i)
 	}
-	cipher, _ := NewSegmentCipher(key)
+	cipher, _ := NewSegmentCipher(key, 0)
 
 	// Create encrypted segment
 	seg1, err := NewSegment(tmpDir, 0, true, cipher)
@@ -480,6 +574,62 @@ func TestSegment_Header(t *testing.T) {
 	}
 }
 
+func TestSegment_InvalidHeaderRejected(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create a valid segment.
+	seg, err := NewSegment(tmpDir, 0, true, nil)
+	if err != nil {
+		t.Fatalf("NewSegment failed: %v", err)
+	}
+	seg.Flush()
+	seg.Close()
+
+	// Corrupt the header magic.
+	filePath := filepath.Join(tmpDir, "segments", seg.GetFilename())
+	f, err := os.OpenFile(filePath, os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatalf("open file for corruption: %v", err)
+	}
+	if _, err := f.WriteAt([]byte("BADHDR"), 0); err != nil {
+		t.Fatalf("write corrupt header: %v", err)
+	}
+	f.Close()
+
+	// Reopen should fail because the header is invalid.
+	if _, err := OpenSegment(tmpDir, seg.GetFilename(), nil); err == nil {
+		t.Fatal("expected OpenSegment to fail with invalid header, got nil")
+	}
+}
+
+func TestSegment_HeaderCRCMismatchRejected(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create a valid segment.
+	seg, err := NewSegment(tmpDir, 0, true, nil)
+	if err != nil {
+		t.Fatalf("NewSegment failed: %v", err)
+	}
+	seg.Flush()
+	seg.Close()
+
+	// Corrupt the version byte (offset 7) without touching the CRC.
+	filePath := filepath.Join(tmpDir, "segments", seg.GetFilename())
+	f, err := os.OpenFile(filePath, os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatalf("open file for corruption: %v", err)
+	}
+	if _, err := f.WriteAt([]byte{0xFF}, 7); err != nil {
+		t.Fatalf("write corrupt version byte: %v", err)
+	}
+	f.Close()
+
+	// Reopen should fail because the header CRC no longer matches.
+	if _, err := OpenSegment(tmpDir, seg.GetFilename(), nil); err == nil {
+		t.Fatal("expected OpenSegment to fail with header CRC mismatch, got nil")
+	}
+}
+
 // makeEvent is a test helper to create a types.Event
 func makeEvent(offset int64, msgID string, topic string) *types.Event {
 	return &types.Event{
@@ -518,6 +668,7 @@ func BenchmarkSegment_AppendEvent(b *testing.B) {
 func BenchmarkSegment_ReadEvent(b *testing.B) {
 	tmpDir := b.TempDir()
 	seg, _ := NewSegment(tmpDir, 0, true, nil)
+	defer seg.Close()
 
 	// Populate
 	for i := 0; i < 1000; i++ {
@@ -546,7 +697,7 @@ func BenchmarkSegment_EncryptDecrypt(b *testing.B) {
 	for i := range key {
 		key[i] = byte(i)
 	}
-	cipher, _ := NewSegmentCipher(key)
+	cipher, _ := NewSegmentCipher(key, 0)
 	plaintext := make([]byte, 4096)
 	for i := range plaintext {
 		plaintext[i] = byte(i % 256)

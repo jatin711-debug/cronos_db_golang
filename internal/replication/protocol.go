@@ -179,21 +179,18 @@ type AppendEntriesMessage struct {
 	PrevLogIndex int64
 	PrevLogTerm  int64
 	CommitIndex  int64
+	Checksum     uint32
 	Events       []*types.Event
 }
 
 func (m *AppendEntriesMessage) Encode() ([]byte, error) {
-	// Custom binary encoding for speed, or protobuf?
-	// Using protobuf for Events is easiest as they are already proto structs.
-	// But let's wrap the whole thing in a proto for simplicity of implementation
-	// given we have `types.Event`.
-
-	// Create a wrapper proto
 	req := &types.ReplicationAppendRequest{
 		PartitionId:        m.PartitionId,
 		Events:             m.Events,
-		ExpectedNextOffset: m.PrevLogIndex + 1, // Approximation
+		ExpectedNextOffset: m.PrevLogIndex + 1,
 		Term:               m.Term,
+		PrevLogTerm:        m.PrevLogTerm,
+		Checksum:           m.Checksum,
 	}
 	return proto.Marshal(req)
 }
@@ -206,21 +203,26 @@ func (m *AppendEntriesMessage) Decode(data []byte) error {
 	m.PartitionId = req.PartitionId
 	m.Term = req.Term
 	m.Events = req.Events
-	m.PrevLogIndex = req.ExpectedNextOffset - 1 // Approximation
+	m.PrevLogIndex = req.ExpectedNextOffset - 1
+	m.PrevLogTerm = req.PrevLogTerm
+	m.Checksum = req.Checksum
 	return nil
 }
 
 // AppendAckMessage
 type AppendAckMessage struct {
-	Term    int64
-	Success bool
-	Offset  int64
+	Term       int64
+	Success    bool
+	Offset     int64
+	NextOffset int64
 }
 
 func (m *AppendAckMessage) Encode() ([]byte, error) {
 	resp := &types.ReplicationAppendResponse{
 		Success:    m.Success,
 		LastOffset: m.Offset,
+		NextOffset: m.NextOffset,
+		Term:       m.Term,
 	}
 	return proto.Marshal(resp)
 }
@@ -232,6 +234,31 @@ func (m *AppendAckMessage) Decode(data []byte) error {
 	}
 	m.Success = resp.Success
 	m.Offset = resp.LastOffset
+	m.NextOffset = resp.NextOffset
+	m.Term = resp.Term
+	return nil
+}
+
+// HeartbeatMessage keeps the leader-follower connection alive and carries the
+// leader's current term and commit index so followers can detect stale leaders.
+type HeartbeatMessage struct {
+	Term        int64
+	CommitIndex int64
+}
+
+func (m *HeartbeatMessage) Encode() ([]byte, error) {
+	buf := make([]byte, 16)
+	binary.BigEndian.PutUint64(buf[0:8], uint64(m.Term))
+	binary.BigEndian.PutUint64(buf[8:16], uint64(m.CommitIndex))
+	return buf, nil
+}
+
+func (m *HeartbeatMessage) Decode(data []byte) error {
+	if len(data) < 16 {
+		return fmt.Errorf("HeartbeatMessage: data too short")
+	}
+	m.Term = int64(binary.BigEndian.Uint64(data[0:8]))
+	m.CommitIndex = int64(binary.BigEndian.Uint64(data[8:16]))
 	return nil
 }
 
@@ -258,14 +285,29 @@ func (m *FileTransferRequestMessage) Decode(data []byte) error {
 
 // FileTransferStartMessage indicates start of file transfer
 type FileTransferStartMessage struct {
-	Filename string
-	FileSize int64
+	Filename        string
+	FileSize        int64
+	Epoch           int64
+	StartOffset     int64
+	EndOffset       int64
+	SegmentChecksum uint32
 }
 
 func (m *FileTransferStartMessage) Encode() ([]byte, error) {
-	buf := make([]byte, 8+len(m.Filename))
-	binary.BigEndian.PutUint64(buf[0:8], uint64(len(m.Filename)))
-	copy(buf[8:], m.Filename)
+	nameLen := len(m.Filename)
+	buf := make([]byte, 8+nameLen+8*4+4)
+	binary.BigEndian.PutUint64(buf[0:8], uint64(nameLen))
+	copy(buf[8:8+nameLen], m.Filename)
+	off := 8 + nameLen
+	binary.BigEndian.PutUint64(buf[off:off+8], uint64(m.FileSize))
+	off += 8
+	binary.BigEndian.PutUint64(buf[off:off+8], uint64(m.Epoch))
+	off += 8
+	binary.BigEndian.PutUint64(buf[off:off+8], uint64(m.StartOffset))
+	off += 8
+	binary.BigEndian.PutUint64(buf[off:off+8], uint64(m.EndOffset))
+	off += 8
+	binary.BigEndian.PutUint32(buf[off:off+4], m.SegmentChecksum)
 	return buf, nil
 }
 
@@ -274,11 +316,20 @@ func (m *FileTransferStartMessage) Decode(data []byte) error {
 		return fmt.Errorf("FileTransferStartMessage: data too short")
 	}
 	nameLen := int(binary.BigEndian.Uint64(data[0:8]))
-	if len(data) < 8+nameLen {
-		return fmt.Errorf("FileTransferStartMessage: data too short for filename")
+	if len(data) < 8+nameLen+8*4+4 {
+		return fmt.Errorf("FileTransferStartMessage: data too short for fields")
 	}
 	m.Filename = string(data[8 : 8+nameLen])
-	m.FileSize = int64(binary.BigEndian.Uint64(data[8+nameLen:]))
+	off := 8 + nameLen
+	m.FileSize = int64(binary.BigEndian.Uint64(data[off : off+8]))
+	off += 8
+	m.Epoch = int64(binary.BigEndian.Uint64(data[off : off+8]))
+	off += 8
+	m.StartOffset = int64(binary.BigEndian.Uint64(data[off : off+8]))
+	off += 8
+	m.EndOffset = int64(binary.BigEndian.Uint64(data[off : off+8]))
+	off += 8
+	m.SegmentChecksum = binary.BigEndian.Uint32(data[off : off+4])
 	return nil
 }
 
@@ -298,20 +349,30 @@ func (m *FileTransferDataMessage) Decode(data []byte) error {
 
 // FileTransferEndMessage indicates end of file transfer
 type FileTransferEndMessage struct {
-	Success bool
+	Success      bool
+	Epoch        int64
+	LastOffset   int64
+	FileChecksum uint32
 }
 
 func (m *FileTransferEndMessage) Encode() ([]byte, error) {
+	buf := make([]byte, 1+8+8+4)
 	if m.Success {
-		return []byte{1}, nil
+		buf[0] = 1
 	}
-	return []byte{0}, nil
+	binary.BigEndian.PutUint64(buf[1:9], uint64(m.Epoch))
+	binary.BigEndian.PutUint64(buf[9:17], uint64(m.LastOffset))
+	binary.BigEndian.PutUint32(buf[17:21], m.FileChecksum)
+	return buf, nil
 }
 
 func (m *FileTransferEndMessage) Decode(data []byte) error {
-	if len(data) < 1 {
+	if len(data) < 21 {
 		return fmt.Errorf("FileTransferEndMessage: data too short")
 	}
 	m.Success = data[0] != 0
+	m.Epoch = int64(binary.BigEndian.Uint64(data[1:9]))
+	m.LastOffset = int64(binary.BigEndian.Uint64(data[9:17]))
+	m.FileChecksum = binary.BigEndian.Uint32(data[17:21])
 	return nil
 }

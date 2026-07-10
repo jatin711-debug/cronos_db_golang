@@ -8,18 +8,24 @@ import (
 )
 
 // IsRetryable reports whether an RPC error is transient/retryable.
+// Non-gRPC errors are treated as non-retryable by default so that application-level
+// failures (serialization, validation, etc.) fail fast instead of being retried.
 func IsRetryable(err error) bool {
 	if err == nil {
 		return false
 	}
 	st, ok := status.FromError(err)
 	if !ok {
-		return true
+		return false
 	}
 
 	switch st.Code() {
-	case codes.Unavailable, codes.DeadlineExceeded, codes.ResourceExhausted, codes.Aborted:
+	case codes.Unavailable, codes.DeadlineExceeded, codes.Aborted:
 		return true
+	case codes.ResourceExhausted:
+		// ResourceExhausted typically indicates tenant quota exhaustion.
+		// Retry amplifies the problem; callers should back off or shed load.
+		return false
 	default:
 		return false
 	}
@@ -32,12 +38,17 @@ func IsLeaderRelated(err error) bool {
 	}
 	st, ok := status.FromError(err)
 	if ok && (st.Code() == codes.FailedPrecondition || st.Code() == codes.Unavailable) {
-		msg := strings.ToLower(st.Message())
-		return strings.Contains(msg, "leader") || strings.Contains(msg, "partition")
+		return IsLeaderRelatedMessage(st.Message())
 	}
 	if ok {
 		return false
 	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "leader") || strings.Contains(msg, "partition")
+	return IsLeaderRelatedMessage(err.Error())
+}
+
+// IsLeaderRelatedMessage reports whether a raw error message contains wording
+// that suggests the request was sent to the wrong node (e.g. stale leader metadata).
+func IsLeaderRelatedMessage(message string) bool {
+	m := strings.ToLower(message)
+	return strings.Contains(m, "leader") || strings.Contains(m, "partition")
 }

@@ -15,8 +15,12 @@ const (
 	// WAL configuration
 	DefaultSegmentSizeBytes = 536870912 // 512MB
 	DefaultIndexInterval    = 1000
-	DefaultFsyncMode        = "periodic"
+	DefaultFsyncMode        = "batch"
 	DefaultFlushIntervalMS  = 1000
+
+	// Retention configuration
+	DefaultRetentionMaxAgeHours = 168 // 7 days
+	DefaultRetentionMaxSizeGB   = 0   // Disabled by default
 
 	// Scheduler configuration
 	DefaultTickMS    = 100
@@ -33,6 +37,11 @@ const (
 
 	// Replication configuration
 	DefaultReplicationBatchSize = 100
+	// DefaultMinInSyncReplicas is the minimum ISR size (including leader) for a
+	// write to be acknowledged as durable. 1 preserves the historical behavior
+	// (leader-only is sufficient). Raise it (e.g. RF=3, minISR=2) to refuse
+	// writes when the cluster degrades below a majority.
+	DefaultMinInSyncReplicas = 1
 
 	// Raft configuration
 	DefaultRaftDir      = "./raft"
@@ -91,4 +100,12 @@ const (
 	// Topic rate limiting (0 = disabled)
 	DefaultTopicRateLimitPerSecond = 0.0
 	DefaultTopicRateLimitBurst     = 0.0
+
+	// Memory-based backpressure (0 = disabled)
+	DefaultMaxMemoryUsagePercent = 0.0 // Disabled by default
+	DefaultMemoryCheckIntervalMs = 5000 // 5 seconds
+
+	// Ingest rate limiting per partition (0 = disabled)
+	DefaultMaxIngestRatePerPartition = 0 // Unlimited by default
+	DefaultIngestRateBurstSize         = 0
 )

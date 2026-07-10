@@ -18,7 +18,8 @@ sequenceDiagram
       API-->>Producer: duplicate error
     else new event
       Dedup-->>API: duplicate=false
-      API->>WAL: Append event and assign offset
+      API->>WAL: Stamp Raft term + trailing checksum
+      WAL-->>API: offset assigned
       API->>Scheduler: Schedule by schedule_ts
       API-->>Producer: success with offset
     end

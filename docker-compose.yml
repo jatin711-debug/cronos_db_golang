@@ -12,6 +12,18 @@ services:
       dockerfile: Dockerfile
     container_name: cronos-single
     image: cronos-db:latest
+    command:
+      - --dev
+      - --data-dir=/data
+      - --fsync-mode=periodic
+      - --flush-interval=50
+      - --index-interval=4096
+      - --segment-size=1073741824
+      - --partition-count=16
+      - --replication-factor=1
+      - --virtual-nodes=2048
+      - --max-credits=50000
+      - --ack-timeout=60s
     ports:
       - "9000:9000"   # gRPC
       - "8080:8080"   # HTTP health
@@ -29,7 +41,7 @@ services:
       - CRONOS_TRACING_SAMPLE_RATIO=${CRONOS_TRACING_SAMPLE_RATIO:-0.01}
       - CRONOS_TRACING_INSECURE=${CRONOS_TRACING_INSECURE:-true}
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 30s
       timeout: 3s
       retries: 3
@@ -43,6 +55,21 @@ services:
       dockerfile: Dockerfile
     container_name: cronos-node1
     image: cronos-db:latest
+    command:
+      - --dev
+      - --data-dir=/data
+      - --node-id=node1
+      - --cluster
+      - --cluster-seeds=
+      - --fsync-mode=periodic
+      - --flush-interval=50
+      - --index-interval=4096
+      - --segment-size=1073741824
+      - --partition-count=16
+      - --replication-factor=1
+      - --virtual-nodes=2048
+      - --max-credits=50000
+      - --ack-timeout=60s
     ports:
       - "9000:9000"   # gRPC
       - "8080:8080"   # HTTP health
@@ -57,23 +84,16 @@ services:
       - CRONOS_GRPC_ADDR=0.0.0.0:9000
       - CRONOS_HTTP_ADDR=0.0.0.0:8080
       - CRONOS_CLUSTER=true
-      - CRONOS_CLUSTER_SEEDS=
-      - CRONOS_PARTITION_COUNT=8
-      - CRONOS_TICK_MS=100
-      - CRONOS_WHEEL_SIZE=60
       - CRONOS_TRACING_ENABLED=${CRONOS_TRACING_ENABLED:-false}
       - CRONOS_TRACING_EXPORTER=${CRONOS_TRACING_EXPORTER:-otlp}
       - CRONOS_TRACING_OTLP_ENDPOINT=${CRONOS_TRACING_OTLP_ENDPOINT:-otel-collector:4317}
       - CRONOS_TRACING_SAMPLE_RATIO=${CRONOS_TRACING_SAMPLE_RATIO:-0.01}
       - CRONOS_TRACING_INSECURE=${CRONOS_TRACING_INSECURE:-true}
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 30s
       timeout: 3s
       retries: 3
-    depends_on:
-      - cronos-node2
-      - cronos-node3
 
   # ---------------------------------------------------------------------------
   # Cluster Node 2 (Follower)
@@ -84,6 +104,21 @@ services:
       dockerfile: Dockerfile
     container_name: cronos-node2
     image: cronos-db:latest
+    command:
+      - --dev
+      - --data-dir=/data
+      - --node-id=node2
+      - --cluster
+      - --cluster-seeds=cronos-node1:7946
+      - --fsync-mode=periodic
+      - --flush-interval=50
+      - --index-interval=4096
+      - --segment-size=1073741824
+      - --partition-count=16
+      - --replication-factor=1
+      - --virtual-nodes=2048
+      - --max-credits=50000
+      - --ack-timeout=60s
     ports:
       - "9001:9000"   # gRPC (host port 9001 -> container 9000)
       - "8081:8080"   # HTTP health
@@ -98,20 +133,18 @@ services:
       - CRONOS_GRPC_ADDR=0.0.0.0:9000
       - CRONOS_HTTP_ADDR=0.0.0.0:8080
       - CRONOS_CLUSTER=true
-      - CRONOS_CLUSTER_SEEDS=cronos-node1:7946
-      - CRONOS_PARTITION_COUNT=8
-      - CRONOS_TICK_MS=100
-      - CRONOS_WHEEL_SIZE=60
       - CRONOS_TRACING_ENABLED=${CRONOS_TRACING_ENABLED:-false}
       - CRONOS_TRACING_EXPORTER=${CRONOS_TRACING_EXPORTER:-otlp}
       - CRONOS_TRACING_OTLP_ENDPOINT=${CRONOS_TRACING_OTLP_ENDPOINT:-otel-collector:4317}
       - CRONOS_TRACING_SAMPLE_RATIO=${CRONOS_TRACING_SAMPLE_RATIO:-0.01}
       - CRONOS_TRACING_INSECURE=${CRONOS_TRACING_INSECURE:-true}
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 30s
       timeout: 3s
       retries: 3
+    depends_on:
+      - cronos-node1
 
   # ---------------------------------------------------------------------------
   # Cluster Node 3 (Follower)
@@ -122,6 +155,21 @@ services:
       dockerfile: Dockerfile
     container_name: cronos-node3
     image: cronos-db:latest
+    command:
+      - --dev
+      - --data-dir=/data
+      - --node-id=node3
+      - --cluster
+      - --cluster-seeds=cronos-node1:7946
+      - --fsync-mode=periodic
+      - --flush-interval=50
+      - --index-interval=4096
+      - --segment-size=1073741824
+      - --partition-count=16
+      - --replication-factor=1
+      - --virtual-nodes=2048
+      - --max-credits=50000
+      - --ack-timeout=60s
     ports:
       - "9002:9000"   # gRPC
       - "8082:8080"   # HTTP health
@@ -136,20 +184,18 @@ services:
       - CRONOS_GRPC_ADDR=0.0.0.0:9000
       - CRONOS_HTTP_ADDR=0.0.0.0:8080
       - CRONOS_CLUSTER=true
-      - CRONOS_CLUSTER_SEEDS=cronos-node1:7946
-      - CRONOS_PARTITION_COUNT=8
-      - CRONOS_TICK_MS=100
-      - CRONOS_WHEEL_SIZE=60
       - CRONOS_TRACING_ENABLED=${CRONOS_TRACING_ENABLED:-false}
       - CRONOS_TRACING_EXPORTER=${CRONOS_TRACING_EXPORTER:-otlp}
       - CRONOS_TRACING_OTLP_ENDPOINT=${CRONOS_TRACING_OTLP_ENDPOINT:-otel-collector:4317}
       - CRONOS_TRACING_SAMPLE_RATIO=${CRONOS_TRACING_SAMPLE_RATIO:-0.01}
       - CRONOS_TRACING_INSECURE=${CRONOS_TRACING_INSECURE:-true}
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 30s
       timeout: 3s
       retries: 3
+    depends_on:
+      - cronos-node1
 
   # ---------------------------------------------------------------------------
   # Observability stack (optional profile)

@@ -39,10 +39,24 @@ func NewGroupManager() *GroupManager {
 
 // NewGroupManagerWithStore creates a new group manager with persistent offset storage
 func NewGroupManagerWithStore(offsetStore *OffsetStore) *GroupManager {
-	return &GroupManager{
+	gm := &GroupManager{
 		groups:      make(map[string]*types.ConsumerGroup),
 		partitions:  make(map[int32]*types.Partition),
 		offsetStore: offsetStore,
+	}
+	// Restore persisted group metadata if available.
+	if offsetStore != nil {
+		for id, group := range offsetStore.LoadGroups() {
+			gm.groups[id] = group
+		}
+	}
+	return gm
+}
+
+// persistGroup writes group metadata to the offset store if one is configured.
+func (g *GroupManager) persistGroup(group *types.ConsumerGroup) {
+	if g.offsetStore != nil {
+		_ = g.offsetStore.PersistGroup(group)
 	}
 }
 
@@ -74,6 +88,7 @@ func (g *GroupManager) CreateGroup(groupID, topic string, partitions []int32) er
 	}
 
 	g.groups[groupID] = group
+	g.persistGroup(group)
 	return nil
 }
 
@@ -84,6 +99,19 @@ func (g *GroupManager) GetGroup(groupID string) (*types.ConsumerGroup, bool) {
 
 	group, exists := g.groups[groupID]
 	return group, exists
+}
+
+// CheckpointOffsetStore creates a point-in-time checkpoint of the persistent
+// offset store if one is configured. Returns nil if no offset store is attached.
+func (g *GroupManager) CheckpointOffsetStore(destDir string) error {
+	g.mu.RLock()
+	store := g.offsetStore
+	g.mu.RUnlock()
+
+	if store == nil {
+		return nil
+	}
+	return store.Checkpoint(destDir)
 }
 
 // JoinGroup adds a consumer to a group
@@ -132,7 +160,11 @@ func (g *GroupManager) JoinGroup(groupID, memberID, address, topic string, parti
 		existing.LastSeenTS = now
 		existing.ConnectedTS = now
 		group.UpdatedTS = now
-		return g.rebalanceGroup(group)
+		if err := g.rebalanceGroup(group); err != nil {
+			return err
+		}
+		g.persistGroup(group)
+		return nil
 	}
 
 	// Validate partition assignment
@@ -161,7 +193,11 @@ func (g *GroupManager) JoinGroup(groupID, memberID, address, topic string, parti
 	group.UpdatedTS = time.Now().UnixMilli()
 
 	// Rebalance to ensure partition assignment
-	return g.rebalanceGroup(group)
+	if err := g.rebalanceGroup(group); err != nil {
+		return err
+	}
+	g.persistGroup(group)
+	return nil
 }
 
 // LeaveGroup removes a consumer from a group
@@ -194,6 +230,7 @@ func (g *GroupManager) LeaveGroup(groupID, memberID string) error {
 	if err := g.rebalanceGroup(group); err != nil {
 		return fmt.Errorf("rebalance after leave: %w", err)
 	}
+	g.persistGroup(group)
 
 	return nil
 }
@@ -333,6 +370,9 @@ func (g *GroupManager) DeleteGroup(groupID string) error {
 	}
 
 	delete(g.groups, groupID)
+	if g.offsetStore != nil {
+		_ = g.offsetStore.DeletePersistedGroup(groupID)
+	}
 	return nil
 }
 

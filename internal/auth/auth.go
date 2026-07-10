@@ -232,15 +232,17 @@ func ClaimsFromContext(ctx context.Context) (*Claims, bool) {
 
 // CheckTopicPermission verifies if the authenticated subject has permission
 // for the given topic and operation ("publish", "subscribe", or "admin").
+// If no policy is configured (nil or empty), all requests are allowed so that
+// auth-disabled deployments remain backward compatible.
 func CheckTopicPermission(ctx context.Context, topic string, op string, policy *Policy) error {
-	claims, ok := ClaimsFromContext(ctx)
-	if !ok {
-		return status.Error(codes.Unauthenticated, "missing auth context")
-	}
-
 	if policy == nil || len(policy.Subjects) == 0 {
 		// No policy configured = allow all (backward compatible)
 		return nil
+	}
+
+	claims, ok := ClaimsFromContext(ctx)
+	if !ok {
+		return status.Error(codes.Unauthenticated, "missing auth context")
 	}
 
 	subject, ok := policy.Subjects[claims.Subject]

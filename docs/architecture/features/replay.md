@@ -20,6 +20,7 @@ Replay serves historical data from WAL by time or offset, enabling debugging, ba
 ## Production Decisions
 
 - Streamed replay avoids loading large result sets into memory.
+- Replay engine reads WAL v2 records with Raft term and trailing checksum validation.
 - Context cancellation is honored for long-running requests.
 - Follower-read policy gate protects consistency expectations.
 

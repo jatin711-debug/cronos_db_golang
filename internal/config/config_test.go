@@ -14,7 +14,7 @@ func init() {
 }
 
 func TestLoadConfig_Defaults(t *testing.T) {
-	os.Args = []string{"test", "-node-id=test-node"}
+	os.Args = []string{"test", "-dev", "-node-id=test-node"}
 	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
 
 	config, err := LoadConfig()
@@ -54,6 +54,7 @@ func TestLoadConfig_Defaults(t *testing.T) {
 func TestLoadConfig_CLIFlagsOverride(t *testing.T) {
 	os.Args = []string{
 		"test",
+		"-dev",
 		"-node-id=test-node",
 		"-data-dir=/tmp/test-data",
 		"-grpc-addr=localhost:9999",
@@ -70,6 +71,7 @@ func TestLoadConfig_CLIFlagsOverride(t *testing.T) {
 		"-encryption-key-file=/tmp/enc.key",
 		"-auth-enabled",
 		"-auth-jwt-secret=mysecret",
+		"-dev",
 	}
 	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
 
@@ -129,7 +131,7 @@ func TestLoadConfig_CLIFlagsOverride(t *testing.T) {
 }
 
 func TestLoadConfig_EnvOverrides(t *testing.T) {
-	os.Args = []string{"test"}
+	os.Args = []string{"test", "-dev"}
 	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
 
 	// Set env vars before loading config
@@ -255,7 +257,7 @@ func TestLoadConfig_TLSValidation(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			args := []string{"test", "-node-id=test-node"}
+			args := []string{"test", "-node-id=test-node", "-dev"}
 			args = append(args, tc.flags...)
 			os.Args = args
 			flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
@@ -296,7 +298,7 @@ func TestLoadConfig_AuthValidation(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			args := []string{"test", "-node-id=test-node"}
+			args := []string{"test", "-node-id=test-node", "-dev"}
 			args = append(args, tc.flags...)
 			os.Args = args
 			flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
@@ -370,6 +372,18 @@ func TestValidateConfig(t *testing.T) {
 			expectError: false,
 		},
 		{
+			name:        "negative min-insync-replicas",
+			config:      &configTestHelper{NodeID: "node", PartitionCount: 1, ReplicationFactor: 1, DataDir: "/data", GPRCAddress: ":9000", MinInSyncReplicas: -1},
+			expectError: true,
+			errorMsg:    "min-insync-replicas must be >= 0",
+		},
+		{
+			name:        "min-insync-replicas exceeds replication factor",
+			config:      &configTestHelper{NodeID: "node", PartitionCount: 1, ReplicationFactor: 3, DataDir: "/data", GPRCAddress: ":9000", MinInSyncReplicas: 4},
+			expectError: true,
+			errorMsg:    "min-insync-replicas (4) cannot exceed replication-factor (3)",
+		},
+		{
 			name:        "zero flush interval",
 			config:      &configTestHelper{NodeID: "node", PartitionCount: 1, ReplicationFactor: 1, DataDir: "/data", GPRCAddress: ":9000"},
 			expectError: true,
@@ -383,10 +397,12 @@ func TestValidateConfig(t *testing.T) {
 				NodeID:             tc.config.NodeID,
 				PartitionCount:     tc.config.PartitionCount,
 				ReplicationFactor:  tc.config.ReplicationFactor,
+				MinInSyncReplicas:  tc.config.MinInSyncReplicas,
 				DataDir:            tc.config.DataDir,
 				GPRCAddress:        tc.config.GPRCAddress,
 				TracingSampleRatio: tc.config.TracingSampleRatio,
 				FlushIntervalMS:    100,
+				DevMode:            true,
 			}
 			if tc.errorMsg == "flush-interval must be > 0" {
 				cfg.FlushIntervalMS = 0
@@ -405,18 +421,18 @@ func TestValidateConfig(t *testing.T) {
 	}
 }
 
-// configTestHelper is a test helper struct that mirrors the relevant fields
 type configTestHelper struct {
 	NodeID             string
 	PartitionCount     int
 	ReplicationFactor  int
+	MinInSyncReplicas  int
 	DataDir            string
 	GPRCAddress        string
 	TracingSampleRatio float64
 }
 
 func TestLoadConfig_ClusterSeeds(t *testing.T) {
-	os.Args = []string{"test", "-node-id=test-node", "-cluster-seeds=node1:7946,node2:7946,node3:7946"}
+	os.Args = []string{"test", "-dev", "-node-id=test-node", "-cluster-seeds=node1:7946,node2:7946,node3:7946"}
 	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
 
 	config, err := LoadConfig()
@@ -435,6 +451,7 @@ func TestLoadConfig_ClusterSeeds(t *testing.T) {
 func TestLoadConfig_TracingConfig(t *testing.T) {
 	os.Args = []string{
 		"test",
+		"-dev",
 		"-node-id=test-node",
 		"-tracing-enabled",
 		"-tracing-exporter=otlp",
@@ -469,6 +486,7 @@ func TestLoadConfig_TracingConfig(t *testing.T) {
 func TestLoadConfig_DeliveryConfig(t *testing.T) {
 	os.Args = []string{
 		"test",
+		"-dev",
 		"-node-id=test-node",
 		"-ack-timeout=60s",
 		"-max-retries=10",
@@ -499,6 +517,7 @@ func TestLoadConfig_DeliveryConfig(t *testing.T) {
 func TestLoadConfig_SchedulerConfig(t *testing.T) {
 	os.Args = []string{
 		"test",
+		"-dev",
 		"-node-id=test-node",
 		"-tick-ms=50",
 		"-wheel-size=120",
@@ -533,6 +552,7 @@ func TestLoadConfig_SchedulerConfig(t *testing.T) {
 func TestLoadConfig_ClusterConfig(t *testing.T) {
 	os.Args = []string{
 		"test",
+		"-dev",
 		"-node-id=test-node",
 		"-cluster",
 		"-cluster-gossip-addr=127.0.0.1:7946",
