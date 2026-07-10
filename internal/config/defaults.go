@@ -33,6 +33,11 @@ const (
 
 	// Replication configuration
 	DefaultReplicationBatchSize = 100
+	// DefaultMinInSyncReplicas is the minimum ISR size (including leader) for a
+	// write to be acknowledged as durable. 1 preserves the historical behavior
+	// (leader-only is sufficient). Raise it (e.g. RF=3, minISR=2) to refuse
+	// writes when the cluster degrades below a majority.
+	DefaultMinInSyncReplicas = 1
 
 	// Raft configuration
 	DefaultRaftDir      = "./raft"

@@ -9,10 +9,10 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unsafe"
 
 	"github.com/jatin711-debug/cronos_db_golang/internal/metrics"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 )
 
 // Dispatcher manages event delivery to subscribers.
@@ -164,7 +164,7 @@ func NewDispatcher(config *Config) *Dispatcher {
 	}
 
 	d.wg.Add(1)
-	go d.timeoutLoop()
+	utils.GoSafe("dispatcher-timeout", d.timeoutLoop)
 
 	return d
 }
@@ -582,24 +582,25 @@ var deliveryMessagePool = sync.Pool{
 	},
 }
 
-// maxDeliveryIDLen is the maximum stack buffer size for delivery IDs.
-const maxDeliveryIDLen = 128
+// maxDeliveryIDBuf is the on-stack buffer size used to build delivery IDs
+// before copying them into a real string. It is intentionally not a
+// zero-allocation path: the returned string escapes (it is stored as a map key
+// in activeDeliveries and passed to the DLQ), so returning a view into a stack
+// buffer would be a use-after-free.
+const maxDeliveryIDBuf = 128
 
-// makeDeliveryID creates a delivery ID without heap allocation.
-// Uses a stack-allocated buffer and unsafe.String for zero-allocation conversion.
+// makeDeliveryID creates a delivery ID of the form "<subID>-<offset>".
 func makeDeliveryID(subID string, offset int64) string {
-	// Fast path: small IDs fit in stack buffer
 	need := len(subID) + 1 + 20 // subID + '-' + max int64 digits
-	if need <= maxDeliveryIDLen {
-		var buf [maxDeliveryIDLen]byte
+	if need <= maxDeliveryIDBuf {
+		var buf [maxDeliveryIDBuf]byte
 		n := copy(buf[:], subID)
 		buf[n] = '-'
 		n++
 		b := strconv.AppendInt(buf[n:n], offset, 10)
 		n += len(b)
-		return unsafe.String(&buf[0], n)
+		return string(buf[:n]) // one alloc; the previous unsafe.String here was unsound
 	}
-	// Slow path: very long subID — fall back to heap
 	b := make([]byte, 0, need)
 	b = append(b, subID...)
 	b = append(b, '-')
@@ -607,11 +608,12 @@ func makeDeliveryID(subID string, offset int64) string {
 	return string(b)
 }
 
-// makeDeliveryIDBatch creates a batch delivery ID without heap allocation.
+// makeDeliveryIDBatch creates a batch delivery ID of the form
+// "<subID>-batch-<offset>-<count>".
 func makeDeliveryIDBatch(subID string, offset int64, count int) string {
 	need := len(subID) + 7 + 20 + 1 + 10 // subID + "-batch-" + offset + '-' + count
-	if need <= maxDeliveryIDLen {
-		var buf [maxDeliveryIDLen]byte
+	if need <= maxDeliveryIDBuf {
+		var buf [maxDeliveryIDBuf]byte
 		n := copy(buf[:], subID)
 		n += copy(buf[n:], "-batch-")
 		b := strconv.AppendInt(buf[n:n], offset, 10)
@@ -620,9 +622,8 @@ func makeDeliveryIDBatch(subID string, offset int64, count int) string {
 		n++
 		b2 := strconv.AppendInt(buf[n:n], int64(count), 10)
 		n += len(b2)
-		return unsafe.String(&buf[0], n)
+		return string(buf[:n]) // one alloc; the previous unsafe.String here was unsound
 	}
-	// Slow path
 	b := make([]byte, 0, need)
 	b = append(b, subID...)
 	b = append(b, "-batch-"...)

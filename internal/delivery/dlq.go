@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 )
 
 // DLQEntry represents a dead-letter queue entry
@@ -20,6 +21,10 @@ type DLQEntry struct {
 	FailedAt    int64        `json:"failed_at"`
 	Subscriber  string       `json:"subscriber"`
 	PartitionID int32        `json:"partition_id"`
+	// Tombstone marks a log entry that deletes/retracts a prior DLQ entry with
+	// the same DeliveryID. It is used by Remove/Retry so the action survives a
+	// restart; load() skips the original entry when a tombstone is present.
+	Tombstone bool `json:"tombstone,omitempty"`
 }
 
 // DeadLetterQueue manages failed deliveries
@@ -121,7 +126,7 @@ func (d *DeadLetterQueue) GetByPartition(partitionID int32) []*DLQEntry {
 	return entries
 }
 
-// Remove removes an entry from the DLQ
+// Remove removes an entry from the DLQ by appending a tombstone record.
 func (d *DeadLetterQueue) Remove(deliveryID string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -129,13 +134,14 @@ func (d *DeadLetterQueue) Remove(deliveryID string) error {
 	for i, entry := range d.entries {
 		if entry.DeliveryID == deliveryID {
 			d.entries = append(d.entries[:i], d.entries[i+1:]...)
-			return nil
+			return d.writeTombstone(deliveryID)
 		}
 	}
 	return fmt.Errorf("entry %s not found", deliveryID)
 }
 
-// Retry moves an entry back to the delivery queue
+// Retry moves an entry back to the delivery queue and appends a tombstone
+// record so the entry is not reloaded after a restart.
 func (d *DeadLetterQueue) Retry(deliveryID string) (*DLQEntry, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -144,10 +150,28 @@ func (d *DeadLetterQueue) Retry(deliveryID string) (*DLQEntry, error) {
 		if entry.DeliveryID == deliveryID {
 			// Remove from DLQ
 			d.entries = append(d.entries[:i], d.entries[i+1:]...)
+			if err := d.writeTombstone(deliveryID); err != nil {
+				return nil, err
+			}
 			return entry, nil
 		}
 	}
 	return nil, fmt.Errorf("entry %s not found", deliveryID)
+}
+
+// writeTombstone appends a tombstone record for the given delivery ID to the
+// segment log. This makes Remove/Retry durable across restarts.
+func (d *DeadLetterQueue) writeTombstone(deliveryID string) error {
+	tombstone := &DLQEntry{
+		DeliveryID: deliveryID,
+		Tombstone:  true,
+		FailedAt:   time.Now().UnixMilli(),
+	}
+	data, err := json.Marshal(tombstone)
+	if err != nil {
+		return fmt.Errorf("marshal dlq tombstone: %w", err)
+	}
+	return d.writer.WriteEntry(data)
 }
 
 // Count returns the number of entries in the DLQ
@@ -169,7 +193,8 @@ func (d *DeadLetterQueue) Clear() error {
 	return nil
 }
 
-// load reads DLQ from segment files
+// load reads DLQ from segment files, filtering out entries whose DeliveryID
+// has a tombstone record in the log.
 func (d *DeadLetterQueue) load() error {
 	if d.writer == nil {
 		return nil
@@ -179,10 +204,27 @@ func (d *DeadLetterQueue) load() error {
 		return fmt.Errorf("scan dlq segments: %w", err)
 	}
 
+	tombstones := make(map[string]bool)
+	for _, record := range records {
+		var marker DLQEntry
+		if err := json.Unmarshal(record, &marker); err != nil {
+			continue // Skip corrupt entries
+		}
+		if marker.Tombstone {
+			tombstones[marker.DeliveryID] = true
+		}
+	}
+
 	for _, record := range records {
 		var entry DLQEntry
 		if err := json.Unmarshal(record, &entry); err != nil {
 			continue // Skip corrupt entries
+		}
+		if entry.Tombstone {
+			continue
+		}
+		if tombstones[entry.DeliveryID] {
+			continue // This entry was removed/retried before the restart.
 		}
 		d.entries = append(d.entries, &entry)
 	}
@@ -215,7 +257,7 @@ func (d *DeadLetterQueue) StartRetryWorker(interval time.Duration) {
 	d.retryQuit = make(chan struct{})
 	d.mu.Unlock()
 
-	go func() {
+	utils.GoSafe("dlq-retry-worker", func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 
@@ -227,7 +269,7 @@ func (d *DeadLetterQueue) StartRetryWorker(interval time.Duration) {
 				return
 			}
 		}
-	}()
+	})
 }
 
 // StopRetryWorker stops the background retry worker.

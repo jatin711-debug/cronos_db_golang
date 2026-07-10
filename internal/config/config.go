@@ -36,6 +36,7 @@ func LoadConfig() (*types.Config, error) {
 	config.BloomCapacity = DefaultBloomCapacity
 	config.ReplicationBatchSize = DefaultReplicationBatchSize
 	config.ReplicationTimeout = 10 * time.Second
+	config.MinInSyncReplicas = DefaultMinInSyncReplicas
 	config.RaftDir = DefaultRaftDir
 	config.StatsPrintInterval = DefaultStatsPrintInterval
 	config.CheckpointInterval = DefaultCheckpointInterval
@@ -146,6 +147,7 @@ func LoadConfig() (*types.Config, error) {
 	// Replication configuration
 	flag.IntVar(&config.ReplicationBatchSize, "replication-batch", DefaultReplicationBatchSize, "Replication batch size")
 	flag.DurationVar(&config.ReplicationTimeout, "replication-timeout", 10*time.Second, "Replication timeout")
+	flag.IntVar(&config.MinInSyncReplicas, "min-insync-replicas", DefaultMinInSyncReplicas, "Minimum in-sync replicas (incl. leader) required to ack a write; 0 = 1")
 
 	// Raft configuration
 	flag.StringVar(&config.RaftDir, "raft-dir", DefaultRaftDir, "Raft data directory")
@@ -372,6 +374,12 @@ func ValidateConfig(c *types.Config) error {
 	}
 	if c.ReplicationFactor <= 0 {
 		return fmt.Errorf("replication-factor must be > 0")
+	}
+	if c.MinInSyncReplicas < 0 {
+		return fmt.Errorf("min-insync-replicas must be >= 0")
+	}
+	if c.MinInSyncReplicas > c.ReplicationFactor {
+		return fmt.Errorf("min-insync-replicas (%d) cannot exceed replication-factor (%d)", c.MinInSyncReplicas, c.ReplicationFactor)
 	}
 	if c.DataDir == "" {
 		return fmt.Errorf("data-dir is required")

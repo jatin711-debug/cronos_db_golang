@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"hash/fnv"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -131,7 +130,6 @@ type Producer struct {
 	closed      atomic.Bool
 	queuedBytes atomic.Int64
 	wg          sync.WaitGroup
-	cb          *circuitbreaker.CircuitBreaker
 }
 
 // NewProducer creates a producer bound to a client.
@@ -164,21 +162,16 @@ func NewProducer(client *Client, cfg ProducerConfig) (*Producer, error) {
 		cfg.CircuitBreaker.Timeout = 5 * time.Second
 	}
 
-	var cb *circuitbreaker.CircuitBreaker
-	if cfg.CircuitBreaker.FailureThreshold > 0 {
-		cb = circuitbreaker.New(cfg.CircuitBreaker)
-	}
 	p := &Producer{
 		client:      client,
 		cfg:         cfg,
 		partitioner: cfg.Partitioner,
 		queue:       make(chan asyncSendRequest, cfg.AsyncQueueSize),
 		inFlight:    make(chan struct{}, cfg.MaxInFlight),
-		cb:          cb,
 	}
 	for i := 0; i < cfg.AsyncWorkers; i++ {
 		p.wg.Add(1)
-		go p.worker()
+		utils.GoSafe("producer-worker", p.worker)
 	}
 	return p, nil
 }
@@ -190,9 +183,6 @@ func (c *Client) NewProducer(cfg ProducerConfig) (*Producer, error) {
 
 // Send publishes one message synchronously.
 func (p *Producer) Send(ctx context.Context, msg Message) (*SendResult, error) {
-	if p.cb != nil && !p.cb.Allow() {
-		return nil, p.wrapErr("producer.send", ErrorKindUnavailable, ErrCircuitOpen)
-	}
 	if err := p.acquireInFlight(ctx); err != nil {
 		return nil, p.wrapErr("producer.send", ErrorKindTimeout, err)
 	}
@@ -233,20 +223,19 @@ func (p *Producer) Send(ctx context.Context, msg Message) (*SendResult, error) {
 				addr string
 			}
 			var addrIdx atomic.Int32
+			triedAddrs := make([]string, 0, len(route.CandidateAddresses))
 			hedgeRes, hedgeErr := hedging.Do[hedgeResult](ctx, p.cfg.Hedging, func(hctx context.Context) (hedgeResult, error) {
 				idx := int(addrIdx.Add(1) - 1)
 				if idx >= len(route.CandidateAddresses) {
 					return hedgeResult{}, fmt.Errorf("exhausted hedge candidates")
 				}
 				addr := route.CandidateAddresses[idx]
-				resp, err := p.tryPublish(hctx, addr, event, allowDuplicate)
-				return hedgeResult{resp: resp, addr: addr}, err
+				triedAddrs = append(triedAddrs, addr)
+				resp, innerErr, _ := p.tryPublishWithBreaker(hctx, addr, event, allowDuplicate)
+				return hedgeResult{resp: resp, addr: addr}, innerErr
 			})
 			if hedgeErr == nil && hedgeRes.resp != nil {
 				if hedgeRes.resp.GetSuccess() {
-					if p.cb != nil {
-						p.cb.RecordSuccess()
-					}
 					return &SendResult{
 						MessageID:   msg.MessageID,
 						PartitionID: hedgeRes.resp.GetPartitionId(),
@@ -275,7 +264,12 @@ func (p *Producer) Send(ctx context.Context, msg Message) (*SendResult, error) {
 
 		// Normal sequential retry through candidates
 		for _, addr := range route.CandidateAddresses {
-			resp, err := p.tryPublish(ctx, addr, event, allowDuplicate)
+			resp, err, breakerRejected := p.tryPublishWithBreaker(ctx, addr, event, allowDuplicate)
+			if breakerRejected {
+				lastErr = err
+				shouldRetry = true
+				continue
+			}
 			if err != nil {
 				lastErr = err
 				if errs.IsLeaderRelated(err) {
@@ -286,9 +280,6 @@ func (p *Producer) Send(ctx context.Context, msg Message) (*SendResult, error) {
 					shouldRetry = true
 					continue
 				}
-				if p.cb != nil {
-					p.cb.RecordFailure()
-				}
 				return nil, p.wrapErr("producer.send", ErrorKindTransport, err)
 			}
 			if resp == nil {
@@ -297,9 +288,6 @@ func (p *Producer) Send(ctx context.Context, msg Message) (*SendResult, error) {
 				continue
 			}
 			if resp.GetSuccess() {
-				if p.cb != nil {
-					p.cb.RecordSuccess()
-				}
 				return &SendResult{
 					MessageID:   msg.MessageID,
 					PartitionID: resp.GetPartitionId(),
@@ -316,9 +304,6 @@ func (p *Producer) Send(ctx context.Context, msg Message) (*SendResult, error) {
 				shouldRetry = true
 				continue
 			}
-			if p.cb != nil {
-				p.cb.RecordFailure()
-			}
 			return nil, p.wrapErr("producer.send", ErrorKindValidation, lastErr)
 		}
 
@@ -329,9 +314,6 @@ func (p *Producer) Send(ctx context.Context, msg Message) (*SendResult, error) {
 
 	if lastErr == nil {
 		lastErr = fmt.Errorf("publish failed after %d attempts", p.cfg.RetryPolicy.MaxAttempts)
-	}
-	if p.cb != nil {
-		p.cb.RecordFailure()
 	}
 	return nil, p.wrapErr("producer.send", ErrorKindUnavailable, lastErr)
 }
@@ -351,6 +333,28 @@ func (p *Producer) tryPublish(ctx context.Context, addr string, event *types.Eve
 	})
 	p.client.observeRequest("event.publish", addr, start, err)
 	return resp, err
+}
+
+// tryPublishWithBreaker checks the per-address circuit breaker, executes the
+// publish, and records the outcome on the breaker. It returns the response,
+// the raw error, and a boolean indicating whether the breaker itself rejected
+// the request (so callers can classify it as a transient retryable failure).
+func (p *Producer) tryPublishWithBreaker(ctx context.Context, addr string, event *types.Event, allowDuplicate bool) (*types.PublishResponse, error, bool) {
+	cb := p.breakerForAddress(addr)
+	if cb != nil && !cb.Allow() {
+		return nil, p.breakerOpenError(addr), true
+	}
+	resp, err := p.tryPublish(ctx, addr, event, allowDuplicate)
+	if err != nil {
+		if cb != nil && !errs.IsRetryable(err) {
+			cb.RecordFailure()
+		}
+		return resp, err, false
+	}
+	if cb != nil {
+		cb.RecordSuccess()
+	}
+	return resp, nil, false
 }
 
 // SendBatch publishes a set of messages.
@@ -516,13 +520,34 @@ func (p *Producer) SendAsyncContext(ctx context.Context, msg Message, callback D
 	}
 }
 
-// Close flushes queued async work and stops workers.
+// Close flushes queued async work and stops workers. For a bounded drain,
+// use CloseWithContext instead.
 func (p *Producer) Close() error {
+	return p.CloseWithContext(context.Background())
+}
+
+// CloseWithContext flushes queued async work and stops workers. If the context
+// expires before the queue drains, remaining in-flight requests are abandoned
+// and workers are stopped as soon as possible.
+func (p *Producer) CloseWithContext(ctx context.Context) error {
 	if !p.closed.CompareAndSwap(false, true) {
 		return nil
 	}
 	close(p.queue)
-	p.wg.Wait()
+
+	done := make(chan struct{})
+	utils.GoSafe("producer-close-wait", func() {
+		defer close(done)
+		p.wg.Wait()
+	})
+
+	select {
+	case <-done:
+	case <-ctx.Done():
+		// Context expired: abandon remaining in-flight work. Workers will
+		// eventually exit once the queue is closed and drained.
+	}
+
 	p.observeState()
 	return nil
 }
@@ -652,8 +677,18 @@ func resolveScheduleTS(msg Message) int64 {
 }
 
 func isLeaderRelatedMessage(message string) bool {
-	m := strings.ToLower(message)
-	return strings.Contains(m, "leader") || strings.Contains(m, "partition")
+	return errs.IsLeaderRelatedMessage(message)
+}
+
+func (p *Producer) breakerForAddress(addr string) *circuitbreaker.CircuitBreaker {
+	if p.client == nil || p.client.breakerMgr == nil {
+		return nil
+	}
+	return p.client.breakerMgr.ForAddress(addr)
+}
+
+func (p *Producer) breakerOpenError(addr string) error {
+	return p.wrapErr("producer.send", ErrorKindUnavailable, fmt.Errorf("circuit breaker open for %s", addr))
 }
 
 func (p *Producer) wrapErr(op string, kind ErrorKind, err error) error {

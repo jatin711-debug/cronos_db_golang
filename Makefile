@@ -5,7 +5,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help print-config build ensure-build-dir rust-dedup test proto clean clean-data \
+.PHONY: help print-config build ensure-build-dir rust-dedup test test-unit test-integration test-chaos proto clean clean-data \
 	verify-env verify-tag-env verify-release-env tag-preflight release-preflight lint ci tag tag-push release publish \
 	node1 node2 node3 cluster loadtest loadtest-batch loadtest-max loadtest-small health \
 	docker docker-build docker-single docker-cluster docker-logs docker-down docker-clean \
@@ -267,8 +267,24 @@ build: rust-dedup ensure-build-dir
 	$(GO_RUNTIME_PREFIX) go build -tags clustertest -o $(BUILD_DIR)/cluster_loadtest$(EXE_EXT) cluster_loadtest.go
 
 # Run all tests. Rust shared library is built/staged first.
-test: rust-dedup
-	$(GO_RUNTIME_PREFIX) go test ./...
+test: rust-dedup test-unit
+
+# Run unit tests only: excludes the integration (tests/integration) and chaos
+# (tests/chaos) suites which require a running cluster or docker. The chaos
+# suite is additionally gated by the `chaos` build tag, so it never compiles
+# into a plain `go test` run.
+test-unit: rust-dedup
+	$(GO_RUNTIME_PREFIX) go test $$({ go list ./... 2>/dev/null || true; } | grep -vE '/tests/integration|/tests/chaos')
+
+# Run the integration suite against a running server. Set CRONOS_TEST_ADDR to
+# point at the server and CRONOS_TEST_INTEGRATION=1 so a dial failure is a hard
+# error instead of a silent skip.
+test-integration: rust-dedup
+	CRONOS_TEST_INTEGRATION=1 $(GO_RUNTIME_PREFIX) go test -v ./tests/integration/...
+
+# Run the chaos suite (requires docker + a running cronos cluster).
+test-chaos: rust-dedup
+	$(GO_RUNTIME_PREFIX) go test -tags chaos -v ./tests/chaos/...
 
 proto:
 	@# Remove stale generated files so protoc always produces a clean output

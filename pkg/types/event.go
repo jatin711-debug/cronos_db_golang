@@ -26,6 +26,13 @@ type Config struct {
 	BloomCapacity        uint64
 	ReplicationBatchSize int
 	ReplicationTimeout   time.Duration
+	// MinInSyncReplicas is the minimum number of in-sync replicas (including the
+	// leader) required to acknowledge a write before it is considered durable.
+	// A write is rejected with a NotEnoughReplicas error if fewer than this
+	// number of replicas are in the ISR. 0 means derive a default of 1 (i.e.
+	// only the leader is required), preserving the historical single-replica
+	// behavior. Equivalent to Kafka's min.insync.replicas.
+	MinInSyncReplicas int
 	RaftDir              string
 	RaftJoinAddr         string
 	StatsPrintInterval   time.Duration

@@ -21,6 +21,7 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/internal/tenant"
 	"github.com/jatin711-debug/cronos_db_golang/internal/tracing"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -368,6 +369,30 @@ func anyDurableAck(events []*types.Event) bool {
 	return false
 }
 
+// partitionEventsPool recycles the map[int32][]*types.Event used to group events
+// by partition in PublishBatch. This removes one allocation per publish request.
+var partitionEventsPool = sync.Pool{
+	New: func() interface{} {
+		return make(map[int32][]*types.Event, 8)
+	},
+}
+
+func acquirePartitionEventsMap() map[int32][]*types.Event {
+	m := partitionEventsPool.Get().(map[int32][]*types.Event)
+	// Maps from the pool are returned empty, but guard against misuse.
+	for k := range m {
+		delete(m, k)
+	}
+	return m
+}
+
+func releasePartitionEventsMap(m map[int32][]*types.Event) {
+	for k := range m {
+		delete(m, k)
+	}
+	partitionEventsPool.Put(m)
+}
+
 // PublishBatch handles batch publish requests for high-throughput ingestion
 func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.PublishBatchRequest) (*types.PublishBatchResponse, error) {
 	if len(req.Events) == 0 {
@@ -384,8 +409,10 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 	var firstOffset, lastOffset int64 = -1, -1
 	var lastError string
 
-	// Group events by partition for batch WAL writes
-	partitionEvents := make(map[int32][]*types.Event)
+	// Group events by partition for batch WAL writes. Reuse a pooled map to
+	// avoid one allocation per request.
+	partitionEvents := acquirePartitionEventsMap()
+	defer releasePartitionEventsMap(partitionEvents)
 
 	for _, event := range req.Events {
 		// Basic validation
@@ -443,22 +470,6 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 			continue
 		}
 
-		// Check dedup
-		if !req.AllowDuplicate {
-			isDuplicate, err := h.dedupManager.IsDuplicate(event.GetMessageId(), 0)
-			if err != nil {
-				atomic.AddInt32(&errorCount, 1)
-				if lastError == "" {
-					lastError = fmt.Sprintf("dedup check failed for %s: %v", event.GetMessageId(), err)
-				}
-				continue
-			}
-			if isDuplicate {
-				atomic.AddInt32(&duplicateCount, 1)
-				continue
-			}
-		}
-
 		// Tenant quota check
 		if h.tenantAccountant != nil {
 			tenantID := tenant.ID("default")
@@ -480,6 +491,43 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 		}
 
 		partitionEvents[partitionID] = append(partitionEvents[partitionID], event)
+	}
+
+	// Batch dedup per partition. This turns N point lookups into one batched
+	// bloom-filter + Pebble write-batch operation, which is much cheaper under
+	// concurrent publish load.
+	if !req.AllowDuplicate && h.dedupManager != nil {
+		for pid, evts := range partitionEvents {
+			messageIDs := make([]string, len(evts))
+			offsets := make([]int64, len(evts))
+			for i, e := range evts {
+				messageIDs[i] = e.GetMessageId()
+				offsets[i] = 0
+			}
+			duplicates, err := h.dedupManager.IsDuplicateBatch(messageIDs, offsets)
+			if err != nil {
+				// Treat a failed dedup check as an error for the whole partition batch.
+				atomic.AddInt32(&errorCount, int32(len(evts)))
+				if lastError == "" {
+					lastError = fmt.Sprintf("dedup check failed for partition %d: %v", pid, err)
+				}
+				delete(partitionEvents, pid)
+				continue
+			}
+			kept := evts[:0]
+			for i, e := range evts {
+				if duplicates[i] {
+					atomic.AddInt32(&duplicateCount, 1)
+					continue
+				}
+				kept = append(kept, e)
+			}
+			if len(kept) == 0 {
+				delete(partitionEvents, pid)
+			} else {
+				partitionEvents[pid] = kept
+			}
+		}
 	}
 
 	// Parallel batch write to each partition's WAL and schedule
@@ -844,9 +892,9 @@ func (h *EventServiceHandler) Replay(req *types.ReplayRequest, stream types.Even
 
 	// Start replay in goroutine
 	errCh := make(chan error, 1)
-	go func() {
+	utils.GoSafe("replay-stream", func() {
 		errCh <- replayEngine.ReplayStream(stream.Context(), replayReq, eventCh)
-	}()
+	})
 
 	// Stream events to client
 	for event := range eventCh {

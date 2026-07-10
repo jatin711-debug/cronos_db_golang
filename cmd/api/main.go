@@ -29,6 +29,7 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/internal/tracing"
 	"github.com/jatin711-debug/cronos_db_golang/internal/tx"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 
 	"github.com/cockroachdb/pebble"
 	"github.com/prometheus/client_golang/prometheus"
@@ -165,20 +166,21 @@ func main() {
 	backupScheduler.Start()
 	defer backupScheduler.Stop()
 
-	// Start compliance retention enforcer
-	retentionEnforcer := compliance.NewEnforcer(cfg.DataDir, compliance.RetentionPolicy{
-		MaxAge:       30 * 24 * time.Hour,
-		MaxSizeBytes: 100 << 30, // 100GB
-	})
-	go func() {
-		ticker := time.NewTicker(1 * time.Hour)
-		defer ticker.Stop()
-		for range ticker.C {
-			if err := retentionEnforcer.Run(context.Background()); err != nil {
-				slog.Warn("Retention enforcement failed", "error", err)
+		// Start compliance retention enforcer
+		retentionEnforcer := compliance.NewEnforcer(cfg.DataDir, compliance.RetentionPolicy{
+			MaxAge:       30 * 24 * time.Hour,
+			MaxSizeBytes: 100 << 30, // 100GB
+		})
+		utils.GoSafe("retention-enforcer", func() {
+			ticker := time.NewTicker(1 * time.Hour)
+			defer ticker.Stop()
+			for range ticker.C {
+				if err := retentionEnforcer.Run(context.Background()); err != nil {
+					slog.Warn("Retention enforcement failed", "error", err)
+				}
 			}
-		}
-	}()
+		})
+
 
 	// Create cluster manager (if enabled)
 	var clusterMgr *cluster.Manager
@@ -447,13 +449,14 @@ func main() {
 		Handler: mux,
 	}
 
-	go func() {
-		slog.Info("Starting health check server", "address", cfg.HTTPAddress)
-		if err := healthServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			slog.Error("Failed to start health server", "error", err)
-			os.Exit(1)
-		}
-	}()
+		utils.GoSafe("health-server", func() {
+			slog.Info("Starting health check server", "address", cfg.HTTPAddress)
+			if err := healthServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				slog.Error("Failed to start health server", "error", err)
+				os.Exit(1)
+			}
+		})
+
 
 	// Start auto-scaler with real system metrics
 	autoScaler := cluster.NewAutoScaler(cluster.NewSystemMetrics(cfg.DataDir))
@@ -473,7 +476,7 @@ func main() {
 		statsPrintInterval = 30 * time.Second
 	}
 
-	go func() {
+	utils.GoSafe("stats-printer", func() {
 		ticker := time.NewTicker(statsPrintInterval)
 		defer ticker.Stop()
 
@@ -560,7 +563,7 @@ func main() {
 				return
 			}
 		}
-	}()
+	})
 
 	// Wait for shutdown signal
 	<-sigChan
@@ -572,7 +575,7 @@ func main() {
 	defer shutdownCancel()
 
 	shutdownDone := make(chan struct{})
-	go func() {
+	utils.GoSafe("shutdown", func() {
 		defer close(shutdownDone)
 
 		// 1. Stop accepting NEW requests first (drain phase)
@@ -613,7 +616,7 @@ func main() {
 		}
 
 		slog.Info("Shutdown complete", "node_id", cfg.NodeID)
-	}()
+	})
 
 	// Wait for shutdown or timeout
 	select {

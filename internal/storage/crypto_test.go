@@ -13,7 +13,7 @@ func TestSegmentCipher_EncryptDecrypt(t *testing.T) {
 		key[i] = byte(i)
 	}
 
-	cipher, err := NewSegmentCipher(key)
+	cipher, err := NewSegmentCipher(key, 0)
 	if err != nil {
 		t.Fatalf("NewSegmentCipher failed: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestSegmentCipher_DecryptErrors(t *testing.T) {
 	for i := range key {
 		key[i] = byte(i)
 	}
-	cipher, err := NewSegmentCipher(key)
+	cipher, err := NewSegmentCipher(key, 0)
 	if err != nil {
 		t.Fatalf("NewSegmentCipher failed: %v", err)
 	}
@@ -105,8 +105,8 @@ func TestSegmentCipher_WrongKey(t *testing.T) {
 		key2[i] = byte(i + 1)
 	}
 
-	cipher1, _ := NewSegmentCipher(key1)
-	cipher2, _ := NewSegmentCipher(key2)
+	cipher1, _ := NewSegmentCipher(key1, 0)
+	cipher2, _ := NewSegmentCipher(key2, 0)
 
 	plaintext := []byte("secret message")
 	ciphertext, err := cipher1.Encrypt(plaintext)
@@ -133,7 +133,7 @@ func TestNewSegmentCipher_InvalidKey(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := NewSegmentCipher(tc.key)
+			_, err := NewSegmentCipher(tc.key, 0)
 			if err == nil {
 				t.Error("expected error but got none")
 			}
@@ -202,7 +202,7 @@ func TestEncryptedFile(t *testing.T) {
 	for i := range key {
 		key[i] = byte(i)
 	}
-	cipher, err := NewSegmentCipher(key)
+	cipher, err := NewSegmentCipher(key, 0)
 	if err != nil {
 		t.Fatalf("NewSegmentCipher: %v", err)
 	}

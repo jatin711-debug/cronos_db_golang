@@ -5,6 +5,7 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/subtle"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"os"
@@ -32,52 +33,108 @@ func LoadMasterKey(keyFile string) ([]byte, error) {
 	return key, nil
 }
 
-// SegmentCipher provides AES-256-GCM encryption for WAL segments.
+// SegmentCipher provides AES-256-GCM encryption for WAL segments and metadata files.
+// The AEAD is built once and reused, which removes per-record key-schedule and allocation
+// overhead. WAL records use a deterministic counter nonce derived from the partition ID and
+// the ciphertext's byte position in the segment; this guarantees GCM nonce uniqueness without
+// reading from crypto/rand on every record.
 type SegmentCipher struct {
-	key []byte
+	key         []byte
+	aead        cipher.AEAD
+	partitionID int32
 }
 
-// NewSegmentCipher creates a cipher from a 32-byte key.
-func NewSegmentCipher(key []byte) (*SegmentCipher, error) {
+// NewSegmentCipher creates a cipher from a 32-byte key and the owning partition ID.
+// The partition ID is mixed into the record counter nonce so records from different
+// partitions cannot share a nonce.
+func NewSegmentCipher(key []byte, partitionID int32) (*SegmentCipher, error) {
 	if len(key) != 32 {
 		return nil, fmt.Errorf("master key must be 32 bytes for AES-256, got %d", len(key))
 	}
-	return &SegmentCipher{key: key}, nil
-}
-
-// Encrypt encrypts plaintext with AES-256-GCM. Returns ciphertext || nonce.
-func (c *SegmentCipher) Encrypt(plaintext []byte) ([]byte, error) {
-	block, err := aes.NewCipher(c.key)
+	block, err := aes.NewCipher(key)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create AES cipher: %w", err)
 	}
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create GCM: %w", err)
 	}
-	nonce := make([]byte, gcm.NonceSize())
+	return &SegmentCipher{
+		key:         key,
+		aead:        gcm,
+		partitionID: partitionID,
+	}, nil
+}
+
+// nonceForRecord builds a deterministic 12-byte GCM nonce from the partition ID and the
+// ciphertext's byte position within its segment file. Positions are unique and monotonic
+// within a partition, so the same nonce is never reused with the same key.
+func (c *SegmentCipher) nonceForRecord(ciphertextPos int64) [12]byte {
+	var nonce [12]byte
+	binary.BigEndian.PutUint32(nonce[:4], uint32(c.partitionID))
+	binary.BigEndian.PutUint64(nonce[4:], uint64(ciphertextPos))
+	return nonce
+}
+
+// Encrypt encrypts plaintext with AES-256-GCM using a random nonce. It is intended for
+// small metadata files (EncryptedFile) rather than WAL records. The returned format is
+// nonce || ciphertext.
+func (c *SegmentCipher) Encrypt(plaintext []byte) ([]byte, error) {
+	if c.aead == nil {
+		return nil, fmt.Errorf("cipher not initialized")
+	}
+	nonce := make([]byte, c.aead.NonceSize())
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return nil, err
 	}
-	return gcm.Seal(nonce, nonce, plaintext, nil), nil
+	return c.aead.Seal(nonce, nonce, plaintext, nil), nil
 }
 
-// Decrypt decrypts ciphertext. Expects nonce || ciphertext.
+// Decrypt decrypts ciphertext produced by Encrypt. Expects nonce || ciphertext.
 func (c *SegmentCipher) Decrypt(ciphertext []byte) ([]byte, error) {
-	block, err := aes.NewCipher(c.key)
-	if err != nil {
-		return nil, err
+	if c.aead == nil {
+		return nil, fmt.Errorf("cipher not initialized")
 	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-	ns := gcm.NonceSize()
+	ns := c.aead.NonceSize()
 	if len(ciphertext) < ns {
 		return nil, fmt.Errorf("ciphertext too short")
 	}
 	nonce, ct := ciphertext[:ns], ciphertext[ns:]
-	return gcm.Open(nil, nonce, ct, nil)
+	return c.aead.Open(nil, nonce, ct, nil)
+}
+
+// EncryptRecord encrypts a WAL record payload with a deterministic counter nonce. The
+// returned format is [version 1B][ciphertext]. The nonce is derived from the partition ID
+// and the ciphertext's byte position (ciphertextPos) inside the segment file.
+func (c *SegmentCipher) EncryptRecord(plaintext []byte, ciphertextPos int64) ([]byte, error) {
+	if c.aead == nil {
+		return nil, fmt.Errorf("cipher not initialized")
+	}
+	nonce := c.nonceForRecord(ciphertextPos)
+	ct := c.aead.Seal(nil, nonce[:], plaintext, nil)
+	out := make([]byte, 1+len(ct))
+	out[0] = 1 // cipher-format version
+	copy(out[1:], ct)
+	return out, nil
+}
+
+// DecryptRecord decrypts a WAL record ciphertext produced by EncryptRecord. ciphertextPos
+// must be the byte offset of the ciphertext (after the 4-byte length prefix) inside the
+// segment file.
+func (c *SegmentCipher) DecryptRecord(ciphertext []byte, ciphertextPos int64) ([]byte, error) {
+	if c.aead == nil {
+		return nil, fmt.Errorf("cipher not initialized")
+	}
+	if len(ciphertext) == 0 {
+		return nil, fmt.Errorf("empty record ciphertext")
+	}
+	version := ciphertext[0]
+	if version != 1 {
+		return nil, fmt.Errorf("unsupported record cipher version: %d", version)
+	}
+	ct := ciphertext[1:]
+	nonce := c.nonceForRecord(ciphertextPos)
+	return c.aead.Open(nil, nonce[:], ct, nil)
 }
 
 // EncryptedFile wraps a file with transparent encryption/decryption.

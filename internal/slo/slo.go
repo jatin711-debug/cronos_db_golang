@@ -5,6 +5,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -47,7 +48,7 @@ func (r *Recorder) Start() {
 		return
 	}
 	r.resetTicker = time.NewTicker(r.window.Duration)
-	go func() {
+	utils.GoSafe("slo-reset", func() {
 		for {
 			select {
 			case <-r.resetTicker.C:
@@ -56,7 +57,7 @@ func (r *Recorder) Start() {
 				return
 			}
 		}
-	}()
+	})
 }
 
 // Stop halts the periodic reset loop.

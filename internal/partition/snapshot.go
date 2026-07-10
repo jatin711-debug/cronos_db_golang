@@ -173,25 +173,24 @@ func (sm *SnapshotManager) SnapshotStats() map[string]interface{} {
 	return stats
 }
 
-// StartPeriodicSnapshots starts a background goroutine that creates snapshots periodically.
+// StartPeriodicSnapshots runs a loop that creates snapshots periodically. It
+// should be invoked in a background goroutine (e.g. via utils.GoSafe).
 func (sm *SnapshotManager) StartPeriodicSnapshots(partition *Partition, interval time.Duration) {
-	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
 
-		for {
-			select {
-			case <-ticker.C:
-				if err := sm.CreateSnapshot(partition); err != nil {
-					log.Printf("[Partition %d] Periodic snapshot failed: %v", partition.ID, err)
-				}
-			case <-partition.deliveryQuit:
-				// Create final snapshot before shutdown
-				if err := sm.CreateSnapshot(partition); err != nil {
-					log.Printf("[Partition %d] Final snapshot failed: %v", partition.ID, err)
-				}
-				return
+	for {
+		select {
+		case <-ticker.C:
+			if err := sm.CreateSnapshot(partition); err != nil {
+				log.Printf("[Partition %d] Periodic snapshot failed: %v", partition.ID, err)
 			}
+		case <-partition.deliveryQuit:
+			// Create final snapshot before shutdown
+			if err := sm.CreateSnapshot(partition); err != nil {
+				log.Printf("[Partition %d] Final snapshot failed: %v", partition.ID, err)
+			}
+			return
 		}
-	}()
+	}
 }

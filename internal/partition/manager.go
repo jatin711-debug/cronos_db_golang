@@ -146,7 +146,7 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 		if err != nil {
 			return fmt.Errorf("load encryption key: %w", err)
 		}
-		cipher, err = storage.NewSegmentCipher(key)
+		cipher, err = storage.NewSegmentCipher(key, partitionID)
 		if err != nil {
 			return fmt.Errorf("create cipher: %w", err)
 		}
@@ -556,7 +556,7 @@ func (pm *PartitionManager) startPartitionInternal(partition *Partition) error {
 
 	// Start delivery loop (event-driven): consume scheduler ready signals and
 	// immediately hand over batches to the worker.
-	go func() {
+	utils.GoSafe("partition-delivery-loop", func() {
 		for {
 			select {
 			case <-partition.Scheduler.ReadySignal():
@@ -571,11 +571,11 @@ func (pm *PartitionManager) startPartitionInternal(partition *Partition) error {
 				return
 			}
 		}
-	}()
+	})
 
 	// Start compaction loop (runs every 10 minutes)
 	compactionInterval := 10 * time.Minute
-	go func() {
+	utils.GoSafe("partition-compaction-loop", func() {
 		ticker := time.NewTicker(compactionInterval)
 		defer ticker.Stop()
 
@@ -587,10 +587,10 @@ func (pm *PartitionManager) startPartitionInternal(partition *Partition) error {
 				return
 			}
 		}
-	}()
+	})
 
 	// Start dedup pruning loop (runs every hour)
-	go func() {
+	utils.GoSafe("partition-dedup-prune-loop", func() {
 		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()
 
@@ -609,10 +609,12 @@ func (pm *PartitionManager) startPartitionInternal(partition *Partition) error {
 				return
 			}
 		}
-	}()
+	})
 
 	// Start periodic snapshot creation (every 5 minutes)
-	go snapshotMgr.StartPeriodicSnapshots(partition, 5*time.Minute)
+	utils.GoSafe("partition-snapshot-loop", func() {
+		snapshotMgr.StartPeriodicSnapshots(partition, 5*time.Minute)
+	})
 
 	return nil
 }
@@ -966,6 +968,20 @@ func (pm *PartitionManager) GetOrCreatePartition(partitionID int32) error {
 	return pm.createPartitionLocked(partitionID, fmt.Sprintf("partition-%d", partitionID))
 }
 
+// replicationTLSConfig builds the internal replication mTLS config from the
+// global node configuration. It returns nil when replication TLS is disabled.
+func (pm *PartitionManager) replicationTLSConfig() *replication.MTLSConfig {
+	if pm.config == nil {
+		return nil
+	}
+	return &replication.MTLSConfig{
+		Enabled:  pm.config.ReplicationTLSEnabled,
+		CAFile:   pm.config.ReplicationTLSCAFile,
+		CertFile: pm.config.ReplicationTLSCertFile,
+		KeyFile:  pm.config.ReplicationTLSKeyFile,
+	}
+}
+
 // SyncPartitionFromLeader syncs a partition from its leader via bulk transfer
 func (pm *PartitionManager) SyncPartitionFromLeader(partitionID int32, leaderAddr string) error {
 	pm.mu.RLock()
@@ -979,7 +995,7 @@ func (pm *PartitionManager) SyncPartitionFromLeader(partitionID int32, leaderAdd
 	// Get or create follower
 	pm.mu.Lock()
 	if partition.Follower == nil {
-		partition.Follower = replication.NewFollower(partitionID, partition.Wal, pm.nodeID)
+		partition.Follower = replication.NewFollower(partitionID, partition.Wal, pm.nodeID, pm.replicationTLSConfig())
 	}
 	pm.mu.Unlock()
 
@@ -1011,7 +1027,7 @@ func (pm *PartitionManager) PromoteToLeader(partitionID int32, epoch int64) erro
 		return nil // Already leader, just update epoch
 	}
 
-	leader := replication.NewLeader(partitionID, int32(pm.config.ReplicationBatchSize), pm.config.ReplicationTimeout, partition.Wal)
+	leader := replication.NewLeader(partitionID, int32(pm.config.ReplicationBatchSize), pm.config.ReplicationTimeout, partition.Wal, pm.config.MinInSyncReplicas, pm.nodeID, pm.replicationTLSConfig())
 	leader.Start()
 	partition.ReplLeader = leader
 	partition.Leader = true

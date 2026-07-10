@@ -1,10 +1,11 @@
 package partition
 
 import (
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/shirou/gopsutil/v3/mem"
 )
 
 // TokenBucket implements a simple token bucket rate limiter.
@@ -90,15 +91,12 @@ func (m *MemoryMonitor) IsOverLimit() bool {
 		return m.overLimit.Load()
 	}
 
-	// Update cache
-	var memStats runtime.MemStats
-	runtime.ReadMemStats(&memStats)
-
-	// Calculate memory usage percentage
-	// Use Sys as total allocated from OS (includes unused but reserved)
-	usedPercent := (float64(memStats.Sys) / float64(memStats.HeapSys)) * 100
-	if memStats.HeapSys == 0 {
-		usedPercent = 0
+	// Update cache using gopsutil for the actual OS-level memory usage. The
+	// previous formula (Sys/HeapSys) was inverted and always >= 100%, which made
+	// backpressure trip immediately with any reasonable threshold.
+	usedPercent := 0.0
+	if vm, err := mem.VirtualMemory(); err == nil {
+		usedPercent = vm.UsedPercent
 	}
 
 	over := usedPercent >= m.maxPercent
@@ -157,10 +155,9 @@ func (bp *BackpressureManager) GetMemoryUsage() float64 {
 	if bp.memoryMonitor == nil {
 		return 0
 	}
-	var memStats runtime.MemStats
-	runtime.ReadMemStats(&memStats)
-	if memStats.HeapSys == 0 {
+	vm, err := mem.VirtualMemory()
+	if err != nil {
 		return 0
 	}
-	return (float64(memStats.Sys) / float64(memStats.HeapSys)) * 100
+	return vm.UsedPercent
 }

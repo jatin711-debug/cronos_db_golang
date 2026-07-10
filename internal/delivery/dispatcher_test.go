@@ -3,6 +3,7 @@ package delivery
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -578,6 +579,44 @@ func TestMakeDeliveryIDBatch(t *testing.T) {
 	id := makeDeliveryIDBatch("sub-1", 100, 5)
 	if id != "sub-1-batch-100-5" {
 		t.Errorf("expected sub-1-batch-100-5, got %s", id)
+	}
+}
+
+// TestMakeDeliveryID_StabilityAcrossCalls is a regression test for a
+// use-after-free bug: makeDeliveryID previously returned unsafe.String over a
+// stack-local buffer, so the returned string's backing memory was reused on
+// the next call. Any caller that held the string (e.g. as an activeDeliveries
+// map key) saw it silently mutate. This test builds many IDs, holds them all,
+// and asserts every one keeps its original value.
+func TestMakeDeliveryID_StabilityAcrossCalls(t *testing.T) {
+	const n = 256
+	ids := make([]string, n)
+	want := make([]string, n)
+	for i := 0; i < n; i++ {
+		ids[i] = makeDeliveryID("sub-1", int64(i))
+		want[i] = "sub-1-" + strconv.Itoa(i)
+	}
+	for i := range ids {
+		if ids[i] != want[i] {
+			t.Errorf("id[%d] mutated: want %q, got %q (use-after-free regression)", i, want[i], ids[i])
+		}
+	}
+}
+
+// TestMakeDeliveryIDBatch_StabilityAcrossCalls is the batch-ID regression test
+// for the same use-after-free as above.
+func TestMakeDeliveryIDBatch_StabilityAcrossCalls(t *testing.T) {
+	const n = 256
+	ids := make([]string, n)
+	want := make([]string, n)
+	for i := 0; i < n; i++ {
+		ids[i] = makeDeliveryIDBatch("sub-1", int64(i), 3)
+		want[i] = "sub-1-batch-" + strconv.Itoa(i) + "-3"
+	}
+	for i := range ids {
+		if ids[i] != want[i] {
+			t.Errorf("batch id[%d] mutated: want %q, got %q (use-after-free regression)", i, want[i], ids[i])
+		}
 	}
 }
 
