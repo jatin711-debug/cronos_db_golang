@@ -7,7 +7,7 @@
 
 .PHONY: help print-config build ensure-build-dir rust-dedup test test-unit test-integration test-chaos proto clean clean-data \
 	verify-env verify-tag-env verify-release-env tag-preflight release-preflight lint ci tag tag-push release publish \
-	node1 node2 node3 cluster loadtest loadtest-batch loadtest-max loadtest-small health \
+	node1 node2 node3 cluster loadtest loadtest-batch loadtest-max loadtest-small loadtest-throughput health \
 	docker docker-build docker-single docker-cluster docker-logs docker-down docker-clean \
 	observability-up observability-down
 
@@ -58,7 +58,7 @@ RUST_SHARED_LIB := $(RUST_LIB_BASENAME).dll
 
 MKDIR_BUILD_CMD = powershell -NoProfile -Command "New-Item -ItemType Directory -Force '$(BUILD_DIR)' | Out-Null"
 VERIFY_RUST_LIB_CMD = powershell -NoProfile -Command "if (!(Test-Path '$(RUST_TARGET_DIR)/$(RUST_SHARED_LIB)')) { throw 'Rust artifact missing: $(RUST_TARGET_DIR)/$(RUST_SHARED_LIB)' }"
-STAGE_RUST_LIB_CMD = powershell -NoProfile -Command "New-Item -ItemType Directory -Force '$(RUST_STAGE_DIR)' | Out-Null; Copy-Item -Force '$(RUST_TARGET_DIR)/$(RUST_SHARED_LIB)' '$(RUST_STAGE_DIR)/'; Copy-Item -Force '$(RUST_TARGET_DIR)/$(RUST_SHARED_LIB)' './'"
+STAGE_RUST_LIB_CMD = powershell -NoProfile -Command "New-Item -ItemType Directory -Force '$(RUST_STAGE_DIR)' | Out-Null; New-Item -ItemType Directory -Force '$(BUILD_DIR)' | Out-Null; Copy-Item -Force '$(RUST_TARGET_DIR)/$(RUST_SHARED_LIB)' '$(RUST_STAGE_DIR)/'; Copy-Item -Force '$(RUST_TARGET_DIR)/$(RUST_SHARED_LIB)' './'; Copy-Item -Force '$(RUST_TARGET_DIR)/$(RUST_SHARED_LIB)' '$(BUILD_DIR)/'"
 CLEAN_BUILD_CMD = powershell -NoProfile -Command "if (Test-Path '$(BUILD_DIR)') { Remove-Item -Recurse -Force '$(BUILD_DIR)' }"
 CLEAN_DATA_CMD = powershell -NoProfile -Command "foreach ($$d in @('data/node1','data/node2','data/node3')) { if (Test-Path $$d) { Remove-Item -Recurse -Force $$d } }"
 
@@ -97,7 +97,7 @@ endif
 
 MKDIR_BUILD_CMD = mkdir -p "$(BUILD_DIR)"
 VERIFY_RUST_LIB_CMD = test -f "$(RUST_TARGET_DIR)/$(RUST_SHARED_LIB)" || (echo "Rust artifact missing: $(RUST_TARGET_DIR)/$(RUST_SHARED_LIB)" && exit 1)
-STAGE_RUST_LIB_CMD = mkdir -p "$(RUST_STAGE_DIR)" && cp -f "$(RUST_TARGET_DIR)/$(RUST_SHARED_LIB)" "$(RUST_STAGE_DIR)/"
+STAGE_RUST_LIB_CMD = mkdir -p "$(RUST_STAGE_DIR)" && mkdir -p "$(BUILD_DIR)" && cp -f "$(RUST_TARGET_DIR)/$(RUST_SHARED_LIB)" "$(RUST_STAGE_DIR)/" && cp -f "$(RUST_TARGET_DIR)/$(RUST_SHARED_LIB)" "$(BUILD_DIR)/"
 CLEAN_BUILD_CMD = rm -rf "$(BUILD_DIR)"
 CLEAN_DATA_CMD = rm -rf data/node1 data/node2 data/node3
 
@@ -182,7 +182,8 @@ help:
 	@echo Load Test
 	@echo   make loadtest       - Run single-event mode cluster load test
 	@echo   make loadtest-batch - Run batch mode cluster load test
-	@echo   make loadtest-max   - Recommended max-throughput profile
+		@echo   make loadtest-max   - Recommended max-throughput profile
+	@echo   make loadtest-throughput - Aggressive throughput benchmark (compiled binary, large payload)
 	@echo.
 	@echo Docker
 	@echo   make docker         - Build image
@@ -331,8 +332,8 @@ clean-data:
 	@$(CLEAN_DATA_CMD)
 
 # Start Node 1 (Bootstrap/Leader)
-node1: rust-dedup
-	$(GO_RUNTIME_PREFIX) go run ./cmd/api \
+node1: build
+	$(GO_RUNTIME_PREFIX) $(BUILD_DIR)/$(BINARY)$(EXE_EXT) \
 		--node-id=node1 \
 		--auth-enabled=false \
 		--cluster \
@@ -358,8 +359,8 @@ node1: rust-dedup
 		--cluster-raft-addr=127.0.0.1:7948
 
 # Start Node 2 (joins Node 1)
-node2: 
-	$(GO_RUNTIME_PREFIX) go run ./cmd/api \
+node2: build
+	$(GO_RUNTIME_PREFIX) $(BUILD_DIR)/$(BINARY)$(EXE_EXT) \
 		--node-id=node2 \
 		--auth-enabled=false \
 		--cluster \
@@ -386,8 +387,8 @@ node2:
 		--cluster-seeds=127.0.0.1:7946
 
 # Start Node 3 (joins Node 1)
-node3: 
-	$(GO_RUNTIME_PREFIX) go run ./cmd/api \
+node3: build
+	$(GO_RUNTIME_PREFIX) $(BUILD_DIR)/$(BINARY)$(EXE_EXT) \
 		--node-id=node3 \
 		--auth-enabled=false \
 		--cluster \
@@ -420,17 +421,20 @@ cluster:
 	@echo   Terminal 3: make node3
 	@echo Node 1 must be started first (bootstrap node).
 
-loadtest:
-	go run -tags clustertest cluster_loadtest.go -nodes=$(NODES) -publishers=$(PUBLISHERS) -events=$(EVENTS) -payload=$(PAYLOAD) -delay=$(SCHEDULE_DELAY) -topic=$(TOPIC) -round-robin=$(ROUND_ROBIN) -partition-count=$(PARTITION_COUNT)
+loadtest: build
+	$(BUILD_DIR)/cluster_loadtest$(EXE_EXT) -nodes=$(NODES) -publishers=$(PUBLISHERS) -events=$(EVENTS) -payload=$(PAYLOAD) -delay=$(SCHEDULE_DELAY) -topic=$(TOPIC) -round-robin=$(ROUND_ROBIN) -partition-count=$(PARTITION_COUNT)
 
-loadtest-batch:
-	go run -tags clustertest cluster_loadtest.go -nodes=$(NODES) -publishers=$(PUBLISHERS) -events=$(EVENTS) -payload=$(PAYLOAD) -delay=$(SCHEDULE_DELAY) -topic=$(TOPIC) -round-robin=$(ROUND_ROBIN) -batch -batch-size=$(BATCH_SIZE) -partition-count=$(PARTITION_COUNT)
+loadtest-batch: build
+	$(BUILD_DIR)/cluster_loadtest$(EXE_EXT) -nodes=$(NODES) -publishers=$(PUBLISHERS) -events=$(EVENTS) -payload=$(PAYLOAD) -delay=$(SCHEDULE_DELAY) -topic=$(TOPIC) -round-robin=$(ROUND_ROBIN) -batch -batch-size=$(BATCH_SIZE) -partition-count=$(PARTITION_COUNT)
 
-loadtest-max:
-	go run -tags clustertest cluster_loadtest.go -nodes=3 -publishers=32 -events=100000 -payload=256 -delay=0 -topic=cluster-loadtest -round-robin=true -batch -batch-size=4000 -partition-count=16
+loadtest-max: build
+	$(BUILD_DIR)/cluster_loadtest$(EXE_EXT) -nodes=3 -publishers=32 -events=200000 -payload=256 -delay=0 -topic=cluster-loadtest -round-robin=true -batch -batch-size=4000 -partition-count=16
 
-loadtest-small:
-	go run -tags clustertest cluster_loadtest.go -publishers=10 -events=1000
+loadtest-throughput: build
+	$(BUILD_DIR)/cluster_loadtest$(EXE_EXT) -nodes=3 -publishers=48 -events=200000 -payload=4096 -delay=0 -topic=cluster-loadtest -round-robin=true -batch -batch-size=4000 -partition-count=24
+
+loadtest-small: build
+	$(BUILD_DIR)/cluster_loadtest$(EXE_EXT) -publishers=10 -events=1000
 
 health:
 	@echo "Checking node health..."
