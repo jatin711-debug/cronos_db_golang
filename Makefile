@@ -120,7 +120,7 @@ REQUIRE_VERSION_CMD = test -n "$(strip $(VERSION))" || (echo 'VERSION is require
 VALIDATE_VERSION_CMD = printf '%s' "$(VERSION)" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$$' || (echo 'VERSION must look like vMAJOR.MINOR.PATCH' && exit 1)
 VERIFY_GIT_CLEAN_CMD = test -z "$$(git status --porcelain)" || (echo 'Working tree not clean. Commit or stash changes before tagging.' && exit 1)
 VERIFY_TAG_EXISTS_LOCAL_CMD = git rev-parse -q --verify refs/tags/$(VERSION) >/dev/null 2>&1 || (echo 'Missing local tag $(VERSION). Run make tag VERSION=$(VERSION) first.' && exit 1)
-VERIFY_TAG_ABSENT_LOCAL_CMD = ! git rev-parse -q --verify refs/tags/$(VERSION) >/dev/null 2>&1 || (echo 'Tag already exists locally: $(VERSION)' && exit 1)
+VERIFY_TAG_ABSENT_LOCAL_CMD = git rev-parse -q --verify refs/tags/$(VERSION) >/dev/null 2>&1 || (echo 'Tag already exists locally: $(VERSION)' && exit 1)
 VERIFY_TAG_EXISTS_REMOTE_CMD = test -n "$$(git ls-remote --tags $(REMOTE) refs/tags/$(VERSION))" || (echo 'Tag $(VERSION) not found on remote $(REMOTE). Run make tag-push VERSION=$(VERSION).' && exit 1)
 VERIFY_TAG_ABSENT_REMOTE_CMD = test -z "$$(git ls-remote --tags $(REMOTE) refs/tags/$(VERSION))" || (echo 'Tag already exists on remote $(REMOTE): $(VERSION)' && exit 1)
 endif
