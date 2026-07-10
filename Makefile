@@ -69,22 +69,22 @@ CLEAN_DATA_CMD = powershell -NoProfile -Command "foreach ($$d in @('data/node1',
 # sufficient for go run/go test dynamic loading in local workflows.
 GO_RUNTIME_PREFIX :=
 
-VERIFY_GO_CMD = where go >NUL 2>&1 || (echo [verify-env] Missing required tool: go && exit /b 1)
-VERIFY_CARGO_CMD = where cargo >NUL 2>&1 || (echo [verify-env] Missing required tool: cargo && exit /b 1)
-VERIFY_PROTOC_CMD = where protoc >NUL 2>&1 || (echo [verify-env] Missing required tool: protoc && exit /b 1)
-VERIFY_DOCKER_CMD = where docker >NUL 2>&1 || (echo [verify-env] Missing required tool: docker && exit /b 1)
-VERIFY_DOCKER_COMPOSE_CMD = docker compose version >NUL 2>&1 || (echo [verify-env] Missing required tool: docker compose && exit /b 1)
-VERIFY_GIT_CMD = where git >NUL 2>&1 || (echo [verify-tag-env] Missing required tool: git && exit /b 1)
-VERIFY_GH_CMD = where gh >NUL 2>&1 || (echo [verify-release-env] Missing required tool: gh && exit /b 1)
-VERIFY_GH_AUTH_CMD = gh auth status >NUL 2>&1 || (echo [verify-release-env] Not authenticated. Run: gh auth login && exit /b 1)
+VERIFY_GO_CMD = command -v go >/dev/null 2>&1 || { echo '[verify-env] Missing required tool: go'; exit 1; }
+VERIFY_CARGO_CMD = command -v cargo >/dev/null 2>&1 || { echo '[verify-env] Missing required tool: cargo'; exit 1; }
+VERIFY_PROTOC_CMD = command -v protoc >/dev/null 2>&1 || { echo '[verify-env] Missing required tool: protoc'; exit 1; }
+VERIFY_DOCKER_CMD = command -v docker >/dev/null 2>&1 || { echo '[verify-env] Missing required tool: docker'; exit 1; }
+VERIFY_DOCKER_COMPOSE_CMD = docker compose version >/dev/null 2>&1 || { echo '[verify-env] Missing required tool: docker compose'; exit 1; }
+VERIFY_GIT_CMD = command -v git >/dev/null 2>&1 || { echo '[verify-tag-env] Missing required tool: git'; exit 1; }
+VERIFY_GH_CMD = command -v gh >/dev/null 2>&1 || { echo '[verify-release-env] Missing required tool: gh'; exit 1; }
+VERIFY_GH_AUTH_CMD = gh auth status >/dev/null 2>&1 || { echo '[verify-release-env] Not authenticated. Run: gh auth login'; exit 1; }
 
 REQUIRE_VERSION_CMD = powershell -NoProfile -Command "if ([string]::IsNullOrWhiteSpace('$(VERSION)')) { Write-Error 'VERSION is required. Example: make tag VERSION=v0.2.1'; exit 1 }"
 VALIDATE_VERSION_CMD = powershell -NoProfile -Command "if ('$(VERSION)' -notmatch '^v\d+\.\d+\.\d+([.-][0-9A-Za-z.-]+)?$$') { Write-Error 'VERSION must look like vMAJOR.MINOR.PATCH'; exit 1 }"
-VERIFY_GIT_CLEAN_CMD = powershell -NoProfile -Command "$$s = git status --porcelain; if ($$s) { Write-Error 'Working tree not clean. Commit or stash changes before tagging.'; exit 1 }"
-VERIFY_TAG_EXISTS_LOCAL_CMD = powershell -NoProfile -Command "git rev-parse -q --verify refs/tags/$(VERSION) 2>$$null >$$null; if ($$LASTEXITCODE -ne 0) { Write-Error 'Missing local tag $(VERSION). Run make tag VERSION=$(VERSION) first.'; exit 1 }"
-VERIFY_TAG_ABSENT_LOCAL_CMD = powershell -NoProfile -Command "git rev-parse -q --verify refs/tags/$(VERSION) 2>$$null >$$null; if ($$LASTEXITCODE -eq 0) { Write-Error 'Tag already exists locally: $(VERSION)'; exit 1 }"
-VERIFY_TAG_EXISTS_REMOTE_CMD = powershell -NoProfile -Command "$$r = git ls-remote --tags $(REMOTE) refs/tags/$(VERSION); if (-not $$r) { Write-Error 'Tag $(VERSION) not found on remote $(REMOTE). Run make tag-push VERSION=$(VERSION).'; exit 1 }"
-VERIFY_TAG_ABSENT_REMOTE_CMD = powershell -NoProfile -Command "$$r = git ls-remote --tags $(REMOTE) refs/tags/$(VERSION); if ($$r) { Write-Error 'Tag already exists on remote $(REMOTE): $(VERSION)'; exit 1 }"
+VERIFY_GIT_CLEAN_CMD = powershell -NoProfile -Command '$$s = git status --porcelain; if ($$s) { Write-Error "Working tree not clean. Commit or stash changes before tagging."; exit 1 }'
+VERIFY_TAG_EXISTS_LOCAL_CMD = powershell -NoProfile -Command 'git rev-parse -q --verify refs/tags/$(VERSION) 2>$$null >$$null; if ($$LASTEXITCODE -ne 0) { Write-Error "Missing local tag $(VERSION). Run make tag VERSION=$(VERSION) first."; exit 1 }'
+VERIFY_TAG_ABSENT_LOCAL_CMD = powershell -NoProfile -Command 'git rev-parse -q --verify refs/tags/$(VERSION) 2>$$null >$$null; if ($$LASTEXITCODE -eq 0) { Write-Error "Tag already exists locally: $(VERSION)"; exit 1 }'
+VERIFY_TAG_EXISTS_REMOTE_CMD = powershell -NoProfile -Command '$$r = git ls-remote --tags $(REMOTE) refs/tags/$(VERSION); if (-not $$r) { Write-Error "Tag $(VERSION) not found on remote $(REMOTE). Run make tag-push VERSION=$(VERSION)."; exit 1 }'
+VERIFY_TAG_ABSENT_REMOTE_CMD = powershell -NoProfile -Command '$$r = git ls-remote --tags $(REMOTE) refs/tags/$(VERSION); if ($$r) { Write-Error "Tag already exists on remote $(REMOTE): $(VERSION)"; exit 1 }'
 
 else
 UNAME_S := $(shell uname -s 2>/dev/null)
