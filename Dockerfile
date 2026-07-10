@@ -77,7 +77,7 @@ WORKDIR /app
 COPY --from=go-builder /cronos-api /app/cronos-api
 
 # Copy Rust library (must be in same directory as binary or in library path)
-COPY --from=rust-builder /build/libcronos_dedup.so /app/cronos_dedup.so
+COPY --from=rust-builder /build/libcronos_dedup.so /app/libcronos_dedup.so
 
 # Also copy to system library path
 COPY --from=rust-builder /build/libcronos_dedup.so /usr/lib/x86_64-linux-gnu/libcronos_dedup.so
