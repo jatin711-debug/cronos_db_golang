@@ -2,6 +2,7 @@ package integration
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -70,6 +71,7 @@ func TestBatchPublish(t *testing.T) {
 		messages[i] = client.Message{
 			Topic:        topic,
 			PartitionKey: topic,
+			MessageID:    fmt.Sprintf("batch-%d", i),
 			Payload:      []byte("batch-msg"),
 			ScheduleTS:   time.Now().Add(2 * time.Second).UnixMilli(),
 		}

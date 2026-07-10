@@ -17,6 +17,24 @@ func TestMultiTopicRouting(t *testing.T) {
 	topics := []string{topicName(t), topicName(t), topicName(t)}
 	expectedCounts := []int{5, 3, 7}
 
+	// Start subscribers first so events are not lost before consumers register.
+	deliveries := make([]chan client.Delivery, len(topics))
+	for i, topic := range topics {
+		deliveries[i] = make(chan client.Delivery, expectedCounts[i]+5)
+		consCfg := client.DefaultConsumerConfig(topic, fmt.Sprintf("test-group-%d", i))
+		consCfg.AckMode = client.AckModeAuto
+		ch := deliveries[i]
+		go func() {
+			_ = testClient.Subscribe(ctx, consCfg, func(ctx context.Context, d client.Delivery) error {
+				ch <- d
+				return nil
+			})
+		}()
+	}
+
+	// Give subscribers a moment to register before publishing.
+	time.Sleep(200 * time.Millisecond)
+
 	// Publish to each topic
 	for i, topic := range topics {
 		producer, err := client.NewProducer(testClient, client.DefaultProducerConfig())
@@ -28,6 +46,7 @@ func TestMultiTopicRouting(t *testing.T) {
 			_, err := producer.Send(ctx, client.Message{
 				Topic:        topic,
 				PartitionKey: topic,
+				MessageID:    fmt.Sprintf("mt-%d-%d", i, j),
 				Payload:      []byte(fmt.Sprintf("msg-%d-%d", i, j)),
 				ScheduleTS:   time.Now().Add(1 * time.Second).UnixMilli(),
 			})
@@ -38,37 +57,26 @@ func TestMultiTopicRouting(t *testing.T) {
 		producer.Close()
 	}
 
-	// Subscribe to each topic and verify counts
-	for i, topic := range topics {
-		deliveries := make(chan client.Delivery, expectedCounts[i]+5)
-		consCfg := client.DefaultConsumerConfig(topic, fmt.Sprintf("test-group-%d", i))
-		consCfg.AckMode = client.AckModeAuto
-
-		go func() {
-			_ = testClient.Subscribe(ctx, consCfg, func(ctx context.Context, d client.Delivery) error {
-				deliveries <- d
-				return nil
-			})
-		}()
-
+	// Verify counts
+	for i := range topics {
 		received := 0
 		timeout := time.After(20 * time.Second)
+	loop:
 		for {
 			select {
-			case <-deliveries:
+			case <-deliveries[i]:
 				received++
 				if received >= expectedCounts[i] {
-					goto done
+					break loop
 				}
 			case <-timeout:
-				goto done
+				break loop
 			}
 		}
-	done:
 		if received != expectedCounts[i] {
-			t.Errorf("topic %d (%s): expected %d deliveries, got %d", i, topic, expectedCounts[i], received)
+			t.Errorf("topic %d (%s): expected %d deliveries, got %d", i, topics[i], expectedCounts[i], received)
 		} else {
-			t.Logf("topic %d (%s): received %d/%d events", i, topic, received, expectedCounts[i])
+			t.Logf("topic %d (%s): received %d/%d events", i, topics[i], received, expectedCounts[i])
 		}
 	}
 }
@@ -106,7 +114,14 @@ func TestPublishConsumeValidateRoundTrip(t *testing.T) {
 	consCfg := client.DefaultConsumerConfig(topic, topicName(t)+"-group")
 	go func() {
 		_ = testClient.Subscribe(ctx, consCfg, func(ctx context.Context, d client.Delivery) error {
-			deliveries <- d
+			for _, ev := range d.Batch {
+				t.Logf("Received offset=%d payload=%s", ev.GetOffset(), ev.GetPayload())
+				deliveries <- d
+			}
+			if d.Event != nil {
+				t.Logf("Received offset=%d payload=%s", d.Event.GetOffset(), d.Event.GetPayload())
+				deliveries <- d
+			}
 			return nil
 		})
 	}()

@@ -22,6 +22,14 @@ func TestMain(m *testing.M) {
 		serverAddr = "localhost:9000"
 	}
 
+	// Integration tests need an external server and can leave persistent state
+	// behind. Only run them when explicitly requested so that `go test ./...`
+	// does not fail against a leftover dev server.
+	if os.Getenv("CRONOS_TEST_INTEGRATION") != "1" {
+		fmt.Fprintf(os.Stderr, "INTEGRATION SKIP: set CRONOS_TEST_INTEGRATION=1 to run integration tests against %s\n", serverAddr)
+		os.Exit(0)
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -32,15 +40,8 @@ func TestMain(m *testing.M) {
 
 	c, err := client.Dial(ctx, cfg)
 	if err != nil {
-		// When CRONOS_TEST_INTEGRATION=1 (CI), a missing server is a hard
-		// failure so the run can't silently report green. Otherwise skip the
-		// suite gracefully for local dev where no server is running.
-		if os.Getenv("CRONOS_TEST_INTEGRATION") == "1" {
-			fmt.Fprintf(os.Stderr, "INTEGRATION FAIL: cannot dial %s: %v\n", serverAddr, err)
-			os.Exit(1)
-		}
-		fmt.Fprintf(os.Stderr, "INTEGRATION SKIP: cannot dial %s: %v\n", serverAddr, err)
-		os.Exit(0)
+		fmt.Fprintf(os.Stderr, "INTEGRATION FAIL: cannot dial %s: %v\n", serverAddr, err)
+		os.Exit(1)
 	}
 	testClient = c
 	defer testClient.Close()
