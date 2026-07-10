@@ -100,8 +100,10 @@ func (sw *DLQSegmentWriter) writeHeader(file *os.File) error {
 	header[7] = 1 // version
 	// Bytes 8-63 reserved, zero-filled
 	// CRC32 of header at bytes 60-63 (but we'll skip for simplicity)
-	_, err := file.Write(header)
-	return err
+	if _, err := file.Write(header); err != nil {
+		return err
+	}
+	return file.Sync()
 }
 
 // WriteEntry appends a DLQ entry to the active segment.
@@ -129,6 +131,9 @@ func (sw *DLQSegmentWriter) WriteEntry(data []byte) error {
 	if err := sw.writer.Flush(); err != nil {
 		return fmt.Errorf("flush dlq entry: %w", err)
 	}
+	if err := sw.activeFile.Sync(); err != nil {
+		return fmt.Errorf("sync dlq entry: %w", err)
+	}
 
 	sw.size += int64(len(record))
 	return nil
@@ -137,6 +142,9 @@ func (sw *DLQSegmentWriter) WriteEntry(data []byte) error {
 // rotate closes the current segment and opens a new one.
 func (sw *DLQSegmentWriter) rotate() error {
 	if err := sw.writer.Flush(); err != nil {
+		return err
+	}
+	if err := sw.activeFile.Sync(); err != nil {
 		return err
 	}
 	if err := sw.activeFile.Close(); err != nil {
@@ -156,6 +164,9 @@ func (sw *DLQSegmentWriter) Close() error {
 		}
 	}
 	if sw.activeFile != nil {
+		if err := sw.activeFile.Sync(); err != nil {
+			return err
+		}
 		return sw.activeFile.Close()
 	}
 	return nil
@@ -297,6 +308,9 @@ func (sw *DLQSegmentWriter) Compact(keep func(data []byte) bool) error {
 	}
 
 	writer.Flush()
+	if err := file.Sync(); err != nil {
+		return fmt.Errorf("sync compacted dlq: %w", err)
+	}
 	sw.activeFile = file
 	sw.writer = writer
 	return nil
