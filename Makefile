@@ -8,7 +8,7 @@
 .PHONY: help print-config build ensure-build-dir rust-dedup test test-unit test-integration test-chaos proto clean clean-data \
 	verify-env verify-tag-env verify-release-env tag-preflight release-preflight lint ci tag tag-push release publish \
 	node1 node2 node3 cluster loadtest loadtest-batch loadtest-max loadtest-small loadtest-throughput health \
-	docker docker-build docker-single docker-cluster docker-logs docker-down docker-clean \
+	docker docker-build docker-build-no-cache docker-build-hub docker-push docker-push-hub docker-single docker-cluster docker-logs docker-down docker-clean \
 	observability-up observability-down
 
 # -----------------------------------------------------------------------------
@@ -25,6 +25,9 @@ RUST_PROFILE ?= release
 RUST_LIB_BASENAME ?= cronos_dedup
 
 DOCKER_COMPOSE ?= docker compose
+DOCKER_IMAGE_NAME ?= cronos-db
+DOCKER_HUB_USER ?= johnny711dock
+DOCKER_TAG ?= latest
 REMOTE ?= origin
 VERSION ?=
 RELEASE_TITLE ?= CronosDB $(VERSION)
@@ -186,7 +189,11 @@ help:
 	@echo   make loadtest-throughput - Aggressive throughput benchmark (compiled binary, large payload)
 	@echo.
 	@echo Docker
-	@echo   make docker         - Build image
+	@echo   make docker         - Build image (cached)
+	@echo   make docker-build-no-cache - Build image (no cache)
+	@echo   make docker-build-hub - Build Docker Hub image: johnny711dock/cronos-db:latest
+	@echo   make docker-push      - Push Docker Hub image
+	@echo   make docker-push-hub  - Build and push Docker Hub image
 	@echo   make docker-single  - Start single-node container
 	@echo   make docker-cluster - Start 3-node container cluster
 	@echo.
@@ -446,14 +453,26 @@ else
 	@curl -fsS http://127.0.0.1:8082/health >/dev/null && echo " - Node 3 OK" || echo " - Node 3 FAIL"
 endif
 
-docker:
-	docker build -t cronos-db:latest --no-cache .
+docker: docker-build
 
 docker-build:
-	docker build -t cronos-db:latest --no-cache . && echo Image built successfully
+	@echo Building Docker image: $(DOCKER_IMAGE_NAME):$(DOCKER_TAG)
+	docker build -t $(DOCKER_IMAGE_NAME):$(DOCKER_TAG) .
+
+docker-build-no-cache:
+	@echo Building Docker image (no cache): $(DOCKER_IMAGE_NAME):$(DOCKER_TAG)
+	docker build --no-cache -t $(DOCKER_IMAGE_NAME):$(DOCKER_TAG) .
 
 docker-build-hub:
-	docker build -t johnny711dock/cronos-db:latest . && echo Image built successfully
+	@echo Building Docker Hub image: $(DOCKER_HUB_USER)/$(DOCKER_IMAGE_NAME):$(DOCKER_TAG)
+	docker build -t $(DOCKER_HUB_USER)/$(DOCKER_IMAGE_NAME):$(DOCKER_TAG) .
+
+docker-push:
+	@echo Pushing Docker Hub image: $(DOCKER_HUB_USER)/$(DOCKER_IMAGE_NAME):$(DOCKER_TAG)
+	docker push $(DOCKER_HUB_USER)/$(DOCKER_IMAGE_NAME):$(DOCKER_TAG)
+
+docker-push-hub: docker-build-hub docker-push
+	@echo Pushed $(DOCKER_HUB_USER)/$(DOCKER_IMAGE_NAME):$(DOCKER_TAG)
 
 docker-single:
 	$(DOCKER_COMPOSE) up -d cronos-single
