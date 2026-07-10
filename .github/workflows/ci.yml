@@ -168,9 +168,9 @@ jobs:
       - name: Bring up cluster
         run: |
           docker compose up -d cronos-node1 cronos-node2 cronos-node3
-          # Wait for node1 to become healthy.
+          # Wait for node1 HTTP health endpoint to become healthy.
           for i in $(seq 1 60); do
-            if curl -sf http://localhost:9000/health >/dev/null 2>&1; then
+            if curl -sf http://localhost:8080/health >/dev/null 2>&1; then
               echo "Cluster healthy"; exit 0
             fi
             sleep 2

@@ -36,6 +36,7 @@ type Membership struct {
 	state       *ClusterState
 	eventCh     chan MemberEvent
 	stopCh      chan struct{}
+	stopOnce    sync.Once
 	listener    net.Listener
 	gossipConns map[string]net.Conn // Persistent connections for heartbeats
 	connMu      sync.Mutex          // Protects gossipConns
@@ -147,9 +148,9 @@ func (m *Membership) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop stops the membership manager
+// Stop stops the membership manager. Safe to call multiple times.
 func (m *Membership) Stop() {
-	close(m.stopCh)
+	m.stopOnce.Do(func() { close(m.stopCh) })
 	if m.listener != nil {
 		m.listener.Close()
 	}

@@ -372,38 +372,39 @@ func (s *BloomPebbleStore) PruneExpired() (int, error) {
 		return count, err
 	}
 
-	// Check bloom filter health and reset if FPR is too high
-	s.checkAndResetBloom()
+	// Check bloom filter health and reset if FPR is too high.
+	// Hold the write lock for the duration so Add/Check callers cannot race
+	// the reset.
+	s.bloomMu.Lock()
+	defer s.bloomMu.Unlock()
+	s.checkAndResetBloomLocked()
 
 	return count, nil
 }
 
-	// checkAndResetBloom checks false positive rate and resets bloom if needed
-	// Must be called with bloomMu held to prevent race with Add operations
-	func (s *BloomPebbleStore) checkAndResetBloom() {
-		// The denominator must be the number of items the bloom said "maybe" for
-		// (i.e. the slow-path lookups). bloomHits are true negatives, so including
-		// them dilutes the FPR and prevents the filter from ever being reset.
-		bloomLookups := atomic.LoadUint64(&s.pebbleHits) + atomic.LoadUint64(&s.bloomFalsePos)
-		if bloomLookups < 1000 {
-			// Not enough slow-path data to judge FPR yet
-			return
-		}
+// checkAndResetBloomLocked checks false positive rate and resets bloom if needed.
+// Must be called with bloomMu held to prevent race with Add operations.
+func (s *BloomPebbleStore) checkAndResetBloomLocked() {
+	// The denominator must be the number of items the bloom said "maybe" for
+	// (i.e. the slow-path lookups). bloomHits are true negatives, so including
+	// them dilutes the FPR and prevents the filter from ever being reset.
+	bloomLookups := atomic.LoadUint64(&s.pebbleHits) + atomic.LoadUint64(&s.bloomFalsePos)
+	if bloomLookups < 1000 {
+		// Not enough slow-path data to judge FPR yet
+		return
+	}
 
-		falsePos := atomic.LoadUint64(&s.bloomFalsePos)
-		actualFPR := float64(falsePos) / float64(bloomLookups)
+	falsePos := atomic.LoadUint64(&s.bloomFalsePos)
+	actualFPR := float64(falsePos) / float64(bloomLookups)
 
-		if actualFPR > s.falsePositiveThresh {
-		// FPR too high, reset bloom filter
-		// Take write lock to block all readers/writers during reset
-		s.bloomMu.Lock()
+	if actualFPR > s.falsePositiveThresh {
+		// FPR too high, reset bloom filter. Lock is already held.
 		s.resetInProgress.Store(true)
 		s.bloom.Reset()
 		atomic.StoreUint64(&s.bloomHits, 0)
 		atomic.StoreUint64(&s.bloomFalsePos, 0)
 		atomic.StoreUint64(&s.pebbleHits, 0)
 		s.resetInProgress.Store(false)
-		s.bloomMu.Unlock()
 	}
 }
 
@@ -412,7 +413,7 @@ func (s *BloomPebbleStore) PruneExpired() (int, error) {
 func (s *BloomPebbleStore) CheckAndResetBloom() {
 	s.bloomMu.Lock()
 	defer s.bloomMu.Unlock()
-	s.checkAndResetBloom()
+	s.checkAndResetBloomLocked()
 }
 
 // GetStats returns store statistics

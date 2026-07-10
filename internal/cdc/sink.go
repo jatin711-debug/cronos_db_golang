@@ -3,6 +3,7 @@ package cdc
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
@@ -27,8 +28,9 @@ type ChangeEvent struct {
 
 // Manager manages multiple CDC sinks.
 type Manager struct {
-	sinks []Sink
-	quit  chan struct{}
+	sinks    []Sink
+	quit     chan struct{}
+	quitOnce sync.Once
 }
 
 // NewManager creates a CDC manager.
@@ -60,9 +62,9 @@ func (m *Manager) Emit(ctx context.Context, event *ChangeEvent) {
 	}
 }
 
-// Close shuts down all sinks.
+// Close shuts down all sinks. Idempotent and safe to call multiple times.
 func (m *Manager) Close() error {
-	close(m.quit)
+	m.quitOnce.Do(func() { close(m.quit) })
 	var lastErr error
 	for _, sink := range m.sinks {
 		if err := sink.Close(); err != nil {

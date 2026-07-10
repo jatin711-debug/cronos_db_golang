@@ -69,6 +69,7 @@ type WAL struct {
 	dirty              atomic.Bool // Set on write, cleared on flush
 	flushErrors        atomic.Int64
 	quit               chan struct{}
+	quitOnce           sync.Once
 	wg                 sync.WaitGroup
 	cipher             *SegmentCipher
 	appendHook         func(event *types.Event) // Called after successful append (e.g. CDC)
@@ -979,10 +980,10 @@ func (w *WAL) Flush() error {
 }
 
 // Close stops the background flush loop, flushes and syncs the active segment,
-// and closes all underlying files.
+// and closes all underlying files. Safe to call multiple times.
 func (w *WAL) Close() error {
 	// Signal background loop to stop
-	close(w.quit)
+	w.quitOnce.Do(func() { close(w.quit) })
 	w.wg.Wait()
 
 	w.mu.Lock()

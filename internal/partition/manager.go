@@ -26,25 +26,26 @@ import (
 
 // Partition represents a data partition
 type Partition struct {
-	ID            int32
-	Topic         string
-	DataDir       string
-	Wal           *storage.WAL
-	Scheduler     *scheduler.Scheduler
-	ConsumerGroup *consumer.GroupManager
-	DedupStore    *dedup.Manager
-	Dispatcher    *delivery.Dispatcher
-	Worker        *delivery.Worker
-	Follower      *replication.Follower // For receiving replicated data
-	ReplLeader    *replication.Leader   // For sending replication to followers
-	Leader        bool
-	Epoch         int64  // Cluster-assigned epoch for split-brain fencing
-	MinKey        string // Minimum key boundary (inclusive)
-	MaxKey        string // Maximum key boundary (exclusive)
-	CreatedTS     time.Time
-	UpdatedTS     time.Time
-	deliveryQuit  chan struct{} // Quit channel for delivery goroutine
-	replayErr     atomic.Pointer[error]
+	ID               int32
+	Topic            string
+	DataDir          string
+	Wal              *storage.WAL
+	Scheduler        *scheduler.Scheduler
+	ConsumerGroup    *consumer.GroupManager
+	DedupStore       *dedup.Manager
+	Dispatcher       *delivery.Dispatcher
+	Worker           *delivery.Worker
+	Follower         *replication.Follower // For receiving replicated data
+	ReplLeader       *replication.Leader   // For sending replication to followers
+	Leader           bool
+	Epoch            int64  // Cluster-assigned epoch for split-brain fencing
+	MinKey           string // Minimum key boundary (inclusive)
+	MaxKey           string // Maximum key boundary (exclusive)
+	CreatedTS        time.Time
+	UpdatedTS        time.Time
+	deliveryQuit     chan struct{} // Quit channel for delivery goroutine
+	deliveryQuitOnce sync.Once
+	replayErr        atomic.Pointer[error]
 }
 
 // GetReplayError returns the last WAL replay error for this partition, if any.
@@ -58,6 +59,27 @@ func (p *Partition) GetReplayError() error {
 // setReplayError stores the last WAL replay error.
 func (p *Partition) setReplayError(err error) {
 	p.replayErr.Store(&err)
+}
+
+// toTypesPartition converts an internal Partition to the public API representation,
+// populating NextOffset and HighWatermark from the WAL when available.
+// The caller must hold pm.mu (at least read-locked) while partition is valid.
+func (pm *PartitionManager) toTypesPartition(partition *Partition) *types.Partition {
+	if partition == nil {
+		return nil
+	}
+	tp := &types.Partition{
+		ID:        partition.ID,
+		Topic:     partition.Topic,
+		Active:    true,
+		CreatedTS: partition.CreatedTS.UnixMilli(),
+		UpdatedTS: partition.UpdatedTS.UnixMilli(),
+	}
+	if partition.Wal != nil {
+		tp.NextOffset = partition.Wal.GetNextOffset()
+		tp.HighWatermark = partition.Wal.GetHighWatermark()
+	}
+	return tp
 }
 
 // IsKeyInBounds returns true if key falls within the partition bounds [MinKey, MaxKey).
@@ -250,15 +272,7 @@ func (pm *PartitionManager) GetPartition(partitionID int32) (*types.Partition, e
 		return nil, err
 	}
 
-	return &types.Partition{
-		ID:            partition.ID,
-		Topic:         partition.Topic,
-		NextOffset:    0, // Would get from WAL
-		HighWatermark: 0, // Would get from WAL
-		Active:        true,
-		CreatedTS:     partition.CreatedTS.UnixMilli(),
-		UpdatedTS:     partition.UpdatedTS.UnixMilli(),
-	}, nil
+	return pm.toTypesPartition(partition), nil
 }
 
 // GetInternalPartition gets the internal partition object
@@ -297,15 +311,7 @@ func (pm *PartitionManager) GetPartitionForTopic(topic string) (*types.Partition
 	pm.mu.RLock()
 	if partition, exists := pm.partitions[partitionID]; exists {
 		pm.mu.RUnlock()
-		return &types.Partition{
-			ID:            partition.ID,
-			Topic:         partition.Topic,
-			NextOffset:    0,
-			HighWatermark: 0,
-			Active:        true,
-			CreatedTS:     partition.CreatedTS.UnixMilli(),
-			UpdatedTS:     partition.UpdatedTS.UnixMilli(),
-		}, nil
+		return pm.toTypesPartition(partition), nil
 	}
 	pm.mu.RUnlock()
 
@@ -315,15 +321,7 @@ func (pm *PartitionManager) GetPartitionForTopic(topic string) (*types.Partition
 
 	// Check if the computed partition already exists locally
 	if partition, exists := pm.partitions[partitionID]; exists {
-		return &types.Partition{
-			ID:            partition.ID,
-			Topic:         partition.Topic,
-			NextOffset:    0,
-			HighWatermark: 0,
-			Active:        true,
-			CreatedTS:     partition.CreatedTS.UnixMilli(),
-			UpdatedTS:     partition.UpdatedTS.UnixMilli(),
-		}, nil
+		return pm.toTypesPartition(partition), nil
 	}
 
 	// Auto-create the partition with the CORRECT hash-derived ID
@@ -362,15 +360,7 @@ func (pm *PartitionManager) GetPartitionForKey(key string) (*types.Partition, er
 	pm.mu.RLock()
 	if partition, exists := pm.partitions[partitionID]; exists {
 		pm.mu.RUnlock()
-		return &types.Partition{
-			ID:            partition.ID,
-			Topic:         partition.Topic,
-			NextOffset:    0,
-			HighWatermark: 0,
-			Active:        true,
-			CreatedTS:     partition.CreatedTS.UnixMilli(),
-			UpdatedTS:     partition.UpdatedTS.UnixMilli(),
-		}, nil
+		return pm.toTypesPartition(partition), nil
 	}
 	pm.mu.RUnlock()
 
@@ -380,15 +370,7 @@ func (pm *PartitionManager) GetPartitionForKey(key string) (*types.Partition, er
 
 	// Check if the computed partition already exists locally
 	if partition, exists := pm.partitions[partitionID]; exists {
-		return &types.Partition{
-			ID:            partition.ID,
-			Topic:         partition.Topic,
-			NextOffset:    0,
-			HighWatermark: 0,
-			Active:        true,
-			CreatedTS:     partition.CreatedTS.UnixMilli(),
-			UpdatedTS:     partition.UpdatedTS.UnixMilli(),
-		}, nil
+		return pm.toTypesPartition(partition), nil
 	}
 
 	// Auto-create the partition with the CORRECT hash-derived ID
@@ -859,12 +841,7 @@ func (pm *PartitionManager) StopPartition(partitionID int32) error {
 
 	// Signal delivery goroutines to stop FIRST to avoid circular lock deadlock
 	// Delivery goroutines read from deliveryQuit channel - closing it allows them to exit
-	select {
-	case <-partition.deliveryQuit:
-		// already closed
-	default:
-		close(partition.deliveryQuit)
-	}
+	partition.deliveryQuitOnce.Do(func() { close(partition.deliveryQuit) })
 
 	// Stop scheduler: no new events will be added to the ready queue
 	if partition.Scheduler != nil {
