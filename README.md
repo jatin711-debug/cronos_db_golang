@@ -7,7 +7,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 [![Status](https://img.shields.io/badge/status-Beta-yellow.svg)](#status)
 
-> **Production Readiness:** The core storage and scheduling paths are implemented and tested, but several operational hardening items (TLS/mTLS enforcement, consumer-group metadata persistence, and chaos testing) are still being finalized. Run production workloads only after enabling TLS, auth, encryption, and RF≥3/minISR≥2.
+> **Production Readiness:** The core storage, scheduling, replication, and consumer-group paths are implemented and tested. Production deployments require TLS, auth, encryption at rest, replication mTLS, RF≥3, and minISR≥2. Use `--dev` only for local development/CI. Run production workloads only after configuring all security controls.
 
 CronosDB is a distributed database purpose-built for **timestamp-triggered event processing**. Publish events with a future timestamp — CronosDB stores them durably and delivers them precisely when the time arrives.
 
@@ -34,12 +34,11 @@ All numbers below are from single-machine benchmarks (3 nodes on one host, AMD R
 ## Features
 
 ### Storage & Durability
-- **Append-Only WAL** — Segmented logs (512MB), CRC32 integrity, sparse indexing
+- **Append-Only WAL v2** — Segmented logs (512MB), per-entry Raft term + CRC32 integrity, sparse indexing. Upgrading from earlier builds requires a clean data directory.
 - **Memory-Mapped Reads** — Zero-copy segment reads on Linux/Windows
-- **Configurable Fsync** — `every_event` | `batch` | `periodic` modes
+- **Configurable Fsync** — `every_event` | `batch` (default) | `periodic` modes
 - **Automatic Compaction** — Removes segments below min consumer offset
-
-### Scheduling
+- **Retention Enforcer** — Time-based and size-based cleanup preserving the active segment per partition
 - **Hierarchical Timing Wheel** — O(1) timer add/remove/tick for millions of events
 - **Two-Tier Cold/Hot Scheduler** — PebbleDB cold store for far-future events (>1hr); adaptive hydrator adjusts scan frequency based on load (5s–5min). Keeps hot memory bounded.
 - **Absolute Time Tracking** — No drift across overflow wheel cascades
@@ -71,7 +70,7 @@ All numbers below are from single-machine benchmarks (3 nodes on one host, AMD R
 ### API
 - **gRPC Streaming** — Bidirectional subscribe, streaming replay
 - **Batch Publish** — 100-4000 events per call for maximum throughput
-- **Consumer Groups** — Kafka-style offset tracking with persistent PebbleDB store
+- **Consumer Groups** — Kafka-style offset tracking with persistent PebbleDB store for offsets, group metadata, and exactly-once commit IDs
 - **Replay Engine** — Time-range or offset-based historical replay
 
 ---
@@ -148,12 +147,14 @@ go build -o bin/cronos-api ./cmd/api/main.go
 ### Run Single Node
 
 ```bash
-./bin/cronos-api -node-id=node1 -data-dir=./data
+# Development mode (disables production security requirements)
+./bin/cronos-api --dev -node-id=node1 -data-dir=./data
 ```
 
 ### Run 3-Node Cluster
 
 ```bash
+# Makefile targets start nodes in developer mode for local benchmarking.
 # Terminal 1: Bootstrap leader
 make node1
 
@@ -186,15 +187,59 @@ make loadtest-batch PUBLISHERS=32 EVENTS=100000 BATCH_SIZE=4000
 # Build image (multi-stage: Rust → Go → Debian slim)
 make docker
 
-# Single node
+# Single node (developer mode)
 make docker-single
 
-# 3-node cluster
+# 3-node cluster (developer mode)
 make docker-cluster
 
 # View logs
 make docker-logs
 ```
+
+### Production Deployment & Security
+
+Do **not** use `--dev` for production. A production-ready configuration requires:
+
+| Requirement | Flag / Config | Recommended Value |
+|-------------|---------------|-------------------|
+| Replication factor | `--replication-factor` | ≥ 3 |
+| Min in-sync replicas | `--min-insync-replicas` | ≥ 2 |
+| gRPC TLS | `--tls-enabled`, `--tls-cert-file`, `--tls-key-file` | Enabled |
+| Authentication | `--auth-enabled`, `--auth-jwt-secret` or `--auth-jwt-public-key` | Enabled |
+| Encryption at rest | `--encryption-enabled`, `--encryption-key-file` | Enabled |
+| Replication mTLS | `--replication-tls-enabled`, `--replication-tls-*` | Enabled |
+| Fsync mode | `--fsync-mode` | `batch` or `every_event` |
+
+Example production startup:
+
+```bash
+./bin/cronos-api \
+  --node-id=node1 \
+  --data-dir=./data \
+  --cluster \
+  --replication-factor=3 \
+  --min-insync-replicas=2 \
+  --fsync-mode=batch \
+  --tls-enabled \
+  --tls-cert-file=/etc/cronos/tls/tls.crt \
+  --tls-key-file=/etc/cronos/tls/tls.key \
+  --auth-enabled \
+  --auth-jwt-secret="${CRONOS_JWT_SECRET}" \
+  --encryption-enabled \
+  --encryption-key-file=/etc/cronos/encryption/master.key \
+  --replication-tls-enabled \
+  --replication-tls-cert-file=/etc/cronos/replication-tls/tls.crt \
+  --replication-tls-key-file=/etc/cronos/replication-tls/tls.key
+```
+
+For Kubernetes, use `values-production.yaml` and create the referenced TLS/auth/encryption secrets before installing:
+
+```bash
+helm install cronos-db ./charts/cronos-db -f ./charts/cronos-db/values-production.yaml
+```
+
+**Note:** The on-disk WAL segment format was upgraded to v2 (per-entry terms). Upgrading from older builds requires a clean `--data-dir`.
 
 ### Test with grpcurl
 

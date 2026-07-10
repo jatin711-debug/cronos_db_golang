@@ -15,8 +15,12 @@ const (
 	// WAL configuration
 	DefaultSegmentSizeBytes = 536870912 // 512MB
 	DefaultIndexInterval    = 1000
-	DefaultFsyncMode        = "every_event"
+	DefaultFsyncMode        = "batch"
 	DefaultFlushIntervalMS  = 1000
+
+	// Retention configuration
+	DefaultRetentionMaxAgeHours = 168 // 7 days
+	DefaultRetentionMaxSizeGB   = 0   // Disabled by default
 
 	// Scheduler configuration
 	DefaultTickMS    = 100

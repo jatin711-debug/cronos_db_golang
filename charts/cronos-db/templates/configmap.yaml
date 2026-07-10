@@ -15,6 +15,7 @@ data:
   CRONOS_CLUSTER_SEEDS: {{ include "cronos-db.clusterSeeds" . | quote }}
   CRONOS_PARTITION_COUNT: {{ .Values.config.partitionCount | quote }}
   CRONOS_REPLICATION_FACTOR: {{ .Values.config.replicationFactor | quote }}
+  CRONOS_MIN_IN_SYNC_REPLICAS: {{ .Values.config.minInSyncReplicas | default 1 | quote }}
   CRONOS_FSYNC_MODE: {{ .Values.config.fsyncMode | quote }}
   CRONOS_SEGMENT_SIZE: {{ .Values.config.segmentSizeBytes | quote }}
   CRONOS_INDEX_INTERVAL: {{ .Values.config.indexInterval | quote }}
@@ -23,8 +24,10 @@ data:
   CRONOS_WHEEL_SIZE: {{ .Values.config.wheelSize | quote }}
   CRONOS_DEDUP_TTL_HOURS: {{ .Values.config.dedupTTLHours | quote }}
   CRONOS_BLOOM_CAPACITY: {{ .Values.config.bloomCapacity | quote }}
+  CRONOS_EXACTLY_ONCE_COMMITS: {{ .Values.config.exactlyOnceCommits | default false | quote }}
   CRONOS_TRACING_ENABLED: {{ .Values.config.tracingEnabled | quote }}
   CRONOS_TRACING_EXPORTER: {{ .Values.config.tracingExporter | quote }}
   CRONOS_TRACING_OTLP_ENDPOINT: {{ .Values.config.tracingOTLPEndpoint | quote }}
   CRONOS_TRACING_SAMPLE_RATIO: {{ .Values.config.tracingSampleRatio | quote }}
   CRONOS_TRACING_INSECURE: {{ .Values.config.tracingInsecure | quote }}
+  CRONOS_DEV: {{ .Values.config.dev | default false | quote }}

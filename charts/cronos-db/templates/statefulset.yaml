@@ -33,6 +33,45 @@ spec:
                   fieldPath: metadata.name
             - name: CRONOS_NODE_ID
               value: "$(POD_NAME)"
+            {{- if .Values.tls.enabled }}
+            - name: CRONOS_TLS_ENABLED
+              value: "true"
+            - name: CRONOS_TLS_CERT_FILE
+              value: "/etc/cronos/tls/tls.crt"
+            - name: CRONOS_TLS_KEY_FILE
+              value: "/etc/cronos/tls/tls.key"
+            {{- if .Values.tls.caCertEnabled }}
+            - name: CRONOS_TLS_CA_FILE
+              value: "/etc/cronos/tls/ca.crt"
+            {{- end }}
+            {{- end }}
+            {{- if .Values.auth.enabled }}
+            - name: CRONOS_AUTH_ENABLED
+              value: "true"
+            - name: CRONOS_AUTH_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ default (printf "%s-auth" (include "cronos-db.fullname" .)) .Values.auth.existingSecret }}
+                  key: {{ .Values.auth.secretKey | default "jwt-secret" }}
+            {{- end }}
+            {{- if .Values.encryption.enabled }}
+            - name: CRONOS_ENCRYPTION_ENABLED
+              value: "true"
+            - name: CRONOS_ENCRYPTION_KEY_FILE
+              value: "/etc/cronos/encryption/master.key"
+            {{- end }}
+            {{- if .Values.replicationTLS.enabled }}
+            - name: CRONOS_REPLICATION_TLS_ENABLED
+              value: "true"
+            - name: CRONOS_REPLICATION_TLS_CERT_FILE
+              value: "/etc/cronos/replication-tls/tls.crt"
+            - name: CRONOS_REPLICATION_TLS_KEY_FILE
+              value: "/etc/cronos/replication-tls/tls.key"
+            {{- if .Values.replicationTLS.caCertEnabled }}
+            - name: CRONOS_REPLICATION_TLS_CA_FILE
+              value: "/etc/cronos/replication-tls/ca.crt"
+            {{- end }}
+            {{- end }}
           envFrom:
             - configMapRef:
                 name: {{ include "cronos-db.fullname" . }}
@@ -73,17 +112,47 @@ spec:
           volumeMounts:
             - name: data
               mountPath: {{ .Values.config.dataDir }}
-          {{- if .Values.tls.enabled }}
+            {{- if .Values.tls.enabled }}
             - name: tls
               mountPath: /etc/cronos/tls
               readOnly: true
-          {{- end }}
-      {{- if .Values.tls.enabled }}
+            {{- end }}
+            {{- if .Values.auth.enabled }}
+            - name: auth
+              mountPath: /etc/cronos/auth
+              readOnly: true
+            {{- end }}
+            {{- if .Values.encryption.enabled }}
+            - name: encryption
+              mountPath: /etc/cronos/encryption
+              readOnly: true
+            {{- end }}
+            {{- if .Values.replicationTLS.enabled }}
+            - name: replication-tls
+              mountPath: /etc/cronos/replication-tls
+              readOnly: true
+            {{- end }}
       volumes:
+        {{- if .Values.tls.enabled }}
         - name: tls
           secret:
             secretName: {{ .Values.tls.existingSecret }}
-      {{- end }}
+        {{- end }}
+        {{- if .Values.auth.enabled }}
+        - name: auth
+          secret:
+            secretName: {{ default (printf "%s-auth" (include "cronos-db.fullname" .)) .Values.auth.existingSecret }}
+        {{- end }}
+        {{- if .Values.encryption.enabled }}
+        - name: encryption
+          secret:
+            secretName: {{ .Values.encryption.existingSecret }}
+        {{- end }}
+        {{- if .Values.replicationTLS.enabled }}
+        - name: replication-tls
+          secret:
+            secretName: {{ .Values.replicationTLS.existingSecret }}
+        {{- end }}
   {{- if .Values.persistence.enabled }}
   volumeClaimTemplates:
     - metadata:

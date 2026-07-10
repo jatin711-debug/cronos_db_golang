@@ -17,9 +17,9 @@ import (
 
 // EncryptionConfig holds at-rest encryption settings.
 type EncryptionConfig struct {
-	Enabled    bool
-	MasterKey  []byte // 32 bytes for AES-256
-	KeyFile    string // Path to file containing master key
+	Enabled   bool
+	MasterKey []byte // 32 bytes for AES-256
+	KeyFile   string // Path to file containing master key
 }
 
 // LoadMasterKey loads the encryption key from file. The key must be exactly 32

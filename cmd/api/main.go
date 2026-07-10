@@ -166,21 +166,20 @@ func main() {
 	backupScheduler.Start()
 	defer backupScheduler.Stop()
 
-		// Start compliance retention enforcer
-		retentionEnforcer := compliance.NewEnforcer(cfg.DataDir, compliance.RetentionPolicy{
-			MaxAge:       30 * 24 * time.Hour,
-			MaxSizeBytes: 100 << 30, // 100GB
-		})
-		utils.GoSafe("retention-enforcer", func() {
-			ticker := time.NewTicker(1 * time.Hour)
-			defer ticker.Stop()
-			for range ticker.C {
-				if err := retentionEnforcer.Run(context.Background()); err != nil {
-					slog.Warn("Retention enforcement failed", "error", err)
-				}
+	// Start compliance retention enforcer
+	retentionEnforcer := compliance.NewEnforcer(cfg.DataDir, compliance.RetentionPolicy{
+		MaxAge:       time.Duration(cfg.RetentionMaxAgeHours) * time.Hour,
+		MaxSizeBytes: cfg.RetentionMaxSizeGB << 30,
+	})
+	utils.GoSafe("retention-enforcer", func() {
+		ticker := time.NewTicker(1 * time.Hour)
+		defer ticker.Stop()
+		for range ticker.C {
+			if err := retentionEnforcer.Run(context.Background()); err != nil {
+				slog.Warn("Retention enforcement failed", "error", err)
 			}
-		})
-
+		}
+	})
 
 	// Create cluster manager (if enabled)
 	var clusterMgr *cluster.Manager
@@ -436,6 +435,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Propagate unexpected gRPC server exits as fatal.
+	utils.GoSafe("grpc-serve-monitor", func() {
+		if err := <-grpcServer.ServeError(); err != nil {
+			slog.Error("gRPC server exited unexpectedly", "error", err)
+			os.Exit(1)
+		}
+	})
+
 	// Health check endpoint with cluster status
 	mux := http.NewServeMux()
 
@@ -449,14 +456,21 @@ func main() {
 		Handler: mux,
 	}
 
-		utils.GoSafe("health-server", func() {
-			slog.Info("Starting health check server", "address", cfg.HTTPAddress)
-			if err := healthServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				slog.Error("Failed to start health server", "error", err)
-				os.Exit(1)
-			}
-		})
+	healthErr := make(chan error, 1)
+	utils.GoSafe("health-server", func() {
+		slog.Info("Starting health check server", "address", cfg.HTTPAddress)
+		if err := healthServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			healthErr <- err
+		}
+	})
 
+	// Fail fast if the health server cannot bind or starts serving errors.
+	utils.GoSafe("health-start-monitor", func() {
+		if err := <-healthErr; err != nil {
+			slog.Error("Health server failed", "error", err)
+			os.Exit(1)
+		}
+	})
 
 	// Start auto-scaler with real system metrics
 	autoScaler := cluster.NewAutoScaler(cluster.NewSystemMetrics(cfg.DataDir))
@@ -492,73 +506,73 @@ func main() {
 
 					partitionLabel := strconv.FormatInt(int64(i), 10)
 
-						if p.Scheduler != nil {
-							schedulerStats := p.Scheduler.GetStats()
-							metrics.SetTimingWheelMetrics(partitionLabel, schedulerStats.ActiveTimers, int64(schedulerStats.OverflowLevel))
-						}
+					if p.Scheduler != nil {
+						schedulerStats := p.Scheduler.GetStats()
+						metrics.SetTimingWheelMetrics(partitionLabel, schedulerStats.ActiveTimers, int64(schedulerStats.OverflowLevel))
+					}
 
-						if p.Wal != nil {
-							activeSegmentSize := int64(0)
-							if activeSegment := p.Wal.GetActiveSegment(); activeSegment != nil {
-								activeSegmentSize = activeSegment.GetSize()
-							}
-							metrics.SetWALMetrics(partitionLabel, len(p.Wal.GetSegments()), activeSegmentSize, p.Wal.GetHighWatermark())
+					if p.Wal != nil {
+						activeSegmentSize := int64(0)
+						if activeSegment := p.Wal.GetActiveSegment(); activeSegment != nil {
+							activeSegmentSize = activeSegment.GetSize()
 						}
+						metrics.SetWALMetrics(partitionLabel, len(p.Wal.GetSegments()), activeSegmentSize, p.Wal.GetHighWatermark())
+					}
 
-						if p.DedupStore != nil {
-							if dedupStats, err := p.DedupStore.GetStats(); err == nil && dedupStats != nil {
-								falsePositiveRate := 0.0
-								totalBloomPositives := dedupStats.BloomHits + dedupStats.BloomFalsePositives
-								if totalBloomPositives > 0 {
-									falsePositiveRate = float64(dedupStats.BloomFalsePositives) / float64(totalBloomPositives)
-								}
-								metrics.SetDedupMetrics(partitionLabel, dedupStats.BloomMemoryBytes, falsePositiveRate, dedupStats.PebbleHits)
+					if p.DedupStore != nil {
+						if dedupStats, err := p.DedupStore.GetStats(); err == nil && dedupStats != nil {
+							falsePositiveRate := 0.0
+							totalBloomPositives := dedupStats.BloomHits + dedupStats.BloomFalsePositives
+							if totalBloomPositives > 0 {
+								falsePositiveRate = float64(dedupStats.BloomFalsePositives) / float64(totalBloomPositives)
 							}
-						}
-
-						if p.Dispatcher != nil {
-							dispatcherStats := p.Dispatcher.GetStats()
-							workerQueueDepth := int64(0)
-							if p.Worker != nil {
-								workerQueueDepth = p.Worker.GetStats().QueueLength
-							}
-							metrics.SetDeliveryMetrics(partitionLabel, dispatcherStats.ActiveDeliveries, dispatcherStats.CreditsInUse, workerQueueDepth)
-						}
-
-						if p.ConsumerGroup != nil && p.Wal != nil {
-							hwm := p.Wal.GetHighWatermark()
-							for _, group := range p.ConsumerGroup.ListGroups() {
-								var lag int64
-								for _, part := range group.Partitions {
-									committed := group.CommittedOffsets[part]
-									if committed < 0 {
-										committed = -1
-									}
-									partLag := hwm - committed
-									if partLag < 0 {
-										partLag = 0
-									}
-									lag += partLag
-									metrics.SetConsumerGroupMetrics(group.GroupID, strconv.FormatInt(int64(part), 10), partLag, len(group.Members))
-								}
-							}
+							metrics.SetDedupMetrics(partitionLabel, dedupStats.BloomMemoryBytes, falsePositiveRate, dedupStats.PebbleHits)
 						}
 					}
 
-					stats := pm.GetStats()
-					slog.Info("Stats", "stats", stats)
-					if cfg.ClusterEnabled && clusterMgr != nil {
-						clusterStats := clusterMgr.GetStats()
-						metrics.SetClusterMetrics(
-							int64(clusterStats.TotalNodes),
-							int64(clusterStats.AliveNodes),
-							int64(clusterStats.NumPartitions),
-							int64(clusterStats.LeaderPartitions),
-						)
-						slog.Info("Cluster Stats", "stats", clusterStats)
-					} else {
-						metrics.SetClusterMetrics(1, 1, stats.TotalPartitions, stats.LeaderPartitions)
+					if p.Dispatcher != nil {
+						dispatcherStats := p.Dispatcher.GetStats()
+						workerQueueDepth := int64(0)
+						if p.Worker != nil {
+							workerQueueDepth = p.Worker.GetStats().QueueLength
+						}
+						metrics.SetDeliveryMetrics(partitionLabel, dispatcherStats.ActiveDeliveries, dispatcherStats.CreditsInUse, workerQueueDepth)
 					}
+
+					if p.ConsumerGroup != nil && p.Wal != nil {
+						hwm := p.Wal.GetHighWatermark()
+						for _, group := range p.ConsumerGroup.ListGroups() {
+							var lag int64
+							for _, part := range group.Partitions {
+								committed := group.CommittedOffsets[part]
+								if committed < 0 {
+									committed = -1
+								}
+								partLag := hwm - committed
+								if partLag < 0 {
+									partLag = 0
+								}
+								lag += partLag
+								metrics.SetConsumerGroupMetrics(group.GroupID, strconv.FormatInt(int64(part), 10), partLag, len(group.Members))
+							}
+						}
+					}
+				}
+
+				stats := pm.GetStats()
+				slog.Info("Stats", "stats", stats)
+				if cfg.ClusterEnabled && clusterMgr != nil {
+					clusterStats := clusterMgr.GetStats()
+					metrics.SetClusterMetrics(
+						int64(clusterStats.TotalNodes),
+						int64(clusterStats.AliveNodes),
+						int64(clusterStats.NumPartitions),
+						int64(clusterStats.LeaderPartitions),
+					)
+					slog.Info("Cluster Stats", "stats", clusterStats)
+				} else {
+					metrics.SetClusterMetrics(1, 1, stats.TotalPartitions, stats.LeaderPartitions)
+				}
 			case <-ctx.Done():
 				return
 			}
@@ -580,10 +594,12 @@ func main() {
 
 		// 1. Stop accepting NEW requests first (drain phase)
 		slog.Info("Shutdown phase 1: Draining incoming requests...")
-		grpcServer.GracefulStop() // Stop accepting new gRPC connections
+		grpcDrainCtx, grpcDrainCancel := context.WithTimeout(shutdownCtx, 25*time.Second)
+		defer grpcDrainCancel()
+		grpcServer.GracefulStopWithTimeout(grpcDrainCtx) // stop accepting new gRPC connections
 
 		// 2. Shutdown health server to stop new HTTP health checks
-		healthShutdownCtx, healthShutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		healthShutdownCtx, healthShutdownCancel := context.WithTimeout(shutdownCtx, 5*time.Second)
 		defer healthShutdownCancel()
 		if err := healthServer.Shutdown(healthShutdownCtx); err != nil {
 			slog.Warn("Health server shutdown error", "error", err)

@@ -704,6 +704,7 @@ func computeBatchChecksum(events []*types.Event) uint32 {
 	}
 	return h.Sum32()
 }
+
 type LeaderStats struct {
 	Followers          int64
 	ConnectedFollowers int64

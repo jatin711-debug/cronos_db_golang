@@ -2,7 +2,9 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"time"
 
@@ -11,7 +13,6 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/internal/tracing"
 	"github.com/jatin711-debug/cronos_db_golang/internal/tx"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
-	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -25,6 +26,7 @@ type GRPCServer struct {
 	listener  net.Listener
 	config    *Config
 	txHandler *tx.Handler
+	serveErr  chan error
 }
 
 // Config represents gRPC server configuration
@@ -172,7 +174,9 @@ func (g *GRPCServer) RegisterRaftServer(srv types.RaftServiceServer) {
 	types.RegisterRaftServiceServer(g.server, srv)
 }
 
-// Start starts the gRPC server
+// Start starts the gRPC server.
+// The returned error is only from net.Listen; server-serve errors can be read
+// from ServeError().
 func (g *GRPCServer) Start() error {
 	lis, err := net.Listen("tcp", g.config.Address)
 	if err != nil {
@@ -180,16 +184,25 @@ func (g *GRPCServer) Start() error {
 	}
 
 	g.listener = lis
+	g.serveErr = make(chan error, 1)
 
 	reflection.Register(g.server)
 
-	utils.GoSafe("grpc-server", func() {
-		if err := g.server.Serve(lis); err != nil {
-			// Log error
+	go func() {
+		err := g.server.Serve(lis)
+		if err != nil && !errors.Is(err, grpc.ErrServerStopped) {
+			g.serveErr <- err
 		}
-	})
+		close(g.serveErr)
+	}()
 
 	return nil
+}
+
+// ServeError returns a channel that receives a non-nil error if the gRPC
+// server exits unexpectedly. It is closed when the server stops.
+func (g *GRPCServer) ServeError() <-chan error {
+	return g.serveErr
 }
 
 // Address returns the address the server is listening on, or an empty string
@@ -201,19 +214,40 @@ func (g *GRPCServer) Address() string {
 	return ""
 }
 
-// Stop stops the gRPC server
+// Stop stops the gRPC server immediately.
 func (g *GRPCServer) Stop() {
 	if g.server != nil {
 		g.server.Stop()
 	}
 	if g.listener != nil {
-		g.listener.Close()
+		_ = g.listener.Close()
 	}
 }
 
-// GracefulStop performs graceful shutdown
+// GracefulStop performs graceful shutdown.
 func (g *GRPCServer) GracefulStop() {
 	if g.server != nil {
 		g.server.GracefulStop()
+	}
+}
+
+// GracefulStopWithTimeout performs a graceful shutdown and falls back to a
+// forced Stop if the supplied context expires before the server drains.
+func (g *GRPCServer) GracefulStopWithTimeout(ctx context.Context) {
+	if g.server == nil {
+		return
+	}
+	done := make(chan struct{})
+	go func() {
+		g.server.GracefulStop()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-ctx.Done():
+		slog.Warn("gRPC graceful stop timed out, forcing stop")
+		g.server.Stop()
+		<-done
 	}
 }

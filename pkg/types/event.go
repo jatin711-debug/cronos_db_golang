@@ -103,6 +103,13 @@ type Config struct {
 	NodeZone   string
 	NodeRegion string
 
+	// Dev mode disables production security requirements for local development.
+	DevMode bool
+
+	// Retention policy (0 = disabled)
+	RetentionMaxAgeHours int
+	RetentionMaxSizeGB   int64
+
 	// Exactly-once delivery option
 	ExactlyOnceCommits bool
 

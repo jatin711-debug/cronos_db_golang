@@ -59,10 +59,14 @@ headlessService:
   raftPort: 7948
 
 config:
+  # Default to developer mode for easy local/CI installs. Production must set
+  # dev=false and provide TLS, auth, and encryption-at-rest configuration.
+  dev: true
   nodeIdPrefix: "cronos-node"
   dataDir: /data
   partitionCount: 8
   replicationFactor: 3
+  minInSyncReplicas: 1
   fsyncMode: every_event
   segmentSizeBytes: 536870912
   indexInterval: 1000
@@ -72,6 +76,7 @@ config:
   # Dedup TTL: 24h is too aggressive for production backfill; 168h = 7 days.
   dedupTTLHours: 168
   bloomCapacity: 1000000
+  exactlyOnceCommits: false
   tracingEnabled: false
   tracingExporter: otlp
   tracingOTLPEndpoint: ""
@@ -81,7 +86,26 @@ config:
 # Enable only when TLS certificates are provided via secrets.
 tls:
   enabled: false
+  caCertEnabled: false
   # existingSecret: cronos-db-tls
+
+# Enable only when an authentication secret is provided.
+auth:
+  enabled: false
+  # existingSecret: cronos-db-auth
+  # secretKey: jwt-secret
+
+# Enable only when an encryption key secret is provided.
+encryption:
+  enabled: false
+  # existingSecret: cronos-db-encryption
+  # secretKey: master.key
+
+# Enable only when replication mTLS certificates are provided via secrets.
+replicationTLS:
+  enabled: false
+  caCertEnabled: false
+  # existingSecret: cronos-db-replication-tls
 
 metrics:
   enabled: true

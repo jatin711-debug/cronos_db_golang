@@ -13,6 +13,7 @@ services:
     container_name: cronos-single
     image: cronos-db:latest
     command:
+      - --dev
       - --data-dir=/data
       - --fsync-mode=periodic
       - --flush-interval=50
@@ -55,6 +56,7 @@ services:
     container_name: cronos-node1
     image: cronos-db:latest
     command:
+      - --dev
       - --data-dir=/data
       - --node-id=node1
       - --cluster
@@ -103,6 +105,7 @@ services:
     container_name: cronos-node2
     image: cronos-db:latest
     command:
+      - --dev
       - --data-dir=/data
       - --node-id=node2
       - --cluster
@@ -153,6 +156,7 @@ services:
     container_name: cronos-node3
     image: cronos-db:latest
     command:
+      - --dev
       - --data-dir=/data
       - --node-id=node3
       - --cluster

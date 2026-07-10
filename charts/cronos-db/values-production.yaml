@@ -19,12 +19,15 @@ persistence:
   size: 100Gi
 
 config:
+  dev: false
   replicationFactor: 3
+  minInSyncReplicas: 2
   # batch = durable-high-throughput; periodic risks more data loss.
   fsyncMode: batch
   partitionCount: 32
   # 7 days dedup TTL to tolerate backfills and replays.
   dedupTTLHours: 168
+  exactlyOnceCommits: true
 
 metrics:
   enabled: true
@@ -36,3 +39,24 @@ alerts:
 
 podDisruptionBudget:
   enabled: true
+
+# Production requires TLS, auth, encryption at rest, and replication mTLS.
+# Create the referenced secrets (or use cert-manager) before installing.
+tls:
+  enabled: true
+  existingSecret: cronos-db-tls
+  caCertEnabled: true
+
+auth:
+  enabled: true
+  existingSecret: cronos-db-auth
+  secretKey: jwt-secret
+
+encryption:
+  enabled: true
+  existingSecret: cronos-db-encryption
+
+replicationTLS:
+  enabled: true
+  existingSecret: cronos-db-replication-tls
+  caCertEnabled: true

@@ -25,6 +25,8 @@ func LoadConfig() (*types.Config, error) {
 	config.IndexInterval = DefaultIndexInterval
 	config.FsyncMode = DefaultFsyncMode
 	config.FlushIntervalMS = DefaultFlushIntervalMS
+	config.RetentionMaxAgeHours = DefaultRetentionMaxAgeHours
+	config.RetentionMaxSizeGB = DefaultRetentionMaxSizeGB
 	config.TickMS = DefaultTickMS
 	config.WheelSize = DefaultWheelSize
 	config.DefaultAckTimeout = 30 * time.Second
@@ -118,6 +120,11 @@ func LoadConfig() (*types.Config, error) {
 	flag.StringVar(&config.FsyncMode, "fsync-mode", DefaultFsyncMode, "fsync mode: every_event, batch, periodic")
 	var flushInterval int
 	flag.IntVar(&flushInterval, "flush-interval", DefaultFlushIntervalMS, "Flush interval in milliseconds")
+	flag.IntVar(&config.RetentionMaxAgeHours, "retention-max-age-hours", DefaultRetentionMaxAgeHours, "Delete WAL segments older than this many hours (0 = disable)")
+	flag.Int64Var(&config.RetentionMaxSizeGB, "retention-max-size-gb", DefaultRetentionMaxSizeGB, "Keep WAL segments within this many GB by deleting oldest (0 = disable)")
+
+	// Security / dev mode
+	flag.BoolVar(&config.DevMode, "dev", false, "Developer mode: disables production security requirements")
 
 	// Scheduler configuration
 	flag.IntVar(&config.TickMS, "tick-ms", DefaultTickMS, "Scheduler tick duration in milliseconds")
@@ -248,6 +255,11 @@ func LoadConfig() (*types.Config, error) {
 	if httpAddr := os.Getenv("CRONOS_HTTP_ADDR"); httpAddr != "" && config.HTTPAddress == DefaultHTTPAddress {
 		config.HTTPAddress = httpAddr
 	}
+	if devMode := os.Getenv("CRONOS_DEV"); devMode != "" {
+		if parsed, err := strconv.ParseBool(devMode); err == nil {
+			config.DevMode = parsed
+		}
+	}
 	if clusterEnabled := os.Getenv("CRONOS_CLUSTER"); clusterEnabled == "true" {
 		config.ClusterEnabled = true
 	}
@@ -331,6 +343,30 @@ func LoadConfig() (*types.Config, error) {
 		config.AuthJWTSecret = jwtSecret
 	}
 
+	// Replication environment overrides
+	if minISR := os.Getenv("CRONOS_MIN_IN_SYNC_REPLICAS"); minISR != "" {
+		if parsed, err := strconv.Atoi(minISR); err == nil {
+			config.MinInSyncReplicas = parsed
+		}
+	}
+
+	// Exactly-once commits
+	if eo := os.Getenv("CRONOS_EXACTLY_ONCE_COMMITS"); eo != "" {
+		if parsed, err := strconv.ParseBool(eo); err == nil {
+			config.ExactlyOnceCommits = parsed
+		}
+	}
+
+	// Encryption at rest environment overrides
+	if encEnabled := os.Getenv("CRONOS_ENCRYPTION_ENABLED"); encEnabled != "" {
+		if parsed, err := strconv.ParseBool(encEnabled); err == nil {
+			config.EncryptionEnabled = parsed
+		}
+	}
+	if encKeyFile := os.Getenv("CRONOS_ENCRYPTION_KEY_FILE"); encKeyFile != "" {
+		config.EncryptionKeyFile = encKeyFile
+	}
+
 	// Topology environment overrides
 	if rack := os.Getenv("CRONOS_NODE_RACK"); rack != "" {
 		config.NodeRack = rack
@@ -393,5 +429,38 @@ func ValidateConfig(c *types.Config) error {
 	if c.FlushIntervalMS <= 0 {
 		return fmt.Errorf("flush-interval must be > 0")
 	}
+
+	// Production hardening: require TLS, auth, encryption, and replication safety
+	// unless the operator explicitly opts into developer mode.
+	if !c.DevMode {
+		if c.ReplicationFactor < 3 {
+			return fmt.Errorf("production mode requires replication-factor >= 3 (use --dev to bypass)")
+		}
+		if c.MinInSyncReplicas < 2 {
+			return fmt.Errorf("production mode requires min-insync-replicas >= 2 (use --dev to bypass)")
+		}
+		if !c.TLSEnabled {
+			return fmt.Errorf("production mode requires TLS to be enabled (use --dev to bypass)")
+		}
+		if c.TLSCertFile == "" || c.TLSKeyFile == "" {
+			return fmt.Errorf("production mode requires tls-cert-file and tls-key-file")
+		}
+		if !c.AuthEnabled {
+			return fmt.Errorf("production mode requires auth to be enabled (use --dev to bypass)")
+		}
+		if c.AuthJWTSecret == "" && c.AuthJWTPublicKey == "" {
+			return fmt.Errorf("production mode requires auth-jwt-secret or auth-jwt-public-key")
+		}
+		if !c.EncryptionEnabled {
+			return fmt.Errorf("production mode requires encryption at rest to be enabled (use --dev to bypass)")
+		}
+		if c.EncryptionKeyFile == "" {
+			return fmt.Errorf("production mode requires encryption-key-file")
+		}
+		if !c.ReplicationTLSEnabled {
+			return fmt.Errorf("production mode requires replication TLS to be enabled (use --dev to bypass)")
+		}
+	}
+
 	return nil
 }

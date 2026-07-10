@@ -18,8 +18,8 @@ func TestNewManager(t *testing.T) {
 	if m == nil {
 		t.Fatal("NewManager should not return nil")
 	}
-	if len(m.sinks) != 0 {
-		t.Errorf("expected 0 sinks, got %d", len(m.sinks))
+	if len(m.pipelines) != 0 {
+		t.Errorf("expected 0 sinks, got %d", len(m.pipelines))
 	}
 }
 
@@ -28,8 +28,8 @@ func TestManager_RegisterSink(t *testing.T) {
 	sink := &mockSink{name: "mock"}
 	m.RegisterSink(sink)
 
-	if len(m.sinks) != 1 {
-		t.Errorf("expected 1 sink, got %d", len(m.sinks))
+	if len(m.pipelines) != 1 {
+		t.Errorf("expected 1 sink, got %d", len(m.pipelines))
 	}
 }
 
