@@ -39,8 +39,9 @@ func TestConsumerGroupOffsetCommit(t *testing.T) {
 
 	select {
 	case d := <-deliveries:
+		t.Logf("received payload=%q expected=%q", string(d.Event.GetPayload()), string(payload))
 		if string(d.Event.GetPayload()) != string(payload) {
-			t.Fatalf("payload mismatch")
+			t.Fatalf("payload mismatch: got %q, want %q", string(d.Event.GetPayload()), string(payload))
 		}
 		t.Logf("Received and acked: offset=%d", d.Event.GetOffset())
 	case <-time.After(15 * time.Second):
@@ -56,7 +57,34 @@ func TestConsumerGroupRebalance(t *testing.T) {
 	groupID := topicName(t) + "-group"
 	count := 50
 
-	// Publish events
+	// Start two consumers in the same group before publishing so events are not
+	// lost before a subscriber is registered.
+	delivered := make(map[string]int)
+	deliveries := make(chan string, count*2)
+
+	startConsumer := func(name string) {
+		consCfg := client.DefaultConsumerConfig(topic, groupID)
+		consCfg.AckMode = client.AckModeAuto
+		consCfg.SubscriptionID = name
+		_ = testClient.Subscribe(ctx, consCfg, func(ctx context.Context, d client.Delivery) error {
+			for _, ev := range d.Batch {
+				deliveries <- name
+				_ = ev
+			}
+			if d.Event != nil {
+				deliveries <- name
+			}
+			return nil
+		})
+	}
+
+	go startConsumer("consumer-1")
+	go startConsumer("consumer-2")
+
+	// Give consumers time to register before publishing.
+	time.Sleep(1 * time.Second)
+
+	// Publish events to a single partition so the group can round-robin.
 	producer, err := client.NewProducer(testClient, client.DefaultProducerConfig())
 	if err != nil {
 		t.Fatalf("create producer: %v", err)
@@ -67,7 +95,8 @@ func TestConsumerGroupRebalance(t *testing.T) {
 	for i := 0; i < count; i++ {
 		messages[i] = client.Message{
 			Topic:        topic,
-			PartitionKey: fmt.Sprintf("key-%d", i%4), // Spread across partitions
+			PartitionKey: topic,
+			MessageID:    fmt.Sprintf("rebalance-%d", i),
 			Payload:      []byte("rebalance-test"),
 			ScheduleTS:   time.Now().Add(3 * time.Second).UnixMilli(),
 		}
@@ -76,23 +105,6 @@ func TestConsumerGroupRebalance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("batch publish failed: %v", err)
 	}
-
-	// Start two consumers in the same group
-	delivered := make(map[string]int)
-	deliveries := make(chan string, count*2)
-
-	startConsumer := func(name string) {
-		consCfg := client.DefaultConsumerConfig(topic, groupID)
-		consCfg.AckMode = client.AckModeAuto
-		consCfg.SubscriptionID = name
-		_ = testClient.Subscribe(ctx, consCfg, func(ctx context.Context, d client.Delivery) error {
-			deliveries <- name
-			return nil
-		})
-	}
-
-	go startConsumer("consumer-1")
-	go startConsumer("consumer-2")
 
 	// Collect deliveries
 	timeout := time.After(30 * time.Second)

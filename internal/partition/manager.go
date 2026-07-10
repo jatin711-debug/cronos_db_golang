@@ -230,7 +230,7 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 	dispatcher := delivery.NewDispatcher(dispatcherConfig)
 
 	// Create worker
-	worker := delivery.NewWorker(dispatcher, 100)
+	worker := delivery.NewWorker(dispatcher, 1)
 
 	// Wire tenant delivery callback if configured
 	if pm.tenantAccountant != nil {
