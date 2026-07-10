@@ -7,6 +7,8 @@ sequenceDiagram
     participant BG as Background Loops
 
     Main->>Config: LoadConfig()
+    Main->>Config: ValidateConfig()
+    Main->>Main: Dev-mode check (--dev bypass)
     Main->>Main: Init logger, tracing, slo, audit
     Main->>PM: NewPartitionManagerWithCache(...)
     Main->>BG: Start disk monitor and backup scheduler
@@ -21,9 +23,13 @@ sequenceDiagram
     Main->>API: NewGRPCServer(config)
     Main->>API: Register Event, Consumer, Partition, Tx
     Main->>API: Register Replication, Raft, CrossRegion
+    Main->>API: Register health server
     Main->>API: Start()
+    Main->>API: Monitor ServeError()
     Main->>BG: Start stats loop and retention loop
     Note over Main,BG: Wait for SIGINT or SIGTERM
-    Main->>API: GracefulStop()
+    Main->>API: GracefulStopWithTimeout(ctx)
+    Main->>API: Forced Stop fallback
+    Main->>API: Stop health server
     Main->>PM: StopAllPartitions()
     Main->>Cluster: Stop()

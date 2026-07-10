@@ -2,6 +2,16 @@
 
 This folder contains the architecture split by feature so developers can read subsystem docs independently.
 
+## Production-Hardening Highlights
+
+Recent changes reflected across these docs:
+
+- **WAL v2 record format** with Raft term and trailing checksum; upgrading requires a clean data dir.
+- **Persistent consumer group metadata** (assignments, group state) and exactly-once commit IDs in `OffsetStore`.
+- **Bounded CDC worker pool** (`DefaultCDCWorkers=4`, queue size 10000) with non-blocking `Emit` and graceful `Close`.
+- **Rewritten retention enforcer** that parses segment headers, protects active segments/system dirs, and removes aged/size-eligible segments plus their `.index` files.
+- **Production security requirements**: TLS, auth, encryption at rest, replication mTLS; disabled by the `--dev` flag.
+
 ## Start Here
 
 - Composition root and runtime lifecycle: [cmd/api/main.go](../../cmd/api/main.go)

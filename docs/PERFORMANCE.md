@@ -43,8 +43,8 @@ $ go test ./internal/api/ \
 The old implementation treated `batch` and `periodic` identically: both relied on the background flush loop. After Tier 3 #12, `batch` performs the buffer flush under the WAL lock and the expensive `fsync` outside the lock. This means:
 
 * `batch=1` is now event-level durable (like `every_event`) and is much slower than the old `batch=1` number, which was not actually syncing.
-* `batch` and `periodic` are no longer comparable; `periodic` remains the highest-throughput mode with a small loss window, while `batch` is the recommended durable-high-throughput mode.
-* The default stays `every_event` (safest); use `batch` for throughput with per-request durability; use `periodic` for maximum throughput.
+* `batch` and `periodic` are no longer comparable; `periodic` remains the highest-throughput mode with a small loss window, while `batch` is the recommended durable-high-throughput mode and is now the default.
+* Use `every_event` for maximum durability; use `periodic` for maximum throughput.
 
 ### 2. Encrypted writes are allocation-leaner
 
@@ -61,6 +61,14 @@ The segment index `Sync()` every 100 entries was moved to the background flush l
 ### 5. CRC implementation unchanged
 
 A benchmark of `klauspost/crc32` versus the standard library showed no consistent win; Go's `hash/crc32` is already hardware-accelerated on amd64. The mmap growth policy (1 GiB pre-allocation, doubling on remap) was also left unchanged after verification.
+
+### 6. Production hardening overhead is off the hot path
+
+Recent production-hardening changes add durability and correctness metadata but do not materially reduce throughput:
+
+* WAL v2 stores an 8-byte Raft term and a 4-byte trailing checksum per record. The extra bytes are appended outside the fsync lock and checksum verification happens on recovery and replication, not on the append fast path.
+* The retention enforcer runs as a background loop and reads only the 64-byte segment header to decide eligibility; it does not scan record contents.
+* CDC uses a bounded worker pool (`DefaultCDCWorkers=4`, queue size 10,000) with non-blocking `Emit`; slow sinks drop events rather than stall the WAL append path.
 
 ## WAL Plaintext Baseline (4 KB payload, par=1)
 

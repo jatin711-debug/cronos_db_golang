@@ -23,6 +23,8 @@ The cluster module provides node membership, partition routing, leader assignmen
 
 ## Production Decisions
 
+- Production clusters require `--replication-factor>=3` and `--min-insync-replicas>=2`.
+- Replication traffic is secured with mTLS in production.
 - Configurable virtual nodes improve partition leadership balance.
 - Consensus metadata is persisted with Raft and Bolt-backed storage.
 - Rebalance path uses partition accessor hooks to avoid ownership without data.

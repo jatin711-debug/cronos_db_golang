@@ -134,7 +134,7 @@ The runtime is composed in `cmd/api/main.go` in this order:
 5. If cluster mode: start cluster manager (`raft` + membership + router).
 6. Create initial partitions and wire WAL append hooks.
 7. Build and start gRPC server, register all services.
-8. Start health/metrics server and periodic stats loop.
+8. Start health/metrics server (fail fast on startup/bind errors) and periodic stats loop.
 9. On signal, execute graceful shutdown in ordered phases.
 
 ### 4.2 Startup and Shutdown Sequence
@@ -164,9 +164,10 @@ sequenceDiagram
     Main->>API: Register Event, Consumer, Partition, Tx
     Main->>API: Register Replication, Raft, CrossRegion
     Main->>API: Start()
+    Main->>API: Monitor ServeError()
     Main->>BG: Start stats loop and retention loop
     Note over Main,BG: Wait for SIGINT or SIGTERM
-    Main->>API: GracefulStop()
+    Main->>API: GracefulStopWithTimeout(ctx)
     Main->>PM: StopAllPartitions()
     Main->>Cluster: Stop()
 ```
@@ -247,12 +248,16 @@ This section is organized by feature area and tells you where to read first, wha
   - `internal/api/replication_server.go`
   - `internal/api/raft_server.go`
   - `internal/api/crossregion_server.go`
+  - `internal/api/health.go`
 - Main flow:
   - Requests enter interceptor chain (tracing, SLO, version, auth, topic limit, audit, metrics, IP limit).
   - Handlers enforce request validation, routing, dedup, and downstream invocation.
   - Partition admin methods provide WAL/scheduler status, compaction, retention, split.
 - Reliability decisions:
   - Explicit gRPC message size limits and keepalive policy.
+  - `Start()` returns listen errors; asynchronous serve errors are surfaced via `ServeError()`.
+  - `GracefulStopWithTimeout(ctx)` drains in-flight RPCs and falls back to forced `Stop` if the context expires.
+  - Health/metrics server startup errors are propagated so the node fails fast on bind or serving failures.
   - Unavailable vs failed precondition semantics for cluster ownership and follower-read gating.
   - Exactly-once commit mode enforces monotonic ack offsets when enabled.
 
@@ -263,10 +268,17 @@ This section is organized by feature area and tells you where to read first, wha
   - `internal/config/defaults.go`
   - `internal/config/config.go`
   - `internal/config/reload.go`
+  - `charts/cronos-db/values.yaml`
+  - `charts/cronos-db/values-production.yaml`
 - Main flow:
-  - Config is loaded once at startup, wrapped in reloadable container.
+  - Config is loaded once at startup from flags and environment variables.
   - SIGHUP listener allows reload updates without process restart.
+  - New flags include retention controls (`--retention-max-age-hours`, `--retention-max-size-gb`) and the full security surface (TLS, auth, replication mTLS, encryption at rest).
 - Reliability decisions:
+  - Default WAL fsync mode is `batch`.
+  - `--dev` disables production security requirements; production mode requires TLS, auth, encryption at rest, replication mTLS, `--replication-factor>=3`, and `--min-insync-replicas>=2`.
+  - New environment variables: `CRONOS_DEV`, `CRONOS_MIN_IN_SYNC_REPLICAS`, `CRONOS_EXACTLY_ONCE_COMMITS`, `CRONOS_ENCRYPTION_ENABLED`, `CRONOS_ENCRYPTION_KEY_FILE`.
+  - Helm chart defaults to `config.dev=true`; `values-production.yaml` disables dev mode and requires TLS, auth, encryption, and replication-mTLS secrets.
   - Conservative defaults for durability and cluster behavior.
   - Feature flags for controlled rollout (`follower-reads`, `exactly-once-commits`, tracing, TLS, auth).
 
@@ -294,14 +306,18 @@ This section is organized by feature area and tells you where to read first, wha
   - `internal/storage/segment.go`
   - `internal/storage/index.go`
   - `internal/storage/backup_scheduler.go`
+  - `internal/storage/backup.go`
   - `internal/storage/crypto.go`
+  - `pkg/utils/atomicfile.go`
 - Main flow:
-  - Append assigns offsets, writes records to active segment, updates sparse index.
+  - Append assigns offsets and writes WAL v2 records to the active segment; each record carries an 8-byte Raft term and a 4-byte trailing checksum, and the sparse index is updated.
   - Segment rotation and compaction reduce long-term storage cost.
   - Backup scheduler snapshots WAL data by interval and retention policy.
 - Reliability decisions:
+  - WAL v2 record format includes a Raft term and trailing checksum; upgrading from older builds requires a clean `--data-dir`.
   - CRC32 validation for integrity checks.
-  - Configurable fsync mode for durability vs throughput tradeoff.
+  - Default fsync mode is `batch`; `every_event` and `periodic` remain available for stricter or looser durability.
+  - Critical metadata (transaction logs, encryption key files, backup manifests/checkpoints) is persisted via `utils.AtomicWriteFile` (temp file + fsync + rename + parent-dir fsync).
   - Optional encryption at rest with key-file managed segment cipher.
 
 ### 6.5 Scheduler (timing wheel + cold store)
@@ -363,10 +379,10 @@ This section is organized by feature area and tells you where to read first, wha
   - `internal/consumer/offset_store.go`
 - Main flow:
   - Subscribe/ack APIs feed into group manager.
-  - Offsets are committed and loaded from persistent store when configured.
+  - Offsets, group metadata/assignments, and exactly-once commit IDs are persisted in the PebbleDB `OffsetStore`.
 - Reliability decisions:
   - Delivery ID parsing routes ack to correct partition path.
-  - Exactly-once commit guard (feature-flagged) enforces forward-only commits.
+  - Exactly-once commit guard (feature-flagged) enforces forward-only commits and stores commit IDs for idempotency.
 
 ### 6.9 Cluster Control Plane (membership, router, raft)
 
@@ -414,15 +430,21 @@ flowchart LR
   - `internal/replication/leader.go`
   - `internal/replication/follower.go`
   - `internal/replication/region.go`
+  - `internal/replication/mtls.go`
   - `internal/api/replication_server.go`
   - `internal/api/crossregion_server.go`
 - Main flow:
-  - Leader replication path: append batches to followers and track ISR.
+  - Leader replication path: append batches to followers and track ISR; each `AppendEntries` batch includes a CRC32 checksum.
+  - Followers verify the batch checksum, stamp replicated events with the leader term and checksum, and append via `AppendReplicatedBatch`.
+  - The leader advances a follower's `NextOffset` only after a successful append response.
   - Cross-region path: WAL append hook batches outgoing events per region; receiving region re-publishes to local partitions.
 - Reliability decisions:
+  - Per-follower dedicated transport in `FollowerInfo` avoids connection sharing across followers.
+  - Batch-level CRC32 checksum verifies integrity end-to-end on the follower.
   - Expected-next-offset checks on replication append.
   - Streaming sync endpoint for catch-up.
   - Last-write-wins conflict handling in cross-region server.
+  - Optional replication mTLS for production deployments.
 
 ### 6.12 Cross-Region Topology
 
@@ -513,9 +535,12 @@ stateDiagram-v2
   - `internal/api/partition_handler.go` (admin compaction/retention)
 - Main flow:
   - Runtime loop enforces max age and max size policies.
+  - The retention enforcer parses each segment's 64-byte header (`firstOffset`, `createdTS`) to decide eligibility and always preserves the active segment per partition.
+  - Matching `.index` files are deleted alongside reclaimed segments.
   - Partition admin RPC can trigger immediate retention and compaction actions.
 - Reliability decisions:
-  - Protected directories are excluded from accidental cleanup.
+  - Protected directories are skipped to prevent accidental cleanup.
+  - The enforcer honors context cancellation so shutdown does not leave partial deletes.
   - Admin actions return explicit success/error and reclaimed counters.
 
 ### 6.18 CDC (Change Data Capture)
@@ -526,10 +551,13 @@ stateDiagram-v2
   - `internal/cdc/kafka_sink.go`
   - `internal/cdc/webhook_sink.go`
 - Main flow:
-  - WAL append hook emits change events to manager.
-  - Manager fan-outs asynchronously to configured sinks.
+  - WAL append hook emits change events to the CDC manager.
+  - A bounded worker pool (`DefaultCDCWorkers=4`, queue size 10,000) fans out asynchronously to configured sinks.
+  - `Emit` is non-blocking and drops events when the queue is full to protect the primary write path.
+  - `Close` drains in-flight work gracefully before exiting.
 - Reliability decisions:
   - Sink failures are isolated and do not block primary write path.
+  - Bounded concurrency and queue limits bound memory and goroutine growth under backpressure.
 
 ### 6.19 Auth and Audit
 
@@ -592,7 +620,7 @@ flowchart TB
 ### 7.2 Reliability Matrix
 
 - Durability:
-  - WAL + CRC32 + fsync modes + backup scheduler.
+  - WAL v2 (term + trailing checksum) + CRC32 + fsync modes + backup scheduler + atomic metadata writes.
 - Correctness:
   - Dedup, schema validation, epoch checks, transaction state machine.
 - Backpressure:
