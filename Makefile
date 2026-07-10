@@ -69,14 +69,14 @@ CLEAN_DATA_CMD = powershell -NoProfile -Command "foreach ($$d in @('data/node1',
 # sufficient for go run/go test dynamic loading in local workflows.
 GO_RUNTIME_PREFIX :=
 
-VERIFY_GO_CMD = command -v go >/dev/null 2>&1 || { echo '[verify-env] Missing required tool: go'; exit 1; }
-VERIFY_CARGO_CMD = command -v cargo >/dev/null 2>&1 || { echo '[verify-env] Missing required tool: cargo'; exit 1; }
-VERIFY_PROTOC_CMD = command -v protoc >/dev/null 2>&1 || { echo '[verify-env] Missing required tool: protoc'; exit 1; }
-VERIFY_DOCKER_CMD = command -v docker >/dev/null 2>&1 || { echo '[verify-env] Missing required tool: docker'; exit 1; }
-VERIFY_DOCKER_COMPOSE_CMD = docker compose version >/dev/null 2>&1 || { echo '[verify-env] Missing required tool: docker compose'; exit 1; }
-VERIFY_GIT_CMD = command -v git >/dev/null 2>&1 || { echo '[verify-tag-env] Missing required tool: git'; exit 1; }
-VERIFY_GH_CMD = command -v gh >/dev/null 2>&1 || { echo '[verify-release-env] Missing required tool: gh'; exit 1; }
-VERIFY_GH_AUTH_CMD = gh auth status >/dev/null 2>&1 || { echo '[verify-release-env] Not authenticated. Run: gh auth login'; exit 1; }
+VERIFY_GO_CMD = powershell -NoProfile -Command "if (-not (Get-Command go -ErrorAction SilentlyContinue)) { Write-Error '[verify-env] Missing required tool: go'; exit 1 }"
+VERIFY_CARGO_CMD = powershell -NoProfile -Command "if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) { Write-Error '[verify-env] Missing required tool: cargo'; exit 1 }"
+VERIFY_PROTOC_CMD = powershell -NoProfile -Command "if (-not (Get-Command protoc -ErrorAction SilentlyContinue)) { Write-Error '[verify-env] Missing required tool: protoc'; exit 1 }"
+VERIFY_DOCKER_CMD = powershell -NoProfile -Command "if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { Write-Error '[verify-env] Missing required tool: docker'; exit 1 }"
+VERIFY_DOCKER_COMPOSE_CMD = powershell -NoProfile -Command "docker compose version *> $$null; if ($$LASTEXITCODE -ne 0) { Write-Error '[verify-env] Missing required tool: docker compose'; exit 1 }"
+VERIFY_GIT_CMD = powershell -NoProfile -Command "if (-not (Get-Command git -ErrorAction SilentlyContinue)) { Write-Error '[verify-tag-env] Missing required tool: git'; exit 1 }"
+VERIFY_GH_CMD = powershell -NoProfile -Command "if (-not (Get-Command gh -ErrorAction SilentlyContinue)) { Write-Error '[verify-release-env] Missing required tool: gh'; exit 1 }"
+VERIFY_GH_AUTH_CMD = powershell -NoProfile -Command "gh auth status *> $$null; if ($$LASTEXITCODE -ne 0) { Write-Error '[verify-release-env] Not authenticated. Run: gh auth login'; exit 1 }"
 
 REQUIRE_VERSION_CMD = powershell -NoProfile -Command "if ([string]::IsNullOrWhiteSpace('$(VERSION)')) { Write-Error 'VERSION is required. Example: make tag VERSION=v0.2.1'; exit 1 }"
 VALIDATE_VERSION_CMD = powershell -NoProfile -Command "if ('$(VERSION)' -notmatch '^v\d+\.\d+\.\d+([.-][0-9A-Za-z.-]+)?$$') { Write-Error 'VERSION must look like vMAJOR.MINOR.PATCH'; exit 1 }"
