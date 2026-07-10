@@ -73,6 +73,8 @@ jobs:
         shell: bash
         run: |
           set -e
+          # Make the Rust shared library discoverable by the test binaries.
+          export LD_LIBRARY_PATH="${PWD}/internal/dedup/rust/target/release:${LD_LIBRARY_PATH:-}"
           # The race detector requires cgo, which on Windows also requires the
           # rust lib to be loadable at test time. Run with -race on linux only.
           if [ "$RUNNER_OS" = "Linux" ]; then
@@ -169,8 +171,9 @@ jobs:
         run: |
           docker compose up -d cronos-node1 cronos-node2 cronos-node3
           # Wait for node1 HTTP health endpoint to become healthy.
+          # Avoid IPv6 localhost resolution issues in CI by using the IPv4 loopback.
           for i in $(seq 1 60); do
-            if curl -sf http://localhost:8080/health >/dev/null 2>&1; then
+            if curl -sf http://127.0.0.1:8080/health >/dev/null 2>&1; then
               echo "Cluster healthy"; exit 0
             fi
             sleep 2
@@ -178,7 +181,8 @@ jobs:
           echo "Cluster did not become healthy in time"; docker compose logs; exit 1
       - name: Run integration tests
         env:
-          CRONOS_TEST_ADDR: localhost:9000
+          CRONOS_TEST_ADDR: 127.0.0.1:9000
+          CRONOS_TEST_HTTP_ADDR: 127.0.0.1:8080
           CRONOS_TEST_INTEGRATION: "1"
         run: make test-integration
       - name: Dump cluster logs on failure
