@@ -24,6 +24,9 @@ The API layer is the system entrypoint for all client and internal RPC traffic. 
 
 ## Production Decisions
 
+- `Start()` exposes `ServeError()` so server startup failures are observable.
+- `GracefulStopWithTimeout(ctx)` falls back to forced `Stop` if the deadline expires.
+- Health-server startup errors are propagated rather than swallowed.
 - Message size and keepalive limits are configured in server options to avoid unbounded payload and idle-connection risk.
 - Partition ownership checks in handlers prevent writes on non-owner nodes and fence stale leaders.
 - Replay path respects follower-read policy flags for consistency control.

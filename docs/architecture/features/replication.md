@@ -16,12 +16,16 @@ Replication keeps partition data synchronized across followers and between regio
 ## Main Flow
 
 1. Leader appends events and tracks follower progress.
-2. Replication service Append enforces partition and offset expectations.
+2. Replication service Append enforces partition and offset expectations and verifies the batch CRC32 checksum.
 3. Sync endpoint streams catch-up batches for lagging followers.
 4. Cross-region replicator batches outbound events to remote regions.
 
 ## Production Decisions
 
+- AppendEntries messages carry a batch CRC32 checksum; followers verify it before acceptance.
+- Followers stamp each replicated event with Raft term and checksum before `AppendReplicatedBatch`.
+- The leader advances `NextOffset` only on successful follower writes.
+- Each `FollowerInfo` holds its own transport for independent, safe follower communication.
 - Expected-next-offset checks prevent silent divergence.
 - Streaming sync is used for efficient catch-up transfers.
 - Cross-region replication is asynchronous to preserve local write latency.
