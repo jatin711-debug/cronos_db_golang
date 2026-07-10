@@ -370,6 +370,18 @@ func TestValidateConfig(t *testing.T) {
 			expectError: false,
 		},
 		{
+			name:        "negative min-insync-replicas",
+			config:      &configTestHelper{NodeID: "node", PartitionCount: 1, ReplicationFactor: 1, DataDir: "/data", GPRCAddress: ":9000", MinInSyncReplicas: -1},
+			expectError: true,
+			errorMsg:    "min-insync-replicas must be >= 0",
+		},
+		{
+			name:        "min-insync-replicas exceeds replication factor",
+			config:      &configTestHelper{NodeID: "node", PartitionCount: 1, ReplicationFactor: 3, DataDir: "/data", GPRCAddress: ":9000", MinInSyncReplicas: 4},
+			expectError: true,
+			errorMsg:    "min-insync-replicas (4) cannot exceed replication-factor (3)",
+		},
+		{
 			name:        "zero flush interval",
 			config:      &configTestHelper{NodeID: "node", PartitionCount: 1, ReplicationFactor: 1, DataDir: "/data", GPRCAddress: ":9000"},
 			expectError: true,
@@ -383,6 +395,7 @@ func TestValidateConfig(t *testing.T) {
 				NodeID:             tc.config.NodeID,
 				PartitionCount:     tc.config.PartitionCount,
 				ReplicationFactor:  tc.config.ReplicationFactor,
+				MinInSyncReplicas: tc.config.MinInSyncReplicas,
 				DataDir:            tc.config.DataDir,
 				GPRCAddress:        tc.config.GPRCAddress,
 				TracingSampleRatio: tc.config.TracingSampleRatio,
@@ -405,13 +418,13 @@ func TestValidateConfig(t *testing.T) {
 	}
 }
 
-// configTestHelper is a test helper struct that mirrors the relevant fields
 type configTestHelper struct {
-	NodeID             string
-	PartitionCount     int
-	ReplicationFactor  int
-	DataDir            string
-	GPRCAddress        string
+	NodeID            string
+	PartitionCount    int
+	ReplicationFactor int
+	MinInSyncReplicas int
+	DataDir           string
+	GPRCAddress       string
 	TracingSampleRatio float64
 }
 

@@ -693,12 +693,16 @@ func (s *Segment) writeRecordMmap(record []byte) (int64, error) {
 // writeRecordBuffered writes using bufio.Writer (for encryption or fallback).
 func (s *Segment) writeRecordBuffered(record []byte) (int64, error) {
 	if s.cipher != nil {
-		// record includes 4-byte length prefix; encrypt payload after it
+		// record includes 4-byte length prefix; encrypt payload after it.
 		if len(record) < 4 {
 			return 0, fmt.Errorf("record too short for encryption")
 		}
 		plaintext := record[4:]
-		ciphertext, err := s.cipher.Encrypt(plaintext)
+		// The ciphertext starts at the byte position immediately after the length
+		// prefix we are about to write. Positions are unique and monotonic within a
+		// partition, so they make a safe deterministic GCM counter nonce.
+		ciphertextPos := s.sizeBytes + 4
+		ciphertext, err := s.cipher.EncryptRecord(plaintext, ciphertextPos)
 		if err != nil {
 			return 0, fmt.Errorf("encrypt: %w", err)
 		}
@@ -745,11 +749,12 @@ func (s *Segment) remapMmap(newSize int64) error {
 }
 
 // decryptRecord decrypts record payload if encryption is enabled.
-func (s *Segment) decryptRecord(ciphertext []byte) ([]byte, error) {
+// ciphertextPos is the byte offset of the ciphertext after the 4-byte length prefix.
+func (s *Segment) decryptRecord(ciphertext []byte, ciphertextPos int64) ([]byte, error) {
 	if s.cipher == nil {
 		return ciphertext, nil
 	}
-	return s.cipher.Decrypt(ciphertext)
+	return s.cipher.DecryptRecord(ciphertext, ciphertextPos)
 }
 
 // ReadEvent reads event at offset using index for fast seeking
@@ -802,7 +807,7 @@ func (s *Segment) readEventMmap(targetOffset int64, startPos int64) (*types.Even
 		// recordData includes CRC + data.
 		recordData := data[pos+4 : pos+int(length)]
 
-		decrypted, err := s.decryptRecord(recordData)
+		decrypted, err := s.decryptRecord(recordData, int64(pos+4))
 		if err != nil {
 			return nil, fmt.Errorf("decrypt: %w", err)
 		}
@@ -862,6 +867,7 @@ func (s *Segment) readEventFile(targetOffset int64, startPos int64) (*types.Even
 			recordBuf = make([]byte, recordLen)
 		}
 		record := recordBuf[:recordLen]
+		ciphertextPos := currentPos
 		if _, err := s.segmentFile.ReadAt(record, currentPos); err != nil {
 			if err == io.EOF {
 				break
@@ -871,7 +877,7 @@ func (s *Segment) readEventFile(targetOffset int64, startPos int64) (*types.Even
 		currentPos += int64(recordLen)
 
 		// Decrypt if needed before parsing
-		decrypted, err := s.decryptRecord(record)
+		decrypted, err := s.decryptRecord(record, ciphertextPos)
 		if err != nil {
 			return nil, fmt.Errorf("decrypt: %w", err)
 		}
@@ -949,6 +955,7 @@ func (s *Segment) ReadEventsByTime(startTS, endTS int64) ([]*types.Event, error)
 			recordBuf = make([]byte, recordLen)
 		}
 		record := recordBuf[:recordLen]
+		ciphertextPos := currentPos
 		if _, err := s.segmentFile.ReadAt(record, currentPos); err != nil {
 			if err == io.EOF {
 				break
@@ -957,7 +964,7 @@ func (s *Segment) ReadEventsByTime(startTS, endTS int64) ([]*types.Event, error)
 		}
 		currentPos += int64(recordLen)
 
-		decrypted, err := s.decryptRecord(record)
+		decrypted, err := s.decryptRecord(record, ciphertextPos)
 		if err != nil {
 			return nil, fmt.Errorf("decrypt: %w", err)
 		}
@@ -1021,6 +1028,7 @@ func (s *Segment) ReadEventsByOffsetRange(startOffset, endOffset int64) ([]*type
 			recordBuf = make([]byte, recordLen)
 		}
 		record := recordBuf[:recordLen]
+		ciphertextPos := currentPos
 		if _, err := s.segmentFile.ReadAt(record, currentPos); err != nil {
 			if err == io.EOF {
 				break
@@ -1029,7 +1037,7 @@ func (s *Segment) ReadEventsByOffsetRange(startOffset, endOffset int64) ([]*type
 		}
 		currentPos += int64(recordLen)
 
-		decrypted, err := s.decryptRecord(record)
+		decrypted, err := s.decryptRecord(record, ciphertextPos)
 		if err != nil {
 			return nil, fmt.Errorf("decrypt: %w", err)
 		}
@@ -1078,6 +1086,13 @@ func (s *Segment) scan() error {
 	s.lastOffset = -1
 	s.lastTS = 0
 
+	// Capture the on-disk size before the scan loop mutates s.sizeBytes (line
+	// below: s.sizeBytes = lastGoodPos on each valid record). The truncation
+	// guard must compare against the original file size, otherwise a corrupt
+	// tail that lies within the preallocated region never triggers truncation
+	// (lastGoodPos == s.sizeBytes after the loop).
+	origSizeBytes := s.sizeBytes
+
 	var lastGoodPos int64 = 64 // Track position of last valid record end
 	var recordStartPos int64 = 64
 	lengthBytes := make([]byte, 4)
@@ -1123,7 +1138,7 @@ func (s *Segment) scan() error {
 		}
 
 		// Decrypt if needed, then parse event to get offset and timestamp
-		decrypted, err := s.decryptRecord(recordData)
+		decrypted, err := s.decryptRecord(recordData, lastGoodPos+4)
 		if err != nil {
 			log.Printf("[SEGMENT] Decrypt failed at position %d: %v, truncating file", lastGoodPos, err)
 			break
@@ -1144,12 +1159,24 @@ func (s *Segment) scan() error {
 		s.sizeBytes = lastGoodPos
 	}
 
-	// If we found corrupt data at the tail, truncate the file
-	if lastGoodPos < s.sizeBytes {
+	// If we found corrupt data at the tail, truncate the file. Compare against
+	// the original on-disk size (origSizeBytes), not s.sizeBytes which the loop
+	// above already advanced to lastGoodPos.
+	if lastGoodPos < origSizeBytes {
 		if err := s.truncateToPosition(lastGoodPos); err != nil {
 			return fmt.Errorf("truncate corrupt tail at %d: %w", lastGoodPos, err)
 		}
-		log.Printf("[SEGMENT] Truncated %d bytes of corrupt tail", s.sizeBytes-lastGoodPos)
+		log.Printf("[SEGMENT] Truncated %d bytes of corrupt tail", origSizeBytes-lastGoodPos)
+
+		// Reconcile the sparse index with the truncated segment. Without this,
+		// the index may still contain entries whose FilePosition points past
+		// the new (shorter) segment EOF, causing later reads to dereference
+		// uninitialized bytes. s.lastOffset is the last valid event offset.
+		if s.index != nil {
+			if err := s.index.Truncate(s.lastOffset); err != nil {
+				return fmt.Errorf("truncate index to offset %d: %w", s.lastOffset, err)
+			}
+		}
 	}
 
 	// If we couldn't find any events, start from firstOffset

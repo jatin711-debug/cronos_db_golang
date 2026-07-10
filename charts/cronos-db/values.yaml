@@ -3,7 +3,10 @@ replicaCount: 3
 image:
   repository: johnny711dock/cronos-db
   pullPolicy: IfNotPresent
-  tag: "latest"
+  # tag defaults to .Chart.AppVersion when empty.
+  tag: ""
+  # Optional image digest; when set, it takes precedence over tag.
+  digest: ""
 
 imagePullSecrets: []
 nameOverride: ""
@@ -36,6 +39,9 @@ tolerations: []
 
 affinity: {}
 
+podDisruptionBudget:
+  enabled: true
+
 persistence:
   enabled: true
   storageClass: ""
@@ -63,7 +69,8 @@ config:
   flushIntervalMs: 100
   tickMs: 100
   wheelSize: 60
-  dedupTTLHours: 24
+  # Dedup TTL: 24h is too aggressive for production backfill; 168h = 7 days.
+  dedupTTLHours: 168
   bloomCapacity: 1000000
   tracingEnabled: false
   tracingExporter: otlp

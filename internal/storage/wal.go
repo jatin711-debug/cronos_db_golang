@@ -226,6 +226,32 @@ var recordBufPool = sync.Pool{
 	},
 }
 
+// preparedRecordPool recycles the []*PreparedRecord slice used by AppendBatch and
+// AppendReplicatedBatch. This avoids one allocation per WAL append.
+var preparedRecordPool = sync.Pool{
+	New: func() interface{} {
+		return make([]*PreparedRecord, 0, 64)
+	},
+}
+
+func acquirePreparedSlice(n int) []*PreparedRecord {
+	p := preparedRecordPool.Get().([]*PreparedRecord)
+	if cap(p) < n {
+		// Pool slot is too small for this batch; allocate a dedicated slice and
+		// return the small one so it can be reused by smaller batches.
+		preparedRecordPool.Put(p)
+		return make([]*PreparedRecord, n)
+	}
+	return p[:n]
+}
+
+func releasePreparedSlice(prepared []*PreparedRecord) {
+	// Don't retain oversized slices in the pool; they likely won't be reused.
+	if cap(prepared) <= 4096 {
+		preparedRecordPool.Put(prepared[:0])
+	}
+}
+
 // PrepareRecord serializes an event to a byte slice with placeholders for offset and CRC
 func PrepareRecord(event *types.Event) (*PreparedRecord, error) {
 	msgIDLen := len(event.GetMessageId())
@@ -319,7 +345,9 @@ func (w *WAL) AppendBatch(events []*types.Event) error {
 	}()
 
 	// 1. Prepare records OUTSIDE the lock
-	prepared := make([]*PreparedRecord, len(events))
+	prepared := acquirePreparedSlice(len(events))
+	defer releasePreparedSlice(prepared)
+
 	for i, event := range events {
 		prep, err := PrepareRecord(event)
 		if err != nil {
@@ -335,7 +363,6 @@ func (w *WAL) AppendBatch(events []*types.Event) error {
 	}
 
 	w.mu.Lock()
-	defer w.mu.Unlock()
 
 	// 2. Set offsets and partition IDs, fill them in the prepared records
 	for _, prep := range prepared {
@@ -353,12 +380,8 @@ func (w *WAL) AppendBatch(events []*types.Event) error {
 
 	// 3. Append to active segment — use Unsafe since we hold w.mu
 	if err := w.activeSegment.AppendPreparedBatchUnsafe(prepared, w.config.IndexInterval); err != nil {
-		// Return buffers to pool
-		for _, prep := range prepared {
-			if len(prep.Buf) <= 4096 {
-				recordBufPool.Put(prep.Buf)
-			}
-		}
+		w.mu.Unlock()
+		returnBuffersToPool(prepared)
 		return fmt.Errorf("append prepared batch to segment: %w", err)
 	}
 
@@ -371,38 +394,34 @@ func (w *WAL) AppendBatch(events []*types.Event) error {
 		hookEvents = append(hookEvents, events...)
 	}
 
-	// Sync inline only for every_event mode.
+	// Flush under the WAL lock so appends and flushes do not interleave on the
+	// segment's bufio writer. For every_event we also sync inline; for batch we
+	// sync outside the lock to let other writers pipeline during the fsync.
+	syncSegment := w.activeSegment
 	if w.fsyncMode == FsyncEveryEvent {
-		if err := w.activeSegment.FlushBuffer(); err != nil {
-			// Return buffers to pool
-			for _, prep := range prepared {
-				if len(prep.Buf) <= 4096 {
-					recordBufPool.Put(prep.Buf)
-				}
-			}
+		if err := syncSegment.FlushBuffer(); err != nil {
+			w.mu.Unlock()
+			returnBuffersToPool(prepared)
 			return fmt.Errorf("flush batch: %w", err)
 		}
-		if err := w.activeSegment.Sync(); err != nil {
-			// Return buffers to pool
-			for _, prep := range prepared {
-				if len(prep.Buf) <= 4096 {
-					recordBufPool.Put(prep.Buf)
-				}
-			}
+		if err := syncSegment.Sync(); err != nil {
+			w.mu.Unlock()
+			returnBuffersToPool(prepared)
 			return fmt.Errorf("sync batch: %w", err)
 		}
-	}
-
-	// 4. Return buffers to pool
-	for _, prep := range prepared {
-		if len(prep.Buf) <= 4096 {
-			recordBufPool.Put(prep.Buf)
+	} else if w.fsyncMode == FsyncBatch {
+		if err := syncSegment.FlushBuffer(); err != nil {
+			w.mu.Unlock()
+			returnBuffersToPool(prepared)
+			return fmt.Errorf("flush batch: %w", err)
 		}
 	}
 
 	// Rotate segment if full
 	if w.activeSegment.IsFull(w.config.SegmentSizeBytes) {
 		if err := w.rotateSegment(); err != nil {
+			w.mu.Unlock()
+			returnBuffersToPool(prepared)
 			return fmt.Errorf("rotate segment: %w", err)
 		}
 	} else {
@@ -413,12 +432,36 @@ func (w *WAL) AppendBatch(events []*types.Event) error {
 		}
 	}
 
+	w.mu.Unlock()
+
+	// For batch mode, the buffer was already flushed under the lock; now sync the
+	// file descriptor outside the WAL lock so other writers can continue appending.
+	if w.fsyncMode == FsyncBatch {
+		if err := syncSegment.Sync(); err != nil {
+			returnBuffersToPool(prepared)
+			return fmt.Errorf("sync batch: %w", err)
+		}
+	}
+
+	// 4. Return buffers to pool
+	returnBuffersToPool(prepared)
+
 	// Fire hooks AFTER releasing the lock to avoid blocking writers
 	for _, e := range hookEvents {
 		w.appendHook(e)
 	}
 
 	return nil
+}
+
+// returnBuffersToPool returns prepared record buffers to the sync.Pool if they
+// are small enough to be reused.
+func returnBuffersToPool(prepared []*PreparedRecord) {
+	for _, prep := range prepared {
+		if prep != nil && len(prep.Buf) <= 4096 {
+			recordBufPool.Put(prep.Buf)
+		}
+	}
 }
 
 // AppendReplicatedBatch appends a batch of events that already carry their leader-assigned
@@ -435,7 +478,9 @@ func (w *WAL) AppendReplicatedBatch(events []*types.Event) error {
 		metrics.ObserveWALAppend(strconv.FormatInt(int64(w.partitionID), 10), time.Since(start))
 	}()
 
-	prepared := make([]*PreparedRecord, len(events))
+	prepared := acquirePreparedSlice(len(events))
+	defer releasePreparedSlice(prepared)
+
 	for i, event := range events {
 		prep, err := PrepareRecord(event)
 		if err != nil {
@@ -450,24 +495,17 @@ func (w *WAL) AppendReplicatedBatch(events []*types.Event) error {
 	}
 
 	w.mu.Lock()
-	defer w.mu.Unlock()
 
 	// Verify contiguity and starting offset against WAL's expected next offset.
 	if events[0].Offset != w.nextOffset {
-		for _, prep := range prepared {
-			if len(prep.Buf) <= 4096 {
-				recordBufPool.Put(prep.Buf)
-			}
-		}
+		w.mu.Unlock()
+		returnBuffersToPool(prepared)
 		return fmt.Errorf("replicated batch gap: expected start offset %d, got %d", w.nextOffset, events[0].Offset)
 	}
 	for i := 1; i < len(events); i++ {
 		if events[i].Offset != events[i-1].Offset+1 {
-			for _, prep := range prepared {
-				if len(prep.Buf) <= 4096 {
-					recordBufPool.Put(prep.Buf)
-				}
-			}
+			w.mu.Unlock()
+			returnBuffersToPool(prepared)
 			return fmt.Errorf("non-contiguous replicated offsets: %d followed by %d", events[i-1].Offset, events[i].Offset)
 		}
 	}
@@ -481,11 +519,8 @@ func (w *WAL) AppendReplicatedBatch(events []*types.Event) error {
 	}
 
 	if err := w.activeSegment.AppendPreparedBatchUnsafe(prepared, w.config.IndexInterval); err != nil {
-		for _, prep := range prepared {
-			if len(prep.Buf) <= 4096 {
-				recordBufPool.Put(prep.Buf)
-			}
-		}
+		w.mu.Unlock()
+		returnBuffersToPool(prepared)
 		return fmt.Errorf("append replicated batch to segment: %w", err)
 	}
 
@@ -497,33 +532,32 @@ func (w *WAL) AppendReplicatedBatch(events []*types.Event) error {
 		hookEvents = append(hookEvents, events...)
 	}
 
+	// Flush under the WAL lock for every_event; for batch, flush under the lock
+	// and sync outside so followers can continue appending while the fsync runs.
+	syncSegment := w.activeSegment
 	if w.fsyncMode == FsyncEveryEvent {
-		if err := w.activeSegment.FlushBuffer(); err != nil {
-			for _, prep := range prepared {
-				if len(prep.Buf) <= 4096 {
-					recordBufPool.Put(prep.Buf)
-				}
-			}
+		if err := syncSegment.FlushBuffer(); err != nil {
+			w.mu.Unlock()
+			returnBuffersToPool(prepared)
 			return fmt.Errorf("flush replicated batch: %w", err)
 		}
-		if err := w.activeSegment.Sync(); err != nil {
-			for _, prep := range prepared {
-				if len(prep.Buf) <= 4096 {
-					recordBufPool.Put(prep.Buf)
-				}
-			}
+		if err := syncSegment.Sync(); err != nil {
+			w.mu.Unlock()
+			returnBuffersToPool(prepared)
 			return fmt.Errorf("sync replicated batch: %w", err)
 		}
-	}
-
-	for _, prep := range prepared {
-		if len(prep.Buf) <= 4096 {
-			recordBufPool.Put(prep.Buf)
+	} else if w.fsyncMode == FsyncBatch {
+		if err := syncSegment.FlushBuffer(); err != nil {
+			w.mu.Unlock()
+			returnBuffersToPool(prepared)
+			return fmt.Errorf("flush replicated batch: %w", err)
 		}
 	}
 
 	if w.activeSegment.IsFull(w.config.SegmentSizeBytes) {
 		if err := w.rotateSegment(); err != nil {
+			w.mu.Unlock()
+			returnBuffersToPool(prepared)
 			return fmt.Errorf("rotate segment: %w", err)
 		}
 	} else {
@@ -532,6 +566,17 @@ func (w *WAL) AppendReplicatedBatch(events []*types.Event) error {
 			go w.maybePreCreateNextSegment(w.nextOffset)
 		}
 	}
+
+	w.mu.Unlock()
+
+	if w.fsyncMode == FsyncBatch {
+		if err := syncSegment.Sync(); err != nil {
+			returnBuffersToPool(prepared)
+			return fmt.Errorf("sync replicated batch: %w", err)
+		}
+	}
+
+	returnBuffersToPool(prepared)
 
 	for _, e := range hookEvents {
 		w.appendHook(e)
@@ -603,7 +648,6 @@ func (w *WAL) AppendEvent(event *types.Event) error {
 	}
 
 	w.mu.Lock()
-	defer w.mu.Unlock()
 
 	// Set offset
 	event.Offset = w.nextOffset
@@ -619,6 +663,7 @@ func (w *WAL) AppendEvent(event *types.Event) error {
 
 	// Append to active segment — use Unsafe since we hold w.mu
 	if err := w.activeSegment.AppendPreparedBatchUnsafe([]*PreparedRecord{prep}, w.config.IndexInterval); err != nil {
+		w.mu.Unlock()
 		if len(prep.Buf) <= 4096 {
 			recordBufPool.Put(prep.Buf)
 		}
@@ -634,15 +679,56 @@ func (w *WAL) AppendEvent(event *types.Event) error {
 		hookEvents = append(hookEvents, event)
 	}
 
-	// Sync inline for every_event mode
+	syncSegment := w.activeSegment
+	// For every_event, flush + sync inline under the lock. For batch, flush
+	// under the lock (so we don't race with concurrent appends) and sync after
+	// releasing the lock to keep the syscall out of the critical section.
 	if w.fsyncMode == FsyncEveryEvent {
-		if err := w.activeSegment.FlushBuffer(); err != nil {
+		if err := syncSegment.FlushBuffer(); err != nil {
+			w.mu.Unlock()
 			if len(prep.Buf) <= 4096 {
 				recordBufPool.Put(prep.Buf)
 			}
 			return fmt.Errorf("flush event: %w", err)
 		}
-		if err := w.activeSegment.Sync(); err != nil {
+		if err := syncSegment.Sync(); err != nil {
+			w.mu.Unlock()
+			if len(prep.Buf) <= 4096 {
+				recordBufPool.Put(prep.Buf)
+			}
+			return fmt.Errorf("sync event: %w", err)
+		}
+	} else if w.fsyncMode == FsyncBatch {
+		if err := syncSegment.FlushBuffer(); err != nil {
+			w.mu.Unlock()
+			if len(prep.Buf) <= 4096 {
+				recordBufPool.Put(prep.Buf)
+			}
+			return fmt.Errorf("flush event: %w", err)
+		}
+	}
+
+	// Rotate segment if full
+	if w.activeSegment.IsFull(w.config.SegmentSizeBytes) {
+		if err := w.rotateSegment(); err != nil {
+			w.mu.Unlock()
+			if len(prep.Buf) <= 4096 {
+				recordBufPool.Put(prep.Buf)
+			}
+			return fmt.Errorf("rotate segment: %w", err)
+		}
+	} else {
+		// Trigger background pre-creation at 90% capacity
+		threshold := int64(float64(w.config.SegmentSizeBytes) * 0.9)
+		if w.activeSegment.GetSize() >= threshold && w.preCreateTriggered.CompareAndSwap(false, true) {
+			go w.maybePreCreateNextSegment(w.nextOffset)
+		}
+	}
+
+	w.mu.Unlock()
+
+	if w.fsyncMode == FsyncBatch {
+		if err := syncSegment.Sync(); err != nil {
 			if len(prep.Buf) <= 4096 {
 				recordBufPool.Put(prep.Buf)
 			}
@@ -652,19 +738,6 @@ func (w *WAL) AppendEvent(event *types.Event) error {
 
 	if len(prep.Buf) <= 4096 {
 		recordBufPool.Put(prep.Buf)
-	}
-
-	// Rotate segment if full
-	if w.activeSegment.IsFull(w.config.SegmentSizeBytes) {
-		if err := w.rotateSegment(); err != nil {
-			return fmt.Errorf("rotate segment: %w", err)
-		}
-	} else {
-		// Trigger background pre-creation at 90% capacity
-		threshold := int64(float64(w.config.SegmentSizeBytes) * 0.9)
-		if w.activeSegment.GetSize() >= threshold && w.preCreateTriggered.CompareAndSwap(false, true) {
-			go w.maybePreCreateNextSegment(w.nextOffset)
-		}
 	}
 
 	// Fire hooks AFTER releasing the lock to avoid blocking writers
@@ -845,14 +918,26 @@ func (w *WAL) periodicFlushLoop() {
 				continue
 			}
 
-			// Sync OUTSIDE the lock — fsync doesn't need to block writers
-			// Writers can continue appending to the bufio.Writer while we sync.
-			if w.fsyncMode == FsyncPeriodic || w.fsyncMode == FsyncBatch {
-				if err := seg.Sync(); err != nil {
-					w.recordFlushError()
-					log.Printf("[WAL-%d] background sync error: %v", w.partitionID, err)
-				}
+		// Sync OUTSIDE the lock — fsync doesn't need to block writers
+		// Writers can continue appending to the bufio.Writer while we sync.
+		if w.fsyncMode == FsyncPeriodic || w.fsyncMode == FsyncBatch {
+			if err := seg.Sync(); err != nil {
+				w.recordFlushError()
+				log.Printf("[WAL-%d] background sync error: %v", w.partitionID, err)
+				continue
 			}
+		}
+
+		// The index is reconstructable from the segment, so we do not need to
+		// sync it on every entry. Flushing it here (outside the WAL lock) moves
+		// the index fsync out of the write hot path.
+		if seg.index != nil {
+			if err := seg.index.Flush(); err != nil {
+				w.recordFlushError()
+				log.Printf("[WAL-%d] background index flush error: %v", w.partitionID, err)
+			}
+		}
+
 
 		case <-w.quit:
 			return

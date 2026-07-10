@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 )
 
 // ReloadableConfig wraps a Config with atomic value access for hot reload.
@@ -116,7 +117,7 @@ func (rc *ReloadableConfig) Reload() bool {
 
 // StartSIGHUPListener starts a goroutine that reloads config on SIGHUP.
 func (rc *ReloadableConfig) StartSIGHUPListener(ctx context.Context) {
-	go func() {
+	utils.GoSafe("config-sighup", func() {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGHUP)
 		defer signal.Stop(sigCh)
@@ -129,7 +130,7 @@ func (rc *ReloadableConfig) StartSIGHUPListener(ctx context.Context) {
 				return
 			}
 		}
-	}()
+	})
 }
 
 func diffConfig(old, new *types.Config) []string {

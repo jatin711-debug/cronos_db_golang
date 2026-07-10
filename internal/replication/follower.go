@@ -1,6 +1,7 @@
 package replication
 
 import (
+	"crypto/tls"
 	"fmt"
 	"hash"
 	"hash/crc32"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/jatin711-debug/cronos_db_golang/internal/storage"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 )
 
 // Follower handles replication from leader
@@ -32,22 +34,25 @@ type Follower struct {
 	catchupMode  bool // True when catching up with leader
 	listener     net.Listener
 	nodeID       string
+	tlsConfig    *MTLSConfig // optional mTLS for replication listener
 }
 
-// NewFollower creates a new follower
-func NewFollower(partitionID int32, wal *storage.WAL, nodeID string) *Follower {
+// NewFollower creates a new follower. tlsConfig may be nil for plaintext dev mode.
+func NewFollower(partitionID int32, wal *storage.WAL, nodeID string, tlsConfig *MTLSConfig) *Follower {
 	return &Follower{
 		partitionID:  partitionID,
 		wal:          wal,
 		nextOffset:   wal.GetNextOffset(),
 		quit:         make(chan struct{}),
 		nodeID:       nodeID,
+		tlsConfig:    tlsConfig,
 		syncInterval: 1 * time.Second,
 		catchupMode:  false,
 	}
 }
 
-// Start starts the follower replication server
+// Start starts the follower replication server. If mTLS is configured, the
+// listener requires and verifies a client certificate from the leader.
 func (f *Follower) Start(port int) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -61,12 +66,20 @@ func (f *Follower) Start(port int) error {
 	if err != nil {
 		return fmt.Errorf("failed to listen: %w", err)
 	}
+	if f.tlsConfig != nil && f.tlsConfig.Enabled {
+		tlsCfg, err := BuildServerTLSConfig(f.tlsConfig)
+		if err != nil {
+			listener.Close()
+			return fmt.Errorf("failed to build replication server TLS config: %w", err)
+		}
+		listener = tls.NewListener(listener, tlsCfg)
+	}
 	f.listener = listener
 	f.active = true
 
-	log.Printf("[FOLLOWER] Started replication server on port %d", port)
+	log.Printf("[FOLLOWER] Started replication server on port %d (tls=%v)", port, f.tlsConfig != nil && f.tlsConfig.Enabled)
 
-	go f.acceptLoop()
+	utils.GoSafe("follower-accept", f.acceptLoop)
 	return nil
 }
 
@@ -84,7 +97,7 @@ func (f *Follower) acceptLoop() {
 			}
 		}
 
-		go f.handleConnection(conn)
+		utils.GoSafe("follower-connection", func() { f.handleConnection(conn) })
 	}
 }
 
@@ -436,8 +449,9 @@ func (f *Follower) PromoteToLeader() (*Leader, error) {
 		f.listener.Close()
 	}
 
-	// Create new leader
-	leader := NewLeader(f.partitionID, 100, 100*time.Millisecond, f.wal)
+	// Create new leader (follower-side promotion uses minISR=1; partition manager
+	// provides the configured value during normal promotion).
+	leader := NewLeader(f.partitionID, 100, 100*time.Millisecond, f.wal, 1, f.nodeID, f.tlsConfig)
 	leader.SetEpoch(f.epoch + 1)
 
 	log.Printf("[FOLLOWER] Promoted to leader for partition %d (new epoch: %d)", f.partitionID, f.epoch+1)

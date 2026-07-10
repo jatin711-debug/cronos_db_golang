@@ -11,6 +11,7 @@ import (
 
 	"github.com/cockroachdb/pebble"
 	"github.com/google/uuid"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 )
 
 type offsetKey struct {
@@ -75,7 +76,7 @@ func NewOffsetStore(dataDir string, partitionID int32, cache *pebble.Cache) (*Of
 
 func (s *OffsetStore) startFlushLoop() {
 	s.wg.Add(1)
-	go func() {
+	utils.GoSafe("offset-store-flush", func() {
 		defer s.wg.Done()
 		ticker := time.NewTicker(50 * time.Millisecond)
 		defer ticker.Stop()
@@ -91,7 +92,7 @@ func (s *OffsetStore) startFlushLoop() {
 				return
 			}
 		}
-	}()
+	})
 }
 
 func (s *OffsetStore) flushPending() {

@@ -11,6 +11,7 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/internal/tracing"
 	"github.com/jatin711-debug/cronos_db_golang/internal/tx"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -94,8 +95,13 @@ func NewGRPCServer(config *Config) (*GRPCServer, error) {
 			RateLimitInterceptor(1000000.0, 2000000.0),
 		),
 		grpc.ChainStreamInterceptor(
+			tracing.GRPCStreamServerInterceptor(),
+			SLOStreamInterceptor(config.SLORecorder),
+			VersionStreamInterceptor(config.VersionGate),
 			auth.StreamInterceptor(config.Auth),
 			AuditStreamInterceptor(config.AuditLogger),
+			MetricsStreamInterceptor(),
+			RateLimitStreamInterceptor(1000000.0, 2000000.0),
 		),
 	}
 
@@ -177,13 +183,22 @@ func (g *GRPCServer) Start() error {
 
 	reflection.Register(g.server)
 
-	go func() {
+	utils.GoSafe("grpc-server", func() {
 		if err := g.server.Serve(lis); err != nil {
 			// Log error
 		}
-	}()
+	})
 
 	return nil
+}
+
+// Address returns the address the server is listening on, or an empty string
+// if the server has not been started.
+func (g *GRPCServer) Address() string {
+	if g.listener != nil {
+		return g.listener.Addr().String()
+	}
+	return ""
 }
 
 // Stop stops the gRPC server

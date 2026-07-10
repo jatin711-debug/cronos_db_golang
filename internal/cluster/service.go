@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
+
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
@@ -37,11 +39,11 @@ func (s *ClusterService) Start(addr string) error {
 	s.server = grpc.NewServer()
 	// Register services here when proto is generated
 
-	go func() {
+	utils.GoSafe("cluster-service", func() {
 		if err := s.server.Serve(listener); err != nil {
 			log.Printf("[CLUSTER-SERVICE] Server error: %v", err)
 		}
-	}()
+	})
 
 	log.Printf("[CLUSTER-SERVICE] Started on %s", addr)
 	return nil

@@ -1,17 +1,18 @@
 package replication
 
 import (
+	"crypto/tls"
 	"fmt"
 	"log"
+	"net"
 	"sync"
 	"time"
 
 	"github.com/jatin711-debug/cronos_db_golang/internal/storage"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
-
-	"net"
 )
 
 var replicationLag = promauto.NewGaugeVec(
@@ -24,16 +25,19 @@ var replicationLag = promauto.NewGaugeVec(
 
 // Leader manages replication to followers
 type Leader struct {
-	mu            sync.RWMutex
-	partitionID   int32
-	epoch         int64
-	followers     map[string]*FollowerInfo
-	batchSize     int32
-	flushInterval time.Duration
-	replicateTimeout time.Duration
-	quit          chan struct{}
-	transports    map[string]*Transport
-	wal           *storage.WAL
+	mu                sync.RWMutex
+	partitionID       int32
+	nodeID            string // identity of this leader node used in replication handshakes
+	epoch             int64
+	followers         map[string]*FollowerInfo
+	batchSize         int32
+	flushInterval     time.Duration
+	replicateTimeout  time.Duration
+	minInSyncReplicas int // minimum ISR size (including leader) required to ack a write
+	quit              chan struct{}
+	transports        map[string]*Transport
+	wal               *storage.WAL
+	tlsConfig         *MTLSConfig // optional mTLS for replication connections
 }
 
 // FollowerInfo represents metadata about a follower replica
@@ -50,18 +54,30 @@ type FollowerInfo struct {
 	InSync        bool // Whether follower is in-sync with leader
 }
 
-// NewLeader creates a new leader
-func NewLeader(partitionID int32, batchSize int32, flushInterval time.Duration, wal *storage.WAL) *Leader {
+// NewLeader creates a new leader. minInSyncReplicas is the minimum ISR size
+// (including the leader itself) required to acknowledge a write as durable;
+// 0 is treated as 1 (single-replica mode). nodeID is advertised to followers
+// during the replication handshake; tlsConfig may be nil for plaintext dev mode.
+func NewLeader(partitionID int32, batchSize int32, flushInterval time.Duration, wal *storage.WAL, minInSyncReplicas int, nodeID string, tlsConfig *MTLSConfig) *Leader {
+	if minInSyncReplicas <= 0 {
+		minInSyncReplicas = 1
+	}
+	if nodeID == "" {
+		nodeID = "leader"
+	}
 	return &Leader{
-		partitionID:      partitionID,
-		epoch:            1,
-		followers:        make(map[string]*FollowerInfo),
-		batchSize:        batchSize,
-		flushInterval:    flushInterval,
-		replicateTimeout: 10 * time.Second,
-		quit:             make(chan struct{}),
-		transports:       make(map[string]*Transport),
-		wal:              wal,
+		partitionID:       partitionID,
+		nodeID:            nodeID,
+		epoch:             1,
+		followers:         make(map[string]*FollowerInfo),
+		batchSize:         batchSize,
+		flushInterval:     flushInterval,
+		replicateTimeout:  10 * time.Second,
+		minInSyncReplicas: minInSyncReplicas,
+		quit:              make(chan struct{}),
+		transports:        make(map[string]*Transport),
+		wal:               wal,
+		tlsConfig:         tlsConfig,
 	}
 }
 
@@ -83,14 +99,27 @@ func (l *Leader) AddFollower(id, address string) error {
 	}
 
 	// Establish connection
-	go l.connectFollower(id, address)
+	utils.GoSafe("leader-connect", func() { l.connectFollower(id, address) })
 
 	return nil
 }
 
-// connectFollower establishes connection to follower
+// connectFollower establishes connection to follower. If mTLS is configured,
+// the connection is upgraded to TLS before the handshake.
 func (l *Leader) connectFollower(id, address string) {
-	conn, err := net.DialTimeout("tcp", address, 5*time.Second)
+	var conn net.Conn
+	var err error
+
+	if l.tlsConfig != nil && l.tlsConfig.Enabled {
+		tlsCfg, err := BuildClientTLSConfig(l.tlsConfig)
+		if err != nil {
+			log.Printf("[LEADER] Failed to build TLS config for follower %s: %v", id, err)
+			return
+		}
+		conn, err = tls.Dial("tcp", address, tlsCfg)
+	} else {
+		conn, err = net.DialTimeout("tcp", address, 5*time.Second)
+	}
 	if err != nil {
 		log.Printf("[LEADER] Failed to connect to follower %s at %s: %v", id, address, err)
 		return
@@ -98,9 +127,14 @@ func (l *Leader) connectFollower(id, address string) {
 
 	transport := NewTransport(conn)
 
-	// Perform handshake
-	handshake := &HandshakeMessage{NodeID: "leader"} // In real system, pass actual ID
-	payload, _ := handshake.Encode()
+	// Perform handshake using the real leader node identity.
+	handshake := &HandshakeMessage{NodeID: l.nodeID}
+	payload, err := handshake.Encode()
+	if err != nil {
+		log.Printf("[LEADER] Handshake encode failed to %s: %v", id, err)
+		transport.Close()
+		return
+	}
 	if err := transport.WriteMessage(MsgTypeHandshake, payload); err != nil {
 		log.Printf("[LEADER] Handshake failed to %s: %v", id, err)
 		transport.Close()
@@ -117,7 +151,7 @@ func (l *Leader) connectFollower(id, address string) {
 	log.Printf("[LEADER] Connected to follower %s at %s (binary protocol)", id, address)
 
 	// Start reader loop for acks
-	go l.readLoop(id, transport)
+	utils.GoSafe("leader-read", func() { l.readLoop(id, transport) })
 }
 
 // readLoop reads messages from follower
@@ -206,13 +240,39 @@ func (l *Leader) Replicate(events []*types.Event) error {
 	defer l.mu.RUnlock()
 
 	if len(l.followers) == 0 {
-		return nil // No followers to replicate to
+		minISR := l.minInSyncReplicas
+		if minISR <= 0 {
+			minISR = 1
+		}
+		if minISR > 1 {
+			return fmt.Errorf("not enough replicas: min-insync-replicas=%d but no followers are configured", minISR)
+		}
+		return nil // Single-replica (RF=1) mode: leader-only is sufficient.
 	}
 
 	isr := l.inSyncReplicasLocked()
+
+	// minInSyncReplicas is the total ISR size including the leader. We need at
+	// least (minInSyncReplicas - 1) follower acks in addition to the leader's
+	// own local write. If there are fewer followers in ISR than required, the
+	// write is rejected rather than silently returning with zero durability.
+	minISR := l.minInSyncReplicas
+	if minISR <= 0 {
+		minISR = 1
+	}
+	if len(isr)+1 < minISR {
+		return fmt.Errorf("not enough replicas: min-insync-replicas=%d but only %d ISR members (incl. leader)", minISR, len(isr)+1)
+	}
+
 	neededAcks := (len(isr) + 1) / 2
+	if minISR-1 > neededAcks {
+		neededAcks = minISR - 1
+	}
 	if neededAcks == 0 {
-		return nil // No ISR yet, treat as success (followers will catch up)
+		// We already validated that there is at least one follower above; with
+		// minISR=1 and a single ISR follower we still need one follower ack to
+		// be safe (leader + follower = RF=2 durability).
+		neededAcks = 1
 	}
 
 	activeISR := 0
@@ -222,7 +282,7 @@ func (l *Leader) Replicate(events []*types.Event) error {
 		}
 	}
 	if activeISR < neededAcks {
-		return fmt.Errorf("replication quorum failed: only %d of %d ISR followers connected", activeISR, len(isr))
+		return fmt.Errorf("replication quorum failed: only %d of %d required ISR followers connected", activeISR, neededAcks)
 	}
 
 	lastOffset := events[len(events)-1].Offset
@@ -234,8 +294,8 @@ func (l *Leader) Replicate(events []*types.Event) error {
 		if follower == nil || !follower.Connected {
 			continue
 		}
-
-		go func(f *FollowerInfo) {
+		utils.GoSafe("leader-send-batch", func() {
+			f := follower
 			f.mu.Lock()
 			err := l.sendBatchLocked(f, events)
 			f.mu.Unlock()
@@ -243,7 +303,7 @@ func (l *Leader) Replicate(events []*types.Event) error {
 				log.Printf("[LEADER] Failed to buffer for %s: %v", f.ID, err)
 			}
 			sendChan <- err
-		}(follower)
+		})
 	}
 
 	for i := 0; i < activeISR; i++ {
@@ -259,7 +319,8 @@ func (l *Leader) Replicate(events []*types.Event) error {
 		if follower == nil || !follower.Connected {
 			continue
 		}
-		go func(f *FollowerInfo) {
+		utils.GoSafe("leader-flush", func() {
+			f := follower
 			f.mu.Lock()
 			err := l.flushFollower(f)
 			if err != nil {
@@ -271,7 +332,7 @@ func (l *Leader) Replicate(events []*types.Event) error {
 			}
 			f.mu.Unlock()
 			flushChan <- err
-		}(follower)
+		})
 	}
 
 	successes := 0
@@ -293,7 +354,7 @@ func (l *Leader) Replicate(events []*types.Event) error {
 	}
 
 	// Phase 3: Wait for quorum of ISR followers to ack the last offset
-	return l.waitForQuorumAcks(lastOffset, l.replicateTimeout)
+	return l.waitForQuorumAcks(lastOffset, neededAcks, l.replicateTimeout)
 }
 
 // inSyncReplicasLocked returns the list of follower IDs that are currently in ISR.
@@ -307,11 +368,10 @@ func (l *Leader) inSyncReplicasLocked() []string {
 	return isr
 }
 
-// waitForQuorumAcks blocks until a majority of in-sync followers have acked an offset
+// waitForQuorumAcks blocks until neededAcks in-sync followers have acked an offset
 // >= targetOffset, or until timeout.
-func (l *Leader) waitForQuorumAcks(targetOffset int64, timeout time.Duration) error {
-	neededAcks := (len(l.inSyncReplicasLocked()) + 1) / 2
-	if neededAcks == 0 {
+func (l *Leader) waitForQuorumAcks(targetOffset int64, neededAcks int, timeout time.Duration) error {
+	if neededAcks <= 0 {
 		return nil
 	}
 	deadline := time.Now().Add(timeout)
@@ -495,7 +555,7 @@ func (l *Leader) GetFollowerOffsets() map[string]int64 {
 
 // Start starts the leader replication
 func (l *Leader) Start() {
-	go l.replicationLoop()
+	utils.GoSafe("leader-replication", l.replicationLoop)
 }
 
 // replicationLoop is the leader replication loop

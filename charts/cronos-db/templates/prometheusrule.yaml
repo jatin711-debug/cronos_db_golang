@@ -15,7 +15,7 @@ spec:
           labels:
             severity: critical
           annotations:
-            summary: "CronosDB node {{ $labels.instance }} is down"
+            summary: "CronosDB node {{`{{ $labels.instance }}`}} is down"
 
         - alert: CronosDBReplicationLagHigh
           expr: |
@@ -28,7 +28,7 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: "CronosDB replication lag is high for partition {{ $labels.partition }}"
+            summary: "CronosDB replication lag is high for partition {{`{{ $labels.partition }}`}}"
 
         - alert: CronosDBWALFlushErrors
           expr: rate(cronos_wal_flush_errors_total{job=~".*cronos-db.*"}[5m]) > 0
@@ -36,7 +36,7 @@ spec:
           labels:
             severity: critical
           annotations:
-            summary: "CronosDB WAL flush errors on {{ $labels.instance }}"
+            summary: "CronosDB WAL flush errors on {{`{{ $labels.instance }}`}}"
 
         - alert: CronosDBUnderReplicated
           expr: |

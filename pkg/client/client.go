@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jatin711-debug/cronos_db_golang/pkg/client/internal/circuitbreaker"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/client/internal/connpool"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/client/internal/metadata"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
@@ -23,9 +24,10 @@ import (
 
 // Client is the CronosDB SDK entry point for metadata-aware routing and transport.
 type Client struct {
-	cfg      Config
-	pool     *connpool.Pool
-	metadata *metadata.Manager
+	cfg        Config
+	pool       *connpool.Pool
+	metadata   *metadata.Manager
+	breakerMgr *circuitbreaker.Manager
 
 	bgCancel  context.CancelFunc
 	closeOnce sync.Once
@@ -71,10 +73,11 @@ func Dial(ctx context.Context, cfg Config) (*Client, error) {
 	metaManager.Start(bgCtx)
 
 	return &Client{
-		cfg:      cfg,
-		pool:     pool,
-		metadata: metaManager,
-		bgCancel: cancel,
+		cfg:        cfg,
+		pool:       pool,
+		metadata:   metaManager,
+		breakerMgr: circuitbreaker.NewManager(cfg.CircuitBreaker),
+		bgCancel:   cancel,
 	}, nil
 }
 

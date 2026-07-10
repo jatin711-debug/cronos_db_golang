@@ -3,6 +3,9 @@ replicaCount: 5
 
 image:
   pullPolicy: Always
+  # Pin to chart appVersion digest in production for reproducible deployments.
+  tag: ""
+  digest: ""
 
 resources:
   requests:
@@ -17,8 +20,11 @@ persistence:
 
 config:
   replicationFactor: 3
-  fsyncMode: every_event
+  # batch = durable-high-throughput; periodic risks more data loss.
+  fsyncMode: batch
   partitionCount: 32
+  # 7 days dedup TTL to tolerate backfills and replays.
+  dedupTTLHours: 168
 
 metrics:
   enabled: true
@@ -26,4 +32,7 @@ metrics:
     enabled: true
 
 alerts:
+  enabled: true
+
+podDisruptionBudget:
   enabled: true

@@ -32,8 +32,15 @@ func TestMain(m *testing.M) {
 
 	c, err := client.Dial(ctx, cfg)
 	if err != nil {
+		// When CRONOS_TEST_INTEGRATION=1 (CI), a missing server is a hard
+		// failure so the run can't silently report green. Otherwise skip the
+		// suite gracefully for local dev where no server is running.
+		if os.Getenv("CRONOS_TEST_INTEGRATION") == "1" {
+			fmt.Fprintf(os.Stderr, "INTEGRATION FAIL: cannot dial %s: %v\n", serverAddr, err)
+			os.Exit(1)
+		}
 		fmt.Fprintf(os.Stderr, "INTEGRATION SKIP: cannot dial %s: %v\n", serverAddr, err)
-		os.Exit(0) // Skip rather than fail so CI doesn't break without a running server
+		os.Exit(0)
 	}
 	testClient = c
 	defer testClient.Close()

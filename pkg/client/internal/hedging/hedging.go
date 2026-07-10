@@ -4,6 +4,8 @@ import (
 	"context"
 	"sync"
 	"time"
+
+	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 )
 
 // Policy controls request hedging behavior.
@@ -48,7 +50,7 @@ func Do[T any](ctx context.Context, policy Policy, fn func(context.Context) (T, 
 
 	launch := func(delay time.Duration) {
 		wg.Add(1)
-		go func() {
+		utils.GoSafe("hedge-request", func() {
 			defer wg.Done()
 			if delay > 0 {
 				select {
@@ -69,7 +71,7 @@ func Do[T any](ctx context.Context, policy Policy, fn func(context.Context) (T, 
 				// Someone else won; cancel this context
 				cancel()
 			}
-		}()
+		})
 	}
 
 	launch(0)
@@ -88,14 +90,14 @@ func Do[T any](ctx context.Context, policy Policy, fn func(context.Context) (T, 
 	mu.Unlock()
 
 	// Drain remaining to avoid goroutine leaks
-	go func() {
+	utils.GoSafe("hedge-drain-results", func() {
 		for range results {
 		}
-	}()
-	go func() {
+	})
+	utils.GoSafe("hedge-wait-group", func() {
 		wg.Wait()
 		close(results)
-	}()
+	})
 
 	return res.val, res.err
 }

@@ -145,9 +145,68 @@ func TestDeadLetterQueue_Retry_NotFound(t *testing.T) {
 
 	_, err := dlq.Retry("nonexistent")
 	if err == nil {
-		t.Error("expected error for nonexistent retry")
+		t.Error("expected error for nonexistent delivery ID")
 	}
 }
+
+// TestDeadLetterQueue_RemovePersistsAcrossRestart verifies that Remove writes a
+// tombstone record so the entry is not resurrected after the DLQ is reloaded.
+func TestDeadLetterQueue_RemovePersistsAcrossRestart(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	dlq1, err := NewDeadLetterQueue(tmpDir, 100)
+	if err != nil {
+		t.Fatalf("NewDeadLetterQueue failed: %v", err)
+	}
+	event := makeDLQEvent(0, "msg", "topic")
+	dlq1.Add(event, "delivery-persist", 1, "err", "sub")
+	if err := dlq1.Remove("delivery-persist"); err != nil {
+		t.Fatalf("Remove failed: %v", err)
+	}
+	if err := dlq1.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	dlq2, err := NewDeadLetterQueue(tmpDir, 100)
+	if err != nil {
+		t.Fatalf("reload NewDeadLetterQueue failed: %v", err)
+	}
+	defer dlq2.Close()
+
+	if dlq2.Count() != 0 {
+		t.Errorf("expected count 0 after reload, got %d (tombstone not respected)", dlq2.Count())
+	}
+}
+
+// TestDeadLetterQueue_RetryPersistsAcrossRestart verifies that Retry writes a
+// tombstone record so the entry is not resurrected after the DLQ is reloaded.
+func TestDeadLetterQueue_RetryPersistsAcrossRestart(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	dlq1, err := NewDeadLetterQueue(tmpDir, 100)
+	if err != nil {
+		t.Fatalf("NewDeadLetterQueue failed: %v", err)
+	}
+	event := makeDLQEvent(0, "msg", "topic")
+	dlq1.Add(event, "delivery-retry-persist", 1, "err", "sub")
+	if _, err := dlq1.Retry("delivery-retry-persist"); err != nil {
+		t.Fatalf("Retry failed: %v", err)
+	}
+	if err := dlq1.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	dlq2, err := NewDeadLetterQueue(tmpDir, 100)
+	if err != nil {
+		t.Fatalf("reload NewDeadLetterQueue failed: %v", err)
+	}
+	defer dlq2.Close()
+
+	if dlq2.Count() != 0 {
+		t.Errorf("expected count 0 after reload, got %d (tombstone not respected)", dlq2.Count())
+	}
+}
+
 
 func TestDeadLetterQueue_Eviction(t *testing.T) {
 	tmpDir := t.TempDir()

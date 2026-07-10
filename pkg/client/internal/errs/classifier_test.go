@@ -13,7 +13,7 @@ func TestIsRetryable(t *testing.T) {
 	retryableCodes := []codes.Code{
 		codes.Unavailable,
 		codes.DeadlineExceeded,
-		codes.ResourceExhausted,
+		codes.Aborted,
 	}
 
 	for _, c := range retryableCodes {
@@ -21,6 +21,11 @@ func TestIsRetryable(t *testing.T) {
 		if !IsRetryable(err) {
 			t.Errorf("expected retryable for code %v", c)
 		}
+	}
+
+	// ResourceExhausted typically indicates quota exhaustion and should not be retried.
+	if IsRetryable(status.Error(codes.ResourceExhausted, "quota exceeded")) {
+		t.Error("expected ResourceExhausted to be non-retryable")
 	}
 
 	// Non-retryable codes
@@ -38,9 +43,10 @@ func TestIsRetryable(t *testing.T) {
 		}
 	}
 
-	// Non-gRPC error — errs package treats all non-gRPC errors as retryable
-	if !IsRetryable(errors.New("random error")) {
-		t.Error("random error should be retryable (non-gRPC = retryable)")
+	// Non-gRPC errors are treated as non-retryable by default so application
+	// failures (serialization, validation, etc.) fail fast.
+	if IsRetryable(errors.New("random error")) {
+		t.Error("random non-gRPC error should be non-retryable")
 	}
 
 	// Nil error
