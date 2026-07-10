@@ -179,6 +179,7 @@ type AppendEntriesMessage struct {
 	PrevLogIndex int64
 	PrevLogTerm  int64
 	CommitIndex  int64
+	Checksum     uint32
 	Events       []*types.Event
 }
 
@@ -189,6 +190,7 @@ func (m *AppendEntriesMessage) Encode() ([]byte, error) {
 		ExpectedNextOffset: m.PrevLogIndex + 1,
 		Term:               m.Term,
 		PrevLogTerm:        m.PrevLogTerm,
+		Checksum:           m.Checksum,
 	}
 	return proto.Marshal(req)
 }
@@ -203,20 +205,23 @@ func (m *AppendEntriesMessage) Decode(data []byte) error {
 	m.Events = req.Events
 	m.PrevLogIndex = req.ExpectedNextOffset - 1
 	m.PrevLogTerm = req.PrevLogTerm
+	m.Checksum = req.Checksum
 	return nil
 }
 
 // AppendAckMessage
 type AppendAckMessage struct {
-	Term    int64
-	Success bool
-	Offset  int64
+	Term       int64
+	Success    bool
+	Offset     int64
+	NextOffset int64
 }
 
 func (m *AppendAckMessage) Encode() ([]byte, error) {
 	resp := &types.ReplicationAppendResponse{
 		Success:    m.Success,
 		LastOffset: m.Offset,
+		NextOffset: m.NextOffset,
 		Term:       m.Term,
 	}
 	return proto.Marshal(resp)
@@ -229,6 +234,7 @@ func (m *AppendAckMessage) Decode(data []byte) error {
 	}
 	m.Success = resp.Success
 	m.Offset = resp.LastOffset
+	m.NextOffset = resp.NextOffset
 	m.Term = resp.Term
 	return nil
 }

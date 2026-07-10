@@ -455,7 +455,9 @@ func (s *Segment) AppendEventUnsafe(event *types.Event, indexInterval int64) err
 	return fmt.Errorf("cannot append to closed segment")
 }
 
-// buildEventRecord builds binary event record
+// buildEventRecord builds binary event record (v2 format).
+// Layout: [length 4][crc32 4][term 8][offset 8][schedule_ts 8][msgID len 2][msgID]
+// [topic len 2][topic][payload len 4][payload][checksum 4][meta count 2][meta...]
 func (s *Segment) buildEventRecord(event *types.Event) ([]byte, error) {
 	// Calculate sizes
 	msgIDLen := len(event.GetMessageId())
@@ -463,8 +465,12 @@ func (s *Segment) buildEventRecord(event *types.Event) ([]byte, error) {
 	payloadLen := len(event.Payload)
 	metaCount := len(event.Meta)
 
+	if event.Checksum == 0 && payloadLen > 0 {
+		event.Checksum = crc32.ChecksumIEEE(event.Payload)
+	}
+
 	// Calculate total size with overflow checking
-	size := 4 + 4 + 8 + 8 + 2 + msgIDLen + 2 + topicLen + 4 + payloadLen + 2
+	size := 4 + 4 + 8 + 8 + 8 + 2 + msgIDLen + 2 + topicLen + 4 + payloadLen + 4 + 2
 	for k, v := range event.Meta {
 		metaEntrySize := 2 + len(k) + 2 + len(v)
 		// Check for integer overflow
@@ -490,6 +496,10 @@ func (s *Segment) buildEventRecord(event *types.Event) ([]byte, error) {
 
 	// CRC32 (4 bytes) - skip for now, fill later
 	offset += 4
+
+	// Term (8 bytes)
+	binary.BigEndian.PutUint64(record[offset:offset+8], uint64(event.GetTerm()))
+	offset += 8
 
 	// Offset (8 bytes)
 	binary.BigEndian.PutUint64(record[offset:offset+8], uint64(event.Offset))
@@ -523,6 +533,10 @@ func (s *Segment) buildEventRecord(event *types.Event) ([]byte, error) {
 	copy(record[offset:offset+payloadLen], event.Payload)
 	offset += payloadLen
 
+	// Payload checksum (4 bytes)
+	binary.BigEndian.PutUint32(record[offset:offset+4], event.Checksum)
+	offset += 4
+
 	// Meta count (2 bytes)
 	binary.BigEndian.PutUint16(record[offset:offset+2], uint16(metaCount))
 	offset += 2
@@ -546,17 +560,18 @@ func (s *Segment) buildEventRecord(event *types.Event) ([]byte, error) {
 		offset += len(v)
 	}
 
-	// Calculate and write CRC32
+	// Calculate and write CRC32 (covers term, offset, payload, checksum, meta)
 	crc := crc32.ChecksumIEEE(record[8:])
 	binary.BigEndian.PutUint32(record[4:8], crc)
 
 	return record, nil
 }
 
-// parseEventRecordWithoutLength parses binary event record that doesn't include length prefix
-// The record starts with CRC32 (4 bytes) followed by event data
+// parseEventRecordWithoutLength parses binary event record that doesn't include length prefix.
+// The v2 record layout is: [crc32 4][term 8][offset 8][schedule_ts 8][msgID len 2][msgID]
+// [topic len 2][topic][payload len 4][payload][checksum 4][meta count 2][meta...]
 func parseEventRecordWithoutLength(record []byte) (*types.Event, error) {
-	if len(record) < 4 {
+	if len(record) < 4+8+8+8 {
 		return nil, fmt.Errorf("record too short")
 	}
 
@@ -568,6 +583,10 @@ func parseEventRecordWithoutLength(record []byte) (*types.Event, error) {
 	}
 
 	offset := 4 // Skip CRC32 (4 bytes), length was already read separately
+
+	// Term (8 bytes)
+	term := int64(binary.BigEndian.Uint64(record[offset : offset+8]))
+	offset += 8
 
 	// Offset (8 bytes)
 	eventOffset := int64(binary.BigEndian.Uint64(record[offset : offset+8]))
@@ -611,7 +630,17 @@ func parseEventRecordWithoutLength(record []byte) (*types.Event, error) {
 	copy(payload, record[offset:offset+payloadLen])
 	offset += payloadLen
 
+	// Payload checksum (4 bytes)
+	if offset+4 > len(record) {
+		return nil, fmt.Errorf("record bounds exceeded for checksum")
+	}
+	checksum := binary.BigEndian.Uint32(record[offset : offset+4])
+	offset += 4
+
 	// Meta count (2 bytes)
+	if offset+2 > len(record) {
+		return nil, fmt.Errorf("record bounds exceeded for meta count")
+	}
 	metaCount := int(binary.BigEndian.Uint16(record[offset : offset+2]))
 	offset += 2
 
@@ -651,6 +680,8 @@ func parseEventRecordWithoutLength(record []byte) (*types.Event, error) {
 		Meta:        meta,
 		Offset:      eventOffset,
 		PartitionId: 0,
+		Term:        term,
+		Checksum:    checksum,
 	}, nil
 }
 
@@ -812,8 +843,8 @@ func (s *Segment) readEventMmap(targetOffset int64, startPos int64) (*types.Even
 			return nil, fmt.Errorf("decrypt: %w", err)
 		}
 
-		if len(decrypted) > 12 {
-			offsetVal := int64(binary.BigEndian.Uint64(decrypted[4:12]))
+		if len(decrypted) > 20 {
+			offsetVal := int64(binary.BigEndian.Uint64(decrypted[12:20]))
 			if offsetVal > targetOffset {
 				return nil, fmt.Errorf("event not found (passed target)")
 			}
@@ -882,9 +913,9 @@ func (s *Segment) readEventFile(targetOffset int64, startPos int64) (*types.Even
 			return nil, fmt.Errorf("decrypt: %w", err)
 		}
 
-		// Early offset check: offset is at bytes 4-12 of record (after CRC)
-		if len(decrypted) > 12 {
-			offsetVal := int64(binary.BigEndian.Uint64(decrypted[4:12]))
+		// Early offset check: offset is at bytes 16-24 of record (after CRC + term).
+		if len(decrypted) > 20 {
+			offsetVal := int64(binary.BigEndian.Uint64(decrypted[12:20]))
 			if offsetVal > targetOffset {
 				break // Past target
 			}
@@ -1043,10 +1074,10 @@ func (s *Segment) ReadEventsByOffsetRange(startOffset, endOffset int64) ([]*type
 		}
 
 		// Early offset check before full event parsing.
-		// Offset is at bytes 4-12 of record (after 4-byte CRC).
+		// Offset is at bytes 12-20 of record (after 4-byte CRC + 8-byte term).
 		// This avoids CRC check + string allocs for out-of-range records.
-		if len(decrypted) > 12 {
-			eventOffset := int64(binary.BigEndian.Uint64(decrypted[4:12]))
+		if len(decrypted) > 20 {
+			eventOffset := int64(binary.BigEndian.Uint64(decrypted[12:20]))
 			if eventOffset > endOffset {
 				break // Past range, done
 			}

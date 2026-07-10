@@ -35,6 +35,9 @@ message Event {
 
   // Optional checksum for payload integrity
   uint32 checksum = 9;
+
+  // Raft term of the log entry (internal replication metadata)
+  int64 term = 10;
 }
 
 // ============================================================================
@@ -246,6 +249,9 @@ message ReplicationAppendRequest {
 
   // Term of the log entry immediately preceding the new entries
   int64 prev_log_term = 5;
+
+  // Batch checksum for end-to-end replication integrity
+  uint32 checksum = 6;
 }
 
 message ReplicationAppendResponse {
