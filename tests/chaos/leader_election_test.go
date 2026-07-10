@@ -206,8 +206,8 @@ func TestPreferISRReplica(t *testing.T) {
 		Replicas: []string{"leader", "isr-low", "out-of-sync-high"},
 		ISR:      []string{"leader", "isr-low"},
 		ReplicaOffsets: map[string]int64{
-			"isr-low":           100,
-			"out-of-sync-high":  900,
+			"isr-low":          100,
+			"out-of-sync-high": 900,
 		},
 	}
 	alive := map[string]bool{"isr-low": true, "out-of-sync-high": true}

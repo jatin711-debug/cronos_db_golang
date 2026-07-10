@@ -514,6 +514,14 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 				delete(partitionEvents, pid)
 				continue
 			}
+			if len(duplicates) != len(evts) {
+				atomic.AddInt32(&errorCount, int32(len(evts)))
+				if lastError == "" {
+					lastError = fmt.Sprintf("dedup check returned %d results for %d events in partition %d", len(duplicates), len(evts), pid)
+				}
+				delete(partitionEvents, pid)
+				continue
+			}
 			kept := evts[:0]
 			for i, e := range evts {
 				if duplicates[i] {

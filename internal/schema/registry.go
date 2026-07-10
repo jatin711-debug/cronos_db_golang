@@ -15,19 +15,19 @@ import (
 type Type string
 
 const (
-	TypeJSON       Type = "json"
-	TypeAvro      Type = "avro"
-	TypeProtobuf  Type = "protobuf"
+	TypeJSON     Type = "json"
+	TypeAvro     Type = "avro"
+	TypeProtobuf Type = "protobuf"
 )
 
 // Schema represents a versioned schema for a topic.
 type Schema struct {
-	Topic       string `json:"topic"`
-	Version     int    `json:"version"`
-	Type        Type   `json:"type"`
-	Definition  string `json:"definition"`
-	Hash        uint64 `json:"hash"`
-	Descriptor  []byte `json:"descriptor,omitempty"` // FileDescriptorProto bytes for protobuf
+	Topic      string `json:"topic"`
+	Version    int    `json:"version"`
+	Type       Type   `json:"type"`
+	Definition string `json:"definition"`
+	Hash       uint64 `json:"hash"`
+	Descriptor []byte `json:"descriptor,omitempty"` // FileDescriptorProto bytes for protobuf
 }
 
 // CompatibilityMode defines schema evolution policy.
@@ -42,10 +42,10 @@ const (
 
 // Registry manages topic schemas with versioning.
 type Registry struct {
-	mu           sync.RWMutex
-	schemas      map[string][]Schema         // topic -> sorted by version ascending
-	compatModes  map[string]CompatibilityMode // topic -> compatibility mode
-	dir          string
+	mu          sync.RWMutex
+	schemas     map[string][]Schema          // topic -> sorted by version ascending
+	compatModes map[string]CompatibilityMode // topic -> compatibility mode
+	dir         string
 }
 
 // NewRegistry creates a schema registry.

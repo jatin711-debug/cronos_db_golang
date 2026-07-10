@@ -32,11 +32,11 @@ type Config struct {
 	// number of replicas are in the ISR. 0 means derive a default of 1 (i.e.
 	// only the leader is required), preserving the historical single-replica
 	// behavior. Equivalent to Kafka's min.insync.replicas.
-	MinInSyncReplicas int
-	RaftDir              string
-	RaftJoinAddr         string
-	StatsPrintInterval   time.Duration
-	CheckpointInterval   time.Duration
+	MinInSyncReplicas  int
+	RaftDir            string
+	RaftJoinAddr       string
+	StatsPrintInterval time.Duration
+	CheckpointInterval time.Duration
 
 	// Tracing/telemetry configuration
 	TracingEnabled      bool
@@ -80,11 +80,11 @@ type Config struct {
 	UseMemberlist bool // true = HashiCorp Memberlist, false = custom TCP gossip
 
 	// TLS configuration
-	TLSEnabled     bool
-	TLSCAFile      string
-	TLSCertFile    string
-	TLSKeyFile     string
-	TLSClientAuth  bool // require client certs (mTLS)
+	TLSEnabled    bool
+	TLSCAFile     string
+	TLSCertFile   string
+	TLSKeyFile    string
+	TLSClientAuth bool // require client certs (mTLS)
 
 	// Internal replication mTLS configuration (leader <-> follower traffic)
 	ReplicationTLSEnabled  bool
@@ -93,10 +93,10 @@ type Config struct {
 	ReplicationTLSKeyFile  string
 
 	// Auth configuration
-	AuthEnabled       bool
-	AuthJWTSecret     string // HMAC secret for JWT verification
-	AuthJWTPublicKey  string // Ed25519/RSA public key file for JWT verification
-	AuthPolicyFile    string // Path to RBAC policy JSON file
+	AuthEnabled      bool
+	AuthJWTSecret    string // HMAC secret for JWT verification
+	AuthJWTPublicKey string // Ed25519/RSA public key file for JWT verification
+	AuthPolicyFile   string // Path to RBAC policy JSON file
 
 	// Node topology for rack-aware placement
 	NodeRack   string

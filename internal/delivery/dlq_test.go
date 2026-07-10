@@ -207,7 +207,6 @@ func TestDeadLetterQueue_RetryPersistsAcrossRestart(t *testing.T) {
 	}
 }
 
-
 func TestDeadLetterQueue_Eviction(t *testing.T) {
 	tmpDir := t.TempDir()
 

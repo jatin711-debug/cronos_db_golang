@@ -287,6 +287,20 @@ func (c *Coordinator) RecoverPreparedLocks() {
 			// loop (and any explicit Commit/Abort) will acquire locks via
 			// acquireLocks(), which is deadlock-free because it sorts by partition
 			// ID. Locking here without ever releasing caused a permanent lock leak.
+
+			// Ensure the transaction exists in memory so GetStatus can report it
+			// and the recovery loop can re-drive resolution when a txLog record is
+			// also present.
+			c.mu.Lock()
+			id := TxID(txID)
+			if _, exists := c.transactions[id]; !exists {
+				c.transactions[id] = &Transaction{
+					ID:        id,
+					Status:    StatusPending,
+					CreatedAt: time.Now(),
+				}
+			}
+			c.mu.Unlock()
 		}
 	}
 }

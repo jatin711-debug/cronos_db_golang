@@ -9,11 +9,11 @@ import (
 
 // TLSConfig holds TLS configuration for the gRPC server.
 type TLSConfig struct {
-	Enabled     bool
-	CAFile      string
-	CertFile    string
-	KeyFile     string
-	ClientAuth  bool // require client certs (mTLS)
+	Enabled    bool
+	CAFile     string
+	CertFile   string
+	KeyFile    string
+	ClientAuth bool // require client certs (mTLS)
 }
 
 // BuildServerTLSConfig builds a tls.Config for the gRPC server.

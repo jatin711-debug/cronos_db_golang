@@ -448,9 +448,9 @@ func TestCheckTopicPermission_UnknownSubject(t *testing.T) {
 
 func TestExtractBearer(t *testing.T) {
 	tests := []struct {
-		name   string
-		md     metadata.MD
-		want   string
+		name string
+		md   metadata.MD
+		want string
 	}{
 		{"valid bearer", metadata.New(map[string]string{"authorization": "Bearer token123"}), "token123"},
 		{"lowercase bearer", metadata.New(map[string]string{"authorization": "bearer token123"}), "token123"},
@@ -483,5 +483,3 @@ var jwtSigningMethodES256 = jwt.SigningMethodES256
 func ParseTokenForTest(tokenStr string, secret []byte) (*Claims, error) {
 	return parseToken(tokenStr, &Config{JWTSecret: secret})
 }
-
-

@@ -10,9 +10,9 @@ import (
 type State int32
 
 const (
-	StateClosed    State = iota // Normal operation
-	StateOpen                   // Failing, reject fast
-	StateHalfOpen               // Testing if recovered
+	StateClosed   State = iota // Normal operation
+	StateOpen                  // Failing, reject fast
+	StateHalfOpen              // Testing if recovered
 )
 
 func (s State) String() string {

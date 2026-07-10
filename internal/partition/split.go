@@ -69,21 +69,12 @@ func (sm *SplitManager) SplitPartition(sourceID int32, newID int32, splitOffset 
 		if err != nil {
 			slog.Error("Split partition failed, rolling back changes", "source", sourceID, "new", newID, "error", err)
 			if partitionCreated {
-				// Close and remove new partition
+				// Stop new partition gracefully (flushes WAL and snapshots) before
+				// removing it from the manager and from disk.
+				_ = sm.pm.StopPartition(newID)
+
 				sm.pm.mu.Lock()
-				if newPart, exists := sm.pm.partitions[newID]; exists {
-					if newPart.Wal != nil {
-						newPart.Wal.Close()
-					}
-					if newPart.Scheduler != nil {
-						newPart.Scheduler.Stop()
-					}
-					if newPart.Worker != nil {
-						newPart.Worker.Stop()
-					}
-					close(newPart.deliveryQuit)
-					delete(sm.pm.partitions, newID)
-				}
+				delete(sm.pm.partitions, newID)
 				sm.pm.mu.Unlock()
 
 				// Clean up directories on disk

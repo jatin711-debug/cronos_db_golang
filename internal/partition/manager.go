@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jatin711-debug/cronos_db_golang/internal/config"
 	"github.com/jatin711-debug/cronos_db_golang/internal/consumer"
 	"github.com/jatin711-debug/cronos_db_golang/internal/dedup"
 	"github.com/jatin711-debug/cronos_db_golang/internal/delivery"
@@ -96,15 +97,15 @@ func (p *Partition) IsKeyInBounds(key string) bool {
 
 // PartitionManager manages all partitions
 type PartitionManager struct {
-	mu                sync.RWMutex
-	partitions        map[int32]*Partition
-	nodeID            string
-	config            *types.Config
-	pebbleCache       *pebble.Cache
-	tenantAccountant  tenantAccountant
-	splitting         map[int32]bool // tracks partitions currently undergoing split
-	splittingMu       sync.RWMutex
-	backpressureMgr   *BackpressureManager
+	mu               sync.RWMutex
+	partitions       map[int32]*Partition
+	nodeID           string
+	config           *types.Config
+	pebbleCache      *pebble.Cache
+	tenantAccountant tenantAccountant
+	splitting        map[int32]bool // tracks partitions currently undergoing split
+	splittingMu      sync.RWMutex
+	backpressureMgr  *BackpressureManager
 }
 
 // tenantAccountant is the minimal interface needed for delivery callbacks.
@@ -156,9 +157,17 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 	dataDir := fmt.Sprintf("%s/partitions/%d", pm.config.DataDir, partitionID)
 
 	// Create WAL
+	segmentSize := pm.config.SegmentSizeBytes
+	if segmentSize <= 0 {
+		segmentSize = config.DefaultSegmentSizeBytes
+	}
+	indexInterval := pm.config.IndexInterval
+	if indexInterval <= 0 {
+		indexInterval = config.DefaultIndexInterval
+	}
 	walConfig := &storage.WALConfig{
-		SegmentSizeBytes: pm.config.SegmentSizeBytes,
-		IndexInterval:    pm.config.IndexInterval,
+		SegmentSizeBytes: segmentSize,
+		IndexInterval:    indexInterval,
 		FsyncMode:        pm.config.FsyncMode,
 		FlushIntervalMS:  pm.config.FlushIntervalMS,
 	}

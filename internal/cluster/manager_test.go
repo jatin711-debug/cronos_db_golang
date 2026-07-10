@@ -209,14 +209,14 @@ type mockMembershipService struct {
 	nodes map[string]*Node
 }
 
-func (m *mockMembershipService) Start(ctx context.Context) error            { return nil }
-func (m *mockMembershipService) Stop()                                      {}
-func (m *mockMembershipService) Join(node *Node) error                      { return nil }
-func (m *mockMembershipService) Leave(nodeID string) error                  { return nil }
-func (m *mockMembershipService) GetNodes() []*Node                          { return m.GetAliveNodes() }
-func (m *mockMembershipService) GetClusterState() *ClusterState             { return nil }
-func (m *mockMembershipService) OnJoin(cb func(node *Node))                 {}
-func (m *mockMembershipService) OnLeave(cb func(node *Node))                {}
+func (m *mockMembershipService) Start(ctx context.Context) error { return nil }
+func (m *mockMembershipService) Stop()                           {}
+func (m *mockMembershipService) Join(node *Node) error           { return nil }
+func (m *mockMembershipService) Leave(nodeID string) error       { return nil }
+func (m *mockMembershipService) GetNodes() []*Node               { return m.GetAliveNodes() }
+func (m *mockMembershipService) GetClusterState() *ClusterState  { return nil }
+func (m *mockMembershipService) OnJoin(cb func(node *Node))      {}
+func (m *mockMembershipService) OnLeave(cb func(node *Node))     {}
 
 func (m *mockMembershipService) GetLocalNode() *Node {
 	return m.local
