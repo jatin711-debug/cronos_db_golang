@@ -50,6 +50,7 @@ type EventServiceHandler struct {
 	tenantAccountant *tenant.Accountant
 	auditLogger      *audit.Logger
 	authPolicy       *auth.Policy
+	authEnabled      bool // true when JWT authentication is active
 }
 
 // DedupManager interface
@@ -138,9 +139,21 @@ func (h *EventServiceHandler) SetAuditLogger(l *audit.Logger) {
 }
 
 // SetAuthPolicy sets the RBAC policy for topic-level authorization.
-// A nil policy disables topic authorization.
+// Call this only when auth is enabled. When auth is disabled, leave
+// authPolicy nil and authEnabled false so topic checks are skipped.
 func (h *EventServiceHandler) SetAuthPolicy(p *auth.Policy) {
 	h.authPolicy = p
+	h.authEnabled = true
+}
+
+// checkTopicAuth is a thin wrapper around auth.CheckTopicPermission that skips
+// the check entirely when auth is disabled (dev mode). When auth is enabled,
+// a nil policy is treated as a misconfiguration and fails closed.
+func (h *EventServiceHandler) checkTopicAuth(ctx context.Context, topic string, op string) error {
+	if !h.authEnabled {
+		return nil // auth disabled — allow all
+	}
+	return auth.CheckTopicPermission(ctx, topic, op, h.authPolicy)
 }
 
 // ensureClusterPartitionWritable validates that this node should accept writes
@@ -228,7 +241,7 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 	}
 
 	// Topic-level authorization
-	if err := auth.CheckTopicPermission(ctx, event.Topic, "publish", h.authPolicy); err != nil {
+	if err := h.checkTopicAuth(ctx, event.Topic, "publish"); err != nil {
 		return nil, err
 	}
 
@@ -426,7 +439,7 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 		}
 
 		// Topic-level authorization
-		if err := auth.CheckTopicPermission(ctx, event.Topic, "publish", h.authPolicy); err != nil {
+		if err := h.checkTopicAuth(ctx, event.Topic, "publish"); err != nil {
 			atomic.AddInt32(&errorCount, 1)
 			if lastError == "" {
 				lastError = err.Error()
@@ -682,7 +695,7 @@ func (h *EventServiceHandler) Subscribe(stream grpc.BidiStreamingServer[types.Su
 	}
 
 	// Topic-level authorization
-	if err := auth.CheckTopicPermission(ctx, req.GetTopic(), "subscribe", h.authPolicy); err != nil {
+	if err := h.checkTopicAuth(ctx, req.GetTopic(), "subscribe"); err != nil {
 		return err
 	}
 
