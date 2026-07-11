@@ -9,6 +9,7 @@ package dedup
 // Usually needs import library. Rust produces .dll.lib for .dll.
 
 #include <stdlib.h>
+#include <string.h>
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -24,33 +25,12 @@ void bloom_reset(void* ptr);
 import "C"
 import (
 	"runtime"
-	"sync"
 	"unsafe"
 )
 
 // RustBloomFilter is a wrapper around the Rust implementation
 type RustBloomFilter struct {
 	ptr unsafe.Pointer
-}
-
-type rustBatchScratch struct {
-	keyPtrs  []*C.uchar
-	keyLens  []C.size_t
-	results  []C.bool
-	goResult []bool
-}
-
-var rustBatchScratchPool = sync.Pool{
-	New: func() interface{} {
-		return &rustBatchScratch{}
-	},
-}
-
-func ensureBatchCap[T any](s []T, n int) []T {
-	if cap(s) < n {
-		return make([]T, n)
-	}
-	return s[:n]
 }
 
 // NewRustBloomFilter creates a new Rust-backed bloom filter
@@ -84,38 +64,79 @@ func (bf *RustBloomFilter) MayContainBatch(keys []string) []bool {
 		return nil
 	}
 
-	scratch := rustBatchScratchPool.Get().(*rustBatchScratch)
-	defer rustBatchScratchPool.Put(scratch)
+	// CGo's pointer-passing rules forbid passing a Go pointer to memory that
+	// itself contains Go pointers (e.g. a [](*C.uchar) whose elements point at
+	// Go string buffers). To stay compliant on Go 1.23+ (which enforces this at
+	// runtime and panics otherwise), allocate the pointer/length/result arrays
+	// and per-key buffers in C and copy the key bytes across before the call.
+	ptrSize := C.size_t(unsafe.Sizeof(uintptr(0)))
+	sizeSize := C.size_t(unsafe.Sizeof(C.size_t(0)))
+	boolSize := C.size_t(unsafe.Sizeof(C.bool(false)))
 
-	keyPtrs := ensureBatchCap(scratch.keyPtrs, n)
-	keyLens := ensureBatchCap(scratch.keyLens, n)
-	results := ensureBatchCap(scratch.results, n)
-	goResults := ensureBatchCap(scratch.goResult, n)
-
-	scratch.keyPtrs = keyPtrs
-	scratch.keyLens = keyLens
-	scratch.results = results
-	scratch.goResult = goResults
-
-	for i, k := range keys {
-		keyPtrs[i] = (*C.uchar)(unsafe.Pointer(unsafe.StringData(k)))
-		keyLens[i] = C.size_t(len(k))
+	cKeys := C.calloc(C.size_t(n), ptrSize)
+	cLens := C.calloc(C.size_t(n), sizeSize)
+	cResults := C.calloc(C.size_t(n), boolSize)
+	if cKeys == nil || cLens == nil || cResults == nil {
+		if cKeys != nil {
+			C.free(cKeys)
+		}
+		if cLens != nil {
+			C.free(cLens)
+		}
+		if cResults != nil {
+			C.free(cResults)
+		}
+		panic("bloom_check_batch: cgo malloc failed")
 	}
+	defer C.free(cKeys)
+	defer C.free(cLens)
+	defer C.free(cResults)
+
+	keyPtrArray := (*[1 << 30]*C.uchar)(cKeys)[:n:n]
+	lensArray := (*[1 << 30]C.size_t)(cLens)[:n:n]
+	resultsArray := (*[1 << 30]C.bool)(cResults)[:n:n]
+
+	keyBuffers := make([]unsafe.Pointer, n)
+	for i, k := range keys {
+		buf := C.malloc(C.size_t(len(k)))
+		if buf == nil {
+			for _, b := range keyBuffers[:i] {
+				if b != nil {
+					C.free(b)
+				}
+			}
+			panic("bloom_check_batch: cgo key malloc failed")
+		}
+		keyBuffers[i] = buf
+		if len(k) == 0 {
+			keyPtrArray[i] = (*C.uchar)(buf)
+			lensArray[i] = 0
+			continue
+		}
+		C.memcpy(buf, unsafe.StringData(k), C.size_t(len(k)))
+		keyPtrArray[i] = (*C.uchar)(buf)
+		lensArray[i] = C.size_t(len(k))
+	}
+	defer func() {
+		for _, b := range keyBuffers {
+			if b != nil {
+				C.free(b)
+			}
+		}
+	}()
 
 	C.bloom_check_batch(
 		bf.ptr,
-		(**C.uchar)(unsafe.Pointer(&keyPtrs[0])),
-		(*C.size_t)(unsafe.Pointer(&keyLens[0])),
+		(**C.uchar)(unsafe.Pointer(cKeys)),
+		(*C.size_t)(unsafe.Pointer(cLens)),
 		C.size_t(n),
-		(*C.bool)(unsafe.Pointer(&results[0])),
+		(*C.bool)(unsafe.Pointer(cResults)),
 	)
 
-	for i, r := range results {
-		goResults[i] = bool(r)
-	}
-
 	out := make([]bool, n)
-	copy(out, goResults)
+	for i, r := range resultsArray {
+		out[i] = bool(r)
+	}
 	return out
 }
 

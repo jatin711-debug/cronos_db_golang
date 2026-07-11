@@ -240,6 +240,11 @@ func (m *Manager) GetStats() (*DedupStats, error) {
 	return m.store.GetStats()
 }
 
+// Close releases any resources held by the underlying dedup store.
+func (m *Manager) Close() error {
+	return m.store.Close()
+}
+
 // Checkpoint creates a point-in-time checkpoint of the underlying store if it
 // supports checkpointing. This is a no-op for stores that do not implement it.
 func (m *Manager) Checkpoint(destDir string) error {
