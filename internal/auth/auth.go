@@ -235,8 +235,19 @@ func ClaimsFromContext(ctx context.Context) (*Claims, bool) {
 // If no policy is configured (nil or empty), all requests are allowed so that
 // auth-disabled deployments remain backward compatible.
 func CheckTopicPermission(ctx context.Context, topic string, op string, policy *Policy) error {
-	if policy == nil || len(policy.Subjects) == 0 {
-		// No policy configured = allow all (backward compatible)
+	if policy == nil {
+		// No policy configured at all. When the RBAC interceptor is active
+		// (auth enabled) this is a misconfiguration — fail closed so topic-level
+		// authorization is not silently bypassed. When auth is disabled the
+		// handler never calls this function (policy is nil and auth is off),
+		// so this path is only reached when auth is on but no policy file was
+		// loaded.
+		return status.Error(codes.FailedPrecondition, "authorization policy not configured")
+	}
+
+	if len(policy.Subjects) == 0 {
+		// Explicit allow-all policy (empty subjects map). This is only set
+		// deliberately via AllowAllPolicy(), so we honor it.
 		return nil
 	}
 

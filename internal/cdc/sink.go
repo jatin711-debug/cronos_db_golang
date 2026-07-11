@@ -94,22 +94,53 @@ func (p *sinkPipeline) worker() {
 }
 
 func (p *sinkPipeline) write(evt *ChangeEvent) {
-	ctx, cancel := context.WithTimeout(context.Background(), DefaultCDCWriteTimeout)
-	defer cancel()
-	if err := p.sink.Write(ctx, evt); err != nil {
-		slog.Warn("CDC sink write failed", "sink", p.sink.Name(), "error", err)
+	// Retry transient write failures up to 3 times with exponential backoff
+	// before giving up. This provides at-least-once semantics for sink writes
+	// without blocking the worker indefinitely.
+	maxRetries := 3
+	backoff := 100 * time.Millisecond
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), DefaultCDCWriteTimeout)
+		err := p.sink.Write(ctx, evt)
+		cancel()
+		if err == nil {
+			return
+		}
+		if attempt < maxRetries {
+			slog.Warn("CDC sink write failed, retrying",
+				"sink", p.sink.Name(), "attempt", attempt+1, "error", err)
+			time.Sleep(backoff)
+			backoff *= 2
+		} else {
+			slog.Warn("CDC sink write failed after retries, event lost",
+				"sink", p.sink.Name(), "error", err,
+				"partition", evt.PartitionID, "offset", evt.Offset)
+		}
 	}
 }
 
+// emit sends an event to the sink queue. When the queue is full it blocks up
+// to DefaultCDCWriteTimeout rather than dropping the event, preventing silent
+// data loss under burst loads. If the timeout expires the event is dropped
+// with a warning (last-resort backpressure relief).
 func (p *sinkPipeline) emit(evt *ChangeEvent) {
+	timer := time.NewTimer(DefaultCDCWriteTimeout)
+	defer timer.Stop()
+
 	select {
 	case p.queue <- evt:
-	default:
+		return
+	case <-p.quit:
+		return
+	case <-timer.C:
 		p.droppedMu.Lock()
 		p.dropped++
 		d := p.dropped
 		p.droppedMu.Unlock()
-		slog.Warn("CDC sink queue full, dropping event", "sink", p.sink.Name(), "dropped", d)
+		slog.Warn("CDC sink queue full after timeout, dropping event",
+			"sink", p.sink.Name(), "dropped", d,
+			"partition", evt.PartitionID, "offset", evt.Offset)
 	}
 }
 

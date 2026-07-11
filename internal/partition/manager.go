@@ -756,12 +756,9 @@ func (pm *PartitionManager) writeTimerCheckpoint(partition *Partition, lastOffse
 		return
 	}
 	cpPath := fmt.Sprintf("%s/timer_replay_checkpoint.json", partition.DataDir)
-	tmpPath := cpPath + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+	if err := utils.AtomicWriteFile(cpPath, data, 0644); err != nil {
 		log2.Warn("Failed to write timer checkpoint", "error", err)
-		return
 	}
-	os.Rename(tmpPath, cpPath)
 }
 
 // runCompaction calculates the minimum consumed offset across all consumer groups
