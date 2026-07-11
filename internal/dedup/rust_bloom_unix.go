@@ -113,7 +113,7 @@ func (bf *RustBloomFilter) MayContainBatch(keys []string) []bool {
 			lensArray[i] = 0
 			continue
 		}
-		C.memcpy(buf, unsafe.StringData(k), C.size_t(len(k)))
+		C.memcpy(buf, unsafe.Pointer(unsafe.StringData(k)), C.size_t(len(k)))
 		keyPtrArray[i] = (*C.uchar)(buf)
 		lensArray[i] = C.size_t(len(k))
 	}
