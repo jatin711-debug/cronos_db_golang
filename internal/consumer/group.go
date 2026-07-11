@@ -101,6 +101,18 @@ func (g *GroupManager) GetGroup(groupID string) (*types.ConsumerGroup, bool) {
 	return group, exists
 }
 
+// Close releases any persistent resources held by the group manager, including
+// the underlying offset store. It is safe to call when no store is configured.
+func (g *GroupManager) Close() error {
+	g.mu.Lock()
+	store := g.offsetStore
+	g.mu.Unlock()
+	if store == nil {
+		return nil
+	}
+	return store.Close()
+}
+
 // CheckpointOffsetStore creates a point-in-time checkpoint of the persistent
 // offset store if one is configured. Returns nil if no offset store is attached.
 func (g *GroupManager) CheckpointOffsetStore(destDir string) error {

@@ -870,6 +870,21 @@ func (pm *PartitionManager) StopPartition(partitionID int32) error {
 		partition.Dispatcher.Close()
 	}
 
+	// Close durable stores before the WAL so background goroutines stop
+	// touching the data directory. Otherwise snapshot/dedup/offset workers can
+	// still be writing when the test's TempDir cleanup runs and we leak files
+	// ("directory not empty").
+	if partition.DedupStore != nil {
+		if err := partition.DedupStore.Close(); err != nil {
+			log.Printf("[Partition %d] Dedup store close failed: %v", partition.ID, err)
+		}
+	}
+	if partition.ConsumerGroup != nil {
+		if err := partition.ConsumerGroup.Close(); err != nil {
+			log.Printf("[Partition %d] Consumer group close failed: %v", partition.ID, err)
+		}
+	}
+
 	// Flush and close WAL
 	if partition.Wal != nil {
 		if err := partition.Wal.Close(); err != nil {

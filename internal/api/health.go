@@ -317,7 +317,11 @@ func (h *HealthChecker) checkWALReadable() (bool, string) {
 	}
 
 	hwm := p.Wal.GetHighWatermark()
-	if hwm < 0 {
+	last := p.Wal.GetLastOffset()
+	// An empty WAL (no appended events yet) is still readable. GetHighWatermark
+	// starts at 0, so use GetLastOffset to distinguish empty (-1) from a WAL
+	// whose first event is at offset 0.
+	if last < 0 {
 		return true, "empty WAL is readable"
 	}
 
