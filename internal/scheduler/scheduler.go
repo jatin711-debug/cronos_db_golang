@@ -391,19 +391,14 @@ func (s *Scheduler) checkpoint() {
 		LastCheckpointTS: now,
 	}
 
-	// Write to file
+	// Write to file via temp+fsync+rename for crash safety.
 	checkpointPath := filepath.Join(s.dataDir, "timer_state.json")
 	data, err := json.Marshal(checkpoint)
 	if err != nil {
 		return
 	}
 
-	tmpPath := checkpointPath + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
-		return
-	}
-
-	if err := os.Rename(tmpPath, checkpointPath); err != nil {
+	if err := utils.AtomicWriteFile(checkpointPath, data, 0644); err != nil {
 		return
 	}
 

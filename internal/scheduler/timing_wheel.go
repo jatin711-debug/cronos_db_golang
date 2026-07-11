@@ -251,9 +251,17 @@ func (tw *TimingWheel) tickLocked() {
 			select {
 			case tw.expired <- expiredCopy:
 			default:
-				// Return slice to pool since we couldn't send it
+				// Channel still full: re-queue the timers instead of dropping them.
+				// They are already removed from the wheel and the timers map, so
+				// add them back so the next tick can retry delivery. This prevents
+				// silent data loss under burst loads.
 				expiredSlicePool.Put(expiredCopy)
-				log.Printf("[TIMING-WHEEL] WARNING: expired channel full, %d timers delayed", len(tw.expiredBuf))
+				log.Printf("[TIMING-WHEEL] WARNING: expired channel full, re-queuing %d timers", len(tw.expiredBuf))
+				for _, t := range tw.expiredBuf {
+					t.next = nil
+					t.prev = nil
+					_ = tw.addTimerLocked(t)
+				}
 			}
 		}
 	}

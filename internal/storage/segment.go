@@ -308,17 +308,20 @@ func (s *Segment) AppendBatch(events []*types.Event, indexInterval int64) error 
 	return s.appendBatchInternal(events, indexInterval)
 }
 
-// AppendBatchUnsafe appends a batch of events without acquiring s.mu.
-// The caller MUST guarantee exclusive access (e.g. WAL.mu is held).
-// This eliminates double-locking in the WAL→Segment write path.
+// AppendBatchUnsafe appends a batch of events to the segment.
+// Despite the name (kept for API compatibility), this method acquires s.mu
+// internally. The WAL write path already holds w.mu which serializes callers,
+// so the segment lock is effectively uncontended.
 func (s *Segment) AppendBatchUnsafe(events []*types.Event, indexInterval int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.appendBatchInternal(events, indexInterval)
 }
 
-// AppendPreparedBatchUnsafe appends a batch of pre-encoded records without acquiring s.mu.
-// The caller MUST guarantee exclusive access (e.g. WAL.mu is held).
+// AppendPreparedBatchUnsafe appends a batch of pre-encoded records.
+// Despite the name (kept for API compatibility), this method acquires s.mu
+// internally. The WAL write path already holds w.mu which serializes callers,
+// so the segment lock is effectively uncontended.
 func (s *Segment) AppendPreparedBatchUnsafe(prepared []*PreparedRecord, indexInterval int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
