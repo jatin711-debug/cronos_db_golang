@@ -73,6 +73,8 @@ jobs:
         shell: bash
         run: |
           set -e
+          # Make the Rust shared library discoverable by the test binaries.
+          export LD_LIBRARY_PATH="${PWD}/internal/dedup/rust/target/release:${LD_LIBRARY_PATH:-}"
           # The race detector requires cgo, which on Windows also requires the
           # rust lib to be loadable at test time. Run with -race on linux only.
           if [ "$RUNNER_OS" = "Linux" ]; then
@@ -148,12 +150,12 @@ jobs:
         run: govulncheck ./...
 
   # --------------------------------------------------------------------------- #
-  # Integration suite: brings up the docker-compose cluster and runs the
-  # tests/integration package against it. Manual + nightly so it doesn't block
-  # every PR (it needs a real cluster), but does run on main/developement.
+  # Integration suite: runs tests/integration against a temporary single-node
+  # server started by the Makefile. This avoids Docker compose bring-up issues
+  # and keeps the test path identical to local development.
   # --------------------------------------------------------------------------- #
   integration:
-    name: Integration (docker-compose)
+    name: Integration (single-node)
     runs-on: ubuntu-latest
     if: github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'run-integration')
     steps:
@@ -163,24 +165,22 @@ jobs:
           go-version-file: go.mod
           cache: true
       - uses: dtolnay/rust-toolchain@stable
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            internal/dedup/rust/target
+          key: linux-cargo-${{ hashFiles('internal/dedup/rust/Cargo.lock', 'internal/dedup/rust/Cargo.toml') }}
+          restore-keys: linux-cargo-
       - name: Build Rust dedup library
         run: make rust-dedup
-      - name: Bring up cluster
-        run: |
-          docker compose up -d cronos-node1 cronos-node2 cronos-node3
-          # Wait for node1 HTTP health endpoint to become healthy.
-          for i in $(seq 1 60); do
-            if curl -sf http://localhost:8080/health >/dev/null 2>&1; then
-              echo "Cluster healthy"; exit 0
-            fi
-            sleep 2
-          done
-          echo "Cluster did not become healthy in time"; docker compose logs; exit 1
       - name: Run integration tests
         env:
-          CRONOS_TEST_ADDR: localhost:9000
-          CRONOS_TEST_INTEGRATION: "1"
+          CRONOS_TEST_ADDR: 127.0.0.1:9000
+          CRONOS_TEST_HTTP_ADDR: 127.0.0.1:8080
         run: make test-integration
-      - name: Dump cluster logs on failure
+      - name: Dump server log on failure
         if: failure()
-        run: docker compose logs
+        run: cat /tmp/cronos-integration-server.log || true

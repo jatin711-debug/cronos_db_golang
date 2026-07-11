@@ -185,8 +185,8 @@ type BloomPebbleStore struct {
 	pebbleHits    uint64 // Actually found in PebbleDB
 
 	// Configuration for bloom filter maintenance
-	bloomCapacity       uint64  // Max items before considering reset
-	falsePositiveThresh float64 // FPR threshold (e.g., 0.05 = 5%) to trigger reset
+	bloomCapacity       uint64      // Max items before considering reset
+	falsePositiveThresh float64     // FPR threshold (e.g., 0.05 = 5%) to trigger reset
 	resetInProgress     atomic.Bool // True when a reset is in progress (kept for compat)
 }
 
@@ -361,7 +361,6 @@ func (s *BloomPebbleStore) Put(messageID string, offset int64, createdTS int64) 
 	s.bloom.Add(messageID)
 	return s.pebble.Put(messageID, offset, createdTS)
 }
-
 
 // PruneExpired removes expired entries and checks bloom filter health
 // If false positive rate is too high, resets the bloom filter

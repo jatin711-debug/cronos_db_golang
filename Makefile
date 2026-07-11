@@ -73,16 +73,16 @@ VERIFY_GO_CMD = powershell -NoProfile -Command "if (-not (Get-Command go -ErrorA
 VERIFY_CARGO_CMD = powershell -NoProfile -Command "if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) { Write-Error '[verify-env] Missing required tool: cargo'; exit 1 }"
 VERIFY_PROTOC_CMD = powershell -NoProfile -Command "if (-not (Get-Command protoc -ErrorAction SilentlyContinue)) { Write-Error '[verify-env] Missing required tool: protoc'; exit 1 }"
 VERIFY_DOCKER_CMD = powershell -NoProfile -Command "if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { Write-Error '[verify-env] Missing required tool: docker'; exit 1 }"
-VERIFY_DOCKER_COMPOSE_CMD = powershell -NoProfile -Command "docker compose version *> $$null; if ($$LASTEXITCODE -ne 0) { Write-Error '[verify-env] Missing required tool: docker compose'; exit 1 }"
+VERIFY_DOCKER_COMPOSE_CMD = powershell -NoProfile -Command 'docker compose version *> $$null; if ($$LASTEXITCODE -ne 0) { Write-Error "[verify-env] Missing required tool: docker compose"; exit 1 }'
 VERIFY_GIT_CMD = powershell -NoProfile -Command "if (-not (Get-Command git -ErrorAction SilentlyContinue)) { Write-Error '[verify-tag-env] Missing required tool: git'; exit 1 }"
 VERIFY_GH_CMD = powershell -NoProfile -Command "if (-not (Get-Command gh -ErrorAction SilentlyContinue)) { Write-Error '[verify-release-env] Missing required tool: gh'; exit 1 }"
-VERIFY_GH_AUTH_CMD = powershell -NoProfile -Command "gh auth status *> $$null; if ($$LASTEXITCODE -ne 0) { Write-Error '[verify-release-env] Not authenticated. Run: gh auth login'; exit 1 }"
+VERIFY_GH_AUTH_CMD = powershell -NoProfile -Command 'gh auth status *> $$null; if ($$LASTEXITCODE -ne 0) { Write-Error "[verify-release-env] Not authenticated. Run: gh auth login"; exit 1 }'
 
 REQUIRE_VERSION_CMD = powershell -NoProfile -Command "if ([string]::IsNullOrWhiteSpace('$(VERSION)')) { Write-Error 'VERSION is required. Example: make tag VERSION=v0.2.1'; exit 1 }"
 VALIDATE_VERSION_CMD = powershell -NoProfile -Command "if ('$(VERSION)' -notmatch '^v\d+\.\d+\.\d+([.-][0-9A-Za-z.-]+)?$$') { Write-Error 'VERSION must look like vMAJOR.MINOR.PATCH'; exit 1 }"
 VERIFY_GIT_CLEAN_CMD = powershell -NoProfile -Command '$$s = git status --porcelain; if ($$s) { Write-Error "Working tree not clean. Commit or stash changes before tagging."; exit 1 }'
 VERIFY_TAG_EXISTS_LOCAL_CMD = powershell -NoProfile -Command 'git rev-parse -q --verify refs/tags/$(VERSION) 2>$$null >$$null; if ($$LASTEXITCODE -ne 0) { Write-Error "Missing local tag $(VERSION). Run make tag VERSION=$(VERSION) first."; exit 1 }'
-VERIFY_TAG_ABSENT_LOCAL_CMD = powershell -NoProfile -Command 'git rev-parse -q --verify refs/tags/$(VERSION) 2>$$null >$$null; if ($$LASTEXITCODE -eq 0) { Write-Error "Tag already exists locally: $(VERSION)"; exit 1 }'
+VERIFY_TAG_ABSENT_LOCAL_CMD = powershell -NoProfile -Command 'git rev-parse -q --verify refs/tags/$(VERSION) 2>$$null >$$null; if ($$LASTEXITCODE -eq 0) { Write-Error "Tag already exists locally: $(VERSION)"; exit 1 }; exit 0'
 VERIFY_TAG_EXISTS_REMOTE_CMD = powershell -NoProfile -Command '$$r = git ls-remote --tags $(REMOTE) refs/tags/$(VERSION); if (-not $$r) { Write-Error "Tag $(VERSION) not found on remote $(REMOTE). Run make tag-push VERSION=$(VERSION)."; exit 1 }'
 VERIFY_TAG_ABSENT_REMOTE_CMD = powershell -NoProfile -Command '$$r = git ls-remote --tags $(REMOTE) refs/tags/$(VERSION); if ($$r) { Write-Error "Tag already exists on remote $(REMOTE): $(VERSION)"; exit 1 }'
 
@@ -284,11 +284,11 @@ test: rust-dedup test-unit
 test-unit: rust-dedup
 	$(GO_RUNTIME_PREFIX) go test $$({ go list ./... 2>/dev/null || true; } | grep -vE '/tests/integration|/tests/chaos')
 
-# Run the integration suite against a running server. Set CRONOS_TEST_ADDR to
-# point at the server and CRONOS_TEST_INTEGRATION=1 so a dial failure is a hard
-# error instead of a silent skip.
-test-integration: rust-dedup
-	CRONOS_TEST_INTEGRATION=1 $(GO_RUNTIME_PREFIX) go test -v ./tests/integration/...
+# Run the integration suite against a running server. If no server is reachable
+# at CRONOS_TEST_ADDR / CRONOS_TEST_HTTP_ADDR, the script starts a temporary
+# single-node instance, runs the tests, and tears it down.
+test-integration: rust-dedup build
+	@bash scripts/run-integration-tests.sh
 
 # Run the chaos suite (requires docker + a running cronos cluster).
 test-chaos: rust-dedup

@@ -34,10 +34,10 @@ func VersionStreamInterceptor(vg *VersionGate) grpc.StreamServerInterceptor {
 		md, ok := metadata.FromIncomingContext(ss.Context())
 		if ok {
 			vals := md.Get("x-cronos-version")
-		if len(vals) > 0 {
-			var clientVer int32
-			if scanVersion(vals[0], &clientVer) == nil {
-				if !vg.IsCompatible(clientVer) {
+			if len(vals) > 0 {
+				var clientVer int32
+				if scanVersion(vals[0], &clientVer) == nil {
+					if !vg.IsCompatible(clientVer) {
 
 						return status.Errorf(codes.FailedPrecondition,
 							"client version %d incompatible with server (min=%d max=%d)",

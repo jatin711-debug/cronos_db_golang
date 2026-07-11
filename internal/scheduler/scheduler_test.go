@@ -328,7 +328,6 @@ func TestScheduler_Checkpoint(t *testing.T) {
 	}
 }
 
-
 // --- Adaptive Hydrator Tests ---
 
 func TestScheduler_SetHydratorIntervals(t *testing.T) {

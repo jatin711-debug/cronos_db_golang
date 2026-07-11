@@ -12,11 +12,11 @@ import (
 
 // DiskMonitor watches disk usage and triggers emergency compaction.
 type DiskMonitor struct {
-	dataDir        string
-	thresholdPct   float64 // e.g. 0.85 for 85%
-	checkInterval  time.Duration
-	compactFn      func()
-	quit           chan struct{}
+	dataDir       string
+	thresholdPct  float64 // e.g. 0.85 for 85%
+	checkInterval time.Duration
+	compactFn     func()
+	quit          chan struct{}
 }
 
 // NewDiskMonitor creates a disk pressure monitor.

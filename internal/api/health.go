@@ -148,6 +148,7 @@ func (h *HealthChecker) handleDeepHealth(w http.ResponseWriter, r *http.Request)
 			// WAL check - test readability, not mutability
 			if p.Wal != nil {
 				hwm := p.Wal.GetHighWatermark()
+				lastOffset := p.Wal.GetLastOffset()
 				flushErrors := p.Wal.GetFlushErrors()
 				replayErr := p.GetReplayError()
 				detail := fmt.Sprintf("HWM=%d, flush_errors=%d", hwm, flushErrors)
@@ -159,7 +160,9 @@ func (h *HealthChecker) handleDeepHealth(w http.ResponseWriter, r *http.Request)
 				if flushErrors > 0 {
 					walHealthy = false
 				}
-				if hwm >= 0 {
+				// Only probe-read when the WAL actually has events. GetHighWatermark
+				// starts at 0, so use GetLastOffset (-1 for empty) to detect emptiness.
+				if lastOffset >= 0 {
 					if _, err := p.Wal.ReadEvent(hwm); err != nil {
 						detail = fmt.Sprintf("WAL read failed at HWM %d: %v", hwm, err)
 						walHealthy = false
@@ -317,7 +320,11 @@ func (h *HealthChecker) checkWALReadable() (bool, string) {
 	}
 
 	hwm := p.Wal.GetHighWatermark()
-	if hwm < 0 {
+	last := p.Wal.GetLastOffset()
+	// An empty WAL (no appended events yet) is still readable. GetHighWatermark
+	// starts at 0, so use GetLastOffset to distinguish empty (-1) from a WAL
+	// whose first event is at offset 0.
+	if last < 0 {
 		return true, "empty WAL is readable"
 	}
 

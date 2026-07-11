@@ -1,12 +1,12 @@
 package utils
 
 import (
-	"slices"
 	"crypto/sha1"
 	"encoding/hex"
 	"hash"
 	"hash/crc32"
 	"hash/fnv"
+	"slices"
 )
 
 // Hash is a simple interface for hashing

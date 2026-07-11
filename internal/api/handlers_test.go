@@ -23,6 +23,9 @@ func (m *MockDedupManager) IsDuplicate(messageID string, offset int64) (bool, er
 }
 
 func (m *MockDedupManager) IsDuplicateBatch(messageIDs []string, offsets []int64) ([]bool, error) {
+	if len(m.isDuplicateBatch) != len(messageIDs) {
+		return make([]bool, len(messageIDs)), m.err
+	}
 	return m.isDuplicateBatch, m.err
 }
 

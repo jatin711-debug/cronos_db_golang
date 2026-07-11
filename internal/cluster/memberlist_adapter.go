@@ -15,17 +15,17 @@ import (
 // MemberlistMembership is a Membership implementation backed by HashiCorp Memberlist (SWIM protocol).
 // It provides production-grade failure detection with lower overhead than custom TCP heartbeats.
 type MemberlistMembership struct {
-	config     *ClusterConfig
-	list       *memberlist.Memberlist
-	localNode  *Node
-	nodes      map[string]*Node
-	nodesMu    sync.RWMutex
-	onJoinCb   func(node *Node)
-	onLeaveCb  func(node *Node)
-	started    bool
-	wg         sync.WaitGroup
-	eventCh    chan MemberEvent
-	quit       chan struct{}
+	config    *ClusterConfig
+	list      *memberlist.Memberlist
+	localNode *Node
+	nodes     map[string]*Node
+	nodesMu   sync.RWMutex
+	onJoinCb  func(node *Node)
+	onLeaveCb func(node *Node)
+	started   bool
+	wg        sync.WaitGroup
+	eventCh   chan MemberEvent
+	quit      chan struct{}
 }
 
 // NewMemberlistMembership creates a new membership using HashiCorp Memberlist.
@@ -239,11 +239,11 @@ func (mm *MemberlistMembership) advertisePort() int {
 
 func (mm *MemberlistMembership) nodeFromMember(m *memberlist.Node) *Node {
 	node := &Node{
-		ID:         m.Name,
-		State:      NodeStateAlive,
-		JoinedAt:   time.Now(),
-		UpdatedAt:  time.Now(),
-		Meta:       make(map[string]string),
+		ID:        m.Name,
+		State:     NodeStateAlive,
+		JoinedAt:  time.Now(),
+		UpdatedAt: time.Now(),
+		Meta:      make(map[string]string),
 	}
 	// Try to decode metadata
 	if len(m.Meta) > 0 {

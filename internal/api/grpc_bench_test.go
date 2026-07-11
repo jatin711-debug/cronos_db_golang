@@ -31,9 +31,9 @@ func startBenchServer(b *testing.B, fsyncMode string) (*GRPCServer, string, func
 	b.Helper()
 
 	cfg := &types.Config{
-		DataDir:        b.TempDir(),
-		PartitionCount: 8,
-		FsyncMode:      fsyncMode,
+		DataDir:         b.TempDir(),
+		PartitionCount:  8,
+		FsyncMode:       fsyncMode,
 		FlushIntervalMS: 10,
 	}
 	pm := partition.NewPartitionManager("bench-node", cfg)

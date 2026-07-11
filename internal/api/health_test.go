@@ -87,6 +87,7 @@ func TestHealthChecker_Ready_ReadOnlyWALCheck(t *testing.T) {
 		NodeID:         "node-1",
 		ClusterEnabled: false,
 		PartitionCount: 1,
+		DataDir:        t.TempDir(),
 		TickMS:         10,
 		WheelSize:      100,
 	}
@@ -155,6 +156,7 @@ func TestHealthChecker_Deep_ReadOnlyWALCheck(t *testing.T) {
 		NodeID:         "node-1",
 		ClusterEnabled: false,
 		PartitionCount: 1,
+		DataDir:        t.TempDir(),
 		TickMS:         10,
 		WheelSize:      100,
 	}
@@ -224,6 +226,7 @@ func TestHealthChecker_Ready_NoWALWrites(t *testing.T) {
 		NodeID:         "node-1",
 		ClusterEnabled: false,
 		PartitionCount: 1,
+		DataDir:        t.TempDir(),
 		TickMS:         10,
 		WheelSize:      100,
 	}

@@ -102,10 +102,10 @@ const (
 	DefaultTopicRateLimitBurst     = 0.0
 
 	// Memory-based backpressure (0 = disabled)
-	DefaultMaxMemoryUsagePercent = 0.0 // Disabled by default
+	DefaultMaxMemoryUsagePercent = 0.0  // Disabled by default
 	DefaultMemoryCheckIntervalMs = 5000 // 5 seconds
 
 	// Ingest rate limiting per partition (0 = disabled)
 	DefaultMaxIngestRatePerPartition = 0 // Unlimited by default
-	DefaultIngestRateBurstSize         = 0
+	DefaultIngestRateBurstSize       = 0
 )

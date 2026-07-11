@@ -2,6 +2,7 @@ package integration
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -23,15 +24,20 @@ func TestReplayByTimeRange(t *testing.T) {
 	defer producer.Close()
 
 	startTS := time.Now()
+	var partitionID int32 = -1
 	for i := 0; i < count; i++ {
-		_, err := producer.Send(ctx, client.Message{
+		res, err := producer.Send(ctx, client.Message{
 			Topic:        topic,
 			PartitionKey: topic,
+			MessageID:    fmt.Sprintf("replay-%d", i),
 			Payload:      []byte("replay-test"),
 			ScheduleTS:   time.Now().Add(5 * time.Second).UnixMilli(),
 		})
 		if err != nil {
 			t.Fatalf("publish %d failed: %v", i, err)
+		}
+		if partitionID < 0 {
+			partitionID = res.PartitionID
 		}
 	}
 	endTS := time.Now().Add(10 * time.Second)
@@ -42,9 +48,10 @@ func TestReplayByTimeRange(t *testing.T) {
 	// Replay by time range
 	var replayed int
 	req := client.ReplayRequest{
-		Topic:     topic,
-		StartTime: startTS,
-		EndTime:   endTS,
+		Topic:       topic,
+		PartitionID: partitionID,
+		StartTime:   startTS,
+		EndTime:     endTS,
 	}
 
 	err = testClient.Replay(ctx, req, func(ctx context.Context, re client.ReplayEvent) error {

@@ -58,10 +58,10 @@ func TestCrossRegionServer_ReplicateEvents_LWW(t *testing.T) {
 		FirstOffset: 10,
 		Events: []*types.Event{
 			{
-				MessageId:  "event-123",
-				CreatedTs:  1000, // Unix ms
-				Payload:    []byte("hello version 1"),
-				Topic:      "test-topic",
+				MessageId: "event-123",
+				CreatedTs: 1000, // Unix ms
+				Payload:   []byte("hello version 1"),
+				Topic:     "test-topic",
 			},
 		},
 	}
@@ -94,10 +94,10 @@ func TestCrossRegionServer_ReplicateEvents_LWW(t *testing.T) {
 		FirstOffset: 20,
 		Events: []*types.Event{
 			{
-				MessageId:  "event-123",
-				CreatedTs:  500, // Older than 1000
-				Payload:    []byte("hello version older"),
-				Topic:      "test-topic",
+				MessageId: "event-123",
+				CreatedTs: 500, // Older than 1000
+				Payload:   []byte("hello version older"),
+				Topic:     "test-topic",
 			},
 		},
 	}
@@ -123,10 +123,10 @@ func TestCrossRegionServer_ReplicateEvents_LWW(t *testing.T) {
 		FirstOffset: 30,
 		Events: []*types.Event{
 			{
-				MessageId:  "event-123",
-				CreatedTs:  2000, // Newer than 1000
-				Payload:    []byte("hello version 2 newer"),
-				Topic:      "test-topic",
+				MessageId: "event-123",
+				CreatedTs: 2000, // Newer than 1000
+				Payload:   []byte("hello version 2 newer"),
+				Topic:     "test-topic",
 			},
 		},
 	}
@@ -151,7 +151,7 @@ func TestCrossRegionServer_ReplicateEvents_LWW(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadEvents failed: %v", err)
 	}
-	
+
 	// We expect 2 events in WAL: the original version 1, and the newer version 2.
 	// The older version (500 ms) was ignored, so it was never written to WAL.
 	if len(events) != 2 {

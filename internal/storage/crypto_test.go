@@ -28,7 +28,13 @@ func TestSegmentCipher_EncryptDecrypt(t *testing.T) {
 		{"large", make([]byte, 1024*1024)}, // 1MB
 		{"binary zeros", bytes.Repeat([]byte{0}, 100)},
 		{"binary pattern", bytes.Repeat([]byte{0xDE, 0xAD, 0xBE, 0xEF}, 50)},
-		{"all bytes", func() []byte { b := make([]byte, 256); for i := range b { b[i] = byte(i) }; return b }()},
+		{"all bytes", func() []byte {
+			b := make([]byte, 256)
+			for i := range b {
+				b[i] = byte(i)
+			}
+			return b
+		}()},
 	}
 
 	for _, tc := range tests {

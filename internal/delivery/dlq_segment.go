@@ -16,7 +16,7 @@ const (
 	dlqMagic        = "CRNDLQ1"
 	dlqHeaderSize   = 64
 	dlqSegmentSize  = 64 * 1024 * 1024 // 64MB per segment
-	dlqWriteBufSize = 4 * 1024 * 1024   // 4MB write buffer
+	dlqWriteBufSize = 4 * 1024 * 1024  // 4MB write buffer
 )
 
 // DLQSegmentWriter writes DLQ entries to an append-only segment file.

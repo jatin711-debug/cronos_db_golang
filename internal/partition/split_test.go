@@ -173,8 +173,8 @@ func TestSplitPartition_BoundsValidation(t *testing.T) {
 	if !part.IsKeyInBounds("banana") {
 		t.Error("banana should be in bounds [apple, cherry)")
 	}
-	if part.IsKeyInBounds("apple-old") {
-		t.Error("apple-old should not be in bounds [apple, cherry)")
+	if part.IsKeyInBounds("appl") {
+		t.Error("appl should not be in bounds [apple, cherry)")
 	}
 	if part.IsKeyInBounds("cherry") {
 		t.Error("cherry should not be in bounds [apple, cherry)")
