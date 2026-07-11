@@ -19,7 +19,8 @@ var (
 func TestMain(m *testing.M) {
 	serverAddr = os.Getenv("CRONOS_TEST_ADDR")
 	if serverAddr == "" {
-		serverAddr = "localhost:9000"
+		// Default to the IPv4 loopback to avoid IPv6 resolution differences in CI.
+		serverAddr = "127.0.0.1:9000"
 	}
 
 	// Integration tests need an external server and can leave persistent state

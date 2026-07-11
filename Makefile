@@ -284,11 +284,11 @@ test: rust-dedup test-unit
 test-unit: rust-dedup
 	$(GO_RUNTIME_PREFIX) go test $$({ go list ./... 2>/dev/null || true; } | grep -vE '/tests/integration|/tests/chaos')
 
-# Run the integration suite against a running server. Set CRONOS_TEST_ADDR to
-# point at the server and CRONOS_TEST_INTEGRATION=1 so a dial failure is a hard
-# error instead of a silent skip.
-test-integration: rust-dedup
-	CRONOS_TEST_INTEGRATION=1 $(GO_RUNTIME_PREFIX) go test -v ./tests/integration/...
+# Run the integration suite against a running server. If no server is reachable
+# at CRONOS_TEST_ADDR / CRONOS_TEST_HTTP_ADDR, the script starts a temporary
+# single-node instance, runs the tests, and tears it down.
+test-integration: rust-dedup build
+	@bash scripts/run-integration-tests.sh
 
 # Run the chaos suite (requires docker + a running cronos cluster).
 test-chaos: rust-dedup

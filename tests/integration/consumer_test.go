@@ -17,14 +17,7 @@ func TestConsumerGroupOffsetCommit(t *testing.T) {
 	groupID := topicName(t) + "-group"
 	payload := []byte("offset-test")
 
-	// Publish one event
-	res, err := publishEvent(ctx, topic, payload, 2*time.Second)
-	if err != nil {
-		t.Fatalf("publish failed: %v", err)
-	}
-	t.Logf("Published at offset %d", res.Offset)
-
-	// Consume with manual ack
+	// Start consumer before publishing so it is registered when the event fires.
 	deliveries := make(chan client.Delivery, 10)
 	consCfg := client.DefaultConsumerConfig(topic, groupID)
 	consCfg.AckMode = client.AckModeManual
@@ -37,11 +30,21 @@ func TestConsumerGroupOffsetCommit(t *testing.T) {
 		})
 	}()
 
+	// Give the consumer a moment to register before publishing.
+	time.Sleep(200 * time.Millisecond)
+
+	// Publish one event
+	res, err := publishEvent(ctx, topic, payload, 2*time.Second)
+	if err != nil {
+		t.Fatalf("publish failed: %v", err)
+	}
+	t.Logf("Published at offset %d", res.Offset)
+
 	select {
 	case d := <-deliveries:
 		t.Logf("received payload=%q expected=%q", string(d.Event.GetPayload()), string(payload))
 		if string(d.Event.GetPayload()) != string(payload) {
-			t.Fatalf("payload mismatch: got %q, want %q", string(d.Event.GetPayload()), string(payload))
+			t.Fatalf("payload mismatch: got %q, want %q", string(d.Event.GetPayload()), payload)
 		}
 		t.Logf("Received and acked: offset=%d", d.Event.GetOffset())
 	case <-time.After(15 * time.Second):
