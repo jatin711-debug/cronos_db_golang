@@ -129,6 +129,7 @@ func NewSegment(dataDir string, firstOffset int64, isActive bool, cipher *Segmen
 		mmapSize:        stat.Size(),
 		sizeBytes:       dataEnd,
 		firstOffset:     firstOffset,
+		lastOffset:      -1, // no records yet; updated as events are appended
 		nextOffset:      firstOffset,
 		createdTS:       createdTS,
 		isActive:        isActive,
