@@ -9,20 +9,20 @@ import (
 type CircuitState int32
 
 const (
-	CircuitClosed    CircuitState = 0 // Normal operation
-	CircuitOpen      CircuitState = 1 // Failing fast, rejecting requests
-	CircuitHalfOpen  CircuitState = 2 // Testing if service recovered
+	CircuitClosed   CircuitState = 0 // Normal operation
+	CircuitOpen     CircuitState = 1 // Failing fast, rejecting requests
+	CircuitHalfOpen CircuitState = 2 // Testing if service recovered
 )
 
 // CircuitBreaker implements per-subscription circuit breaking.
 // When failure rate exceeds threshold over a time window, the circuit opens.
 // After openDuration, it transitions to half-open and allows a trial request.
 type CircuitBreaker struct {
-	state         atomic.Int32  // CircuitState
-	openUntilTS   atomic.Int64  // Unix ms — when to transition from Open to HalfOpen
-	failures      atomic.Int64  // Failure count in current window
-	successes     atomic.Int64  // Success count in current window
-	lastFailureTS atomic.Int64  // Unix ms of last failure
+	state         atomic.Int32 // CircuitState
+	openUntilTS   atomic.Int64 // Unix ms — when to transition from Open to HalfOpen
+	failures      atomic.Int64 // Failure count in current window
+	successes     atomic.Int64 // Success count in current window
+	lastFailureTS atomic.Int64 // Unix ms of last failure
 }
 
 // NewCircuitBreaker creates a new circuit breaker.

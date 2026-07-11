@@ -13,12 +13,12 @@ import (
 // Snapshot represents a point-in-time snapshot of partition state.
 // This enables fast recovery without replaying the entire WAL.
 type Snapshot struct {
-	PartitionID        int32             `json:"partition_id"`
-	HighWatermark      int64             `json:"high_watermark"`
+	PartitionID         int32            `json:"partition_id"`
+	HighWatermark       int64            `json:"high_watermark"`
 	LastScheduledOffset int64            `json:"last_scheduled_offset"`
-	ConsumerOffsets    map[string]int64  `json:"consumer_offsets"` // groupID -> offset
-	Timestamp          int64             `json:"timestamp"`
-	Version            int               `json:"version"`
+	ConsumerOffsets     map[string]int64 `json:"consumer_offsets"` // groupID -> offset
+	Timestamp           int64            `json:"timestamp"`
+	Version             int              `json:"version"`
 }
 
 const snapshotVersion = 1
@@ -26,10 +26,10 @@ const snapshotFilename = "snapshot.json"
 
 // SnapshotManager handles creating and loading snapshots for fast recovery.
 type SnapshotManager struct {
-	mu            sync.RWMutex
-	dataDir       string
-	partitionID   int32
-	lastSnapshot  *Snapshot
+	mu               sync.RWMutex
+	dataDir          string
+	partitionID      int32
+	lastSnapshot     *Snapshot
 	lastSnapshotTime time.Time
 }
 
@@ -51,9 +51,9 @@ func (sm *SnapshotManager) CreateSnapshot(partition *Partition) error {
 		PartitionID:         partition.ID,
 		HighWatermark:       partition.Wal.GetHighWatermark(),
 		LastScheduledOffset: partition.Wal.GetLastOffset(),
-		ConsumerOffsets:   make(map[string]int64),
-		Timestamp:         time.Now().UnixMilli(),
-		Version:           snapshotVersion,
+		ConsumerOffsets:     make(map[string]int64),
+		Timestamp:           time.Now().UnixMilli(),
+		Version:             snapshotVersion,
 	}
 
 	// Capture consumer group offsets

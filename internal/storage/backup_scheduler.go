@@ -10,11 +10,11 @@ import (
 
 // BackupScheduler periodically backs up closed WAL segments.
 type BackupScheduler struct {
-	walDir      string
-	backupDir   string
-	interval    time.Duration
-	retention   time.Duration
-	quit        chan struct{}
+	walDir    string
+	backupDir string
+	interval  time.Duration
+	retention time.Duration
+	quit      chan struct{}
 }
 
 // NewBackupScheduler creates a backup scheduler.

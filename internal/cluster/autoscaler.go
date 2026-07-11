@@ -14,10 +14,10 @@ import (
 
 // AutoScalerMetrics provides resource metrics for scaling decisions.
 type AutoScalerMetrics interface {
-	CPUUsage() float64        // 0.0-1.0
-	MemoryUsage() float64     // 0.0-1.0
-	DiskUsage() float64       // 0.0-1.0
-	RequestRate() float64     // requests/sec
+	CPUUsage() float64    // 0.0-1.0
+	MemoryUsage() float64 // 0.0-1.0
+	DiskUsage() float64   // 0.0-1.0
+	RequestRate() float64 // requests/sec
 	PartitionLag() map[int32]int64
 }
 
@@ -137,14 +137,14 @@ func (SystemMetrics) PartitionLag() map[int32]int64 {
 // SimpleMetrics is a basic metrics implementation using runtime stats (deprecated, use SystemMetrics).
 type SimpleMetrics struct{}
 
-func (SimpleMetrics) CPUUsage() float64    { return 0 }
+func (SimpleMetrics) CPUUsage() float64 { return 0 }
 func (SimpleMetrics) MemoryUsage() float64 {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
 	return float64(m.Sys) / float64(1<<30)
 }
-func (SimpleMetrics) DiskUsage() float64   { return 0 }
-func (SimpleMetrics) RequestRate() float64 { return 0 }
+func (SimpleMetrics) DiskUsage() float64            { return 0 }
+func (SimpleMetrics) RequestRate() float64          { return 0 }
 func (SimpleMetrics) PartitionLag() map[int32]int64 { return nil }
 
 // NetworkStats provides network I/O statistics.

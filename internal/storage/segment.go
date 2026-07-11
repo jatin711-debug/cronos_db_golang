@@ -129,6 +129,7 @@ func NewSegment(dataDir string, firstOffset int64, isActive bool, cipher *Segmen
 		mmapSize:        stat.Size(),
 		sizeBytes:       dataEnd,
 		firstOffset:     firstOffset,
+		lastOffset:      -1, // no records yet; updated as events are appended
 		nextOffset:      firstOffset,
 		createdTS:       createdTS,
 		isActive:        isActive,
@@ -311,12 +312,17 @@ func (s *Segment) AppendBatch(events []*types.Event, indexInterval int64) error 
 // The caller MUST guarantee exclusive access (e.g. WAL.mu is held).
 // This eliminates double-locking in the WAL→Segment write path.
 func (s *Segment) AppendBatchUnsafe(events []*types.Event, indexInterval int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.appendBatchInternal(events, indexInterval)
 }
 
 // AppendPreparedBatchUnsafe appends a batch of pre-encoded records without acquiring s.mu.
 // The caller MUST guarantee exclusive access (e.g. WAL.mu is held).
 func (s *Segment) AppendPreparedBatchUnsafe(prepared []*PreparedRecord, indexInterval int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if !s.isActive {
 		return fmt.Errorf("cannot append to closed segment")
 	}
@@ -1377,11 +1383,15 @@ func (s *Segment) Delete() error {
 
 // IsFull checks if segment is full
 func (s *Segment) IsFull(maxSize int64) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.sizeBytes >= maxSize
 }
 
 // GetSize returns segment size in bytes
 func (s *Segment) GetSize() int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.sizeBytes
 }
 

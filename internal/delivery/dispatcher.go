@@ -30,6 +30,11 @@ type Dispatcher struct {
 	partitionsMu  sync.RWMutex
 	partitionSubs map[int32][]*Subscription
 
+	// Per-consumer-group round-robin cursor that persists across batches so
+	// single-event batches (batchSize=1) still rotate across subscribers.
+	groupCursorMu sync.Mutex
+	groupCursor   map[string]int
+
 	// In-flight limiter to protect memory under slow consumers.
 	inFlightCount atomic.Int64
 
@@ -161,6 +166,7 @@ func NewDispatcher(config *Config) *Dispatcher {
 		dlq:           nil,
 		quit:          make(chan struct{}),
 		partitionSubs: make(map[int32][]*Subscription),
+		groupCursor:   make(map[string]int),
 		retryHeap:     NewRetryHeap(),
 	}
 
@@ -236,9 +242,6 @@ func (d *Dispatcher) Subscribe(sub *Subscription) error {
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 
-	log.Printf("[DISPATCHER] Subscribe: Registering subscription %s (partition=%d, maxCredits=%d)",
-		sub.ID, sub.Partition.ID, sub.MaxCredits)
-
 	if _, exists := shard.subscriptions[sub.ID]; exists {
 		return fmt.Errorf("subscription %s already exists", sub.ID)
 	}
@@ -259,7 +262,6 @@ func (d *Dispatcher) Subscribe(sub *Subscription) error {
 	d.partitionSubs[sub.Partition.ID] = append(d.partitionSubs[sub.Partition.ID], sub)
 	d.partitionsMu.Unlock()
 
-	log.Printf("[DISPATCHER] Subscribe: Successfully registered subscription %s", sub.ID)
 	return nil
 }
 
@@ -278,7 +280,9 @@ func (d *Dispatcher) Unsubscribe(subscriptionID string) error {
 
 	for deliveryID, active := range shard.activeDeliveries {
 		if active.Subscription != nil && active.Subscription.ID == subscriptionID {
-			if err := d.decInFlight(1); err != nil { log.Printf("[DISPATCHER] in-flight underflow: %v", err) }
+			if err := d.decInFlight(1); err != nil {
+				log.Printf("[DISPATCHER] in-flight underflow: %v", err)
+			}
 			delete(shard.activeDeliveries, deliveryID)
 		}
 	}
@@ -302,6 +306,15 @@ func (d *Dispatcher) Unsubscribe(subscriptionID string) error {
 	d.partitionsMu.Unlock()
 
 	return nil
+}
+
+func (d *Dispatcher) nextGroupStart(groupID string, numSubs int) int {
+	d.groupCursorMu.Lock()
+	defer d.groupCursorMu.Unlock()
+
+	start := d.groupCursor[groupID]
+	d.groupCursor[groupID] = (start + 1) % numSubs
+	return start
 }
 
 func groupSubscriptionsByConsumer(allSubs []*Subscription) map[string][]*Subscription {
@@ -366,7 +379,7 @@ func (d *Dispatcher) Dispatch(event *types.Event) error {
 	consumerGroupSubs := groupSubscriptionsByConsumer(allSubs)
 
 	for groupID, groupSubs := range consumerGroupSubs {
-		startIdx := int(event.Offset % int64(len(groupSubs)))
+		startIdx := d.nextGroupStart(groupID, len(groupSubs))
 		selectedSub := d.pickSubscriber(groupSubs, startIdx)
 		if selectedSub == nil {
 			log.Printf("[DISPATCHER] No subscriber with credits in group %s for event %s",
@@ -388,7 +401,9 @@ func (d *Dispatcher) Dispatch(event *types.Event) error {
 		}
 
 		if err := selectedSub.Stream.Send(delivery); err != nil {
-			if err := d.decInFlight(1); err != nil { log.Printf("[DISPATCHER] in-flight underflow: %v", err) }
+			if err := d.decInFlight(1); err != nil {
+				log.Printf("[DISPATCHER] in-flight underflow: %v", err)
+			}
 			d.releaseCredit(selectedSub)
 			deliveryMessagePool.Put(delivery)
 			log.Printf("[DISPATCHER] Failed to send to subscriber %s: %v", selectedSub.ID, err)
@@ -427,7 +442,9 @@ func (d *Dispatcher) dispatchToSub(sub *Subscription, event *types.Event) error 
 	}
 
 	if err := sub.Stream.Send(delivery); err != nil {
-		if err := d.decInFlight(1); err != nil { log.Printf("[DISPATCHER] in-flight underflow: %v", err) }
+		if err := d.decInFlight(1); err != nil {
+			log.Printf("[DISPATCHER] in-flight underflow: %v", err)
+		}
 		d.releaseCredit(sub)
 		deliveryMessagePool.Put(delivery)
 		if sub.circuitBreaker != nil {
@@ -485,8 +502,6 @@ func (d *Dispatcher) dispatchPartitionBatch(partitionID int32, events []*types.E
 
 	consumerGroupSubs := groupSubscriptionsByConsumer(allSubs)
 
-	// Maintain rolling cursor per group to avoid recomputing random starts.
-	groupCursor := make(map[string]int)
 	batchesBySub := make(map[*Subscription][]*types.Event)
 
 	for _, event := range events {
@@ -495,17 +510,13 @@ func (d *Dispatcher) dispatchPartitionBatch(partitionID int32, events []*types.E
 				continue
 			}
 
-			start := groupCursor[groupID]
-			if start < 0 || start >= len(groupSubs) {
-				start = int(event.Offset % int64(len(groupSubs)))
-			}
+			start := d.nextGroupStart(groupID, len(groupSubs))
 
 			selectedSub := d.pickSubscriber(groupSubs, start)
 			if selectedSub == nil {
 				continue
 			}
 
-			groupCursor[groupID] = (start + 1) % len(groupSubs)
 			batchesBySub[selectedSub] = append(batchesBySub[selectedSub], event)
 		}
 	}
@@ -517,10 +528,16 @@ func (d *Dispatcher) dispatchPartitionBatch(partitionID int32, events []*types.E
 
 		delivery := deliveryMessagePool.Get().(*DeliveryMessage)
 		delivery.Event = nil
+		delivery.Batch = batchEvents
+		if len(batchEvents) == 1 {
+			// Singleton batches are common; expose the event directly so
+			// single-event consumers see it in Delivery.Event.
+			delivery.Event = batchEvents[0]
+			delivery.Batch = nil
+		}
 		delivery.DeliveryID = makeDeliveryIDBatch(sub.ID, batchEvents[0].Offset, len(batchEvents))
 		delivery.Attempt = 1
 		delivery.AckTimeout = int32(d.config.DefaultAckTimeout / time.Millisecond)
-		delivery.Batch = batchEvents
 
 		if !d.tryReserveInFlight(1) {
 			deliveryMessagePool.Put(delivery)
@@ -530,7 +547,9 @@ func (d *Dispatcher) dispatchPartitionBatch(partitionID int32, events []*types.E
 		}
 
 		if err := sub.Stream.Send(delivery); err != nil {
-			if err := d.decInFlight(1); err != nil { log.Printf("[DISPATCHER] in-flight underflow: %v", err) }
+			if err := d.decInFlight(1); err != nil {
+				log.Printf("[DISPATCHER] in-flight underflow: %v", err)
+			}
 			d.releaseCredits(sub, int32(len(batchEvents)))
 			deliveryMessagePool.Put(delivery)
 			if sub.circuitBreaker != nil {
@@ -658,7 +677,9 @@ func (d *Dispatcher) scanExpiredDeliveries(now time.Time) {
 		for deliveryID, active := range shard.activeDeliveries {
 			if now.After(active.AckDeadline) {
 				delete(shard.activeDeliveries, deliveryID)
-				if err := d.decInFlight(1); err != nil { log.Printf("[DISPATCHER] in-flight underflow: %v", err) }
+				if err := d.decInFlight(1); err != nil {
+					log.Printf("[DISPATCHER] in-flight underflow: %v", err)
+				}
 
 				if active.Attempt < d.config.MaxRetries {
 					// Non-blocking: push to retry heap instead of sleeping inline
@@ -710,7 +731,9 @@ func (d *Dispatcher) processRetries(now time.Time) {
 		}
 
 		if err := active.Subscription.Stream.Send(retryDelivery); err != nil {
-			if err := d.decInFlight(1); err != nil { log.Printf("[DISPATCHER] in-flight underflow: %v", err) }
+			if err := d.decInFlight(1); err != nil {
+				log.Printf("[DISPATCHER] in-flight underflow: %v", err)
+			}
 			deliveryMessagePool.Put(retryDelivery)
 			if active.Subscription.circuitBreaker != nil {
 				active.Subscription.circuitBreaker.RecordFailure(
@@ -821,7 +844,9 @@ func (d *Dispatcher) HandleAck(deliveryID string, success bool, nextOffset int64
 	delete(shard.activeDeliveries, deliveryID)
 	shard.mu.Unlock()
 
-	if err := d.decInFlight(1); err != nil { log.Printf("[DISPATCHER] in-flight underflow: %v", err) }
+	if err := d.decInFlight(1); err != nil {
+		log.Printf("[DISPATCHER] in-flight underflow: %v", err)
+	}
 
 	if success {
 		active.Subscription.NextOffset = nextOffset
@@ -915,14 +940,18 @@ func (d *Dispatcher) retryDelivery(active *ActiveDelivery) error {
 			timer.Stop()
 		case <-d.quit:
 			timer.Stop()
-			if err := d.decInFlight(1); err != nil { log.Printf("[DISPATCHER] in-flight underflow: %v", err) }
+			if err := d.decInFlight(1); err != nil {
+				log.Printf("[DISPATCHER] in-flight underflow: %v", err)
+			}
 			deliveryMessagePool.Put(retryDelivery)
 			return fmt.Errorf("dispatcher closing")
 		}
 	}
 
 	if err := active.Subscription.Stream.Send(retryDelivery); err != nil {
-		if err := d.decInFlight(1); err != nil { log.Printf("[DISPATCHER] in-flight underflow: %v", err) }
+		if err := d.decInFlight(1); err != nil {
+			log.Printf("[DISPATCHER] in-flight underflow: %v", err)
+		}
 		deliveryMessagePool.Put(retryDelivery)
 		return fmt.Errorf("resend failed: %w", err)
 	}
@@ -988,7 +1017,9 @@ func (d *Dispatcher) Close() {
 	for _, shard := range d.shards {
 		shard.mu.Lock()
 		for deliveryID := range shard.activeDeliveries {
-			if err := d.decInFlight(1); err != nil { log.Printf("[DISPATCHER] in-flight underflow: %v", err) }
+			if err := d.decInFlight(1); err != nil {
+				log.Printf("[DISPATCHER] in-flight underflow: %v", err)
+			}
 			delete(shard.activeDeliveries, deliveryID)
 		}
 		shard.subscriptions = make(map[string]*Subscription)
