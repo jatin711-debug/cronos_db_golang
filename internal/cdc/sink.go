@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
@@ -160,6 +161,11 @@ type Manager struct {
 	mu        sync.RWMutex
 	quit      chan struct{}
 	quitOnce  sync.Once
+	// hasSinks is an atomic fast-path flag checked on every Emit call. It lets
+	// the WAL append hook skip ChangeEvent allocation + time.Now() entirely
+	// when no sinks are registered (the common case in dev / load-test mode).
+	// Flips false→true once at registration time and never goes back.
+	hasSinks atomic.Bool
 }
 
 // NewManager creates a CDC manager.
@@ -177,10 +183,18 @@ func (m *Manager) RegisterSink(sink Sink) {
 	pipeline := newSinkPipeline(sink, DefaultCDCQueueSize, DefaultCDCWorkers)
 	pipeline.start()
 	m.pipelines = append(m.pipelines, pipeline)
+	m.hasSinks.Store(true) // flip the fast-path flag; stays true for the process lifetime
 }
 
 // Emit sends an event to all registered sinks.
 func (m *Manager) Emit(ctx context.Context, event *ChangeEvent) {
+	// Atomic fast path: skip the RLock entirely when no sinks are registered.
+	// This is the common case in dev / load-test mode where CDC is not
+	// configured, and Emit is called once per appended WAL event.
+	if !m.hasSinks.Load() {
+		return
+	}
+
 	m.mu.RLock()
 	pipelines := m.pipelines
 	m.mu.RUnlock()
@@ -191,6 +205,13 @@ func (m *Manager) Emit(ctx context.Context, event *ChangeEvent) {
 	for _, p := range pipelines {
 		p.emit(event)
 	}
+}
+
+// HasSinks reports whether any sinks are registered. Intended as a lock-free
+// guard so callers (e.g. the WAL append hook) can avoid allocating a
+// ChangeEvent when CDC is inactive.
+func (m *Manager) HasSinks() bool {
+	return m.hasSinks.Load()
 }
 
 // SinkCount returns the number of registered sinks.

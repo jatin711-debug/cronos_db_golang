@@ -229,8 +229,11 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 	dispatcherConfig := delivery.DefaultConfig()
 	dispatcher := delivery.NewDispatcher(dispatcherConfig)
 
-	// Create worker
-	worker := delivery.NewWorker(dispatcher, 1)
+	// Create worker. Batch size of 100 amortizes DispatchBatch overhead
+	// (metrics observe, map allocations, in-flight CAS, shard write-lock)
+	// across many events. Round-robin fairness across subscribers within a
+	// consumer group is handled by the dispatcher's per-group cursor.
+	worker := delivery.NewWorker(dispatcher, 100)
 
 	// Wire tenant delivery callback if configured
 	if pm.tenantAccountant != nil {

@@ -19,7 +19,9 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
 
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 )
@@ -36,6 +38,16 @@ type ClusterNode struct {
 	clients  []types.EventServiceClient   // Round-robin clients
 	client   types.EventServiceClient     // Legacy single client (for probing)
 	pclient  types.PartitionServiceClient // Partition metadata client
+	connRR   atomic.Uint64                // round-robin cursor for nextClient()
+}
+
+// nextClient returns the next client for this node using atomic round-robin
+// across all connsPerNode connections. This distributes load evenly across
+// all sockets instead of statically pinning publishers to one hot connection
+// (which amplifies any single-connection GOAWAY into a large error burst).
+func (n *ClusterNode) nextClient() types.EventServiceClient {
+	idx := n.connRR.Add(1)
+	return n.clients[idx%uint64(len(n.clients))]
 }
 
 // ClusterLoadTestConfig holds cluster load test configuration
@@ -272,6 +284,20 @@ func runClusterLoadTest(config ClusterLoadTestConfig) *ClusterMetrics {
 				grpc.WithInitialConnWindowSize(32*1024*1024), // 32MB connection window
 				grpc.WithWriteBufferSize(4*1024*1024),        // 4MB write buffer
 				grpc.WithReadBufferSize(4*1024*1024),         // 4MB read buffer
+				grpc.WithKeepaliveParams(keepalive.ClientParameters{
+					Time:                10 * time.Second, // ping interval
+					Timeout:             5 * time.Second,  // ping timeout — detects dead connections fast
+					PermitWithoutStream: true,             // keep pinging even when idle
+				}),
+				grpc.WithConnectParams(grpc.ConnectParams{
+					Backoff: backoff.Config{
+						BaseDelay:  100 * time.Millisecond, // reconnect quickly after a GOAWAY
+						Multiplier: 1.6,
+						Jitter:     0.2,
+						MaxDelay:   1 * time.Second,
+					},
+					MinConnectTimeout: 3 * time.Second,
+				}),
 				grpc.WithDefaultCallOptions(
 					grpc.MaxCallRecvMsgSize(16*1024*1024),
 					grpc.MaxCallSendMsgSize(16*1024*1024),
@@ -496,7 +522,7 @@ func runBatchPublisher(config ClusterLoadTestConfig, metrics *ClusterMetrics, pu
 				defer batchWg.Done()
 				node := config.Nodes[nIdx]
 				// Round-robin across connections for this node
-				client := node.clients[publisherID%connsPerNode]
+				client := node.nextClient()
 				req := &types.PublishBatchRequest{Events: evts, AllowDuplicate: true}
 
 				start := time.Now()
@@ -547,7 +573,7 @@ func runRoundRobinPublisher(config ClusterLoadTestConfig, metrics *ClusterMetric
 			nodeIdx = (publisherID + i) % len(config.Nodes)
 		}
 		node := config.Nodes[nodeIdx]
-		client := node.clients[publisherID%connsPerNode]
+		client := node.nextClient()
 		scheduleTime := time.Now().Add(config.ScheduleDelay)
 
 		event := &types.Event{
@@ -592,7 +618,7 @@ func runNodePublisher(config ClusterLoadTestConfig, metrics *ClusterMetrics, nod
 	rand.Read(payload)
 
 	pubIDStr := strconv.Itoa(publisherID)
-	client := node.clients[publisherID%connsPerNode]
+	client := node.nextClient()
 
 	for i := 0; i < config.EventsPerPub; i++ {
 		eventKey := fmt.Sprintf("%s-pub-%d-event-%d", node.ID, publisherID, i)
