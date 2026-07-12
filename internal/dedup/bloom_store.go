@@ -1,7 +1,6 @@
 package dedup
 
 import (
-	"runtime"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -31,12 +30,10 @@ type GoBloomFilter struct {
 	generation uint64     // Generation counter for detecting resets
 }
 
-// NewBloomFilter creates a bloom filter sized for expectedItems with targetFPR false positive rate
+// NewBloomFilter creates a bloom filter sized for expectedItems with targetFPR false positive rate.
+// It prefers the Rust-backed implementation when available and falls back to a
+// pure-Go implementation on platforms without cgo or if the Rust filter fails.
 func NewBloomFilter(expectedItems uint64, targetFPR float64) BloomFilter {
-	if runtime.GOOS == "windows" {
-		return NewGoBloomFilter(expectedItems, targetFPR)
-	}
-	// Using Rust implementation for 5-10x performance gain
 	bf := NewRustBloomFilter(expectedItems, targetFPR)
 	if bf == nil {
 		return NewGoBloomFilter(expectedItems, targetFPR)

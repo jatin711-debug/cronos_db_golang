@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/jatin711-debug/cronos_db_golang/internal/cluster"
@@ -18,6 +19,10 @@ type HealthChecker struct {
 	PartitionMgr *partition.PartitionManager
 	ClusterMgr   *cluster.Manager
 	startTime    time.Time
+	// lastDeepProbe stores the Unix-nano timestamp of the last WAL probe read
+	// inside /health/deep. Probes are rate-limited to 1 Hz to avoid stealing
+	// disk IOPS from the write path.
+	lastDeepProbe atomic.Int64
 }
 
 // DeepHealthResponse is the JSON response for /health/deep.
@@ -136,6 +141,20 @@ func (h *HealthChecker) handleDeepHealth(w http.ResponseWriter, r *http.Request)
 	healthy := true
 	now := time.Now()
 
+	// WAL probe reads are expensive (random disk read per partition). They are
+	// only performed when the caller explicitly requests them with ?probe=true
+	// and no more than once per second across all callers.
+	probeRequested := r.URL.Query().Get("probe") == "true"
+	canProbe := false
+	if probeRequested {
+		last := h.lastDeepProbe.Load()
+		if now.UnixNano()-last >= int64(time.Second) {
+			if h.lastDeepProbe.CompareAndSwap(last, now.UnixNano()) {
+				canProbe = true
+			}
+		}
+	}
+
 	// Partition checks
 	if h.PartitionMgr != nil {
 		for i := int32(0); i < int32(h.Config.PartitionCount); i++ {
@@ -145,7 +164,7 @@ func (h *HealthChecker) handleDeepHealth(w http.ResponseWriter, r *http.Request)
 			}
 			label := "partition_" + strconv.FormatInt(int64(i), 10)
 
-			// WAL check - test readability, not mutability
+			// WAL check - metadata is cheap; probe-read is gated.
 			if p.Wal != nil {
 				hwm := p.Wal.GetHighWatermark()
 				lastOffset := p.Wal.GetLastOffset()
@@ -160,9 +179,10 @@ func (h *HealthChecker) handleDeepHealth(w http.ResponseWriter, r *http.Request)
 				if flushErrors > 0 {
 					walHealthy = false
 				}
-				// Only probe-read when the WAL actually has events. GetHighWatermark
-				// starts at 0, so use GetLastOffset (-1 for empty) to detect emptiness.
-				if lastOffset >= 0 {
+				// Only probe-read when explicitly allowed, within rate limit, and
+				// the WAL actually has events. GetHighWatermark starts at 0, so use
+				// GetLastOffset (-1 for empty) to detect emptiness.
+				if canProbe && lastOffset >= 0 {
 					if _, err := p.Wal.ReadEvent(hwm); err != nil {
 						detail = fmt.Sprintf("WAL read failed at HWM %d: %v", hwm, err)
 						walHealthy = false

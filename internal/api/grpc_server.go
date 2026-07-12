@@ -69,6 +69,55 @@ func DefaultConfig() *Config {
 // NewGRPCServer creates a new gRPC server.
 // Returns an error if TLS is requested but cannot be configured.
 func NewGRPCServer(config *Config) (*GRPCServer, error) {
+	// In --dev mode (auth disabled) skip heavy observability and IP-rate-limit
+	// interceptors to maximize throughput. Tracing, version gating, auth and
+	// topic-level rate limiting remain active because they are either cheap or
+	// required for request routing.
+	devMode := config.Auth == nil || !config.Auth.Enabled
+
+	unary := []grpc.UnaryServerInterceptor{
+		tracing.GRPCServerInterceptor(),
+	}
+	if !devMode {
+		unary = append(unary,
+			SLOUnaryInterceptor(config.SLORecorder),
+		)
+	}
+	unary = append(unary,
+		VersionInterceptor(config.VersionGate),
+		auth.Interceptor(config.Auth),
+		TopicRateLimitInterceptor(config.TopicRateLimiter),
+		// Audit only when authentication is active; in --dev mode every
+		// subject is "anonymous", so audit records carry no security value.
+		AuditUnaryInterceptor(config.AuditLogger, config.Auth != nil && config.Auth.Enabled),
+	)
+	if !devMode {
+		unary = append(unary,
+			MetricsInterceptor(),
+			RateLimitInterceptor(1000000.0, 2000000.0),
+		)
+	}
+
+	stream := []grpc.StreamServerInterceptor{
+		tracing.GRPCStreamServerInterceptor(),
+	}
+	if !devMode {
+		stream = append(stream,
+			SLOStreamInterceptor(config.SLORecorder),
+		)
+	}
+	stream = append(stream,
+		VersionStreamInterceptor(config.VersionGate),
+		auth.StreamInterceptor(config.Auth),
+		AuditStreamInterceptor(config.AuditLogger, config.Auth != nil && config.Auth.Enabled),
+	)
+	if !devMode {
+		stream = append(stream,
+			MetricsStreamInterceptor(),
+			RateLimitStreamInterceptor(1000000.0, 2000000.0),
+		)
+	}
+
 	opts := []grpc.ServerOption{
 		grpc.MaxRecvMsgSize(config.MaxRecvMsgSize),
 		grpc.MaxSendMsgSize(config.MaxSendMsgSize),
@@ -86,27 +135,8 @@ func NewGRPCServer(config *Config) (*GRPCServer, error) {
 			MinTime:             5 * time.Second,
 			PermitWithoutStream: true,
 		}),
-		grpc.ChainUnaryInterceptor(
-			tracing.GRPCServerInterceptor(),
-			SLOUnaryInterceptor(config.SLORecorder),
-			VersionInterceptor(config.VersionGate),
-			auth.Interceptor(config.Auth),
-			TopicRateLimitInterceptor(config.TopicRateLimiter),
-			// Audit only when authentication is active; in --dev mode every
-			// subject is "anonymous", so audit records carry no security value.
-			AuditUnaryInterceptor(config.AuditLogger, config.Auth != nil && config.Auth.Enabled),
-			MetricsInterceptor(),
-			RateLimitInterceptor(1000000.0, 2000000.0),
-		),
-		grpc.ChainStreamInterceptor(
-			tracing.GRPCStreamServerInterceptor(),
-			SLOStreamInterceptor(config.SLORecorder),
-			VersionStreamInterceptor(config.VersionGate),
-			auth.StreamInterceptor(config.Auth),
-			AuditStreamInterceptor(config.AuditLogger, config.Auth != nil && config.Auth.Enabled),
-			MetricsStreamInterceptor(),
-			RateLimitStreamInterceptor(1000000.0, 2000000.0),
-		),
+		grpc.ChainUnaryInterceptor(unary...),
+		grpc.ChainStreamInterceptor(stream...),
 	}
 
 	if config.TLS != nil && config.TLS.Enabled {

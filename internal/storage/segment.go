@@ -308,21 +308,30 @@ func (s *Segment) AppendBatch(events []*types.Event, indexInterval int64) error 
 	return s.appendBatchInternal(events, indexInterval)
 }
 
-// AppendBatchUnsafe appends a batch of events to the segment.
-// Despite the name (kept for API compatibility), this method acquires s.mu
-// internally. The WAL write path already holds w.mu which serializes callers,
-// so the segment lock is effectively uncontended.
+// AppendBatchLocked appends a batch of events to the segment.
+// The caller MUST already hold the segment lock (or an outer lock that
+// serializes access, such as WAL.mu). This avoids double-locking on the
+// hot write path.
+func (s *Segment) AppendBatchLocked(events []*types.Event, indexInterval int64) error {
+	return s.appendBatchInternal(events, indexInterval)
+}
+
+// AppendBatchUnsafe is a convenience wrapper that acquires s.mu before calling
+// AppendBatchLocked. Prefer AppendBatchLocked when the caller already guarantees
+// exclusive access.
 func (s *Segment) AppendBatchUnsafe(events []*types.Event, indexInterval int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.appendBatchInternal(events, indexInterval)
 }
 
-// AppendPreparedBatchUnsafe appends a batch of pre-encoded records.
-// Despite the name (kept for API compatibility), this method acquires s.mu
-// internally. The WAL write path already holds w.mu which serializes callers,
-// so the segment lock is effectively uncontended.
-func (s *Segment) AppendPreparedBatchUnsafe(prepared []*PreparedRecord, indexInterval int64) error {
+// AppendPreparedBatchLocked appends a batch of pre-encoded records.
+// The caller MUST hold the WAL lock (or any other outer lock that serializes
+// access to the active segment). This method acquires the segment lock so that
+// mmap writes/metadata remain consistent with concurrent Sync/FlushBuffer/Read
+// callers. This avoids the previous double-lock deadlock because the segment
+// lock is never held while waiting for the WAL lock.
+func (s *Segment) AppendPreparedBatchLocked(prepared []*PreparedRecord, indexInterval int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -365,6 +374,13 @@ func (s *Segment) AppendPreparedBatchUnsafe(prepared []*PreparedRecord, indexInt
 	}
 
 	return nil
+}
+
+// AppendPreparedBatchUnsafe is a convenience wrapper that acquires s.mu before
+// calling AppendPreparedBatchLocked. Prefer AppendPreparedBatchLocked when the
+// caller already guarantees exclusive access.
+func (s *Segment) AppendPreparedBatchUnsafe(prepared []*PreparedRecord, indexInterval int64) error {
+	return s.AppendPreparedBatchLocked(prepared, indexInterval)
 }
 
 // appendBatchInternal is the shared batch append implementation
@@ -1257,13 +1273,23 @@ func (s *Segment) truncateToPosition(pos int64) error {
 // Safe to call on a closed segment — returns nil without action.
 func (s *Segment) FlushBuffer() error {
 	s.mu.RLock()
+	closed := s.closed
+	data := s.mmapData
+	pos := s.mmapWritePos
+	s.mu.RUnlock()
+	if closed {
+		return nil
+	}
+	// If using mmap, sync mmap to disk. The expensive msync is performed
+	// outside the segment lock so appends are not blocked by disk I/O.
+	if data != nil {
+		return syncMmap(data[:pos])
+	}
+	// Buffered writer is not thread-safe, so flush it under the lock.
+	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.closed {
 		return nil
-	}
-	// If using mmap, sync mmap to disk
-	if s.mmapData != nil {
-		return syncMmap(s.mmapData[:s.mmapWritePos])
 	}
 	return s.writer.Flush()
 }
@@ -1273,33 +1299,48 @@ func (s *Segment) FlushBuffer() error {
 // Safe to call on a closed segment — returns nil without action.
 func (s *Segment) Sync() error {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if s.closed {
+	closed := s.closed
+	data := s.mmapData
+	pos := s.mmapWritePos
+	file := s.segmentFile
+	s.mu.RUnlock()
+	if closed {
 		return nil
 	}
-	// If using mmap, sync mmap to disk
-	if s.mmapData != nil {
-		if err := syncMmap(s.mmapData[:s.mmapWritePos]); err != nil {
+	// If using mmap, sync mmap to disk outside the lock so appends can
+	// continue while the fsync is in flight.
+	if data != nil {
+		if err := syncMmap(data[:pos]); err != nil {
 			return err
 		}
-		return s.segmentFile.Sync() // Also sync the file descriptor
+		return file.Sync() // Also sync the file descriptor
 	}
-	return s.segmentFile.Sync()
+	return file.Sync()
 }
 
 // Flush flushes pending writes and syncs to disk.
 // This is expensive; prefer FlushBuffer for routine flushing.
 func (s *Segment) Flush() error {
 	s.mu.RLock()
+	closed := s.closed
+	data := s.mmapData
+	pos := s.mmapWritePos
+	file := s.segmentFile
+	s.mu.RUnlock()
+	if closed {
+		return nil
+	}
+	if data != nil {
+		if err := syncMmap(data[:pos]); err != nil {
+			return err
+		}
+		return file.Sync()
+	}
+	// Buffered writer is not thread-safe, so flush/sync it under the lock.
+	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.closed {
 		return nil
-	}
-	if s.mmapData != nil {
-		if err := syncMmap(s.mmapData[:s.mmapWritePos]); err != nil {
-			return err
-		}
-		return s.segmentFile.Sync()
 	}
 	if err := s.writer.Flush(); err != nil {
 		return err

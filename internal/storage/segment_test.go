@@ -80,6 +80,33 @@ func TestSegment_AppendBatch(t *testing.T) {
 	}
 }
 
+func TestSegment_AppendBatchLocked(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	seg, err := NewSegment(tmpDir, 0, true, nil)
+	if err != nil {
+		t.Fatalf("NewSegment failed: %v", err)
+	}
+	defer seg.Close()
+
+	events := make([]*types.Event, 10)
+	for i := 0; i < 10; i++ {
+		events[i] = makeEvent(int64(i), fmt.Sprintf("locked-%d", i), "locked-topic")
+	}
+
+	// AppendBatchLocked requires caller to hold the segment lock.
+	seg.mu.Lock()
+	err = seg.AppendBatchLocked(events, 3)
+	seg.mu.Unlock()
+	if err != nil {
+		t.Fatalf("AppendBatchLocked failed: %v", err)
+	}
+
+	if seg.GetLastOffset() != 9 {
+		t.Errorf("expected last offset 9, got %d", seg.GetLastOffset())
+	}
+}
+
 func TestSegment_AppendBatchUnsafe(t *testing.T) {
 	tmpDir := t.TempDir()
 
@@ -94,7 +121,7 @@ func TestSegment_AppendBatchUnsafe(t *testing.T) {
 		events[i] = makeEvent(int64(i), fmt.Sprintf("unsafe-%d", i), "unsafe-topic")
 	}
 
-	// AppendBatchUnsafe is for when caller holds the lock - test it directly
+	// AppendBatchUnsafe is a convenience wrapper that acquires s.mu.
 	if err := seg.AppendBatchUnsafe(events, 3); err != nil {
 		t.Fatalf("AppendBatchUnsafe failed: %v", err)
 	}

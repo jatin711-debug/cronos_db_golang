@@ -106,6 +106,7 @@ type PartitionManager struct {
 	splitting        map[int32]bool // tracks partitions currently undergoing split
 	splittingMu      sync.RWMutex
 	backpressureMgr  *BackpressureManager
+	fsyncCoalescer   *storage.FsyncCoalescer
 }
 
 // tenantAccountant is the minimal interface needed for delivery callbacks.
@@ -115,13 +116,17 @@ type tenantAccountant interface {
 
 // NewPartitionManager creates a new partition manager
 func NewPartitionManager(nodeID string, config *types.Config) *PartitionManager {
-	return &PartitionManager{
+	pm := &PartitionManager{
 		partitions:      make(map[int32]*Partition),
 		nodeID:          nodeID,
 		config:          config,
 		splitting:       make(map[int32]bool),
 		backpressureMgr: NewBackpressureManager(config.MaxMemoryUsagePercent, config.MemoryCheckIntervalMs),
 	}
+	if config.FlushIntervalMS > 0 {
+		pm.fsyncCoalescer = storage.NewFsyncCoalescer(time.Duration(config.FlushIntervalMS) * time.Millisecond)
+	}
+	return pm
 }
 
 // SetTenantAccountant configures the tenant accountant for delivery tracking.
@@ -182,7 +187,7 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 			return fmt.Errorf("create cipher: %w", err)
 		}
 	}
-	wal, err := storage.NewWAL(dataDir, partitionID, walConfig, cipher)
+	wal, err := storage.NewWALWithCoalescer(dataDir, partitionID, walConfig, cipher, pm.fsyncCoalescer)
 	if err != nil {
 		return fmt.Errorf("create WAL: %w", err)
 	}
@@ -922,6 +927,24 @@ func (pm *PartitionManager) StopAllPartitions() error {
 
 	if len(errs) > 0 {
 		return fmt.Errorf("failed to stop %d partitions: %v", len(errs), errs[0])
+	}
+	return nil
+}
+
+// Close stops all partitions and shuts down the global fsync coalescer.
+// It should be called once during application shutdown after all partitions
+// have been drained.
+func (pm *PartitionManager) Close() error {
+	var errs []error
+	if err := pm.StopAllPartitions(); err != nil {
+		errs = append(errs, err)
+	}
+	if pm.fsyncCoalescer != nil {
+		pm.fsyncCoalescer.Close()
+		pm.fsyncCoalescer = nil
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("partition manager close: %v", errs[0])
 	}
 	return nil
 }

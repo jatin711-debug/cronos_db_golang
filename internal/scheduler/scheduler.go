@@ -60,7 +60,25 @@ var (
 		},
 		[]string{"partition"},
 	)
-)
+	)
+
+// eventSlicePool reuses short-lived []*types.Event backing arrays inside the
+// scheduler (e.g. ScheduleBatch temporary buffers) to reduce GC pressure.
+var eventSlicePool = sync.Pool{
+	New: func() interface{} {
+		return make([]*types.Event, 0, 64)
+	},
+}
+
+func acquireEventSlice() []*types.Event {
+	return eventSlicePool.Get().([]*types.Event)[:0]
+}
+
+func releaseEventSlice(s []*types.Event) {
+	if cap(s) <= 4096 {
+		eventSlicePool.Put(s[:0])
+	}
+}
 
 // EventReader reads a single event by offset from the WAL.
 // Implemented by *storage.WAL to avoid a direct dependency.
@@ -189,7 +207,8 @@ func (s *Scheduler) ScheduleBatch(events []*types.Event) error {
 	}
 
 	now := time.Now().UnixMilli()
-	var readyEvents []*types.Event
+	readyEvents := acquireEventSlice()
+	defer releaseEventSlice(readyEvents)
 	var wheelTimers []*Timer
 	var coldEntries []struct {
 		Offset     int64
