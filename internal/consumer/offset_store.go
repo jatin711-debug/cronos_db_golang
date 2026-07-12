@@ -188,7 +188,11 @@ func (s *OffsetStore) startFlushLoop() {
 	s.wg.Add(1)
 	utils.GoSafe("offset-store-flush", func() {
 		defer s.wg.Done()
-		ticker := time.NewTicker(50 * time.Millisecond)
+		// 200ms balances durability with throughput: offsets are batched in
+		// memory and committed to Pebble without an immediate fsync, then
+		// periodically flushed to disk. Consumer offsets are recoverable via
+		// replay if the process crashes within this window.
+		ticker := time.NewTicker(200 * time.Millisecond)
 		defer ticker.Stop()
 
 		for {
@@ -344,10 +348,12 @@ func (s *OffsetStore) flushPending() {
 		_ = batch.Delete(s.groupMetaKey(id), pebble.NoSync)
 	}
 
-	if err := batch.Commit(pebble.Sync); err != nil {
+	if err := batch.Commit(pebble.NoSync); err != nil {
 		fmt.Printf("[OFFSET_STORE] Failed to commit batch: %v\n", err)
 	}
 
+	// Explicit flush moves data from Pebble's memtable/WAL to L0 and fsyncs.
+	// The 200ms flush loop above is the durability boundary, not each commit.
 	_ = s.db.Flush()
 }
 

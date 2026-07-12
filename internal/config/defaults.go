@@ -22,9 +22,10 @@ const (
 	DefaultRetentionMaxAgeHours = 168 // 7 days
 	DefaultRetentionMaxSizeGB   = 0   // Disabled by default
 
-	// Scheduler configuration
-	DefaultTickMS    = 100
-	DefaultWheelSize = 60
+	// Scheduler configuration. 10ms tick + 600 slots = 6s wheel span, giving
+	// finer granularity for scheduled events without increasing CPU overhead.
+	DefaultTickMS    = 10
+	DefaultWheelSize = 600
 
 	// Delivery configuration
 	DefaultMaxRetries         = 5

@@ -61,7 +61,7 @@ RUST_SHARED_LIB := $(RUST_LIB_BASENAME).dll
 
 MKDIR_BUILD_CMD = powershell -NoProfile -Command "New-Item -ItemType Directory -Force '$(BUILD_DIR)' | Out-Null"
 VERIFY_RUST_LIB_CMD = powershell -NoProfile -Command "if (!(Test-Path '$(RUST_TARGET_DIR)/$(RUST_SHARED_LIB)')) { throw 'Rust artifact missing: $(RUST_TARGET_DIR)/$(RUST_SHARED_LIB)' }"
-STAGE_RUST_LIB_CMD = powershell -NoProfile -Command "New-Item -ItemType Directory -Force '$(RUST_STAGE_DIR)' | Out-Null; New-Item -ItemType Directory -Force '$(BUILD_DIR)' | Out-Null; Copy-Item -Force '$(RUST_TARGET_DIR)/$(RUST_SHARED_LIB)' '$(RUST_STAGE_DIR)/'; Copy-Item -Force '$(RUST_TARGET_DIR)/$(RUST_SHARED_LIB)' './'; Copy-Item -Force '$(RUST_TARGET_DIR)/$(RUST_SHARED_LIB)' '$(BUILD_DIR)/'"
+STAGE_RUST_LIB_CMD = powershell -NoProfile -Command "New-Item -ItemType Directory -Force '$(RUST_STAGE_DIR)' | Out-Null; New-Item -ItemType Directory -Force '$(BUILD_DIR)' | Out-Null; Copy-Item -Force '$(RUST_TARGET_DIR)/$(RUST_SHARED_LIB)' '$(RUST_STAGE_DIR)/'; Copy-Item -Force '$(RUST_TARGET_DIR)/$(RUST_SHARED_LIB)' './'; Copy-Item -Force '$(RUST_TARGET_DIR)/$(RUST_SHARED_LIB)' '$(BUILD_DIR)/'; if (Test-Path '$(RUST_TARGET_DIR)/$(RUST_LIB_BASENAME).dll.lib') { Copy-Item -Force '$(RUST_TARGET_DIR)/$(RUST_LIB_BASENAME).dll.lib' '$(RUST_STAGE_DIR)/'; Copy-Item -Force '$(RUST_TARGET_DIR)/$(RUST_LIB_BASENAME).dll.lib' './'; Copy-Item -Force '$(RUST_TARGET_DIR)/$(RUST_LIB_BASENAME).dll.lib' '$(BUILD_DIR)/'; Copy-Item -Force '$(RUST_TARGET_DIR)/$(RUST_LIB_BASENAME).dll.exp' '$(RUST_STAGE_DIR)/' -ErrorAction SilentlyContinue }"
 CLEAN_BUILD_CMD = powershell -NoProfile -Command "if (Test-Path '$(BUILD_DIR)') { Remove-Item -Recurse -Force '$(BUILD_DIR)' }"
 CLEAN_DATA_CMD = powershell -NoProfile -Command "foreach ($$d in @('data/node1','data/node2','data/node3')) { if (Test-Path $$d) { Remove-Item -Recurse -Force $$d } }"
 
@@ -129,10 +129,10 @@ endif
 # Throughput profile settings (override at invocation time)
 # Example: make loadtest-batch PUBLISHERS=32 EVENTS=100000 BATCH_SIZE=4000
 # -----------------------------------------------------------------------------
-PARTITION_COUNT ?= 16
+PARTITION_COUNT ?= 32
 REPLICATION_FACTOR ?= 1
 FSYNC_MODE ?= periodic
-FLUSH_INTERVAL_MS ?= 50
+FLUSH_INTERVAL_MS ?= 100
 INDEX_INTERVAL ?= 4096
 SEGMENT_SIZE_BYTES ?= 1073741824
 VIRTUAL_NODES ?= 2048
@@ -293,6 +293,17 @@ test-integration: rust-dedup build
 # Run the chaos suite (requires docker + a running cronos cluster).
 test-chaos: rust-dedup
 	$(GO_RUNTIME_PREFIX) go test -tags chaos -v ./tests/chaos/...
+
+# Benchmark targets. The gate compares the geometric mean MB/s of the primary
+# WAL batch benchmark against bench/baseline.txt and fails on a >10% drop.
+bench-baseline:
+	@mkdir -p bench
+	$(GO_RUNTIME_PREFIX) go test ./internal/storage \
+		-bench=BenchmarkWAL_AppendBatch_Matrix/fsync=periodic/payload=256B/batch=1000/par=16 \
+		-benchtime=3s -count=3 > bench/baseline.txt
+
+bench-gate:
+	@bash scripts/check-benchmark-gate.sh
 
 proto:
 	@# Remove stale generated files so protoc always produces a clean output

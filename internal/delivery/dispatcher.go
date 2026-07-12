@@ -15,6 +15,69 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 )
 
+// dispatchPools recycle short-lived maps and slices used on the hot dispatch
+// path. Maps are cleared before reuse so the pooled instance does not retain
+// stale references.
+var dispatchPools = struct {
+	partitionEvents sync.Pool // map[int32][]*types.Event
+	groupSubs       sync.Pool // map[string][]*Subscription
+	batchesBySub    sync.Pool // map[*Subscription][]*types.Event
+	intMap          sync.Pool // map[string]int
+	stringSlice     sync.Pool // []string
+}{
+	partitionEvents: sync.Pool{New: func() interface{} { return make(map[int32][]*types.Event) }},
+	groupSubs:       sync.Pool{New: func() interface{} { return make(map[string][]*Subscription) }},
+	batchesBySub:    sync.Pool{New: func() interface{} { return make(map[*Subscription][]*types.Event) }},
+	intMap:          sync.Pool{New: func() interface{} { return make(map[string]int) }},
+	stringSlice:     sync.Pool{New: func() interface{} { return make([]string, 0, 16) }},
+}
+
+func acquirePartitionEventMap() map[int32][]*types.Event {
+	return dispatchPools.partitionEvents.Get().(map[int32][]*types.Event)
+}
+
+func releasePartitionEventMap(m map[int32][]*types.Event) {
+	clear(m)
+	dispatchPools.partitionEvents.Put(m)
+}
+
+func acquireGroupSubsMap() map[string][]*Subscription {
+	return dispatchPools.groupSubs.Get().(map[string][]*Subscription)
+}
+
+func releaseGroupSubsMap(m map[string][]*Subscription) {
+	clear(m)
+	dispatchPools.groupSubs.Put(m)
+}
+
+func acquireBatchesBySubMap() map[*Subscription][]*types.Event {
+	return dispatchPools.batchesBySub.Get().(map[*Subscription][]*types.Event)
+}
+
+func releaseBatchesBySubMap(m map[*Subscription][]*types.Event) {
+	clear(m)
+	dispatchPools.batchesBySub.Put(m)
+}
+
+func acquireIntMap() map[string]int {
+	return dispatchPools.intMap.Get().(map[string]int)
+}
+
+func releaseIntMap(m map[string]int) {
+	clear(m)
+	dispatchPools.intMap.Put(m)
+}
+
+func acquireStringSlice() []string {
+	return dispatchPools.stringSlice.Get().([]string)[:0]
+}
+
+func releaseStringSlice(s []string) {
+	if cap(s) <= 4096 {
+		dispatchPools.stringSlice.Put(s[:0])
+	}
+}
+
 // Dispatcher manages event delivery to subscribers.
 // It is optimized with sharding for reduced lock contention.
 type Dispatcher struct {
@@ -357,7 +420,9 @@ func (d *Dispatcher) advanceGroupCursors(snapshots map[string]int, numSubsByGrou
 }
 
 func groupSubscriptionsByConsumer(allSubs []*Subscription) map[string][]*Subscription {
-	// Fast path: if all subs share the same consumer group, skip map allocation
+	consumerGroupSubs := acquireGroupSubsMap()
+
+	// Fast path: if all subs share the same consumer group, avoid appending.
 	if len(allSubs) > 0 {
 		firstGroup := allSubs[0].ConsumerGroup
 		allSame := true
@@ -368,11 +433,11 @@ func groupSubscriptionsByConsumer(allSubs []*Subscription) map[string][]*Subscri
 			}
 		}
 		if allSame {
-			return map[string][]*Subscription{firstGroup: allSubs}
+			consumerGroupSubs[firstGroup] = allSubs
+			return consumerGroupSubs
 		}
 	}
 
-	consumerGroupSubs := make(map[string][]*Subscription)
 	for _, sub := range allSubs {
 		consumerGroupSubs[sub.ConsumerGroup] = append(consumerGroupSubs[sub.ConsumerGroup], sub)
 	}
@@ -511,7 +576,8 @@ func (d *Dispatcher) DispatchBatch(events []*types.Event) error {
 	}
 
 	// Support mixed-partition batches without additional caller assumptions.
-	byPartition := make(map[int32][]*types.Event)
+	byPartition := acquirePartitionEventMap()
+	defer releasePartitionEventMap(byPartition)
 	for _, ev := range events {
 		byPartition[ev.GetPartitionId()] = append(byPartition[ev.GetPartitionId()], ev)
 	}
@@ -540,21 +606,26 @@ func (d *Dispatcher) dispatchPartitionBatch(partitionID int32, events []*types.E
 	}
 
 	consumerGroupSubs := groupSubscriptionsByConsumer(allSubs)
+	defer releaseGroupSubsMap(consumerGroupSubs)
 
 	// Snapshot the persistent per-group cursors ONCE for the whole batch and
 	// rotate them in a lock-free local map. This reduces mutex acquisitions
 	// from O(numEvents × numGroups) per batch down to 2 (snapshot + commit).
 	// Cross-batch fairness is preserved because we commit the final positions
 	// back to the persistent store after the loop.
-	groupIDs := make([]string, 0, len(consumerGroupSubs))
-	numSubsByGroup := make(map[string]int, len(consumerGroupSubs))
+	groupIDs := acquireStringSlice()
+	defer releaseStringSlice(groupIDs)
+	numSubsByGroup := acquireIntMap()
+	defer releaseIntMap(numSubsByGroup)
 	for gid, subs := range consumerGroupSubs {
 		groupIDs = append(groupIDs, gid)
 		numSubsByGroup[gid] = len(subs)
 	}
 	localCursors := d.snapshotGroupCursors(groupIDs)
+	defer releaseIntMap(localCursors)
 
-	batchesBySub := make(map[*Subscription][]*types.Event)
+	batchesBySub := acquireBatchesBySubMap()
+	defer releaseBatchesBySubMap(batchesBySub)
 
 	for _, event := range events {
 		for groupID, groupSubs := range consumerGroupSubs {

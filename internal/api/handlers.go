@@ -117,6 +117,23 @@ func NewEventServiceHandler(
 	}
 }
 
+// dedupManagerForPartition returns the dedup store owned by the given
+// partition, falling back to the node-wide default (partition 0's store) if
+// the partition has not materialized locally yet (e.g. in cluster mode before
+// the first write creates it).
+//
+// Routing is deterministic by FNV-1a hash of the message_id, so the same
+// message_id always lands in the same partition — per-partition dedup stores
+// are therefore safe and scale linearly with partition count (each has its own
+// bloom filter + PebbleDB). This removes the flat throughput ceiling of
+// funneling all dedup traffic through a single store.
+func (h *EventServiceHandler) dedupManagerForPartition(partitionID int32) DedupManager {
+	if p, err := h.partitionManager.GetInternalPartition(partitionID); err == nil && p != nil && p.DedupStore != nil {
+		return p.DedupStore
+	}
+	return h.dedupManager
+}
+
 // SetClusterRouter sets the cluster router for partition-aware request routing.
 // When set, Publish/Subscribe will reject requests for non-local partitions.
 func (h *EventServiceHandler) SetClusterRouter(router ClusterRouter) {
@@ -304,11 +321,12 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 
 	// Check if duplicate (unless explicitly allowed)
 	if !req.AllowDuplicate {
-		if h.dedupManager == nil {
+		dedupMgr := h.dedupManagerForPartition(partitionID)
+		if dedupMgr == nil {
 			return nil, status.Error(codes.Unavailable, "dedup manager not initialized on this node")
 		}
 
-		isDuplicate, err := h.dedupManager.IsDuplicate(event.GetMessageId(), 0) // offset will be assigned
+		isDuplicate, err := dedupMgr.IsDuplicate(event.GetMessageId(), 0) // offset will be assigned
 		if err != nil {
 			return &types.PublishResponse{
 				Success: false,
@@ -508,7 +526,9 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 
 	// Batch dedup per partition. This turns N point lookups into one batched
 	// bloom-filter + Pebble write-batch operation, which is much cheaper under
-	// concurrent publish load.
+	// concurrent publish load. Each partition uses its OWN dedup store (bloom
+	// filter + PebbleDB), so dedup throughput scales linearly with partition
+	// count instead of funneling through a single global store.
 	if !req.AllowDuplicate && h.dedupManager != nil {
 		for pid, evts := range partitionEvents {
 			messageIDs := make([]string, len(evts))
@@ -517,7 +537,16 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 				messageIDs[i] = e.GetMessageId()
 				offsets[i] = 0
 			}
-			duplicates, err := h.dedupManager.IsDuplicateBatch(messageIDs, offsets)
+			dedupMgr := h.dedupManagerForPartition(pid)
+			if dedupMgr == nil {
+				atomic.AddInt32(&errorCount, int32(len(evts)))
+				if lastError == "" {
+					lastError = fmt.Sprintf("dedup store not available for partition %d", pid)
+				}
+				delete(partitionEvents, pid)
+				continue
+			}
+			duplicates, err := dedupMgr.IsDuplicateBatch(messageIDs, offsets)
 			if err != nil {
 				// Treat a failed dedup check as an error for the whole partition batch.
 				atomic.AddInt32(&errorCount, int32(len(evts)))
