@@ -31,7 +31,11 @@ type Dispatcher struct {
 	partitionSubs map[int32][]*Subscription
 
 	// Per-consumer-group round-robin cursor that persists across batches so
-	// single-event batches (batchSize=1) still rotate across subscribers.
+	// events are evenly distributed across subscribers. snapshotGroupCursors
+	// (called once per batch) reads the current positions into a lock-free
+	// local map used for the duration of the batch; advanceGroupCursors
+	// writes the final positions back. This avoids acquiring the mutex once
+	// per event on the hot path.
 	groupCursorMu sync.Mutex
 	groupCursor   map[string]int
 
@@ -308,6 +312,10 @@ func (d *Dispatcher) Unsubscribe(subscriptionID string) error {
 	return nil
 }
 
+// nextGroupStart returns the next subscriber index for a consumer group and
+// advances the persistent cursor by one. Used by the single-event Dispatch
+// path; the batch path uses snapshotGroupCursors/advanceGroupCursors to avoid
+// a mutex acquire per event.
 func (d *Dispatcher) nextGroupStart(groupID string, numSubs int) int {
 	d.groupCursorMu.Lock()
 	defer d.groupCursorMu.Unlock()
@@ -315,6 +323,37 @@ func (d *Dispatcher) nextGroupStart(groupID string, numSubs int) int {
 	start := d.groupCursor[groupID]
 	d.groupCursor[groupID] = (start + 1) % numSubs
 	return start
+}
+
+// snapshotGroupCursors returns a snapshot of the current cursor position for
+// each group ID in groupIDs. The caller mutates the returned map locally
+// (per-event increment) without any locking, then commits the final positions
+// back via advanceGroupCursors.
+func (d *Dispatcher) snapshotGroupCursors(groupIDs []string) map[string]int {
+	d.groupCursorMu.Lock()
+	defer d.groupCursorMu.Unlock()
+	snapshot := make(map[string]int, len(groupIDs))
+	for _, gid := range groupIDs {
+		snapshot[gid] = d.groupCursor[gid]
+	}
+	return snapshot
+}
+
+// advanceGroupCursors commits the (locally incremented) cursor positions back
+// into the persistent store. Called once per batch, not per event.
+func (d *Dispatcher) advanceGroupCursors(snapshots map[string]int, numSubsByGroup map[string]int) {
+	if len(snapshots) == 0 {
+		return
+	}
+	d.groupCursorMu.Lock()
+	defer d.groupCursorMu.Unlock()
+	for gid, pos := range snapshots {
+		if numSubs, ok := numSubsByGroup[gid]; ok && numSubs > 0 {
+			d.groupCursor[gid] = pos % numSubs
+		} else {
+			d.groupCursor[gid] = pos
+		}
+	}
 }
 
 func groupSubscriptionsByConsumer(allSubs []*Subscription) map[string][]*Subscription {
@@ -502,6 +541,19 @@ func (d *Dispatcher) dispatchPartitionBatch(partitionID int32, events []*types.E
 
 	consumerGroupSubs := groupSubscriptionsByConsumer(allSubs)
 
+	// Snapshot the persistent per-group cursors ONCE for the whole batch and
+	// rotate them in a lock-free local map. This reduces mutex acquisitions
+	// from O(numEvents × numGroups) per batch down to 2 (snapshot + commit).
+	// Cross-batch fairness is preserved because we commit the final positions
+	// back to the persistent store after the loop.
+	groupIDs := make([]string, 0, len(consumerGroupSubs))
+	numSubsByGroup := make(map[string]int, len(consumerGroupSubs))
+	for gid, subs := range consumerGroupSubs {
+		groupIDs = append(groupIDs, gid)
+		numSubsByGroup[gid] = len(subs)
+	}
+	localCursors := d.snapshotGroupCursors(groupIDs)
+
 	batchesBySub := make(map[*Subscription][]*types.Event)
 
 	for _, event := range events {
@@ -510,7 +562,9 @@ func (d *Dispatcher) dispatchPartitionBatch(partitionID int32, events []*types.E
 				continue
 			}
 
-			start := d.nextGroupStart(groupID, len(groupSubs))
+			numSubs := numSubsByGroup[groupID]
+			start := localCursors[groupID] % numSubs
+			localCursors[groupID] = start + 1
 
 			selectedSub := d.pickSubscriber(groupSubs, start)
 			if selectedSub == nil {
@@ -520,6 +574,10 @@ func (d *Dispatcher) dispatchPartitionBatch(partitionID int32, events []*types.E
 			batchesBySub[selectedSub] = append(batchesBySub[selectedSub], event)
 		}
 	}
+
+	// Commit the locally advanced cursor positions back to the persistent store
+	// so the next batch continues round-robin from where this one left off.
+	d.advanceGroupCursors(localCursors, numSubsByGroup)
 
 	for sub, batchEvents := range batchesBySub {
 		if len(batchEvents) == 0 {

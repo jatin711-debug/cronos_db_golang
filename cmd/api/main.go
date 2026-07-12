@@ -261,7 +261,11 @@ func main() {
 			continue
 		}
 		p.Wal.SetAppendHook(func(event *types.Event) {
-			if cdcManager != nil {
+			// Fast path: skip the ChangeEvent allocation + time.Now() syscall
+			// entirely when there are no CDC sinks and no cross-region
+			// replicator configured. This is the common case in dev / load
+			// test mode and avoids per-event heap pressure at 1M+ events/sec.
+			if cdcManager != nil && cdcManager.HasSinks() {
 				cdcManager.Emit(context.Background(), &cdc.ChangeEvent{
 					Timestamp:   time.Now(),
 					Op:          "append",

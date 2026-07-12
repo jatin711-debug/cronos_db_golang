@@ -92,7 +92,9 @@ func NewGRPCServer(config *Config) (*GRPCServer, error) {
 			VersionInterceptor(config.VersionGate),
 			auth.Interceptor(config.Auth),
 			TopicRateLimitInterceptor(config.TopicRateLimiter),
-			AuditUnaryInterceptor(config.AuditLogger),
+			// Audit only when authentication is active; in --dev mode every
+			// subject is "anonymous", so audit records carry no security value.
+			AuditUnaryInterceptor(config.AuditLogger, config.Auth != nil && config.Auth.Enabled),
 			MetricsInterceptor(),
 			RateLimitInterceptor(1000000.0, 2000000.0),
 		),
@@ -101,7 +103,7 @@ func NewGRPCServer(config *Config) (*GRPCServer, error) {
 			SLOStreamInterceptor(config.SLORecorder),
 			VersionStreamInterceptor(config.VersionGate),
 			auth.StreamInterceptor(config.Auth),
-			AuditStreamInterceptor(config.AuditLogger),
+			AuditStreamInterceptor(config.AuditLogger, config.Auth != nil && config.Auth.Enabled),
 			MetricsStreamInterceptor(),
 			RateLimitStreamInterceptor(1000000.0, 2000000.0),
 		),
