@@ -19,6 +19,7 @@ import (
 // Segment represents a WAL segment file
 type Segment struct {
 	mu              sync.RWMutex
+	flushMu         sync.Mutex // serializes flush/sync with mmap remapping
 	segmentFile     *os.File
 	writer          *bufio.Writer
 	reader          io.ReaderAt
@@ -44,8 +45,19 @@ type Segment struct {
 	cipher          *SegmentCipher
 }
 
-// NewSegment creates a new segment
+const defaultSegmentPreallocSize = 64 * 1024 * 1024
+
+// NewSegment creates a new segment using a conservative default preallocation
+// size. WAL callers should use NewSegmentWithSize so the configured segment
+// size is honored.
 func NewSegment(dataDir string, firstOffset int64, isActive bool, cipher *SegmentCipher) (*Segment, error) {
+	return NewSegmentWithSize(dataDir, firstOffset, isActive, cipher, defaultSegmentPreallocSize)
+}
+
+// NewSegmentWithSize creates a new segment and preallocates at most the
+// configured segment size. Keeping this value tied to WALConfig avoids mapping
+// 1GB for every partition regardless of the requested segment size.
+func NewSegmentWithSize(dataDir string, firstOffset int64, isActive bool, cipher *SegmentCipher, segmentSize int64) (*Segment, error) {
 	filename := fmt.Sprintf("%020d.log", firstOffset)
 	filePath := filepath.Join(dataDir, "segments", filename)
 
@@ -63,8 +75,7 @@ func NewSegment(dataDir string, firstOffset int64, isActive bool, cipher *Segmen
 		return nil, fmt.Errorf("open segment file: %w", err)
 	}
 
-	// Determine whether the file is newly created *before* extending it. Pre-allocation
-	// sets the size to 1GB, so we cannot rely on stat.Size() == 0 after that step.
+	// Determine whether the file is newly created *before* extending it.
 	stat, err := file.Stat()
 	if err != nil {
 		file.Close()
@@ -72,8 +83,11 @@ func NewSegment(dataDir string, firstOffset int64, isActive bool, cipher *Segmen
 	}
 	isNewFile := stat.Size() == 0
 
-	// Pre-allocate segment file for zero-allocation writes
-	const preallocSize = 1024 * 1024 * 1024 // 1GB pre-allocation
+	// Pre-allocate segment file for zero-allocation writes.
+	preallocSize := segmentSize
+	if preallocSize <= 0 {
+		preallocSize = defaultSegmentPreallocSize
+	}
 	if err := preallocateFile(file, preallocSize); err != nil {
 		// Pre-allocation is optional — log warning but continue
 		log.Printf("[SEGMENT] Pre-allocation failed for %s: %v (continuing without pre-allocation)", filename, err)
@@ -778,6 +792,9 @@ func (s *Segment) writeRecordBuffered(record []byte) (int64, error) {
 
 // remapMmap remaps the file with a new size.
 func (s *Segment) remapMmap(newSize int64) error {
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
+
 	if s.mmapData != nil {
 		if err := syncMmap(s.mmapData); err != nil {
 			log.Printf("[SEGMENT] mmap sync before remap failed: %v", err)
@@ -1276,18 +1293,27 @@ func (s *Segment) FlushBuffer() error {
 	closed := s.closed
 	data := s.mmapData
 	pos := s.mmapWritePos
-	s.mu.RUnlock()
 	if closed {
+		s.mu.RUnlock()
 		return nil
 	}
 	// If using mmap, sync mmap to disk. The expensive msync is performed
 	// outside the segment lock so appends are not blocked by disk I/O.
 	if data != nil {
+		s.flushMu.Lock()
+		s.mu.RUnlock()
+		defer s.flushMu.Unlock()
+		if pos > int64(len(data)) {
+			pos = int64(len(data))
+		}
 		return syncMmap(data[:pos])
 	}
-	// Buffered writer is not thread-safe, so flush it under the lock.
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.RUnlock()
+	// Buffered writer is not thread-safe, so flush it under the exclusive lock.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
 	if s.closed {
 		return nil
 	}
@@ -1303,55 +1329,45 @@ func (s *Segment) Sync() error {
 	data := s.mmapData
 	pos := s.mmapWritePos
 	file := s.segmentFile
-	s.mu.RUnlock()
 	if closed {
+		s.mu.RUnlock()
 		return nil
 	}
 	// If using mmap, sync mmap to disk outside the lock so appends can
 	// continue while the fsync is in flight.
 	if data != nil {
+		s.flushMu.Lock()
+		s.mu.RUnlock()
+		defer s.flushMu.Unlock()
+		if pos > int64(len(data)) {
+			pos = int64(len(data))
+		}
 		if err := syncMmap(data[:pos]); err != nil {
 			return err
 		}
 		return file.Sync() // Also sync the file descriptor
 	}
+	s.mu.RUnlock()
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
 	return file.Sync()
 }
 
 // Flush flushes pending writes and syncs to disk.
 // This is expensive; prefer FlushBuffer for routine flushing.
 func (s *Segment) Flush() error {
-	s.mu.RLock()
-	closed := s.closed
-	data := s.mmapData
-	pos := s.mmapWritePos
-	file := s.segmentFile
-	s.mu.RUnlock()
-	if closed {
-		return nil
-	}
-	if data != nil {
-		if err := syncMmap(data[:pos]); err != nil {
-			return err
-		}
-		return file.Sync()
-	}
-	// Buffered writer is not thread-safe, so flush/sync it under the lock.
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if s.closed {
-		return nil
-	}
-	if err := s.writer.Flush(); err != nil {
+	if err := s.FlushBuffer(); err != nil {
 		return err
 	}
-	return s.segmentFile.Sync()
+	return s.Sync()
 }
 
 // Close closes segment and returns all accumulated close/sync errors.
 func (s *Segment) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
 
 	return s.closeLocked()
 }
@@ -1402,6 +1418,8 @@ func (s *Segment) closeLocked() error {
 func (s *Segment) Delete() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
 
 	var errs []error
 

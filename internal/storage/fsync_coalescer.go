@@ -14,11 +14,12 @@ import (
 // The coalescer is safe for concurrent registration/unregistration and will skip
 // WALs that are no longer registered.
 type FsyncCoalescer struct {
-	mu       sync.Mutex
-	walSet   map[*WAL]struct{}
-	interval time.Duration
-	quit     chan struct{}
-	wg       sync.WaitGroup
+	mu        sync.Mutex
+	walSet    map[*WAL]struct{}
+	interval  time.Duration
+	quit      chan struct{}
+	wg        sync.WaitGroup
+	closeOnce sync.Once
 }
 
 // NewFsyncCoalescer starts a background sweep loop. interval should be the same
@@ -52,7 +53,9 @@ func (c *FsyncCoalescer) Unregister(w *WAL) {
 // Close stops the background sweep. It does NOT perform a final flush; callers
 // should flush WALs before closing the coalescer.
 func (c *FsyncCoalescer) Close() {
-	close(c.quit)
+	c.closeOnce.Do(func() {
+		close(c.quit)
+	})
 	c.wg.Wait()
 }
 

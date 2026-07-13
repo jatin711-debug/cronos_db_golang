@@ -86,7 +86,10 @@ const (
 	DefaultClusterGossipAddr = ":7946"
 	DefaultClusterGRPCAddr   = ":7947"
 	DefaultClusterRaftAddr   = ":7948"
-	DefaultVirtualNodes      = 150
+	// 150 virtual nodes is too sparse for low partition counts and can produce
+	// severe ownership skew in small clusters. Keep the direct binary default
+	// aligned with the benchmark/deployment defaults.
+	DefaultVirtualNodes      = 2048
 	DefaultHeartbeatInterval = 1 * time.Second
 	DefaultFailureTimeout    = 5 * time.Second
 	DefaultSuspectTimeout    = 3 * time.Second

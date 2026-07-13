@@ -66,10 +66,11 @@ func (tb *tokenBucket) refund(n float64) {
 
 // Accountant tracks per-tenant resource usage.
 type Accountant struct {
-	mu      sync.RWMutex
-	limits  map[ID]Limits
-	usage   map[ID]*Usage
-	buckets map[ID]*tokenBucket
+	mu         sync.RWMutex
+	limits     map[ID]Limits
+	usage      map[ID]*Usage
+	buckets    map[ID]*tokenBucket
+	configured atomic.Bool
 }
 
 // Usage tracks current consumption.
@@ -87,11 +88,19 @@ func NewAccountant() *Accountant {
 	}
 }
 
+// HasConfiguredLimits reports whether any tenant has an explicit limit. The
+// API hot path uses this to avoid per-event accounting when the accountant is
+// installed only for delivery callbacks and no quotas are configured.
+func (a *Accountant) HasConfiguredLimits() bool {
+	return a.configured.Load()
+}
+
 // SetLimits configures limits for a tenant.
 func (a *Accountant) SetLimits(tenant ID, limits Limits) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.limits[tenant] = limits
+	a.configured.Store(true)
 	if _, ok := a.usage[tenant]; !ok {
 		a.usage[tenant] = &Usage{}
 	}
@@ -104,6 +113,18 @@ func (a *Accountant) SetLimits(tenant ID, limits Limits) {
 
 // AllowPublish checks if a tenant can publish.
 func (a *Accountant) AllowPublish(tenant ID) bool {
+	return a.AllowPublishBatch(tenant, 1, 0)
+}
+
+// AllowPublishBatch checks a whole publish batch in one accountant operation.
+// Rate-limit tokens are consumed for the complete batch and refunded if any
+// quota rejects it. Usage counters are checked using the batch cardinality and
+// byte total instead of performing one map lookup per event.
+func (a *Accountant) AllowPublishBatch(tenant ID, eventCount, bytes int64) bool {
+	if eventCount <= 0 {
+		return true
+	}
+
 	a.mu.RLock()
 	limits, ok := a.limits[tenant]
 	usage, hasUsage := a.usage[tenant]
@@ -118,24 +139,24 @@ func (a *Accountant) AllowPublish(tenant ID) bool {
 	}
 
 	if hasBucket {
-		if !bucket.tryConsume(1) {
+		if !bucket.tryConsume(float64(eventCount)) {
 			return false
 		}
 	}
 	if limits.MaxInFlight > 0 {
-		if usage.InFlight.Load() >= limits.MaxInFlight {
+		if usage.InFlight.Load()+eventCount > limits.MaxInFlight {
 			// Refund the token since we're rejecting
 			if hasBucket {
-				bucket.refund(1) // refund
+				bucket.refund(float64(eventCount))
 			}
 			return false
 		}
 	}
 	if limits.MaxStorageBytes > 0 {
-		if usage.StorageBytes.Load() >= limits.MaxStorageBytes {
+		if usage.StorageBytes.Load()+bytes > limits.MaxStorageBytes {
 			// Refund the token since we're rejecting
 			if hasBucket {
-				bucket.refund(1) // refund
+				bucket.refund(float64(eventCount))
 			}
 			return false
 		}
@@ -143,18 +164,92 @@ func (a *Accountant) AllowPublish(tenant ID) bool {
 	return true
 }
 
+// ReservePublishBatch atomically admits and accounts for a publish batch. It
+// is the safe operation for concurrent producers: unlike AllowPublishBatch
+// followed by RecordPublishBatch, two callers cannot both pass a MaxInFlight
+// or MaxStorageBytes check before recording their usage.
+func (a *Accountant) ReservePublishBatch(tenant ID, eventCount, bytes int64) bool {
+	if eventCount <= 0 {
+		return true
+	}
+
+	a.mu.RLock()
+	limits, ok := a.limits[tenant]
+	usage, hasUsage := a.usage[tenant]
+	bucket, hasBucket := a.buckets[tenant]
+	a.mu.RUnlock()
+
+	if !ok || !hasUsage {
+		return true
+	}
+
+	refund := func() {
+		if hasBucket {
+			bucket.refund(float64(eventCount))
+		}
+	}
+	if hasBucket && !bucket.tryConsume(float64(eventCount)) {
+		return false
+	}
+
+	if limits.MaxInFlight > 0 {
+		for {
+			current := usage.InFlight.Load()
+			if current > limits.MaxInFlight || eventCount > limits.MaxInFlight-current {
+				refund()
+				return false
+			}
+			if usage.InFlight.CompareAndSwap(current, current+eventCount) {
+				break
+			}
+		}
+	} else {
+		usage.InFlight.Add(eventCount)
+	}
+
+	if limits.MaxStorageBytes > 0 {
+		for {
+			current := usage.StorageBytes.Load()
+			if current > limits.MaxStorageBytes || bytes > limits.MaxStorageBytes-current {
+				usage.InFlight.Add(-eventCount)
+				refund()
+				return false
+			}
+			if usage.StorageBytes.CompareAndSwap(current, current+bytes) {
+				break
+			}
+		}
+	} else {
+		usage.StorageBytes.Add(bytes)
+	}
+
+	return true
+}
+
 // RecordPublish records a publish attempt.
 func (a *Accountant) RecordPublish(tenant ID, bytes int64) {
+	a.RecordPublishBatch(tenant, 1, bytes)
+}
+
+// RecordPublishBatch records a complete publish batch with one map operation
+// and two atomic increments.
+func (a *Accountant) RecordPublishBatch(tenant ID, eventCount, bytes int64) {
+	if eventCount <= 0 {
+		return
+	}
 	a.mu.RLock()
 	usage, ok := a.usage[tenant]
 	a.mu.RUnlock()
 	if !ok {
 		a.mu.Lock()
-		usage = &Usage{}
-		a.usage[tenant] = usage
+		usage, ok = a.usage[tenant]
+		if !ok {
+			usage = &Usage{}
+			a.usage[tenant] = usage
+		}
 		a.mu.Unlock()
 	}
-	usage.InFlight.Add(1)
+	usage.InFlight.Add(eventCount)
 	usage.StorageBytes.Add(bytes)
 }
 

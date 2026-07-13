@@ -60,7 +60,7 @@ var (
 		},
 		[]string{"partition"},
 	)
-	)
+)
 
 // eventSlicePool reuses short-lived []*types.Event backing arrays inside the
 // scheduler (e.g. ScheduleBatch temporary buffers) to reduce GC pressure.
@@ -88,7 +88,13 @@ type EventReader interface {
 
 // Scheduler manages timestamp-triggered event execution
 type Scheduler struct {
-	mu               sync.RWMutex
+	mu sync.RWMutex
+	// readyMu guards readyQueue on its own dedicated mutex, decoupled from mu.
+	// The ready queue is touched on the hottest paths (ScheduleBatch appends
+	// expired events, GetReadyEvents drains, the tick drains expired timers), so
+	// keeping it off the RWMutex shared with checkpoint/stats/hydrator state cuts
+	// contention. Never hold mu and readyMu at the same time.
+	readyMu          sync.Mutex
 	timingWheel      *TimingWheel
 	readyQueue       []*types.Event
 	readySignal      chan struct{}
@@ -179,9 +185,9 @@ func (s *Scheduler) Schedule(event *types.Event) error {
 	now := time.Now().UnixMilli()
 	// If event is already expired, add to ready queue
 	if event.GetScheduleTs() <= now {
-		s.mu.Lock()
+		s.readyMu.Lock()
 		s.readyQueue = append(s.readyQueue, event)
-		s.mu.Unlock()
+		s.readyMu.Unlock()
 		s.notifyReady()
 		return nil
 	}
@@ -253,9 +259,9 @@ func (s *Scheduler) ScheduleBatch(events []*types.Event) error {
 	}
 
 	if len(readyEvents) > 0 {
-		s.mu.Lock()
+		s.readyMu.Lock()
 		s.readyQueue = append(s.readyQueue, readyEvents...)
-		s.mu.Unlock()
+		s.readyMu.Unlock()
 		s.notifyReady()
 	}
 
@@ -264,8 +270,8 @@ func (s *Scheduler) ScheduleBatch(events []*types.Event) error {
 
 // GetReadyEvents returns events ready for execution
 func (s *Scheduler) GetReadyEvents() []*types.Event {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.readyMu.Lock()
+	defer s.readyMu.Unlock()
 
 	// Return ready events
 	if len(s.readyQueue) == 0 {
@@ -296,9 +302,9 @@ func (s *Scheduler) drainExpiredToReady() {
 	}
 done:
 	if len(localBuf) > 0 {
-		s.mu.Lock()
+		s.readyMu.Lock()
 		s.readyQueue = append(s.readyQueue, localBuf...)
-		s.mu.Unlock()
+		s.readyMu.Unlock()
 		s.notifyReady()
 	}
 }
@@ -357,10 +363,10 @@ func (s *Scheduler) worker() {
 			// RLock acquisitions and GetStats overhead
 			tickCount++
 			if tickCount%10 == 0 {
-				s.mu.RLock()
+				s.readyMu.Lock()
 				readyCount := int64(len(s.readyQueue))
-				twStats := s.timingWheel.GetStats()
-				s.mu.RUnlock()
+				s.readyMu.Unlock()
+				twStats := s.timingWheel.GetStats() // timing wheel has its own lock
 				schedulerReadyEvents.WithLabelValues(partitionLabel).Set(float64(readyCount))
 				schedulerActiveTimers.WithLabelValues(partitionLabel).Set(float64(twStats.ActiveTimers))
 			}
@@ -392,9 +398,11 @@ func (s *Scheduler) checkpoint() {
 	s.mu.RLock()
 	lastCheckpointTS := s.lastCheckpointTS
 	partitionID := s.partitionID
-	readyEvents := int64(len(s.readyQueue))
-	twStats := s.timingWheel.GetStats()
 	s.mu.RUnlock()
+	s.readyMu.Lock()
+	readyEvents := int64(len(s.readyQueue))
+	s.readyMu.Unlock()
+	twStats := s.timingWheel.GetStats()
 
 	if now-lastCheckpointTS < 10000 {
 		return
@@ -556,9 +564,9 @@ func (s *Scheduler) hydrate() int {
 		now := time.Now().UnixMilli()
 		if event.GetScheduleTs() <= now {
 			// Already expired — send directly to ready queue
-			s.mu.Lock()
+			s.readyMu.Lock()
 			s.readyQueue = append(s.readyQueue, event)
-			s.mu.Unlock()
+			s.readyMu.Unlock()
 			s.notifyReady()
 		} else {
 			// Add to timing wheel
@@ -591,8 +599,8 @@ func (s *Scheduler) hydrate() int {
 
 // GetReadyQueueDepth returns the number of events in the ready queue.
 func (s *Scheduler) GetReadyQueueDepth() int64 {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.readyMu.Lock()
+	defer s.readyMu.Unlock()
 	return int64(len(s.readyQueue))
 }
 
@@ -659,17 +667,18 @@ func (s *Scheduler) Stop() {
 
 // GetStats returns scheduler statistics
 func (s *Scheduler) GetStats() *SchedulerStats {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	twStats := s.timingWheel.GetStats() // timing wheel has its own lock
+	s.readyMu.Lock()
+	readyEvents := int64(len(s.readyQueue))
+	s.readyMu.Unlock()
 
-	twStats := s.timingWheel.GetStats()
 	return &SchedulerStats{
 		ActiveTimers:  twStats.ActiveTimers,
 		CurrentTick:   twStats.CurrentTick,
 		TickMs:        twStats.TickMs,
 		WheelSize:     twStats.WheelSize,
 		OverflowLevel: twStats.OverflowLevel,
-		ReadyEvents:   int64(len(s.readyQueue)),
+		ReadyEvents:   readyEvents,
 	}
 }
 

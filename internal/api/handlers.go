@@ -57,6 +57,9 @@ type EventServiceHandler struct {
 type DedupManager interface {
 	IsDuplicate(messageID string, offset int64) (bool, error)
 	IsDuplicateBatch(messageIDs []string, offsets []int64) ([]bool, error)
+	// RollbackBatch undoes dedup claims when the durable write that followed the
+	// claim failed, so a client retry is not dropped as a spurious duplicate.
+	RollbackBatch(messageIDs []string) error
 }
 
 // ConsumerManager interface
@@ -117,21 +120,15 @@ func NewEventServiceHandler(
 	}
 }
 
-// dedupManagerForPartition returns the dedup store owned by the given
-// partition, falling back to the node-wide default (partition 0's store) if
-// the partition has not materialized locally yet (e.g. in cluster mode before
-// the first write creates it).
-//
-// Routing is deterministic by FNV-1a hash of the message_id, so the same
-// message_id always lands in the same partition — per-partition dedup stores
-// are therefore safe and scale linearly with partition count (each has its own
-// bloom filter + PebbleDB). This removes the flat throughput ceiling of
-// funneling all dedup traffic through a single store.
+// dedupManagerForPartition returns only the dedup store owned by the target
+// partition. Falling back to partition 0 is unsafe: in lazy cluster mode it
+// can record a message ID in the wrong namespace before the real partition is
+// materialized, allowing a retry to be accepted by the correct store.
 func (h *EventServiceHandler) dedupManagerForPartition(partitionID int32) DedupManager {
 	if p, err := h.partitionManager.GetInternalPartition(partitionID); err == nil && p != nil && p.DedupStore != nil {
 		return p.DedupStore
 	}
-	return h.dedupManager
+	return nil
 }
 
 // SetClusterRouter sets the cluster router for partition-aware request routing.
@@ -310,6 +307,7 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 				Error:   fmt.Sprintf("get partition: %v", err),
 			}, nil
 		}
+		partitionID = topicPartitionID
 	}
 
 	if !partitionInternal.IsKeyInBounds(partitionKey) {
@@ -319,9 +317,11 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 		}, nil
 	}
 
-	// Check if duplicate (unless explicitly allowed)
+	// Check if duplicate (unless explicitly allowed). dedupMgr is kept in scope so
+	// the claim can be rolled back if the durable WAL append below fails.
+	var dedupMgr DedupManager
 	if !req.AllowDuplicate {
-		dedupMgr := h.dedupManagerForPartition(partitionID)
+		dedupMgr = h.dedupManagerForPartition(partitionID)
 		if dedupMgr == nil {
 			return nil, status.Error(codes.Unavailable, "dedup manager not initialized on this node")
 		}
@@ -342,23 +342,60 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 	}
 
 	// Tenant quota check
-	if h.tenantAccountant != nil {
+	if h.tenantAccountant != nil && h.tenantAccountant.HasConfiguredLimits() {
 		tenantID := tenant.ID("default")
 		if claims, ok := auth.ClaimsFromContext(ctx); ok {
 			tenantID = tenant.ID(claims.Subject)
 		}
-		if !h.tenantAccountant.AllowPublish(tenantID) {
+		if !h.tenantAccountant.ReservePublishBatch(tenantID, 1, int64(len(event.Payload))) {
 			return nil, status.Errorf(codes.ResourceExhausted, "tenant quota exceeded")
 		}
-		h.tenantAccountant.RecordPublish(tenantID, int64(len(event.Payload)))
 		if event.Meta == nil {
 			event.Meta = make(map[string]string)
 		}
 		event.Meta["tenant_id"] = string(tenantID)
 	}
 
-	// Append to WAL (sync behavior depends on fsync mode; durable_ack forces an fsync)
-	if err := partitionInternal.Wal.AppendEvent(event); err != nil {
+	// Append to WAL (sync behavior depends on fsync mode; durable_ack forces an
+	// fsync). rollbackDedup undoes the dedup claim if the event never became
+	// durable, so a client retry of this message ID is not silently dropped as a
+	// duplicate. Failures AFTER a successful append (schedule, etc.) intentionally
+	// keep the claim, since the event is in the WAL and will be recovered on replay.
+	rollbackDedup := func() {
+		if dedupMgr == nil {
+			return
+		}
+		if rbErr := dedupMgr.RollbackBatch([]string{event.GetMessageId()}); rbErr != nil {
+			slog.Warn("dedup rollback after WAL append failure failed",
+				"messageId", event.GetMessageId(), "error", rbErr)
+		}
+	}
+
+	// On a replication leader, append and replication must occur together in
+	// strict offset order; serialize them under the partition's ReplicateMu.
+	// RF=1 / non-leader partitions keep the fast path with no extra locking.
+	if repl := partitionInternal.ReplLeader; repl != nil {
+		partitionInternal.ReplicateMu.Lock()
+		if err := partitionInternal.Wal.AppendEvent(event); err != nil {
+			partitionInternal.ReplicateMu.Unlock()
+			rollbackDedup()
+			return &types.PublishResponse{
+				Success: false,
+				Error:   fmt.Sprintf("append to WAL: %v", err),
+			}, nil
+		}
+		replErr := repl.Replicate([]*types.Event{event})
+		partitionInternal.ReplicateMu.Unlock()
+		if replErr != nil {
+			// Durable locally but not replicated to the required in-sync replicas.
+			// Report failure; keep the dedup claim (event is in the WAL).
+			return &types.PublishResponse{
+				Success: false,
+				Error:   fmt.Sprintf("replication: %v", replErr),
+			}, nil
+		}
+	} else if err := partitionInternal.Wal.AppendEvent(event); err != nil {
+		rollbackDedup()
 		return &types.PublishResponse{
 			Success: false,
 			Error:   fmt.Sprintf("append to WAL: %v", err),
@@ -426,102 +463,167 @@ func releasePartitionEventsMap(m map[int32][]*types.Event) {
 
 // PublishBatch handles batch publish requests for high-throughput ingestion
 func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.PublishBatchRequest) (*types.PublishBatchResponse, error) {
+	if req == nil {
+		return nil, status.Error(codes.InvalidArgument, "publish batch request is required")
+	}
 	if len(req.Events) == 0 {
 		return &types.PublishBatchResponse{
 			Success: true,
 		}, nil
 	}
 
-	if !req.AllowDuplicate && h.dedupManager == nil {
-		return nil, status.Error(codes.Unavailable, "dedup manager not initialized on this node")
-	}
-
 	var publishedCount, duplicateCount, errorCount int32
 	var firstOffset, lastOffset int64 = -1, -1
 	var lastError string
+	var resultMu sync.Mutex
+
+	setError := func(count int32, message string) {
+		if count <= 0 {
+			return
+		}
+		atomic.AddInt32(&errorCount, count)
+		resultMu.Lock()
+		if lastError == "" {
+			lastError = message
+		}
+		resultMu.Unlock()
+	}
+
+	partitionKeyOf := func(event *types.Event) string {
+		key := event.GetMessageId()
+		if pk, ok := event.Meta["partition_key"]; ok && pk != "" {
+			key = pk
+		}
+		return key
+	}
 
 	// Group events by partition for batch WAL writes. Reuse a pooled map to
 	// avoid one allocation per request.
 	partitionEvents := acquirePartitionEventsMap()
 	defer releasePartitionEventsMap(partitionEvents)
 
-	for _, event := range req.Events {
+	// Authorization is invariant for all events with the same topic and request
+	// context. Avoid taking the policy locks once per event in a large batch.
+	authResults := make(map[string]error, 4)
+
+	for i, event := range req.Events {
+		if i&255 == 0 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			default:
+			}
+		}
+
 		// Basic validation
-		if event.GetMessageId() == "" || event.GetScheduleTs() <= 0 || len(event.Payload) == 0 {
-			atomic.AddInt32(&errorCount, 1)
-			if lastError == "" {
-				lastError = fmt.Sprintf("validation failed: msgId=%q, scheduleTs=%d, payloadLen=%d",
-					event.GetMessageId(), event.GetScheduleTs(), len(event.Payload))
+		if event == nil || event.GetMessageId() == "" || len(event.GetMessageId()) > 128 ||
+			event.GetScheduleTs() <= 0 || len(event.Payload) == 0 || len(event.Payload) > 4*1024*1024 || len(event.Topic) > 255 {
+			if event == nil {
+				setError(1, "validation failed: event is nil")
+			} else {
+				setError(1, fmt.Sprintf("validation failed: msgId=%q, scheduleTs=%d, payloadLen=%d",
+					event.GetMessageId(), event.GetScheduleTs(), len(event.Payload)))
 			}
 			continue
 		}
 
 		// Topic-level authorization
-		if err := h.checkTopicAuth(ctx, event.Topic, "publish"); err != nil {
-			atomic.AddInt32(&errorCount, 1)
-			if lastError == "" {
-				lastError = err.Error()
-			}
+		authErr, checked := authResults[event.Topic]
+		if !checked {
+			authErr = h.checkTopicAuth(ctx, event.Topic, "publish")
+			authResults[event.Topic] = authErr
+		}
+		if authErr != nil {
+			setError(1, authErr.Error())
 			continue
 		}
 
 		// Schema validation
 		if h.schemaRegistry != nil && event.Topic != "" {
 			if err := h.schemaRegistry.Validate(event.Topic, event.Payload); err != nil {
-				atomic.AddInt32(&errorCount, 1)
-				if lastError == "" {
-					lastError = fmt.Sprintf("schema validation failed for %s: %v", event.GetMessageId(), err)
-				}
+				setError(1, fmt.Sprintf("schema validation failed for %s: %v", event.GetMessageId(), err))
 				continue
 			}
 		}
 
-		// Get partition
-		partitionKey := event.GetMessageId()
-		if pk, ok := event.Meta["partition_key"]; ok && pk != "" {
-			partitionKey = pk
-		}
-
+		partitionKey := partitionKeyOf(event)
 		partitionID := h.partitionManager.GetPartitionIDForKey(partitionKey)
-		if ownerErr := h.ensureClusterPartitionWritable(partitionID); ownerErr != nil {
-			atomic.AddInt32(&errorCount, 1)
-			if lastError == "" {
-				lastError = ownerErr.Error()
-			}
+		partitionEvents[partitionID] = append(partitionEvents[partitionID], event)
+	}
+
+	// Materialize and validate each partition exactly once. This also ensures
+	// deduplication uses the partition-owned store rather than a node-wide
+	// fallback. Bounds and admission are evaluated before any dedup claim so a
+	// rejected event does not consume an ID or quota.
+	partitionInternals := make(map[int32]*partition.Partition, len(partitionEvents))
+	for pid, events := range partitionEvents {
+		if ownerErr := h.ensureClusterPartitionWritable(pid); ownerErr != nil {
+			setError(int32(len(events)), ownerErr.Error())
+			delete(partitionEvents, pid)
 			continue
 		}
 
-		// Admission control
-		if !h.partitionManager.CanAccept(partitionID) {
-			metrics.IncAdmissionRejected()
-			atomic.AddInt32(&errorCount, 1)
-			if lastError == "" {
-				lastError = fmt.Sprintf("partition %d is at capacity", partitionID)
-			}
+		partitionInternal, err := h.partitionManager.GetOrCreateInternalPartition(pid, partitionKeyOf(events[0]))
+		if err != nil {
+			setError(int32(len(events)), fmt.Sprintf("get internal partition %d: %v", pid, err))
+			delete(partitionEvents, pid)
 			continue
 		}
 
-		// Tenant quota check
-		if h.tenantAccountant != nil {
-			tenantID := tenant.ID("default")
-			if claims, ok := auth.ClaimsFromContext(ctx); ok {
-				tenantID = tenant.ID(claims.Subject)
-			}
-			if !h.tenantAccountant.AllowPublish(tenantID) {
-				atomic.AddInt32(&errorCount, 1)
-				if lastError == "" {
-					lastError = "tenant quota exceeded"
-				}
+		validEvents := events[:0]
+		for _, event := range events {
+			if !partitionInternal.IsKeyInBounds(partitionKeyOf(event)) {
+				setError(1, fmt.Sprintf("key %s is out of partition bounds [%s, %s)", partitionKeyOf(event), partitionInternal.MinKey, partitionInternal.MaxKey))
 				continue
 			}
-			h.tenantAccountant.RecordPublish(tenantID, int64(len(event.Payload)))
-			if event.Meta == nil {
-				event.Meta = make(map[string]string)
-			}
-			event.Meta["tenant_id"] = string(tenantID)
+			validEvents = append(validEvents, event)
+		}
+		if len(validEvents) == 0 {
+			delete(partitionEvents, pid)
+			continue
 		}
 
-		partitionEvents[partitionID] = append(partitionEvents[partitionID], event)
+		if !h.partitionManager.CanAcceptBatch(pid, int64(len(validEvents))) {
+			metrics.IncAdmissionRejected()
+			setError(int32(len(validEvents)), fmt.Sprintf("partition %d is at capacity", pid))
+			delete(partitionEvents, pid)
+			continue
+		}
+
+		partitionEvents[pid] = validEvents
+		partitionInternals[pid] = partitionInternal
+	}
+
+	// Tenant accounting is disabled unless at least one tenant has configured
+	// limits. In the common unrestricted case this removes a map lookup,
+	// atomic increment, and metadata allocation from every event.
+	if h.tenantAccountant != nil && h.tenantAccountant.HasConfiguredLimits() && len(partitionEvents) > 0 {
+		tenantID := tenant.ID("default")
+		if claims, ok := auth.ClaimsFromContext(ctx); ok {
+			tenantID = tenant.ID(claims.Subject)
+		}
+		var eventCount, payloadBytes int64
+		for _, events := range partitionEvents {
+			eventCount += int64(len(events))
+			for _, event := range events {
+				payloadBytes += int64(len(event.Payload))
+			}
+		}
+		if !h.tenantAccountant.ReservePublishBatch(tenantID, eventCount, payloadBytes) {
+			setError(int32(eventCount), "tenant quota exceeded")
+			for pid := range partitionEvents {
+				delete(partitionEvents, pid)
+			}
+		} else {
+			for _, events := range partitionEvents {
+				for _, event := range events {
+					if event.Meta == nil {
+						event.Meta = make(map[string]string, 1)
+					}
+					event.Meta["tenant_id"] = string(tenantID)
+				}
+			}
+		}
 	}
 
 	// Batch dedup per partition. This turns N point lookups into one batched
@@ -529,7 +631,7 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 	// concurrent publish load. Each partition uses its OWN dedup store (bloom
 	// filter + PebbleDB), so dedup throughput scales linearly with partition
 	// count instead of funneling through a single global store.
-	if !req.AllowDuplicate && h.dedupManager != nil {
+	if !req.AllowDuplicate {
 		for pid, evts := range partitionEvents {
 			messageIDs := make([]string, len(evts))
 			offsets := make([]int64, len(evts))
@@ -537,30 +639,21 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 				messageIDs[i] = e.GetMessageId()
 				offsets[i] = 0
 			}
-			dedupMgr := h.dedupManagerForPartition(pid)
+			dedupMgr := partitionInternals[pid].DedupStore
 			if dedupMgr == nil {
-				atomic.AddInt32(&errorCount, int32(len(evts)))
-				if lastError == "" {
-					lastError = fmt.Sprintf("dedup store not available for partition %d", pid)
-				}
+				setError(int32(len(evts)), fmt.Sprintf("dedup store not available for partition %d", pid))
 				delete(partitionEvents, pid)
 				continue
 			}
 			duplicates, err := dedupMgr.IsDuplicateBatch(messageIDs, offsets)
 			if err != nil {
 				// Treat a failed dedup check as an error for the whole partition batch.
-				atomic.AddInt32(&errorCount, int32(len(evts)))
-				if lastError == "" {
-					lastError = fmt.Sprintf("dedup check failed for partition %d: %v", pid, err)
-				}
+				setError(int32(len(evts)), fmt.Sprintf("dedup check failed for partition %d: %v", pid, err))
 				delete(partitionEvents, pid)
 				continue
 			}
 			if len(duplicates) != len(evts) {
-				atomic.AddInt32(&errorCount, int32(len(evts)))
-				if lastError == "" {
-					lastError = fmt.Sprintf("dedup check returned %d results for %d events in partition %d", len(duplicates), len(evts), pid)
-				}
+				setError(int32(len(evts)), fmt.Sprintf("dedup check returned %d results for %d events in partition %d", len(duplicates), len(evts), pid))
 				delete(partitionEvents, pid)
 				continue
 			}
@@ -582,96 +675,90 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 
 	// Parallel batch write to each partition's WAL and schedule
 	var wg sync.WaitGroup
-	var mu sync.Mutex // protects firstOffset, lastOffset, lastError
 
 	for partitionID, events := range partitionEvents {
 		wg.Add(1)
 		go func(pid int32, evts []*types.Event) {
 			defer wg.Done()
 
-			partitionInternal, err := h.partitionManager.GetOrCreateInternalPartition(pid, evts[0].Topic)
-			if err != nil {
-				// Fallback to topic-based partitioning
-				topicPartitionID := h.partitionManager.GetPartitionIDForTopic(evts[0].Topic)
-				if ownerErr := h.ensureClusterPartitionWritable(topicPartitionID); ownerErr != nil {
-					atomic.AddInt32(&errorCount, int32(len(evts)))
-					mu.Lock()
-					if lastError == "" {
-						lastError = fmt.Sprintf("get internal partition %d: %v", pid, err)
-					}
-					mu.Unlock()
-					return
-				}
-				partitionInternal, err = h.partitionManager.GetOrCreateInternalPartition(topicPartitionID, evts[0].Topic)
-				if err != nil {
-					atomic.AddInt32(&errorCount, int32(len(evts)))
-					mu.Lock()
-					if lastError == "" {
-						lastError = fmt.Sprintf("get internal partition %d: %v", topicPartitionID, err)
-					}
-					mu.Unlock()
-					return
-				}
-			}
-
-			// Filter and validate keys bounds for each event in the batch
-			validEvts := make([]*types.Event, 0, len(evts))
-			for _, event := range evts {
-				partitionKey := event.GetMessageId()
-				if pk, ok := event.Meta["partition_key"]; ok && pk != "" {
-					partitionKey = pk
-				}
-				if !partitionInternal.IsKeyInBounds(partitionKey) {
-					atomic.AddInt32(&errorCount, 1)
-					mu.Lock()
-					if lastError == "" {
-						lastError = fmt.Sprintf("key %s is out of partition bounds [%s, %s)", partitionKey, partitionInternal.MinKey, partitionInternal.MaxKey)
-					}
-					mu.Unlock()
-					continue
-				}
-				validEvts = append(validEvts, event)
-			}
-			if len(validEvts) == 0 {
+			partitionInternal := partitionInternals[pid]
+			if partitionInternal == nil {
+				setError(int32(len(evts)), fmt.Sprintf("partition %d was not materialized", pid))
 				return
 			}
-			evts = validEvts
 
-			// Batch append to WAL (single syscall for all events)
-			if err := partitionInternal.Wal.AppendBatch(evts); err != nil {
-				atomic.AddInt32(&errorCount, int32(len(evts)))
-				mu.Lock()
-				if lastError == "" {
-					lastError = fmt.Sprintf("WAL append for partition %d: %v", pid, err)
+			// rollbackDedup undoes the dedup claims for this batch after a failed
+			// durable append so client retries are not dropped as spurious
+			// duplicates. Only meaningful when dedup actually claimed them
+			// (i.e. !req.AllowDuplicate).
+			rollbackDedup := func() {
+				if req.AllowDuplicate || partitionInternal.DedupStore == nil {
+					return
 				}
-				mu.Unlock()
+				ids := make([]string, len(evts))
+				for i, e := range evts {
+					ids[i] = e.GetMessageId()
+				}
+				if rbErr := partitionInternal.DedupStore.RollbackBatch(ids); rbErr != nil {
+					slog.Warn("dedup rollback after WAL append failure failed",
+						"partition", pid, "count", len(ids), "error", rbErr)
+				}
+			}
+
+			// Batch append to WAL (single syscall for all events). When this
+			// partition is a replication leader, the append and the replication to
+			// followers must occur together in strict offset order — Leader.Replicate
+			// requires contiguous offsets and is not safe to call concurrently out of
+			// order. ReplicateMu serializes the two for replicated partitions only;
+			// RF=1 / non-leader partitions (ReplLeader == nil) keep the fully
+			// pipelined fast path with no extra locking.
+			if repl := partitionInternal.ReplLeader; repl != nil {
+				partitionInternal.ReplicateMu.Lock()
+				if err := partitionInternal.Wal.AppendBatch(evts); err != nil {
+					partitionInternal.ReplicateMu.Unlock()
+					rollbackDedup()
+					setError(int32(len(evts)), fmt.Sprintf("WAL append for partition %d: %v", pid, err))
+					return
+				}
+				replErr := repl.Replicate(evts)
+				partitionInternal.ReplicateMu.Unlock()
+				if replErr != nil {
+					// The batch is durable in the local WAL but did not reach the
+					// required in-sync replicas. Surface the failure so the client can
+					// retry; do NOT roll back dedup — the event is in the WAL, will be
+					// delivered/recovered locally, and a retry is correctly deduped.
+					setError(int32(len(evts)), fmt.Sprintf("replication for partition %d: %v", pid, replErr))
+					return
+				}
+			} else if err := partitionInternal.Wal.AppendBatch(evts); err != nil {
+				rollbackDedup()
+				setError(int32(len(evts)), fmt.Sprintf("WAL append for partition %d: %v", pid, err))
 				return
 			}
 
 			// Force fsync if any event in the batch requested durable acknowledgement.
 			if anyDurableAck(evts) {
 				if err := partitionInternal.Wal.Flush(); err != nil {
-					atomic.AddInt32(&errorCount, int32(len(evts)))
-					mu.Lock()
-					if lastError == "" {
-						lastError = fmt.Sprintf("durable fsync for partition %d: %v", pid, err)
-					}
-					mu.Unlock()
+					setError(int32(len(evts)), fmt.Sprintf("durable fsync for partition %d: %v", pid, err))
 					return
 				}
 			}
 
 			// Batch schedule all events (single lock acquisition)
 			if err := partitionInternal.Scheduler.ScheduleBatch(evts); err != nil {
-				// Events are in WAL, just log scheduling error
+				// The events are in the WAL, but the publish is not complete until
+				// they are scheduled. Recovery can replay them, so surface the
+				// failure instead of silently reporting success.
 				slog.Warn("batch schedule partially failed", "partition", pid, "count", len(evts), "error", err)
+				setError(int32(len(evts)), fmt.Sprintf("schedule batch for partition %d: %v", pid, err))
+				return
 			}
 
 			// Update stats
 			localPublished := int32(len(evts))
 			atomic.AddInt32(&publishedCount, localPublished)
 
-			mu.Lock()
+			resultMu.Lock()
 			for _, event := range evts {
 				if firstOffset == -1 || event.Offset < firstOffset {
 					firstOffset = event.Offset
@@ -680,28 +767,42 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 					lastOffset = event.Offset
 				}
 			}
-			mu.Unlock()
+			resultMu.Unlock()
 		}(partitionID, events)
 	}
 
 	wg.Wait()
 
+	// Read counters atomically because partition writers update them in parallel.
+	finalPublishedCount := atomic.LoadInt32(&publishedCount)
+	finalDuplicateCount := atomic.LoadInt32(&duplicateCount)
+	finalErrorCount := atomic.LoadInt32(&errorCount)
+
 	// Log errors periodically to help debug
-	if errorCount > 0 && errorCount%1000 == 0 {
+	if finalErrorCount > 0 && finalErrorCount%1000 == 0 {
 		slog.Warn("batch publish errors",
-			"errorCount", errorCount,
-			"duplicateCount", duplicateCount,
+			"errorCount", finalErrorCount,
+			"duplicateCount", finalDuplicateCount,
 			"lastError", lastError)
 	}
 
+	resultMu.Lock()
+	responseError := lastError
+	responseFirstOffset := firstOffset
+	responseLastOffset := lastOffset
+	resultMu.Unlock()
+
 	return &types.PublishBatchResponse{
-		Success:        errorCount == 0 && duplicateCount == 0,
-		Error:          lastError,
-		PublishedCount: publishedCount,
-		DuplicateCount: duplicateCount,
-		ErrorCount:     errorCount,
-		FirstOffset:    firstOffset,
-		LastOffset:     lastOffset,
+		// Duplicate IDs are an idempotent result, not a failed RPC. This is
+		// important because clients must not retry an entire batch when only
+		// some IDs were already accepted.
+		Success:        finalErrorCount == 0,
+		Error:          responseError,
+		PublishedCount: finalPublishedCount,
+		DuplicateCount: finalDuplicateCount,
+		ErrorCount:     finalErrorCount,
+		FirstOffset:    responseFirstOffset,
+		LastOffset:     responseLastOffset,
 	}, nil
 }
 
