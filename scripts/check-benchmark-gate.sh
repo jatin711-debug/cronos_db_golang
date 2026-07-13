@@ -16,11 +16,42 @@ if [[ ! -f "$BASELINE_FILE" ]]; then
 fi
 
 echo "[bench-gate] Running benchmark (this may take ~30s)..."
-CGO_ENABLED=0 go test ./internal/storage \
+
+# `make bench-gate` invokes this script through bash. On Windows that may be
+# WSL bash, whose non-login PATH does not contain the host Go installation.
+# Resolve a usable Go binary explicitly so the gate fails with a useful error
+# instead of silently stopping at the benchmark command.
+GO_BIN="${GO_BIN:-}"
+if [[ -z "$GO_BIN" ]]; then
+    for candidate in go "/mnt/c/Program Files/Go/bin/go.exe" "/c/Program Files/Go/bin/go.exe" \
+        /usr/local/go/bin/go /snap/bin/go "$HOME/go/bin/go"; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            GO_BIN="$candidate"
+            break
+        fi
+        if [[ -x "$candidate" ]]; then
+            GO_BIN="$candidate"
+            break
+        fi
+    done
+fi
+if [[ -z "$GO_BIN" ]]; then
+    echo "[bench-gate] Go executable not found. Set GO_BIN to its path."
+    exit 1
+fi
+
+CURRENT_FILE="$(mktemp "${TMPDIR:-/tmp}/cronos_bench_current.XXXXXX")"
+trap 'rm -f "$CURRENT_FILE"' EXIT
+
+if ! CGO_ENABLED=0 "$GO_BIN" test ./internal/storage \
     -bench="$BENCH_PATTERN" \
     -benchtime=3s \
     -count=3 \
-    > /tmp/cronos_bench_current.txt 2>/dev/null
+    > "$CURRENT_FILE" 2>&1; then
+    echo "[bench-gate] Benchmark command failed: $GO_BIN"
+    tail -80 "$CURRENT_FILE"
+    exit 1
+fi
 
 avg_mbps() {
     awk '/MB\/s/ {
@@ -41,7 +72,7 @@ avg_mbps() {
 }
 
 baseline=$(avg_mbps "$BASELINE_FILE")
-current=$(avg_mbps /tmp/cronos_bench_current.txt)
+current=$(avg_mbps "$CURRENT_FILE")
 
 echo "[bench-gate] Baseline: ${baseline} MB/s"
 echo "[bench-gate] Current:  ${current} MB/s"

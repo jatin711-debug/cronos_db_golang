@@ -64,6 +64,7 @@ type ClusterLoadTestConfig struct {
 	FailoverAfter  time.Duration // When to simulate node failure
 	BatchMode      bool          // Use batch publish API
 	BatchSize      int           // Events per batch
+	AllowDuplicate bool          // Skip deduplication for raw throughput benchmarks
 	PartitionCount int           // Total cluster partitions (for route discovery)
 }
 
@@ -188,6 +189,7 @@ func main() {
 	failoverAfter := flag.Duration("failover-after", 10*time.Second, "When to simulate failover")
 	batchMode := flag.Bool("batch", false, "Use batch publish API for higher throughput")
 	batchSize := flag.Int("batch-size", 100, "Events per batch when using batch mode")
+	allowDuplicate := flag.Bool("allow-duplicate", true, "Allow duplicate IDs to bypass deduplication in batch mode")
 	partitionCount := flag.Int("partition-count", 16, "Total number of partitions in the cluster")
 
 	flag.Parse()
@@ -214,6 +216,7 @@ func main() {
 		FailoverAfter:  *failoverAfter,
 		BatchMode:      *batchMode,
 		BatchSize:      *batchSize,
+		AllowDuplicate: *allowDuplicate,
 		PartitionCount: *partitionCount,
 	}
 
@@ -231,6 +234,7 @@ func main() {
 	fmt.Printf("║ Round Robin:  %-48v ║\n", config.RoundRobin)
 	fmt.Printf("║ Batch Mode:   %-48v ║\n", config.BatchMode)
 	fmt.Printf("║ Batch Size:   %-48d ║\n", config.BatchSize)
+	fmt.Printf("║ Allow Dup:    %-48v ║\n", config.AllowDuplicate)
 	fmt.Printf("║ Failover:     %-48v ║\n", config.TestFailover)
 	fmt.Println("╚═══════════════════════════════════════════════════════════════╝")
 	fmt.Println()
@@ -325,6 +329,9 @@ func runClusterLoadTest(config ClusterLoadTestConfig) *ClusterMetrics {
 		log.Fatalf("Failed to discover partition leaders: %v", err)
 	}
 	logPartitionLeaders(config, leadersByPartition)
+	// Exclude health checks, connection setup, and metadata discovery from the
+	// throughput denominator.
+	metrics.StartTime = time.Now()
 
 	// Start progress reporter
 	done := make(chan struct{})
@@ -369,13 +376,13 @@ func runClusterLoadTest(config ClusterLoadTestConfig) *ClusterMetrics {
 		}
 	} else {
 		// Per-node: publishers are dedicated to specific nodes
-		for _, node := range config.Nodes {
+		for nodeIdx := range config.Nodes {
 			for pubIdx := 0; pubIdx < config.NumPublishers; pubIdx++ {
 				wg.Add(1)
-				go func(n ClusterNode, pid int) {
+				go func(nIdx, pid int) {
 					defer wg.Done()
-					runNodePublisher(config, metrics, n, pid)
-				}(node, pubIdx)
+					runNodePublisher(config, metrics, &config.Nodes[nIdx], pid)
+				}(nodeIdx, pubIdx)
 			}
 		}
 	}
@@ -512,18 +519,16 @@ func runBatchPublisher(config ClusterLoadTestConfig, metrics *ClusterMetrics, pu
 			partitionBatchCounts[partitionID]++
 		}
 
-		eventsInBatch := int64(batchEnd - batchStart)
-
 		// Send to different nodes IN PARALLEL
 		var batchWg sync.WaitGroup
 		for nodeIdx, events := range eventsByNode {
 			batchWg.Add(1)
 			go func(nIdx int, evts []*types.Event) {
 				defer batchWg.Done()
-				node := config.Nodes[nIdx]
+				node := &config.Nodes[nIdx]
 				// Round-robin across connections for this node
 				client := node.nextClient()
-				req := &types.PublishBatchRequest{Events: evts, AllowDuplicate: true}
+				req := &types.PublishBatchRequest{Events: evts, AllowDuplicate: config.AllowDuplicate}
 
 				start := time.Now()
 				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -553,7 +558,6 @@ func runBatchPublisher(config ClusterLoadTestConfig, metrics *ClusterMetrics, pu
 		batchWg.Wait()
 		metrics.recordPartitionBatch(partitionBatchCounts)
 
-		_ = eventsInBatch // Progress tracked via TotalPublished
 	}
 }
 
@@ -572,7 +576,7 @@ func runRoundRobinPublisher(config ClusterLoadTestConfig, metrics *ClusterMetric
 		if !ok {
 			nodeIdx = (publisherID + i) % len(config.Nodes)
 		}
-		node := config.Nodes[nodeIdx]
+		node := &config.Nodes[nodeIdx]
 		client := node.nextClient()
 		scheduleTime := time.Now().Add(config.ScheduleDelay)
 
@@ -613,7 +617,7 @@ func runRoundRobinPublisher(config ClusterLoadTestConfig, metrics *ClusterMetric
 }
 
 // runNodePublisher sends all events to a specific node
-func runNodePublisher(config ClusterLoadTestConfig, metrics *ClusterMetrics, node ClusterNode, publisherID int) {
+func runNodePublisher(config ClusterLoadTestConfig, metrics *ClusterMetrics, node *ClusterNode, publisherID int) {
 	payload := make([]byte, config.PayloadSize)
 	rand.Read(payload)
 

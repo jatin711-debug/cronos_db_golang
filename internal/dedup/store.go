@@ -130,6 +130,16 @@ func (m *MemoryStore) Exists(messageID string) (bool, error) {
 	return exists, nil
 }
 
+// RollbackBatch removes the given message IDs, undoing prior CheckAndStore claims.
+func (m *MemoryStore) RollbackBatch(messageIDs []string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, id := range messageIDs {
+		delete(m.entries, id)
+	}
+	return nil
+}
+
 // PruneExpired removes expired entries
 func (m *MemoryStore) PruneExpired() (int, error) {
 	m.mu.Lock()
@@ -228,6 +238,26 @@ func (m *Manager) IsDuplicateBatch(messageIDs []string, offsets []int64) ([]bool
 // BatchDedupStore is an optional interface for stores that support batch operations
 type BatchDedupStore interface {
 	CheckAndStoreBatch(messageIDs []string, offsets []int64) ([]bool, error)
+}
+
+// RollbackDedupStore is an optional interface for stores that can undo a claim
+// made by CheckAndStore/CheckAndStoreBatch.
+type RollbackDedupStore interface {
+	RollbackBatch(messageIDs []string) error
+}
+
+// RollbackBatch undoes dedup claims for the given message IDs. It is called when
+// a durable write that followed a successful dedup claim fails, so that a client
+// retry of the same message ID is not incorrectly rejected as a duplicate. It is
+// a no-op for stores that do not support rollback.
+func (m *Manager) RollbackBatch(messageIDs []string) error {
+	if len(messageIDs) == 0 {
+		return nil
+	}
+	if rb, ok := m.store.(RollbackDedupStore); ok {
+		return rb.RollbackBatch(messageIDs)
+	}
+	return nil
 }
 
 // PruneExpired removes expired dedup entries from the underlying store

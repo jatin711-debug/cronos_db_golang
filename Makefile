@@ -7,7 +7,7 @@
 
 .PHONY: help print-config build ensure-build-dir rust-dedup test test-unit test-integration test-chaos proto clean clean-data \
 	verify-env verify-tag-env verify-release-env tag-preflight release-preflight lint ci tag tag-push release publish \
-	node1 node2 node3 cluster loadtest loadtest-batch loadtest-max loadtest-small loadtest-throughput health \
+	node1 node2 node3 cluster loadtest loadtest-single loadtest-batch loadtest-max loadtest-small loadtest-throughput health \
 	docker docker-build docker-build-no-cache docker-build-hub docker-push docker-push-hub docker-single docker-cluster docker-logs docker-down docker-clean \
 	observability-up observability-down
 
@@ -63,11 +63,16 @@ MKDIR_BUILD_CMD = powershell -NoProfile -Command "New-Item -ItemType Directory -
 VERIFY_RUST_LIB_CMD = powershell -NoProfile -Command "if (!(Test-Path '$(RUST_TARGET_DIR)/$(RUST_SHARED_LIB)')) { throw 'Rust artifact missing: $(RUST_TARGET_DIR)/$(RUST_SHARED_LIB)' }"
 STAGE_RUST_LIB_CMD = powershell -NoProfile -Command "New-Item -ItemType Directory -Force '$(RUST_STAGE_DIR)' | Out-Null; New-Item -ItemType Directory -Force '$(BUILD_DIR)' | Out-Null; Copy-Item -Force '$(RUST_TARGET_DIR)/$(RUST_SHARED_LIB)' '$(RUST_STAGE_DIR)/'; Copy-Item -Force '$(RUST_TARGET_DIR)/$(RUST_SHARED_LIB)' './'; Copy-Item -Force '$(RUST_TARGET_DIR)/$(RUST_SHARED_LIB)' '$(BUILD_DIR)/'; if (Test-Path '$(RUST_TARGET_DIR)/$(RUST_LIB_BASENAME).dll.lib') { Copy-Item -Force '$(RUST_TARGET_DIR)/$(RUST_LIB_BASENAME).dll.lib' '$(RUST_STAGE_DIR)/'; Copy-Item -Force '$(RUST_TARGET_DIR)/$(RUST_LIB_BASENAME).dll.lib' './'; Copy-Item -Force '$(RUST_TARGET_DIR)/$(RUST_LIB_BASENAME).dll.lib' '$(BUILD_DIR)/'; Copy-Item -Force '$(RUST_TARGET_DIR)/$(RUST_LIB_BASENAME).dll.exp' '$(RUST_STAGE_DIR)/' -ErrorAction SilentlyContinue }"
 CLEAN_BUILD_CMD = powershell -NoProfile -Command "if (Test-Path '$(BUILD_DIR)') { Remove-Item -Recurse -Force '$(BUILD_DIR)' }"
-CLEAN_DATA_CMD = powershell -NoProfile -Command "foreach ($$d in @('data/node1','data/node2','data/node3')) { if (Test-Path $$d) { Remove-Item -Recurse -Force $$d } }"
+CLEAN_DATA_CMD = powershell -NoProfile -Command "foreach ($$d in @('$(DATA_ROOT)/node1','$(DATA_ROOT)/node2','$(DATA_ROOT)/node3')) { if (Test-Path $$d) { Remove-Item -Recurse -Force $$d } }"
 
-# On Windows, placing the DLL in repo root and internal/dedup is generally
-# sufficient for go run/go test dynamic loading in local workflows.
-GO_RUNTIME_PREFIX :=
+# On Windows the cgo-linked cronos_dedup.dll must be on the DLL search path when
+# go runs the test/server binaries. Their working directory is the package dir,
+# which does not contain the DLL, so a repo-root copy alone is not found. Prepend
+# the staged DLL directory to PATH — the Windows equivalent of the Unix
+# LD_LIBRARY_PATH line above. cygpath converts make's mixed-form abspath (D:/...)
+# into the MSYS form (/d/...) that a shell PATH list requires; the D:/... form is
+# mis-parsed as two entries and the DLL fails to load (0xC0000135).
+GO_RUNTIME_PREFIX = PATH="$$(cygpath -u '$(abspath $(RUST_STAGE_DIR))'):$$PATH"
 
 VERIFY_GO_CMD = powershell -NoProfile -Command "if (-not (Get-Command go -ErrorAction SilentlyContinue)) { Write-Error '[verify-env] Missing required tool: go'; exit 1 }"
 VERIFY_CARGO_CMD = powershell -NoProfile -Command "if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) { Write-Error '[verify-env] Missing required tool: cargo'; exit 1 }"
@@ -102,7 +107,7 @@ MKDIR_BUILD_CMD = mkdir -p "$(BUILD_DIR)"
 VERIFY_RUST_LIB_CMD = test -f "$(RUST_TARGET_DIR)/$(RUST_SHARED_LIB)" || (echo "Rust artifact missing: $(RUST_TARGET_DIR)/$(RUST_SHARED_LIB)" && exit 1)
 STAGE_RUST_LIB_CMD = mkdir -p "$(RUST_STAGE_DIR)" && mkdir -p "$(BUILD_DIR)" && cp -f "$(RUST_TARGET_DIR)/$(RUST_SHARED_LIB)" "$(RUST_STAGE_DIR)/" && cp -f "$(RUST_TARGET_DIR)/$(RUST_SHARED_LIB)" "$(BUILD_DIR)/"
 CLEAN_BUILD_CMD = rm -rf "$(BUILD_DIR)"
-CLEAN_DATA_CMD = rm -rf data/node1 data/node2 data/node3
+CLEAN_DATA_CMD = rm -rf "$(DATA_ROOT)/node1" "$(DATA_ROOT)/node2" "$(DATA_ROOT)/node3"
 
 # Ensure the Rust shared library is discoverable by dynamic linker for run/test.
 GO_RUNTIME_PREFIX = $(RUST_RUNTIME_ENV)="$(abspath $(RUST_TARGET_DIR)):$$$(RUST_RUNTIME_ENV)"
@@ -134,7 +139,9 @@ REPLICATION_FACTOR ?= 1
 FSYNC_MODE ?= periodic
 FLUSH_INTERVAL_MS ?= 100
 INDEX_INTERVAL ?= 4096
-SEGMENT_SIZE_BYTES ?= 1073741824
+# 512MB matches the server default and avoids allocating 1GB per active
+# partition. Override for large-disk benchmarks when rotation cost matters.
+SEGMENT_SIZE_BYTES ?= 536870912
 VIRTUAL_NODES ?= 2048
 MAX_CREDITS ?= 50000
 ACK_TIMEOUT ?= 60s
@@ -143,6 +150,13 @@ TRACING_EXPORTER ?= otlp
 TRACING_OTLP_ENDPOINT ?= 127.0.0.1:4317
 TRACING_SAMPLE_RATIO ?= 0.01
 TRACING_INSECURE ?= true
+DATA_ROOT ?= ./data
+NODE1_GRPC ?= 127.0.0.1:9000
+NODE1_HTTP ?= 127.0.0.1:8080
+NODE2_GRPC ?= 127.0.0.1:9001
+NODE2_HTTP ?= 127.0.0.1:8081
+NODE3_GRPC ?= 127.0.0.1:9002
+NODE3_HTTP ?= 127.0.0.1:8082
 
 # Load test settings
 NODES ?= 3
@@ -153,6 +167,10 @@ SCHEDULE_DELAY ?= 0
 TOPIC ?= cluster-loadtest
 ROUND_ROBIN ?= true
 BATCH_SIZE ?= 4000
+LOADTEST_BATCH ?= true
+LOADTEST_ALLOW_DUPLICATE ?= true
+THROUGHPUT_BATCH_SIZE ?= 2000
+LOADTEST_NODE_FLAGS = -node1-grpc=$(NODE1_GRPC) -node1-http=$(NODE1_HTTP) -node2-grpc=$(NODE2_GRPC) -node2-http=$(NODE2_HTTP) -node3-grpc=$(NODE3_GRPC) -node3-http=$(NODE3_HTTP)
 
 print-config:
 	@echo Platform:            $(PLATFORM)
@@ -183,9 +201,10 @@ help:
 	@echo   make health         - Check node health endpoints
 	@echo.
 	@echo Load Test
-	@echo   make loadtest       - Run single-event mode cluster load test
+	@echo   make loadtest       - Run batch mode cluster load test (LOADTEST_BATCH=false for single-event mode)
+	@echo   make loadtest-single - Run single-event mode cluster load test
 	@echo   make loadtest-batch - Run batch mode cluster load test
-		@echo   make loadtest-max   - Recommended max-throughput profile
+	@echo   make loadtest-max   - Recommended max-throughput profile
 	@echo   make loadtest-throughput - Aggressive throughput benchmark (compiled binary, large payload)
 	@echo.
 	@echo Docker
@@ -370,9 +389,9 @@ node1: build
 		--tracing-otlp-endpoint=$(TRACING_OTLP_ENDPOINT) \
 		--tracing-sample-ratio=$(TRACING_SAMPLE_RATIO) \
 		--tracing-insecure=$(TRACING_INSECURE) \
-		--data-dir=./data/node1 \
-		--grpc-addr=127.0.0.1:9000 \
-		--http-addr=127.0.0.1:8080 \
+		--data-dir=$(DATA_ROOT)/node1 \
+		--grpc-addr=$(NODE1_GRPC) \
+		--http-addr=$(NODE1_HTTP) \
 		--cluster-gossip-addr=127.0.0.1:7946 \
 		--cluster-grpc-addr=127.0.0.1:7947 \
 		--cluster-raft-addr=127.0.0.1:7948
@@ -398,9 +417,9 @@ node2: build
 		--tracing-otlp-endpoint=$(TRACING_OTLP_ENDPOINT) \
 		--tracing-sample-ratio=$(TRACING_SAMPLE_RATIO) \
 		--tracing-insecure=$(TRACING_INSECURE) \
-		--data-dir=./data/node2 \
-		--grpc-addr=127.0.0.1:9001 \
-		--http-addr=127.0.0.1:8081 \
+		--data-dir=$(DATA_ROOT)/node2 \
+		--grpc-addr=$(NODE2_GRPC) \
+		--http-addr=$(NODE2_HTTP) \
 		--cluster-gossip-addr=127.0.0.1:7956 \
 		--cluster-grpc-addr=127.0.0.1:7957 \
 		--cluster-raft-addr=127.0.0.1:7958 \
@@ -427,9 +446,9 @@ node3: build
 		--tracing-otlp-endpoint=$(TRACING_OTLP_ENDPOINT) \
 		--tracing-sample-ratio=$(TRACING_SAMPLE_RATIO) \
 		--tracing-insecure=$(TRACING_INSECURE) \
-		--data-dir=./data/node3 \
-		--grpc-addr=127.0.0.1:9002 \
-		--http-addr=127.0.0.1:8082 \
+		--data-dir=$(DATA_ROOT)/node3 \
+		--grpc-addr=$(NODE3_GRPC) \
+		--http-addr=$(NODE3_HTTP) \
 		--cluster-gossip-addr=127.0.0.1:7966 \
 		--cluster-grpc-addr=127.0.0.1:7967 \
 		--cluster-raft-addr=127.0.0.1:7968 \
@@ -443,16 +462,23 @@ cluster:
 	@echo Node 1 must be started first (bootstrap node).
 
 loadtest: build
+ifeq ($(LOADTEST_BATCH),true)
+	$(BUILD_DIR)/cluster_loadtest$(EXE_EXT) $(LOADTEST_NODE_FLAGS) -nodes=$(NODES) -publishers=$(PUBLISHERS) -events=$(EVENTS) -payload=$(PAYLOAD) -delay=$(SCHEDULE_DELAY) -topic=$(TOPIC) -round-robin=$(ROUND_ROBIN) -batch -batch-size=$(BATCH_SIZE) -allow-duplicate=$(LOADTEST_ALLOW_DUPLICATE) -partition-count=$(PARTITION_COUNT)
+else
+	$(BUILD_DIR)/cluster_loadtest$(EXE_EXT) $(LOADTEST_NODE_FLAGS) -nodes=$(NODES) -publishers=$(PUBLISHERS) -events=$(EVENTS) -payload=$(PAYLOAD) -delay=$(SCHEDULE_DELAY) -topic=$(TOPIC) -round-robin=$(ROUND_ROBIN) -partition-count=$(PARTITION_COUNT)
+endif
+
+loadtest-single: build
 	$(BUILD_DIR)/cluster_loadtest$(EXE_EXT) -nodes=$(NODES) -publishers=$(PUBLISHERS) -events=$(EVENTS) -payload=$(PAYLOAD) -delay=$(SCHEDULE_DELAY) -topic=$(TOPIC) -round-robin=$(ROUND_ROBIN) -partition-count=$(PARTITION_COUNT)
 
 loadtest-batch: build
-	$(BUILD_DIR)/cluster_loadtest$(EXE_EXT) -nodes=$(NODES) -publishers=$(PUBLISHERS) -events=$(EVENTS) -payload=$(PAYLOAD) -delay=$(SCHEDULE_DELAY) -topic=$(TOPIC) -round-robin=$(ROUND_ROBIN) -batch -batch-size=$(BATCH_SIZE) -partition-count=$(PARTITION_COUNT)
+	$(BUILD_DIR)/cluster_loadtest$(EXE_EXT) $(LOADTEST_NODE_FLAGS) -nodes=$(NODES) -publishers=$(PUBLISHERS) -events=$(EVENTS) -payload=$(PAYLOAD) -delay=$(SCHEDULE_DELAY) -topic=$(TOPIC) -round-robin=$(ROUND_ROBIN) -batch -batch-size=$(BATCH_SIZE) -allow-duplicate=$(LOADTEST_ALLOW_DUPLICATE) -partition-count=$(PARTITION_COUNT)
 
 loadtest-max: build
-	$(BUILD_DIR)/cluster_loadtest$(EXE_EXT) -nodes=3 -publishers=32 -events=200000 -payload=256 -delay=0 -topic=cluster-loadtest -round-robin=true -batch -batch-size=4000 -partition-count=16
+	$(BUILD_DIR)/cluster_loadtest$(EXE_EXT) $(LOADTEST_NODE_FLAGS) -nodes=3 -publishers=32 -events=200000 -payload=256 -delay=0 -topic=cluster-loadtest -round-robin=true -batch -batch-size=4000 -allow-duplicate=$(LOADTEST_ALLOW_DUPLICATE) -partition-count=$(PARTITION_COUNT)
 
 loadtest-throughput: build
-	$(BUILD_DIR)/cluster_loadtest$(EXE_EXT) -nodes=3 -publishers=48 -events=200000 -payload=4096 -delay=0 -topic=cluster-loadtest -round-robin=true -batch -batch-size=4000 -partition-count=$(PARTITION_COUNT)
+	$(BUILD_DIR)/cluster_loadtest$(EXE_EXT) $(LOADTEST_NODE_FLAGS) -nodes=3 -publishers=48 -events=200000 -payload=4096 -delay=0 -topic=cluster-loadtest -round-robin=true -batch -batch-size=$(THROUGHPUT_BATCH_SIZE) -allow-duplicate=$(LOADTEST_ALLOW_DUPLICATE) -partition-count=$(PARTITION_COUNT)
 
 loadtest-small: build
 	$(BUILD_DIR)/cluster_loadtest$(EXE_EXT) -publishers=10 -events=1000

@@ -378,7 +378,7 @@ Representative latency in batch mode is typically P50 ~100-150µs and P99 under 
 | Batch WAL + Batch Schedule | Single lock per 1000 events |
 | 32-shard dispatcher | Lock contention eliminated |
 | PebbleDB NoSync + disabled WAL | Our WAL provides durability |
-| FNV-1a routing (not SHA-256) | ~5ns partition lookup |
+| FNV-1a event partitioning; SHA-256 node ownership ring | Stable routing with balanced small-cluster placement |
 | Atomic CAS credits | Lock-free flow control |
 | Cold store (offsets only, ~16B/key) | Millions of far-future events without RAM bloat |
 | Retry heap (non-blocking) | `timeoutLoop` stays responsive under retry storms |

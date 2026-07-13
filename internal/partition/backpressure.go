@@ -133,6 +133,15 @@ func (bp *BackpressureManager) SetRateLimiter(partitionID int32, maxRate, burstS
 
 // CanAccept checks if a partition can accept new events considering all backpressure signals.
 func (bp *BackpressureManager) CanAccept(partitionID int32) bool {
+	return bp.CanAcceptN(partitionID, 1)
+}
+
+// CanAcceptN checks if a partition can accept count events. Batch admission
+// consumes the full rate-limit cost so batching cannot bypass backpressure.
+func (bp *BackpressureManager) CanAcceptN(partitionID int32, count int64) bool {
+	if count <= 0 {
+		return true
+	}
 	// Check memory first (global backpressure)
 	if bp.memoryMonitor != nil && bp.memoryMonitor.IsOverLimit() {
 		return false
@@ -143,7 +152,7 @@ func (bp *BackpressureManager) CanAccept(partitionID int32) bool {
 	limiter, exists := bp.rateLimiters[partitionID]
 	bp.mu.RUnlock()
 
-	if exists && !limiter.TryConsume(1) {
+	if exists && !limiter.TryConsume(count) {
 		return false
 	}
 

@@ -331,3 +331,29 @@ func TestAccountant_AllowPublish_Refund(t *testing.T) {
 		}
 	}
 }
+
+func TestAccountant_ReservePublishBatch_IsAtomic(t *testing.T) {
+	a := NewAccountant()
+	a.SetLimits("tenant-1", Limits{MaxInFlight: 4, MaxStorageBytes: 400})
+
+	const workers = 32
+	results := make(chan bool, workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			results <- a.ReservePublishBatch("tenant-1", 1, 100)
+		}()
+	}
+
+	accepted := 0
+	for i := 0; i < workers; i++ {
+		if <-results {
+			accepted++
+		}
+	}
+	if accepted != 4 {
+		t.Fatalf("expected exactly 4 reservations, got %d", accepted)
+	}
+	if inFlight, bytes := a.GetUsage("tenant-1"); inFlight != 4 || bytes != 400 {
+		t.Fatalf("unexpected reserved usage: inFlight=%d bytes=%d", inFlight, bytes)
+	}
+}

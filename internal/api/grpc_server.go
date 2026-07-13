@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"runtime"
 	"time"
 
 	"github.com/jatin711-debug/cronos_db_golang/internal/audit"
@@ -118,10 +119,19 @@ func NewGRPCServer(config *Config) (*GRPCServer, error) {
 		)
 	}
 
+	// NumStreamWorkers bounds the pool of goroutines that process incoming
+	// streams instead of spawning one per stream, reducing goroutine churn and
+	// scheduler pressure under many concurrent Subscribe/Ack streams.
+	streamWorkers := runtime.NumCPU()
+	if streamWorkers < 1 {
+		streamWorkers = 1
+	}
+
 	opts := []grpc.ServerOption{
 		grpc.MaxRecvMsgSize(config.MaxRecvMsgSize),
 		grpc.MaxSendMsgSize(config.MaxSendMsgSize),
 		grpc.MaxConcurrentStreams(10000),
+		grpc.NumStreamWorkers(uint32(streamWorkers)),
 		grpc.InitialWindowSize(16 * 1024 * 1024),
 		grpc.InitialConnWindowSize(32 * 1024 * 1024),
 		grpc.WriteBufferSize(4 * 1024 * 1024),

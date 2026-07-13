@@ -27,7 +27,7 @@ type FsyncMode int
 const (
 	FsyncPeriodic   FsyncMode = iota // Sync in background flush loop
 	FsyncEveryEvent                  // Sync after every write (safest, slowest)
-	FsyncBatch                       // Sync in background flush loop (like periodic)
+	FsyncBatch                       // Sync after each append request via group commit
 )
 
 // ParseFsyncMode converts a string to FsyncMode enum
@@ -59,9 +59,9 @@ type WAL struct {
 	partitionLabel     string // cached string for metrics
 	segments           []*Segment
 	activeSegment      *Segment
-	nextSegment        *Segment    // Pre-created next segment for fast rotation
-	nextSegMu          sync.Mutex  // Protects nextSegment
-	preCreateTriggered atomic.Bool // Atomic flag to avoid duplicate pre-creation goroutines
+	nextSegment        *Segment     // Pre-created next segment for fast rotation
+	nextSegMu          sync.Mutex   // Protects nextSegment
+	preCreateTriggered atomic.Bool  // Atomic flag to avoid duplicate pre-creation goroutines
 	nextOffset         atomic.Int64 // Next offset to assign; atomically reserved outside w.mu
 	highWatermark      int64
 	appendSeq          atomic.Int64 // Next offset that must be appended; enforces in-order segment writes
@@ -311,17 +311,35 @@ func releasePreparedSlice(prepared []*PreparedRecord) {
 // The record format v2 is: [crc32 4][term 8][offset 8][schedule_ts 8][msgID len 2][msgID]
 // [topic len 2][topic][payload len 4][payload][checksum 4][meta count 2][meta...].
 func PrepareRecord(event *types.Event, term int64) (*PreparedRecord, error) {
-	if event.Term == 0 {
-		event.Term = term
+	if event == nil {
+		return nil, fmt.Errorf("event is nil")
 	}
-	if event.Checksum == 0 && len(event.Payload) > 0 {
-		event.Checksum = crc32.ChecksumIEEE(event.Payload)
+
+	// Serialize local values instead of mutating the caller's event. Producers
+	// may reuse an event object across concurrent appenders; WAL preparation must
+	// not introduce a data race on Term or Checksum.
+	eventTerm := event.Term
+	if eventTerm == 0 {
+		eventTerm = term
+	}
+	eventChecksum := event.Checksum
+	if eventChecksum == 0 && len(event.Payload) > 0 {
+		eventChecksum = crc32.ChecksumIEEE(event.Payload)
 	}
 
 	msgIDLen := len(event.GetMessageId())
 	topicLen := len(event.Topic)
 	payloadLen := len(event.Payload)
 	metaCount := len(event.Meta)
+	maxUint16 := int(^uint16(0))
+	if msgIDLen > maxUint16 || topicLen > maxUint16 || metaCount > maxUint16 {
+		return nil, fmt.Errorf("event record field exceeds uint16 limit")
+	}
+	for key, value := range event.Meta {
+		if len(key) > maxUint16 || len(value) > maxUint16 {
+			return nil, fmt.Errorf("event metadata field exceeds uint16 limit")
+		}
+	}
 
 	// Calculate size
 	size := 4 + 4 + 8 + 8 + 8 + 2 + msgIDLen + 2 + topicLen + 4 + payloadLen + 4 + 2
@@ -331,6 +349,9 @@ func PrepareRecord(event *types.Event, term int64) (*PreparedRecord, error) {
 			return nil, fmt.Errorf("event record too large: overflow in size calculation")
 		}
 		size += metaEntrySize
+	}
+	if size > int(^uint32(0)) {
+		return nil, fmt.Errorf("event record exceeds uint32 length limit")
 	}
 
 	var buf []byte
@@ -351,7 +372,7 @@ func PrepareRecord(event *types.Event, term int64) (*PreparedRecord, error) {
 	offset += 4
 
 	// Term (8 bytes)
-	binary.BigEndian.PutUint64(buf[offset:offset+8], uint64(term))
+	binary.BigEndian.PutUint64(buf[offset:offset+8], uint64(eventTerm))
 	offset += 8
 
 	// Offset (8 bytes) - placeholder
@@ -380,7 +401,7 @@ func PrepareRecord(event *types.Event, term int64) (*PreparedRecord, error) {
 	offset += payloadLen
 
 	// Payload checksum (4 bytes)
-	binary.BigEndian.PutUint32(buf[offset:offset+4], event.Checksum)
+	binary.BigEndian.PutUint32(buf[offset:offset+4], eventChecksum)
 	offset += 4
 
 	// Meta count (2 bytes)
@@ -402,7 +423,7 @@ func PrepareRecord(event *types.Event, term int64) (*PreparedRecord, error) {
 	return &PreparedRecord{
 		Event: event,
 		Buf:   buf,
-		Term:  term,
+		Term:  eventTerm,
 	}, nil
 }
 
@@ -728,7 +749,7 @@ func (w *WAL) maybePreCreateNextSegment(nextOffset int64) {
 	}
 	w.nextSegMu.Unlock()
 
-	seg, err := NewSegment(w.dataDir, nextOffset, true, w.cipher)
+	seg, err := NewSegmentWithSize(w.dataDir, nextOffset, true, w.cipher, w.config.SegmentSizeBytes)
 	if err != nil {
 		log.Printf("[WAL-%d] failed to pre-create next segment: %v", w.partitionID, err)
 		w.preCreateTriggered.Store(false)
@@ -757,7 +778,7 @@ func (w *WAL) openActiveSegment() error {
 	}
 
 	// Create new active segment
-	segment, err := NewSegment(w.dataDir, w.nextOffset.Load(), true, w.cipher)
+	segment, err := NewSegmentWithSize(w.dataDir, w.nextOffset.Load(), true, w.cipher, w.config.SegmentSizeBytes)
 	if err != nil {
 		return fmt.Errorf("create new segment: %w", err)
 	}
@@ -910,7 +931,7 @@ func (w *WAL) rotateSegment() error {
 	if nextSeg == nil {
 		// Fallback: create synchronously
 		var err error
-		nextSeg, err = NewSegment(w.dataDir, w.nextOffset.Load(), true, w.cipher)
+		nextSeg, err = NewSegmentWithSize(w.dataDir, w.nextOffset.Load(), true, w.cipher, w.config.SegmentSizeBytes)
 		if err != nil {
 			return fmt.Errorf("create new active segment: %w", err)
 		}

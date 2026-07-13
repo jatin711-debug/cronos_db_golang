@@ -440,7 +440,11 @@ func (p *Producer) SendBatch(ctx context.Context, msgs []Message) (*BatchSendRes
 		cancel()
 		p.client.observeRequest("event.publish_batch", group.addr, start, err)
 
-		if err != nil || resp == nil || !resp.GetSuccess() {
+		// A non-nil response is authoritative. PublishBatch returns counts for
+		// logical duplicates and validation failures; those results must not be
+		// converted into N single-event RPCs. Retrying the whole batch here used
+		// to turn one duplicate into a throughput collapse.
+		if err != nil || resp == nil {
 			if err != nil && errs.IsLeaderRelated(err) {
 				p.client.MarkMetadataStale()
 			}

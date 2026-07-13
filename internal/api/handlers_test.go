@@ -16,6 +16,7 @@ type MockDedupManager struct {
 	isDuplicate      bool
 	isDuplicateBatch []bool
 	err              error
+	rolledBack       [][]string // records RollbackBatch calls for assertions
 }
 
 func (m *MockDedupManager) IsDuplicate(messageID string, offset int64) (bool, error) {
@@ -27,6 +28,13 @@ func (m *MockDedupManager) IsDuplicateBatch(messageIDs []string, offsets []int64
 		return make([]bool, len(messageIDs)), m.err
 	}
 	return m.isDuplicateBatch, m.err
+}
+
+func (m *MockDedupManager) RollbackBatch(messageIDs []string) error {
+	ids := make([]string, len(messageIDs))
+	copy(ids, messageIDs)
+	m.rolledBack = append(m.rolledBack, ids)
+	return nil
 }
 
 type MockConsumerManager struct {
@@ -152,7 +160,6 @@ func TestEventServiceHandler_Publish_Duplicate(t *testing.T) {
 
 	h := &EventServiceHandler{
 		partitionManager: pm,
-		dedupManager:     &MockDedupManager{isDuplicate: true},
 	}
 
 	ctx := context.Background()
@@ -168,6 +175,16 @@ func TestEventServiceHandler_Publish_Duplicate(t *testing.T) {
 	resp, err := h.Publish(ctx, req)
 	if err != nil {
 		t.Fatalf("Publish failed: %v", err)
+	}
+	if !resp.Success {
+		t.Fatalf("initial publish failed: %s", resp.Error)
+	}
+
+	// The partition-owned dedup store must reject the same ID on retry. Using
+	// a node-wide mock here would hide cross-partition namespace mistakes.
+	resp, err = h.Publish(ctx, req)
+	if err != nil {
+		t.Fatalf("duplicate publish failed: %v", err)
 	}
 	if resp.Success {
 		t.Error("Expected duplicate message to be rejected")
@@ -275,6 +292,44 @@ func TestEventServiceHandler_PublishBatch_DurableAck(t *testing.T) {
 	}
 	if resp.PublishedCount != 2 {
 		t.Errorf("expected 2 published events, got %d", resp.PublishedCount)
+	}
+}
+
+func TestEventServiceHandler_PublishBatch_DuplicateIsIdempotentResult(t *testing.T) {
+	skipWindows(t)
+
+	cfg := &types.Config{
+		DataDir:         t.TempDir(),
+		PartitionCount:  1,
+		TickMS:          10,
+		WheelSize:       100,
+		FsyncMode:       "periodic",
+		FlushIntervalMS: 10,
+	}
+	pm := partition.NewPartitionManager("node-1", cfg)
+	defer pm.StopAllPartitions()
+	pm.CreatePartition(0, "topic-test")
+	pm.StartPartition(0)
+
+	h := NewEventServiceHandler(pm, nil, nil)
+	event := &types.Event{
+		MessageId:  "idempotent-batch-id",
+		Topic:      "topic-test",
+		Payload:    []byte("payload"),
+		ScheduleTs: time.Now().UnixMilli() + 1000,
+	}
+
+	first, err := h.PublishBatch(context.Background(), &types.PublishBatchRequest{Events: []*types.Event{event}})
+	if err != nil || !first.Success || first.PublishedCount != 1 {
+		t.Fatalf("initial batch: response=%+v err=%v", first, err)
+	}
+
+	second, err := h.PublishBatch(context.Background(), &types.PublishBatchRequest{Events: []*types.Event{event}})
+	if err != nil {
+		t.Fatalf("duplicate batch: %v", err)
+	}
+	if !second.Success || second.DuplicateCount != 1 || second.ErrorCount != 0 {
+		t.Fatalf("duplicate should be an idempotent result, got %+v", second)
 	}
 }
 

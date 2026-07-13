@@ -27,17 +27,24 @@ import (
 
 // Partition represents a data partition
 type Partition struct {
-	ID               int32
-	Topic            string
-	DataDir          string
-	Wal              *storage.WAL
-	Scheduler        *scheduler.Scheduler
-	ConsumerGroup    *consumer.GroupManager
-	DedupStore       *dedup.Manager
-	Dispatcher       *delivery.Dispatcher
-	Worker           *delivery.Worker
-	Follower         *replication.Follower // For receiving replicated data
-	ReplLeader       *replication.Leader   // For sending replication to followers
+	ID            int32
+	Topic         string
+	DataDir       string
+	Wal           *storage.WAL
+	Scheduler     *scheduler.Scheduler
+	ConsumerGroup *consumer.GroupManager
+	DedupStore    *dedup.Manager
+	Dispatcher    *delivery.Dispatcher
+	Worker        *delivery.Worker
+	Follower      *replication.Follower // For receiving replicated data
+	ReplLeader    *replication.Leader   // For sending replication to followers
+	// ReplicateMu serializes WAL append + replication for this partition when it
+	// is a replication leader, so events reach followers in strict offset order
+	// (Leader.Replicate requires contiguous offsets and is not safe to call
+	// concurrently out of order). It is only taken on the replicated write path;
+	// RF=1 / non-leader partitions (ReplLeader == nil) never acquire it, keeping
+	// the single-node fast path fully pipelined.
+	ReplicateMu      sync.Mutex
 	Leader           bool
 	Epoch            int64  // Cluster-assigned epoch for split-brain fencing
 	MinKey           string // Minimum key boundary (inclusive)
@@ -415,8 +422,17 @@ func (pm *PartitionManager) GetPartitionForKey(key string) (*types.Partition, er
 
 // CanAccept returns true if the partition can accept new publishes without exceeding capacity limits.
 func (pm *PartitionManager) CanAccept(partitionID int32) bool {
+	return pm.CanAcceptBatch(partitionID, 1)
+}
+
+// CanAcceptBatch performs admission checks once for a batch. Queue, timing
+// wheel, and in-flight limits include the incoming batch cardinality.
+func (pm *PartitionManager) CanAcceptBatch(partitionID int32, count int64) bool {
+	if count <= 0 {
+		return true
+	}
 	// Check backpressure first (memory + rate limiting)
-	if pm.backpressureMgr != nil && !pm.backpressureMgr.CanAccept(partitionID) {
+	if pm.backpressureMgr != nil && !pm.backpressureMgr.CanAcceptN(partitionID, count) {
 		return false
 	}
 
@@ -430,24 +446,24 @@ func (pm *PartitionManager) CanAccept(partitionID int32) bool {
 	// Check admission control limits
 	if pm.config.MaxReadyQueueSize > 0 {
 		depth := partition.Scheduler.GetReadyQueueDepth()
-		if depth >= pm.config.MaxReadyQueueSize {
+		if depth+count > pm.config.MaxReadyQueueSize {
 			return false
 		}
 		// Load shedding: reject if above threshold percentage of max
 		if pm.config.LoadSheddingThreshold > 0 {
 			threshold := int64(float64(pm.config.MaxReadyQueueSize) * pm.config.LoadSheddingThreshold)
-			if depth >= threshold {
+			if depth+count >= threshold {
 				return false
 			}
 		}
 	}
 	if pm.config.MaxTimingWheelSize > 0 {
-		if partition.Scheduler.GetTimingWheelDepth() >= pm.config.MaxTimingWheelSize {
+		if partition.Scheduler.GetTimingWheelDepth()+count > pm.config.MaxTimingWheelSize {
 			return false
 		}
 	}
 	if pm.config.MaxInFlightPerPartition > 0 {
-		if partition.Dispatcher.GetStats().ActiveDeliveries >= pm.config.MaxInFlightPerPartition {
+		if partition.Dispatcher.GetStats().ActiveDeliveries+count > pm.config.MaxInFlightPerPartition {
 			return false
 		}
 	}

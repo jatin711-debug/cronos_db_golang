@@ -118,7 +118,11 @@ type DispatcherShard struct {
 	mu               sync.RWMutex
 	subscriptions    map[string]*Subscription
 	activeDeliveries map[string]*ActiveDelivery
-	dlq              *DeadLetterQueue
+	// expiry indexes activeDeliveries by ack deadline so the timeout loop pops
+	// only the entries that are actually due instead of scanning every active
+	// delivery. Guarded by mu, in lockstep with activeDeliveries.
+	expiry *deliveryExpiry
+	dlq    *DeadLetterQueue
 }
 
 // Subscription represents a subscriber.
@@ -223,6 +227,7 @@ func NewDispatcher(config *Config) *Dispatcher {
 		shards[i] = &DispatcherShard{
 			subscriptions:    make(map[string]*Subscription),
 			activeDeliveries: make(map[string]*ActiveDelivery),
+			expiry:           newDeliveryExpiry(),
 		}
 	}
 
@@ -351,6 +356,7 @@ func (d *Dispatcher) Unsubscribe(subscriptionID string) error {
 				log.Printf("[DISPATCHER] in-flight underflow: %v", err)
 			}
 			delete(shard.activeDeliveries, deliveryID)
+			shard.expiry.remove(deliveryID)
 		}
 	}
 
@@ -711,6 +717,8 @@ func (d *Dispatcher) trackDelivery(delivery *DeliveryMessage, sub *Subscription)
 	// Single time.Now() call instead of two separate calls
 	now := time.Now()
 
+	ackDeadline := now.Add(d.config.DefaultAckTimeout)
+
 	shard := d.getShard(sub.ID)
 	shard.mu.Lock()
 	shard.activeDeliveries[delivery.DeliveryID] = &ActiveDelivery{
@@ -718,9 +726,12 @@ func (d *Dispatcher) trackDelivery(delivery *DeliveryMessage, sub *Subscription)
 		Subscription:    sub,
 		Attempt:         delivery.Attempt,
 		CreatedTS:       now.UnixMilli(),
-		AckDeadline:     now.Add(d.config.DefaultAckTimeout),
+		AckDeadline:     ackDeadline,
 		CreditsConsumed: creditsConsumed,
 	}
+	// Index by deadline for O(k log n) expiry. A retry re-tracks the same
+	// delivery id, which updates the existing deadline in place.
+	shard.expiry.add(delivery.DeliveryID, ackDeadline.UnixNano())
 	shard.mu.Unlock()
 }
 
@@ -801,23 +812,34 @@ func (d *Dispatcher) timeoutLoop() {
 }
 
 func (d *Dispatcher) scanExpiredDeliveries(now time.Time) {
+	nowNano := now.UnixNano()
 	for _, shard := range d.shards {
 		shard.mu.Lock()
-		for deliveryID, active := range shard.activeDeliveries {
-			if now.After(active.AckDeadline) {
-				delete(shard.activeDeliveries, deliveryID)
-				if err := d.decInFlight(1); err != nil {
-					log.Printf("[DISPATCHER] in-flight underflow: %v", err)
-				}
+		// Pop only the deliveries whose deadline has passed; the heap yields them
+		// in deadline order and stops at the first entry still in the future.
+		for {
+			deliveryID, ok := shard.expiry.popExpired(nowNano)
+			if !ok {
+				break
+			}
+			active, exists := shard.activeDeliveries[deliveryID]
+			if !exists {
+				// Already acked/removed; the expiry entry was stale. (Removal on
+				// ack normally prevents this, but stay defensive.)
+				continue
+			}
+			delete(shard.activeDeliveries, deliveryID)
+			if err := d.decInFlight(1); err != nil {
+				log.Printf("[DISPATCHER] in-flight underflow: %v", err)
+			}
 
-				if active.Attempt < d.config.MaxRetries {
-					// Non-blocking: push to retry heap instead of sleeping inline
-					backoff := time.Duration(active.Attempt) * d.config.RetryBackoff
-					d.retryHeap.PushEntry(NewRetryEntry(active, backoff))
-				} else {
-					d.releaseCredits(active.Subscription, active.CreditsConsumed)
-					d.sendToDLQ(active, "delivery timeout after max retries")
-				}
+			if active.Attempt < d.config.MaxRetries {
+				// Non-blocking: push to retry heap instead of sleeping inline
+				backoff := time.Duration(active.Attempt) * d.config.RetryBackoff
+				d.retryHeap.PushEntry(NewRetryEntry(active, backoff))
+			} else {
+				d.releaseCredits(active.Subscription, active.CreditsConsumed)
+				d.sendToDLQ(active, "delivery timeout after max retries")
 			}
 		}
 		shard.mu.Unlock()
@@ -971,6 +993,7 @@ func (d *Dispatcher) HandleAck(deliveryID string, success bool, nextOffset int64
 		return nil
 	}
 	delete(shard.activeDeliveries, deliveryID)
+	shard.expiry.remove(deliveryID)
 	shard.mu.Unlock()
 
 	if err := d.decInFlight(1); err != nil {
@@ -1151,6 +1174,7 @@ func (d *Dispatcher) Close() {
 			}
 			delete(shard.activeDeliveries, deliveryID)
 		}
+		shard.expiry = newDeliveryExpiry()
 		shard.subscriptions = make(map[string]*Subscription)
 		shard.mu.Unlock()
 	}
