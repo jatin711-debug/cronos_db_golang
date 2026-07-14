@@ -1,6 +1,7 @@
 package partition
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -1022,7 +1023,8 @@ func (pm *PartitionManager) replicationTLSConfig() *replication.MTLSConfig {
 	}
 }
 
-// SyncPartitionFromLeader syncs a partition from its leader via bulk transfer
+// SyncPartitionFromLeader syncs a partition from its leader via bulk snapshot
+// install over the internal replication gRPC channel.
 func (pm *PartitionManager) SyncPartitionFromLeader(partitionID int32, leaderAddr string) error {
 	pm.mu.RLock()
 	partition, exists := pm.partitions[partitionID]
@@ -1042,9 +1044,11 @@ func (pm *PartitionManager) SyncPartitionFromLeader(partitionID int32, leaderAdd
 	// Set leader info
 	partition.Follower.SetLeader(fmt.Sprintf("leader-%d", partitionID), leaderAddr, 0)
 
-	// Perform bulk file sync
-	if err := partition.Follower.SyncFilesFromLeader(); err != nil {
-		return fmt.Errorf("bulk sync from leader %s: %w", leaderAddr, err)
+	// Perform bulk snapshot install.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	if err := partition.Follower.InstallSnapshot(ctx, leaderAddr, partitionID, 0); err != nil {
+		return fmt.Errorf("install snapshot from leader %s: %w", leaderAddr, err)
 	}
 
 	log.Printf("[PARTITION] Partition %d synced from leader %s", partitionID, leaderAddr)

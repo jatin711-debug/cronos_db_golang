@@ -843,8 +843,9 @@ var ConsumerGroupService_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	ReplicationService_Append_FullMethodName = "/cronos_db.ReplicationService/Append"
-	ReplicationService_Sync_FullMethodName   = "/cronos_db.ReplicationService/Sync"
+	ReplicationService_Append_FullMethodName   = "/cronos_db.ReplicationService/Append"
+	ReplicationService_Sync_FullMethodName     = "/cronos_db.ReplicationService/Sync"
+	ReplicationService_Snapshot_FullMethodName = "/cronos_db.ReplicationService/Snapshot"
 )
 
 // ReplicationServiceClient is the client API for ReplicationService service.
@@ -855,6 +856,8 @@ type ReplicationServiceClient interface {
 	Append(ctx context.Context, in *ReplicationAppendRequest, opts ...grpc.CallOption) (*ReplicationAppendResponse, error)
 	// Internal: Sync from leader
 	Sync(ctx context.Context, in *ReplicationSyncRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ReplicationSyncResponse], error)
+	// Internal: Bulk snapshot install from leader
+	Snapshot(ctx context.Context, in *ReplicationSnapshotRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ReplicationSnapshotChunk], error)
 }
 
 type replicationServiceClient struct {
@@ -894,6 +897,25 @@ func (c *replicationServiceClient) Sync(ctx context.Context, in *ReplicationSync
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type ReplicationService_SyncClient = grpc.ServerStreamingClient[ReplicationSyncResponse]
 
+func (c *replicationServiceClient) Snapshot(ctx context.Context, in *ReplicationSnapshotRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ReplicationSnapshotChunk], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &ReplicationService_ServiceDesc.Streams[1], ReplicationService_Snapshot_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[ReplicationSnapshotRequest, ReplicationSnapshotChunk]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type ReplicationService_SnapshotClient = grpc.ServerStreamingClient[ReplicationSnapshotChunk]
+
 // ReplicationServiceServer is the server API for ReplicationService service.
 // All implementations must embed UnimplementedReplicationServiceServer
 // for forward compatibility.
@@ -902,6 +924,8 @@ type ReplicationServiceServer interface {
 	Append(context.Context, *ReplicationAppendRequest) (*ReplicationAppendResponse, error)
 	// Internal: Sync from leader
 	Sync(*ReplicationSyncRequest, grpc.ServerStreamingServer[ReplicationSyncResponse]) error
+	// Internal: Bulk snapshot install from leader
+	Snapshot(*ReplicationSnapshotRequest, grpc.ServerStreamingServer[ReplicationSnapshotChunk]) error
 	mustEmbedUnimplementedReplicationServiceServer()
 }
 
@@ -917,6 +941,9 @@ func (UnimplementedReplicationServiceServer) Append(context.Context, *Replicatio
 }
 func (UnimplementedReplicationServiceServer) Sync(*ReplicationSyncRequest, grpc.ServerStreamingServer[ReplicationSyncResponse]) error {
 	return status.Errorf(codes.Unimplemented, "method Sync not implemented")
+}
+func (UnimplementedReplicationServiceServer) Snapshot(*ReplicationSnapshotRequest, grpc.ServerStreamingServer[ReplicationSnapshotChunk]) error {
+	return status.Errorf(codes.Unimplemented, "method Snapshot not implemented")
 }
 func (UnimplementedReplicationServiceServer) mustEmbedUnimplementedReplicationServiceServer() {}
 func (UnimplementedReplicationServiceServer) testEmbeddedByValue()                            {}
@@ -968,6 +995,17 @@ func _ReplicationService_Sync_Handler(srv interface{}, stream grpc.ServerStream)
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type ReplicationService_SyncServer = grpc.ServerStreamingServer[ReplicationSyncResponse]
 
+func _ReplicationService_Snapshot_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(ReplicationSnapshotRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(ReplicationServiceServer).Snapshot(m, &grpc.GenericServerStream[ReplicationSnapshotRequest, ReplicationSnapshotChunk]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type ReplicationService_SnapshotServer = grpc.ServerStreamingServer[ReplicationSnapshotChunk]
+
 // ReplicationService_ServiceDesc is the grpc.ServiceDesc for ReplicationService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -984,6 +1022,11 @@ var ReplicationService_ServiceDesc = grpc.ServiceDesc{
 		{
 			StreamName:    "Sync",
 			Handler:       _ReplicationService_Sync_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "Snapshot",
+			Handler:       _ReplicationService_Snapshot_Handler,
 			ServerStreams: true,
 		},
 	},

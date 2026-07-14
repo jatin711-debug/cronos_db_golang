@@ -92,6 +92,11 @@ type Config struct {
 	ReplicationTLSCertFile string
 	ReplicationTLSKeyFile  string
 
+	// SnapshotCatchupThreshold is the replication lag (in events) above which a
+	// follower will request a full segment snapshot instead of incremental Sync.
+	// 0 disables snapshot-driven catch-up.
+	SnapshotCatchupThreshold int64
+
 	// Auth configuration
 	AuthEnabled      bool
 	AuthJWTSecret    string // HMAC secret for JWT verification

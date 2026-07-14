@@ -43,6 +43,10 @@ const (
 	// (leader-only is sufficient). Raise it (e.g. RF=3, minISR=2) to refuse
 	// writes when the cluster degrades below a majority.
 	DefaultMinInSyncReplicas = 1
+	// DefaultSnapshotCatchupThreshold is the replication lag (in events) above
+	// which a follower will request a full segment snapshot instead of
+	// incremental event-by-event catch-up.
+	DefaultSnapshotCatchupThreshold = 10_000
 
 	// Raft configuration
 	DefaultRaftDir      = "./raft"

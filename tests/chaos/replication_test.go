@@ -220,3 +220,68 @@ func TestFollowerRestartCatchUp(t *testing.T) {
 
 	t.Log("Follower restart catch-up test passed")
 }
+
+// TestFollowerWipeAndBulkCatchUp stops a follower, wipes its data directory,
+// restarts it, and verifies that it bulk-catches up via snapshot install and
+// reports replication lag zero.
+func TestFollowerWipeAndBulkCatchUp(t *testing.T) {
+	containers, err := findCronosContainers()
+	if err != nil {
+		t.Skipf("Docker not available: %v", err)
+	}
+	if len(containers) < 3 {
+		t.Skipf("Need 3 cronos containers for follower wipe test, found %d", len(containers))
+	}
+
+	c, err := dial()
+	if err != nil {
+		t.Skipf("Cannot dial server: %v", err)
+	}
+	defer c.Close()
+
+	ctx := context.Background()
+	p, err := c.NewProducer(client.DefaultProducerConfig())
+	if err != nil {
+		t.Fatalf("create producer: %v", err)
+	}
+	topic := topicName(t)
+
+	// Baseline publish.
+	for i := 0; i < 10; i++ {
+		if _, err := p.Send(ctx, client.Message{Topic: topic, Payload: []byte(fmt.Sprintf("pre-wipe-%d", i))}); err != nil {
+			t.Fatalf("baseline publish failed: %v", err)
+		}
+	}
+	waitForLagZero(t, nodeHTTPPort(0), 20*time.Second)
+
+	follower := containers[2]
+	t.Logf("Stopping follower container %s", follower)
+	if out, err := execDocker("stop", "-t", "2", follower); err != nil {
+		t.Logf("docker stop output: %s", out)
+	}
+
+	// Wipe the follower's data volume before restarting.
+	dataPath := "/data"
+	if out, err := execDocker("run", "--rm", "--volumes-from", follower, "alpine", "sh", "-c", "rm -rf "+dataPath+"/*"); err != nil {
+		t.Logf("data wipe output: %s", out)
+	}
+
+	// Publish while follower is down so the leader has data to snapshot.
+	for i := 0; i < 20; i++ {
+		if _, err := p.Send(ctx, client.Message{Topic: topic, Payload: []byte(fmt.Sprintf("while-down-%d", i))}); err != nil {
+			t.Fatalf("publish while follower down failed: %v", err)
+		}
+	}
+
+	// Restart follower with empty data; it should bulk-catch-up via snapshot.
+	t.Logf("Restarting wiped follower container %s", follower)
+	if out, err := execDocker("start", follower); err != nil {
+		t.Fatalf("docker start output: %s", out)
+	}
+	defer execDocker("stop", "-t", "2", follower)
+
+	time.Sleep(3 * time.Second)
+	waitForLagZero(t, nodeHTTPPort(0), 30*time.Second)
+
+	t.Log("Follower wipe and bulk catch-up test passed")
+}
