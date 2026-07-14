@@ -370,6 +370,28 @@ Representative latency at the RF=1 ceiling (`periodic` fsync, batch mode): **P50
 
 > Throughput varies by CPU, disk, scheduler settings, and payload size. Re-run the provided load tests in your environment for production sizing.
 
+### Durability & Fault Tolerance
+
+With replication enabled (`--replication-factor=3 --min-insync-replicas=2`), every publish blocks until a **quorum** of replicas (leader + at least one follower) has the data. Each partition leader streams its WAL to followers over gRPC and only acknowledges the write once `minISR` replicas ack — so an acknowledged write survives a node loss, and a write that *cannot* reach quorum is **rejected rather than silently accepted**.
+
+Measured on a 3-node RF=3 / minISR=2 cluster (16 partitions, batch=4000):
+
+| Cluster state | Result | Behavior |
+|---------------|--------|----------|
+| **All 3 nodes up** | ✅ 100% success, ~200K events/sec, `replication_lag=0` | Every write replicated to both followers |
+| **1 node down** | ✅ **100% success** | Leader + 1 surviving follower still meet minISR=2 — stays available |
+| **2 nodes down** | 🛑 **Writes fail-closed** | Quorum impossible (1 < 2); publishes are **rejected**, not lost |
+
+The fail-closed rejection is explicit, e.g.:
+
+```
+replication for partition 13: not enough replicas: min-insync-replicas=2 but no connected followers
+```
+
+This is the intended safety property: the system refuses to acknowledge a write it cannot make durable, avoiding silent data loss or split-brain. Confirm replication health any time via the `cronos_replication_lag` metric (`curl http://<node>:8080/metrics | grep replication_lag`) — `0` means followers are fully caught up.
+
+> RF=1 (the default in the `make node*` / benchmark profiles) is the fast, **non-replicated** path used for throughput numbers. Enable RF≥3 + minISR≥2 for the durability guarantees above.
+
 ### What Makes It Fast
 
 | Optimization | Impact |
