@@ -1,7 +1,6 @@
 package replication
 
 import (
-	"crypto/tls"
 	"fmt"
 	"hash"
 	"hash/crc32"
@@ -14,8 +13,6 @@ import (
 	"time"
 
 	"github.com/jatin711-debug/cronos_db_golang/internal/storage"
-	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
-	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 )
 
 // Follower handles replication from leader
@@ -49,230 +46,6 @@ func NewFollower(partitionID int32, wal *storage.WAL, nodeID string, tlsConfig *
 		syncInterval: 1 * time.Second,
 		catchupMode:  false,
 	}
-}
-
-// Start starts the follower replication server. If mTLS is configured, the
-// listener requires and verifies a client certificate from the leader.
-func (f *Follower) Start(port int) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	if f.active {
-		return nil
-	}
-
-	// Listen for connections from leader
-	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
-	if err != nil {
-		return fmt.Errorf("failed to listen: %w", err)
-	}
-	if f.tlsConfig != nil && f.tlsConfig.Enabled {
-		tlsCfg, err := BuildServerTLSConfig(f.tlsConfig)
-		if err != nil {
-			listener.Close()
-			return fmt.Errorf("failed to build replication server TLS config: %w", err)
-		}
-		listener = tls.NewListener(listener, tlsCfg)
-	}
-	f.listener = listener
-	f.active = true
-
-	log.Printf("[FOLLOWER] Started replication server on port %d (tls=%v)", port, f.tlsConfig != nil && f.tlsConfig.Enabled)
-
-	utils.GoSafe("follower-accept", f.acceptLoop)
-	return nil
-}
-
-// acceptLoop accepts connections
-func (f *Follower) acceptLoop() {
-	for {
-		conn, err := f.listener.Accept()
-		if err != nil {
-			select {
-			case <-f.quit:
-				return
-			default:
-				log.Printf("[FOLLOWER] Accept error: %v", err)
-				continue
-			}
-		}
-
-		utils.GoSafe("follower-connection", func() { f.handleConnection(conn) })
-	}
-}
-
-// handleConnection handles leader connection
-func (f *Follower) handleConnection(conn net.Conn) {
-	defer conn.Close()
-
-	transport := NewTransport(conn)
-	log.Printf("[FOLLOWER] Accepted connection from %s", conn.RemoteAddr())
-
-	for {
-		msgType, payload, err := transport.ReadMessage()
-		if err != nil {
-			log.Printf("[FOLLOWER] Connection error: %v", err)
-			return
-		}
-
-		if err := f.handleMessage(transport, msgType, payload); err != nil {
-			log.Printf("[FOLLOWER] Handle message error: %v", err)
-			return
-		}
-	}
-}
-
-// handleMessage handles a protocol message
-func (f *Follower) handleMessage(t *Transport, msgType uint8, payload []byte) error {
-	switch msgType {
-	case MsgTypeHandshake:
-		hs := &HandshakeMessage{}
-		if err := hs.Decode(payload); err != nil {
-			return err
-		}
-		log.Printf("[FOLLOWER] Handshake from node %s", hs.NodeID)
-		// Ack? For now assume OK if connection accepted.
-
-	case MsgTypeAppendEntries:
-		msg := &AppendEntriesMessage{}
-		if err := msg.Decode(payload); err != nil {
-			return err
-		}
-
-		f.mu.Lock()
-
-		// Term validation: reject stale leaders, step up on newer term.
-		if msg.Term < f.epoch {
-			term := f.epoch
-			nextOffset := f.nextOffset
-			f.mu.Unlock()
-			ack := &types.ReplicationAppendResponse{
-				Success:    false,
-				LastOffset: nextOffset - 1,
-				NextOffset: nextOffset,
-				Term:       term,
-			}
-			return t.WriteProtoMessage(MsgTypeAppendAck, ack)
-		}
-		if msg.Term > f.epoch {
-			f.epoch = msg.Term
-		}
-
-		// Gap detection: the new entries must start exactly where the WAL expects.
-		expectedNext := msg.PrevLogIndex + 1
-		if expectedNext != f.nextOffset {
-			term := f.epoch
-			localNext := f.nextOffset
-			f.mu.Unlock()
-			log.Printf("[FOLLOWER] Append entries gap for partition %d: expected %d, local %d", f.partitionID, expectedNext, localNext)
-			ack := &types.ReplicationAppendResponse{
-				Success:    false,
-				LastOffset: localNext - 1,
-				NextOffset: localNext,
-				Term:       term,
-				Error:      fmt.Sprintf("offset mismatch: expected %d, local %d", expectedNext, localNext),
-			}
-			return t.WriteProtoMessage(MsgTypeAppendAck, ack)
-		}
-
-		// Append replicated events, preserving leader-assigned offsets.
-		if f.wal != nil && len(msg.Events) > 0 {
-			// Verify the batch-level checksum from the leader.
-			if msg.Checksum != 0 {
-				computed := computeBatchChecksum(msg.Events)
-				if computed != msg.Checksum {
-					term := f.epoch
-					nextOffset := f.nextOffset
-					f.mu.Unlock()
-					log.Printf("[FOLLOWER] Replication batch checksum mismatch from leader for partition %d", f.partitionID)
-					ack := &types.ReplicationAppendResponse{
-						Success:    false,
-						LastOffset: nextOffset - 1,
-						NextOffset: nextOffset,
-						Term:       term,
-						Error:      "replication batch checksum mismatch",
-					}
-					return t.WriteProtoMessage(MsgTypeAppendAck, ack)
-				}
-			}
-
-			// Stamp each event with the leader's term and a per-payload checksum.
-			for _, e := range msg.Events {
-				if e.Term == 0 {
-					e.Term = msg.Term
-				}
-				if e.Checksum == 0 && len(e.Payload) > 0 {
-					e.Checksum = crc32.ChecksumIEEE(e.Payload)
-				}
-			}
-
-			f.wal.SetCurrentTerm(msg.Term)
-			if err := f.wal.AppendReplicatedBatch(msg.Events); err != nil {
-				term := f.epoch
-				nextOffset := f.nextOffset
-				f.mu.Unlock()
-				log.Printf("[FOLLOWER] Failed to append replicated batch: %v", err)
-				ack := &types.ReplicationAppendResponse{
-					Success:    false,
-					LastOffset: nextOffset - 1,
-					NextOffset: nextOffset,
-					Term:       term,
-					Error:      err.Error(),
-				}
-				return t.WriteProtoMessage(MsgTypeAppendAck, ack)
-			}
-		}
-
-		f.nextOffset = f.wal.GetNextOffset()
-		term := f.epoch
-		lastOffset := f.nextOffset - 1
-		f.mu.Unlock()
-
-		// Send success ack
-		ack := &types.ReplicationAppendResponse{
-			Success:    true,
-			LastOffset: lastOffset,
-			NextOffset: f.nextOffset,
-			Term:       term,
-		}
-		return t.WriteProtoMessage(MsgTypeAppendAck, ack)
-
-	case MsgTypeHeartbeat:
-		msg := &HeartbeatMessage{}
-		if err := msg.Decode(payload); err != nil {
-			return err
-		}
-
-		f.mu.Lock()
-		if msg.Term < f.epoch {
-			term := f.epoch
-			lastOffset := f.nextOffset - 1
-			f.mu.Unlock()
-			ack := &types.ReplicationAppendResponse{
-				Success:    false,
-				LastOffset: lastOffset,
-				Term:       term,
-				Error:      "heartbeat term is stale",
-			}
-			return t.WriteProtoMessage(MsgTypeHeartbeatAck, ack)
-		}
-		if msg.Term > f.epoch {
-			f.epoch = msg.Term
-		}
-		term := f.epoch
-		lastOffset := f.nextOffset - 1
-		f.mu.Unlock()
-
-		// Respond to heartbeat
-		ack := &types.ReplicationAppendResponse{
-			Success:    true,
-			LastOffset: lastOffset,
-			Term:       term,
-		}
-		return t.WriteProtoMessage(MsgTypeHeartbeatAck, ack)
-	}
-
-	return nil
 }
 
 // SyncFilesFromLeader actively pulls raw disk segment files from the leader
@@ -439,14 +212,6 @@ func (f *Follower) SyncFilesFromLeader() error {
 	}
 }
 
-// AppendEvents appends replicated events to WAL (Logic moved to handleMessage)
-func (f *Follower) AppendEvents(events []*types.Event, leaderEpoch int64) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	// ... (Existing logic can be kept if needed for other paths, but we are using binary protocol now)
-	return nil
-}
-
 // GetNextOffset returns next offset to replicate
 func (f *Follower) GetNextOffset() int64 {
 	f.mu.RLock()
@@ -466,30 +231,6 @@ func (f *Follower) SetEpoch(epoch int64) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.epoch = epoch
-}
-
-// PromoteToLeader promotes this follower to become the leader
-func (f *Follower) PromoteToLeader() (*Leader, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	if !f.active {
-		return nil, fmt.Errorf("follower not active")
-	}
-
-	// Stop follower replication
-	f.active = false
-	if f.listener != nil {
-		f.listener.Close()
-	}
-
-	// Create new leader (follower-side promotion uses minISR=1; partition manager
-	// provides the configured value during normal promotion).
-	leader := NewLeader(f.partitionID, 100, 100*time.Millisecond, f.wal, 1, f.nodeID, f.tlsConfig)
-	leader.SetEpoch(f.epoch + 1)
-
-	log.Printf("[FOLLOWER] Promoted to leader for partition %d (new epoch: %d)", f.partitionID, f.epoch+1)
-	return leader, nil
 }
 
 // Stop stops the follower

@@ -182,6 +182,32 @@ make loadtest-batch PUBLISHERS=20 EVENTS=50000 BATCH_SIZE=1000
 make loadtest-batch PUBLISHERS=32 EVENTS=100000 BATCH_SIZE=4000
 ```
 
+### Windows Development
+
+The Rust bloom-filter DLL lives in `internal/dedup/cronos_dedup.dll`. On Windows,
+both the built binary and `go test` binaries need it on `PATH` because they run
+outside the repository root.
+
+**Run a single node:**
+
+```powershell
+.\scripts\run-node-windows.ps1 -NodeID node1 -GRPCAddr localhost:9000
+```
+
+**Run unit tests:**
+
+```powershell
+# From repository root
+$env:PATH = "$PWD\internal\dedup;$env:PATH"
+go test ./internal/storage/... ./internal/scheduler/... ./internal/dedup/... ./internal/partition/... ./internal/cluster/... ./internal/api/...
+```
+
+Or use the provided helper:
+
+```powershell
+.\scripts\run-tests-windows.ps1
+```
+
 ### Docker
 
 ```bash
@@ -581,8 +607,10 @@ See [proto/events.proto](proto/events.proto) for the complete specification.
 - [x] Gossip-based membership & failure detection
 - [x] Consistent hashing with virtual nodes
 - [x] Automatic partition rebalancing on join/leave
-- [x] Leader-follower async replication (binary protocol)
-- [x] Bulk segment file sync for new node bootstrap
+- [x] Leader-follower async replication over gRPC (dedicated internal listener)
+- [x] Replication mTLS on internal cluster channel
+- [x] ISR reconciliation from replication leader state
+- [ ] Bulk segment file sync for new node bootstrap (protocol retained; catch-up path in progress)
 - [x] Partition leader election on failure
 
 ### Performance ✅ Optimized (single-machine)
@@ -622,10 +650,10 @@ See [proto/events.proto](proto/events.proto) for the complete specification.
 - [x] TLS/mTLS support (enable in production)
 - [x] JWT auth support (enable in production)
 - [x] At-rest encryption support (enable in production)
-- [ ] Consumer-group metadata persistence across restarts
+- [x] Consumer-group metadata persistence across restarts
 - [ ] Replication wire checksums
-- [ ] Per-entry terms in WAL
-- [ ] Chaos testing suite
+- [x] Per-entry terms in WAL
+- [x] Chaos testing suite (Docker-based replication failover, below-minISR, follower restart)
 
 ### Remaining 🚧
 - [ ] Admin CLI & dashboard

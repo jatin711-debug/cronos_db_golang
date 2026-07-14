@@ -81,8 +81,6 @@ func TestHealthChecker_Ready_Unhealthy(t *testing.T) {
 }
 
 func TestHealthChecker_Ready_ReadOnlyWALCheck(t *testing.T) {
-	skipWindows(t)
-
 	cfg := &types.Config{
 		NodeID:         "node-1",
 		ClusterEnabled: false,
@@ -150,8 +148,6 @@ func TestHealthChecker_Ready_ReadOnlyWALCheck(t *testing.T) {
 }
 
 func TestHealthChecker_Deep_ReadOnlyWALCheck(t *testing.T) {
-	skipWindows(t)
-
 	cfg := &types.Config{
 		NodeID:         "node-1",
 		ClusterEnabled: false,
@@ -220,8 +216,6 @@ func TestHealthChecker_Deep_ReadOnlyWALCheck(t *testing.T) {
 }
 
 func TestHealthChecker_Ready_NoWALWrites(t *testing.T) {
-	skipWindows(t)
-
 	cfg := &types.Config{
 		NodeID:         "node-1",
 		ClusterEnabled: false,

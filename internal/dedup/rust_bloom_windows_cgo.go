@@ -50,11 +50,16 @@ func NewRustBloomFilter(expectedItems uint64, fpr float64) *RustBloomFilter {
 func (bf *RustBloomFilter) Add(key string) {
 	p := unsafe.StringData(key)
 	C.bloom_add(bf.ptr, (*C.uchar)(unsafe.Pointer(p)), C.size_t(len(key)))
+	runtime.KeepAlive(key)
+	runtime.KeepAlive(bf)
 }
 
 func (bf *RustBloomFilter) MayContain(key string) bool {
 	p := unsafe.StringData(key)
-	return bool(C.bloom_check(bf.ptr, (*C.uchar)(unsafe.Pointer(p)), C.size_t(len(key))))
+	result := bool(C.bloom_check(bf.ptr, (*C.uchar)(unsafe.Pointer(p)), C.size_t(len(key))))
+	runtime.KeepAlive(key)
+	runtime.KeepAlive(bf)
+	return result
 }
 
 func (bf *RustBloomFilter) MayContainBatch(keys []string) []bool {
@@ -103,17 +108,23 @@ func (bf *RustBloomFilter) MayContainBatch(keys []string) []bool {
 	for i, r := range results {
 		out[i] = bool(r)
 	}
+	runtime.KeepAlive(bf)
 	return out
 }
 
 func (bf *RustBloomFilter) Count() uint64 {
-	return uint64(C.bloom_count(bf.ptr))
+	result := uint64(C.bloom_count(bf.ptr))
+	runtime.KeepAlive(bf)
+	return result
 }
 
 func (bf *RustBloomFilter) Reset() {
 	C.bloom_reset(bf.ptr)
+	runtime.KeepAlive(bf)
 }
 
 func (bf *RustBloomFilter) MemoryUsageBytes() uint64 {
-	return uint64(C.bloom_memory_usage(bf.ptr))
+	result := uint64(C.bloom_memory_usage(bf.ptr))
+	runtime.KeepAlive(bf)
+	return result
 }

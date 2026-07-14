@@ -21,10 +21,6 @@ const (
 const (
 	MsgTypeHandshake           = 1
 	MsgTypeHandshakeAck        = 2
-	MsgTypeAppendEntries       = 3
-	MsgTypeAppendAck           = 4
-	MsgTypeHeartbeat           = 5
-	MsgTypeHeartbeatAck        = 6
 	MsgTypeFileTransferRequest = 7
 	MsgTypeFileTransferStart   = 8
 	MsgTypeFileTransferData    = 9
@@ -169,96 +165,6 @@ func (m *HandshakeMessage) Encode() ([]byte, error) {
 
 func (m *HandshakeMessage) Decode(data []byte) error {
 	m.NodeID = string(data)
-	return nil
-}
-
-// AppendEntriesMessage
-type AppendEntriesMessage struct {
-	PartitionId  int32
-	Term         int64
-	PrevLogIndex int64
-	PrevLogTerm  int64
-	CommitIndex  int64
-	Checksum     uint32
-	Events       []*types.Event
-}
-
-func (m *AppendEntriesMessage) Encode() ([]byte, error) {
-	req := &types.ReplicationAppendRequest{
-		PartitionId:        m.PartitionId,
-		Events:             m.Events,
-		ExpectedNextOffset: m.PrevLogIndex + 1,
-		Term:               m.Term,
-		PrevLogTerm:        m.PrevLogTerm,
-		Checksum:           m.Checksum,
-	}
-	return proto.Marshal(req)
-}
-
-func (m *AppendEntriesMessage) Decode(data []byte) error {
-	req := &types.ReplicationAppendRequest{}
-	if err := proto.Unmarshal(data, req); err != nil {
-		return err
-	}
-	m.PartitionId = req.PartitionId
-	m.Term = req.Term
-	m.Events = req.Events
-	m.PrevLogIndex = req.ExpectedNextOffset - 1
-	m.PrevLogTerm = req.PrevLogTerm
-	m.Checksum = req.Checksum
-	return nil
-}
-
-// AppendAckMessage
-type AppendAckMessage struct {
-	Term       int64
-	Success    bool
-	Offset     int64
-	NextOffset int64
-}
-
-func (m *AppendAckMessage) Encode() ([]byte, error) {
-	resp := &types.ReplicationAppendResponse{
-		Success:    m.Success,
-		LastOffset: m.Offset,
-		NextOffset: m.NextOffset,
-		Term:       m.Term,
-	}
-	return proto.Marshal(resp)
-}
-
-func (m *AppendAckMessage) Decode(data []byte) error {
-	resp := &types.ReplicationAppendResponse{}
-	if err := proto.Unmarshal(data, resp); err != nil {
-		return err
-	}
-	m.Success = resp.Success
-	m.Offset = resp.LastOffset
-	m.NextOffset = resp.NextOffset
-	m.Term = resp.Term
-	return nil
-}
-
-// HeartbeatMessage keeps the leader-follower connection alive and carries the
-// leader's current term and commit index so followers can detect stale leaders.
-type HeartbeatMessage struct {
-	Term        int64
-	CommitIndex int64
-}
-
-func (m *HeartbeatMessage) Encode() ([]byte, error) {
-	buf := make([]byte, 16)
-	binary.BigEndian.PutUint64(buf[0:8], uint64(m.Term))
-	binary.BigEndian.PutUint64(buf[8:16], uint64(m.CommitIndex))
-	return buf, nil
-}
-
-func (m *HeartbeatMessage) Decode(data []byte) error {
-	if len(data) < 16 {
-		return fmt.Errorf("HeartbeatMessage: data too short")
-	}
-	m.Term = int64(binary.BigEndian.Uint64(data[0:8]))
-	m.CommitIndex = int64(binary.BigEndian.Uint64(data[8:16]))
 	return nil
 }
 

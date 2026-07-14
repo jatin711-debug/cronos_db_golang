@@ -2,5 +2,8 @@
 data
 target
 bin/
+build/
 *.dll
+*.dll.lib
+*.dll.exp
 .bench.*.txt

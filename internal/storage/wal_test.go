@@ -379,4 +379,3 @@ func TestWAL_ConcurrentAppendBatch(t *testing.T) {
 		seen[ev.Offset] = struct{}{}
 	}
 }
-

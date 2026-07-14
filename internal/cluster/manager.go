@@ -333,7 +333,7 @@ func (m *Manager) performLeaderTasks() {
 }
 
 // updateReplicaOffsets queries local partition leaders and pushes their
-// follower/high-watermark offsets into the router.
+// follower/high-watermark offsets and current ISR into the router.
 func (m *Manager) updateReplicaOffsets() {
 	if m.partitionAccessor == nil || m.router == nil {
 		return
@@ -347,6 +347,10 @@ func (m *Manager) updateReplicaOffsets() {
 		offsets := m.partitionAccessor.GetPartitionReplicaOffsets(partitionID)
 		if len(offsets) > 0 {
 			m.router.UpdateReplicaOffsets(partitionID, offsets)
+		}
+		isr := m.partitionAccessor.GetPartitionInSyncReplicas(partitionID)
+		if len(isr) > 0 {
+			m.router.UpdatePartitionISR(partitionID, isr)
 		}
 	}
 }
