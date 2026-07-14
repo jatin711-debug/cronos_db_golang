@@ -6,11 +6,13 @@ Storage module provides durable append-only event persistence with indexed reads
 
 ## Key Files
 
-- [internal/storage/wal.go](../../../internal/storage/wal.go)
-- [internal/storage/segment.go](../../../internal/storage/segment.go)
-- [internal/storage/index.go](../../../internal/storage/index.go)
-- [internal/storage/backup_scheduler.go](../../../internal/storage/backup_scheduler.go)
-- [internal/storage/crypto.go](../../../internal/storage/crypto.go)
+- [internal/storage/wal.go](../../../internal/storage/wal.go) — segmented WAL, append/replay/recovery (`ReloadSegments` is also called by the follower snapshot install path).
+- [internal/storage/segment.go](../../../internal/storage/segment.go), [internal/storage/mmap_unix.go](../../../internal/storage/mmap_unix.go), [internal/storage/mmap_windows.go](../../../internal/storage/mmap_windows.go) — segment file format and platform mmap shims.
+- [internal/storage/index.go](../../../internal/storage/index.go) — sparse index for O(log N) seeks.
+- [internal/storage/fsync_coalescer.go](../../../internal/storage/fsync_coalescer.go) — the implementation behind the `batch` fsync mode; coalesces fsync calls across partitions.
+- [internal/storage/backup_scheduler.go](../../../internal/storage/backup_scheduler.go) — periodic backup scheduler loop.
+- [internal/storage/backup.go](../../../internal/storage/backup.go) — backup manifest / restore primitives (distinct from the scheduler).
+- [internal/storage/crypto.go](../../../internal/storage/crypto.go) — AES-256-GCM encryption at rest (enabled by `--encryption-enabled`).
 
 ## Main Flow
 

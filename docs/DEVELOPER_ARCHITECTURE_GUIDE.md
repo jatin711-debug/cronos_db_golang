@@ -241,13 +241,15 @@ This section is organized by feature area and tells you where to read first, wha
 
 - Purpose: external and internal RPC surface.
 - Key files:
-  - `internal/api/grpc_server.go`
+  - `internal/api/grpc_server.go` (public listener on `:9000`)
+  - `internal/api/internal_grpc_server.go` (internal cluster listener on `:7947`, registers `ReplicationServiceServer` + `RaftServiceServer`)
   - `internal/api/handlers.go`
   - `internal/api/consumer_handler.go`
   - `internal/api/partition_handler.go`
   - `internal/api/replication_server.go`
   - `internal/api/raft_server.go`
   - `internal/api/crossregion_server.go`
+  - `internal/api/transaction_handler.go` (registered on public listener via `RegisterTransactionServiceServer`)
   - `internal/api/health.go`
 - Main flow:
   - Requests enter interceptor chain (tracing, SLO, version, auth, topic limit, audit, metrics, IP limit).
@@ -424,27 +426,36 @@ flowchart LR
 
 ### 6.11 Replication (intra-cluster and cross-region)
 
-- Purpose: keep followers and remote regions in sync.
+- Purpose: keep intra-cluster followers in sync for durability, and push
+  events to remote regions for geo-resilience.
 - Key files:
-  - `internal/replication/protocol.go`
-  - `internal/replication/leader.go`
-  - `internal/replication/follower.go`
-  - `internal/replication/region.go`
-  - `internal/replication/mtls.go`
-  - `internal/api/replication_server.go`
-  - `internal/api/crossregion_server.go`
+  - `internal/replication/leader.go` — `Leader.Replicate`, `Leader.catchUpFollower`, `FollowerInfo` and ISR/quorum accounting.
+  - `internal/replication/follower.go` — `Follower.InstallSnapshot`, `Follower.dialCredentials`.
+  - `internal/replication/mtls.go` — `MTLSConfig`, `BuildClientTLSConfig`, `BuildServerTLSConfig`.
+  - `internal/replication/region.go` — `CrossRegionReplicator`, per-region batched async push.
+  - `internal/api/replication_server.go` — `ReplicationServiceHandler.Append`, `.Sync`, `.Snapshot`.
+  - `internal/api/internal_grpc_server.go` — `InternalGRPCServer` on the dedicated internal listener (default `:7947`).
+  - `internal/api/crossregion_server.go` — `CrossRegionServiceServer`.
+  - `internal/partition/manager.go` — `PartitionManager.SyncPartitionFromLeader` (trigger for bulk install).
+  - `internal/cluster/manager.go` — `Manager.JoinCluster` (the only caller of `SyncPartitionFromLeader`).
 - Main flow:
-  - Leader replication path: append batches to followers and track ISR; each `AppendEntries` batch includes a CRC32 checksum.
-  - Followers verify the batch checksum, stamp replicated events with the leader term and checksum, and append via `AppendReplicatedBatch`.
-  - The leader advances a follower's `NextOffset` only after a successful append response.
-  - Cross-region path: WAL append hook batches outgoing events per region; receiving region re-publishes to local partitions.
+  - **Happy path** — `Leader.Replicate(events)` fans the contiguous batch out concurrently to every connected follower via gRPC `ReplicationService.Append` on the internal listener. The call carries `PartitionId`, `Events`, `ExpectedNextOffset`, `Term`, `PrevLogTerm`, and an IEEE CRC32 batch checksum.
+  - **Quorum** — `Leader.Replicate` returns success to the client only after `min-insync-replicas` followers have durably appended via `WAL.AppendReplicatedBatch`.
+  - **Incremental catch-up** — when a follower reports `NextOffset < events[0].Offset`, `Leader.catchUpFollower` slices `[from, to)` from the leader's WAL into `batchSize`-sized chunks and replays them through `Append`. For very long ranges the leader also serves the server-streaming `ReplicationService.Sync` RPC.
+  - **Bulk install** — `Follower.InstallSnapshot(ctx, leaderAddr, partitionID, 0)` dials the leader over the internal listener and calls `ReplicationService.Snapshot`. The leader flushes its active segment and streams each segment + sparse-index file with a `ReplicationSnapshotHeader` (per-file IEEE CRC32, first/last offset, file size, `is_index`) followed by 1 MB data chunks and a final trailer carrying `{success, last_offset, epoch}`. The follower stages files under `<dataDir>/snapshot-staging/{segments,index}/`, verifies the last-file CRC32, closes the local WAL, atomically renames `segments`/`index` to `*.old`, moves the staged dirs into place, removes `*.old`, and calls `wal.ReloadSegments()`.
+  - **Trigger** — bulk install is invoked only by `PartitionManager.SyncPartitionFromLeader` under a 10-minute context, which is itself called from `Manager.JoinCluster` when a node joins and iterates its `router.GetLocalPartitions()`. After formation, `Manager.reconcileLocalLeadership` runs every 5s and idempotently wires up `PromoteToLeader` + `AddFollower` on every locally-led partition, which is what enables streaming `Append` on a healthy cluster.
+  - **Cross-region** — `CrossRegionReplicator` queues per region, batches (100 events / 100 ms), and pushes via `CrossRegionService.ReplicateEvents`. Best-effort, no ISR semantics.
 - Reliability decisions:
-  - Per-follower dedicated transport in `FollowerInfo` avoids connection sharing across followers.
-  - Batch-level CRC32 checksum verifies integrity end-to-end on the follower.
-  - Expected-next-offset checks on replication append.
-  - Streaming sync endpoint for catch-up.
-  - Last-write-wins conflict handling in cross-region server.
-  - Optional replication mTLS for production deployments.
+  - **Channel isolation** — replication traffic runs over `InternalGRPCServer` (default `:7947`), a separate listener from the public API on `:9000`. Public clients cannot reach replication.
+  - **Per-batch CRC32** on `ReplicationAppendRequest`; verified before `WAL.AppendReplicatedBatch`.
+  - **Per-file CRC32** on `ReplicationSnapshotHeader`; abort + cleanup on mismatch.
+  - **Term fencing** in `ReplicationServiceHandler.Append`: rejects `req.Term < p.Epoch`, steps up on newer terms. Prevents stale-leader replays after a leadership change.
+  - **Expected-next-offset check** on `Append` rejects gaps and triggers catch-up.
+  - **Quorum durability** — `min-insync-replicas` enforced before client ack. With RF=3 / minISR=2 the leader + at least one follower must ack; cluster degradation below minISR fails closed rather than silently succeeding on leader-only.
+  - **Atomic swap** during snapshot install — WAL closed before rename, matching `StopPartition`'s ordering; avoids Windows file-lock contention.
+  - **mTLS optional** — `--replication-tls-enabled` plus `--replication-tls-{ca,cert,key}-file`. Server enforces `tls.RequireAndVerifyClientCert`; both sides pin against the cluster CA. `Follower.dialCredentials` falls back to insecure credentials when the flag is off (intentional for `--dev`, refused by `config.ValidateConfig` in production).
+  - **Cross-region** is intentionally separate from intra-cluster — no ISR, last-write-wins conflict handling, fire-and-forget.
+  - **Trigger caveat** — `--snapshot-catchup-threshold` is defined and exposed (default `10000`) but **not yet consumed** by any automatic lag-driven code path. Documented as forward-compatible configuration; a far-behind follower mid-flight still does incremental `Sync`/`Append` catch-up.
 
 ### 6.12 Cross-Region Topology
 
@@ -677,12 +688,12 @@ flowchart TB
 For a developer new to the codebase:
 
 1. `cmd/api/main.go` (composition and lifecycle).
-2. `internal/api/grpc_server.go` and `internal/api/handlers.go` (entry points).
+2. `internal/api/grpc_server.go` (public API listener, interceptors), `internal/api/internal_grpc_server.go` (internal replication + Raft listener), and `internal/api/handlers.go` (entry points).
 3. `internal/partition/manager.go` (system core assembly).
 4. `internal/storage/wal.go` and `internal/scheduler/scheduler.go` (data and time model).
 5. `internal/delivery/dispatcher.go` and `internal/consumer/group.go` (delivery and ack semantics).
 6. `internal/cluster/manager.go`, `router.go`, `raft.go` (distributed control plane).
-7. `internal/replication/*` and `internal/tx/*` (advanced reliability paths).
+7. `internal/replication/*` (leader/follower/mTLS/region) and `internal/api/replication_server.go` (advanced reliability paths).
 8. `internal/compliance`, `internal/schema`, `internal/slo`, `internal/tracing` (operational hardening).
 
 ---

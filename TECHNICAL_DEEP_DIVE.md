@@ -49,9 +49,11 @@
 
 **In CronosDB** (`internal/storage/wal.go`):
 - Segmented into 512MB files
-- Each record: `[Length(4B)][CRC32(4B)][Offset(8B)][ScheduleTS(8B)][MsgID][Topic][Payload][Meta]`
-- CRC32 checksum detects corruption
+- Each record uses **WAL v2** format:
+  `[Length(4B)][CRC32(4B)][Offset(8B)][Raft Term(8B)][ScheduleTS(8B)][MsgID][Topic][Payload][Meta][Trailing Checksum(4B)]`
+- CRC32 + trailing checksum detect corruption; Raft term enables term-aware replication
 - Sparse index for O(log N) lookups
+- Upgrading from earlier builds requires a clean `--data-dir` (v2 is not backward-compatible)
 
 ### 1.3 Partitioning
 
@@ -636,7 +638,7 @@ Leader: Receives majority acks → commits → tells followers to commit
 - Strong consistency (linearizable reads)
 
 **In CronosDB**: Used only for **metadata** (who owns what partition), not for data replication.
-- Data replication: Custom binary protocol (faster, async)
+- Data replication: synchronous gRPC over a dedicated internal listener (`InternalGRPCServer`, default `:7947`), batch CRC32, quorum-acked via `--min-insync-replicas`; bulk install via `ReplicationService.Snapshot` streaming RPC with per-file CRC32
 - Metadata: Raft (strong consistency needed)
 
 **In code**: `internal/cluster/raft.go`
@@ -953,7 +955,9 @@ Segment 2 fills up → Instant swap to Segment 3 (already ready)
 | `internal/delivery/retry_queue.go` | Min-heap retry queue | Non-blocking retries |
 | `internal/cluster/raft.go` | HashiCorp Raft | Metadata consensus |
 | `internal/cluster/hashring.go` | Consistent hashing with vnodes | Minimal data movement on node changes |
-| `internal/replication/protocol.go` | Binary protocol (0xCAFEBABE) | Fast async replication |
+| `internal/replication/protocol.go` | *(removed)* | Replaced by `ReplicationService.Append / Sync / Snapshot` over gRPC (`internal/replication/follower.go`, `internal/api/replication_server.go`) |
+| `internal/replication/follower.go` | `Follower.InstallSnapshot`, `dialCredentials` | Bulk snapshot install + per-file CRC32 + atomic dir swap; mTLS-aware |
+| `internal/replication/mtls.go` | `BuildClientTLSConfig`, `BuildServerTLSConfig` | Optional CA-pinned mTLS on the internal replication channel |
 | `pkg/utils/hash.go` | FNV-1a, CRC32 | Fast hashing for routing/integrity |
 | `pkg/client/internal/connpool/` | Connection pooling | Reuse expensive connections |
 | `pkg/client/internal/hedging/` | Request hedging | Reduce tail latency |
