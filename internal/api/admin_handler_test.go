@@ -54,7 +54,7 @@ func TestAdminServiceHandler_StandaloneMode(t *testing.T) {
 	// pm is nil-safe because GetClusterTopology does not touch it in
 	// standalone mode. authCfg is nil (dev mode) so the auth check is
 	// permissive.
-	h := NewAdminServiceHandler(nil, nil, nil, "test-node")
+	h := NewAdminServiceHandler(nil, nil, nil, "test-node", t.TempDir())
 	client, teardown := dialAdminServer(t, h)
 	defer teardown()
 
@@ -91,7 +91,7 @@ func TestAdminServiceHandler_AdminAuth_Allowed(t *testing.T) {
 		},
 	}
 	authCfg := &auth.Config{Enabled: true, Policy: policy}
-	h := NewAdminServiceHandler(nil, nil, authCfg, "test-node")
+	h := NewAdminServiceHandler(nil, nil, authCfg, "test-node", t.TempDir())
 
 	if err := h.checkAdmin(auth.WithClaims(context.Background(), auth.ClaimsWithSubject("ops"))); err != nil {
 		t.Fatalf("expected admin subject to be allowed, got: %v", err)
@@ -107,7 +107,7 @@ func TestAdminServiceHandler_AdminAuth_Denied(t *testing.T) {
 		},
 	}
 	authCfg := &auth.Config{Enabled: true, Policy: policy}
-	h := NewAdminServiceHandler(nil, nil, authCfg, "test-node")
+	h := NewAdminServiceHandler(nil, nil, authCfg, "test-node", t.TempDir())
 
 	err := h.checkAdmin(auth.WithClaims(context.Background(), auth.ClaimsWithSubject("user")))
 	if err == nil {
@@ -122,8 +122,109 @@ func TestAdminServiceHandler_AdminAuth_Denied(t *testing.T) {
 // is nil (--dev mode), the handler does not enforce auth. This mirrors
 // the rest of the auth interceptor behavior in dev mode.
 func TestAdminServiceHandler_DevMode_AllowsAdmin(t *testing.T) {
-	h := NewAdminServiceHandler(nil, nil, nil, "test-node")
+	h := NewAdminServiceHandler(nil, nil, nil, "test-node", t.TempDir())
 	if err := h.checkAdmin(context.Background()); err != nil {
 		t.Fatalf("expected dev mode (nil authCfg) to permit, got: %v", err)
+	}
+}
+
+// TestAdminServiceHandler_StubRPCs_ReturnDeferred verifies that the
+// schema and tenant RPCs return structured "deferred" responses rather
+// than fake data or Unimplemented. The CLI depends on this contract
+// to surface the gap clearly to operators.
+func TestAdminServiceHandler_StubRPCs_ReturnDeferred(t *testing.T) {
+	h := NewAdminServiceHandler(nil, nil, nil, "test-node", t.TempDir())
+	client, teardown := dialAdminServer(t, h)
+	defer teardown()
+
+	ctx := context.Background()
+
+	// ListSchemas: empty success.
+	schemas, err := client.ListSchemas(ctx, &types.ListSchemasRequest{})
+	if err != nil {
+		t.Fatalf("ListSchemas: %v", err)
+	}
+	if len(schemas.Schemas) != 0 {
+		t.Errorf("expected empty Schemas slice, got %d entries", len(schemas.Schemas))
+	}
+
+	// GetSchema: returns Unimplemented (the only explicit Unimplemented).
+	_, err = client.GetSchema(ctx, &types.GetSchemaRequest{Topic: "any"})
+	if err == nil {
+		t.Fatal("expected GetSchema to return Unimplemented error")
+	}
+	if status.Code(err).String() != "Unimplemented" {
+		t.Fatalf("expected Unimplemented, got %v", status.Code(err))
+	}
+
+	// GetTenantUsage: structured response with LimitsConfigured=false.
+	tenant, err := client.GetTenantUsage(ctx, &types.TenantUsage{TenantId: "acme"})
+	if err != nil {
+		t.Fatalf("GetTenantUsage: %v", err)
+	}
+	if tenant.LimitsConfigured {
+		t.Error("expected LimitsConfigured=false in deferred response")
+	}
+	if tenant.TenantId != "acme" {
+		t.Errorf("expected TenantId=acme, got %q", tenant.TenantId)
+	}
+
+	// TriggerRebalance: success with descriptive error explaining gap.
+	rb, err := client.TriggerRebalance(ctx, &types.RebalanceRequest{})
+	if err != nil {
+		t.Fatalf("TriggerRebalance: %v", err)
+	}
+	if !rb.Success {
+		t.Error("expected Success=true with descriptive error")
+	}
+	if rb.Error == "" {
+		t.Error("expected non-empty Error describing the rebalance gap")
+	}
+}
+
+// TestAdminServiceHandler_RunRetention_PermissionDenied verifies that
+// mutating RPCs reject non-admin subjects.
+func TestAdminServiceHandler_RunRetention_PermissionDenied(t *testing.T) {
+	policy := &auth.Policy{
+		Subjects: map[string]*auth.Subject{
+			"user": {Admin: false},
+		},
+	}
+	authCfg := &auth.Config{Enabled: true, Policy: policy}
+	h := NewAdminServiceHandler(nil, nil, authCfg, "test-node", t.TempDir())
+	client, teardown := dialAdminServer(t, h)
+	defer teardown()
+
+	_, err := client.RunRetention(context.Background(), &types.RunRetentionRequest{})
+	if err == nil {
+		t.Fatal("expected authorization error")
+	}
+	// Without an auth interceptor in front of the in-process server, no
+	// claims are put in ctx and CheckAdminPermission returns
+	// Unauthenticated. With a real production interceptor, it would be
+	// PermissionDenied. Either way the call is denied.
+	code := status.Code(err).String()
+	if code != "PermissionDenied" && code != "Unauthenticated" {
+		t.Fatalf("expected PermissionDenied or Unauthenticated, got %v", code)
+	}
+}
+
+// TestAdminServiceHandler_RunCompaction_RequiresPartitionID verifies that
+// RunCompaction returns a structured failure (not Unimplemented) when
+// partition_id=0, because the underlying primitive is per-partition.
+func TestAdminServiceHandler_RunCompaction_RequiresPartitionID(t *testing.T) {
+	h := NewAdminServiceHandler(nil, nil, nil, "test-node", t.TempDir())
+	client, teardown := dialAdminServer(t, h)
+	defer teardown()
+
+	resp, err := client.RunCompaction(context.Background(), &types.RunCompactionRequest{})
+	if err != nil {
+		t.Fatalf("RunCompaction: %v", err)
+	}
+	if resp.Success {
+		t.Error("expected Success=false when partition_id=0")
+	}
+	if resp.Error == "" {
+		t.Error("expected non-empty Error explaining the per-partition primitive")
 	}
 }
