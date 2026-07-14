@@ -15,7 +15,9 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 )
 
 func TestAllowAllPolicy(t *testing.T) {
@@ -485,6 +487,136 @@ func TestExtractBearer(t *testing.T) {
 // jwt helpers for tests
 func jwtNewWithClaims(method jwt.SigningMethod, claims Claims) *jwt.Token {
 	return jwt.NewWithClaims(method, claims)
+}
+
+// ---------------------------------------------------------------------------
+// CheckAdminPermission tests
+// ---------------------------------------------------------------------------
+//
+// These mirror the TestCheckTopicPermission_* family but exercise the
+// global Subject.Admin flag instead of the per-topic TopicPerms.Admin.
+// The semantics we want to lock in:
+//
+//   1. nil policy + auth enabled  -> FailedPrecondition (fail closed)
+//   2. policy with no claims      -> Unauthenticated
+//   3. subject not in policy      -> PermissionDenied
+//   4. subject present, Admin==false -> PermissionDenied
+//   5. subject present, Admin==true  -> nil
+//   6. AllowAllPolicy (non-nil, empty subjects) -> nil for any subject
+//   7. Per-topic TopicPerms.Admin does NOT satisfy Subject.Admin
+//
+
+func TestCheckAdminPermission_NilPolicy_Denied(t *testing.T) {
+	// nil policy means auth is enabled but no policy file was loaded.
+	// Fail closed rather than silently allow.
+	err := CheckAdminPermission(context.Background(), nil)
+	if err == nil {
+		t.Fatal("expected nil policy to be denied (fail-closed), got nil")
+	}
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("expected FailedPrecondition, got %v", status.Code(err))
+	}
+}
+
+func TestCheckAdminPermission_NoClaims_WithPolicy_Denied(t *testing.T) {
+	policy := &Policy{
+		Subjects: map[string]*Subject{
+			"admin-user": {Admin: true},
+		},
+	}
+	err := CheckAdminPermission(context.Background(), policy)
+	if err == nil {
+		t.Fatal("expected error when claims are missing")
+	}
+	if status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("expected Unauthenticated, got %v", status.Code(err))
+	}
+}
+
+func TestCheckAdminPermission_SubjectNotInPolicy_Denied(t *testing.T) {
+	claims := ClaimsWithSubject("unknown")
+	ctx := WithClaims(context.Background(), claims)
+	policy := &Policy{
+		Subjects: map[string]*Subject{
+			"someone-else": {Admin: true},
+		},
+	}
+	err := CheckAdminPermission(ctx, policy)
+	if err == nil {
+		t.Fatal("expected PermissionDenied for unknown subject")
+	}
+	if status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("expected PermissionDenied, got %v", status.Code(err))
+	}
+}
+
+func TestCheckAdminPermission_SubjectWithoutAdminFlag_Denied(t *testing.T) {
+	// Subject exists in policy but has Admin=false (even though they have
+	// per-topic TopicPerms.Admin set; that must NOT satisfy the global check).
+	claims := ClaimsWithSubject("user")
+	ctx := WithClaims(context.Background(), claims)
+	policy := &Policy{
+		Subjects: map[string]*Subject{
+			"user": {
+				Admin: false,
+				Topics: map[string]TopicPerms{
+					"orders": {Publish: true, Subscribe: true, Admin: true},
+				},
+			},
+		},
+	}
+	err := CheckAdminPermission(ctx, policy)
+	if err == nil {
+		t.Fatal("expected PermissionDenied when Subject.Admin is false")
+	}
+	if status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("expected PermissionDenied, got %v", status.Code(err))
+	}
+}
+
+func TestCheckAdminPermission_SubjectWithAdminFlag_Allowed(t *testing.T) {
+	claims := ClaimsWithSubject("ops")
+	ctx := WithClaims(context.Background(), claims)
+	policy := &Policy{
+		Subjects: map[string]*Subject{
+			"ops": {Admin: true},
+		},
+	}
+	if err := CheckAdminPermission(ctx, policy); err != nil {
+		t.Fatalf("expected nil, got: %v", err)
+	}
+}
+
+func TestCheckAdminPermission_AllowAllPolicy(t *testing.T) {
+	// AllowAllPolicy is non-nil with empty Subjects; it explicitly
+	// permits any authenticated principal.
+	claims := ClaimsWithSubject("any-principal")
+	ctx := WithClaims(context.Background(), claims)
+	if err := CheckAdminPermission(ctx, AllowAllPolicy()); err != nil {
+		t.Fatalf("expected AllowAllPolicy to permit, got: %v", err)
+	}
+}
+
+func TestCheckAdminPermission_TopicAdminDoesNotImplySubjectAdmin(t *testing.T) {
+	// A subject with TopicPerms.Admin set on every topic, but no global
+	// Subject.Admin, must still be denied. This is the explicit decoupling
+	// we want between per-topic admin rights and global admin privileges.
+	claims := ClaimsWithSubject("topic-admin")
+	ctx := WithClaims(context.Background(), claims)
+	policy := &Policy{
+		Subjects: map[string]*Subject{
+			"topic-admin": {
+				Admin: false,
+				Topics: map[string]TopicPerms{
+					"orders": {Admin: true},
+					"events": {Admin: true},
+				},
+			},
+		},
+	}
+	if err := CheckAdminPermission(ctx, policy); err == nil {
+		t.Fatal("topic-level admin must not satisfy global admin check")
+	}
 }
 
 var jwtSigningMethodHS256 = jwt.SigningMethodHS256

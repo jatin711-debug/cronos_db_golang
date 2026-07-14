@@ -438,8 +438,15 @@ func main() {
 		internalServer.RegisterRaftServer(raftServer)
 	}
 
+	// Construct the operator-facing AdminService handler. The handler is
+	// served on the public listener alongside EventService / PartitionService
+	// and reuses the existing auth config. authConfig is nil when auth is
+	// disabled (--dev), in which case the handler treats admin RPCs as
+	// permitted (mirroring the rest of the auth interceptor behavior).
+	adminHandler := api.NewAdminServiceHandler(pm, clusterMgr, authConfig, cfg.NodeID)
+
 	// Register services
-	grpcServer.RegisterServices(eventHandler, consumerHandler, partitionHandler)
+	grpcServer.RegisterServices(eventHandler, consumerHandler, partitionHandler, adminHandler)
 
 	// Load remote regions from environment
 	if regions := os.Getenv("CRONOS_REGIONS"); regions != "" {
