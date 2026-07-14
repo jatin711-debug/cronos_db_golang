@@ -7,3 +7,4 @@ build/
 *.dll.lib
 *.dll.exp
 .bench.*.txt
+.zcode/

@@ -610,7 +610,7 @@ See [proto/events.proto](proto/events.proto) for the complete specification.
 - [x] Leader-follower async replication over gRPC (dedicated internal listener)
 - [x] Replication mTLS on internal cluster channel
 - [x] ISR reconciliation from replication leader state
-- [ ] Bulk segment file sync for new node bootstrap (protocol retained; catch-up path in progress)
+- [x] Bulk segment snapshot install over gRPC for new node bootstrap / far-behind followers
 - [x] Partition leader election on failure
 
 ### Performance ✅ Optimized (single-machine)
@@ -653,7 +653,7 @@ See [proto/events.proto](proto/events.proto) for the complete specification.
 - [x] Consumer-group metadata persistence across restarts
 - [ ] Replication wire checksums
 - [x] Per-entry terms in WAL
-- [x] Chaos testing suite (Docker-based replication failover, below-minISR, follower restart)
+- [x] Chaos testing suite (Docker-based replication failover, below-minISR, follower restart, follower wipe + bulk catch-up)
 
 ### Remaining 🚧
 - [ ] Admin CLI & dashboard
@@ -702,7 +702,7 @@ This is a reference implementation demonstrating production-grade patterns for d
 
 - Hierarchical timing wheels for O(1) scheduling
 - Two-tier deduplication with Rust FFI
-- Custom binary replication protocol
+- gRPC-based replication with mTLS and snapshot install
 - Consistent hashing with virtual nodes
 - Credit-based backpressure flow control
 - Lock-free concurrent data structures
