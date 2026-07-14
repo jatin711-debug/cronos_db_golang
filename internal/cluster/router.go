@@ -20,6 +20,9 @@ type PartitionAccessor interface {
 	DemoteFromLeader(partitionID int32) error
 	// GetPartitionReplicaOffsets returns the latest replica offsets for a local partition.
 	GetPartitionReplicaOffsets(partitionID int32) map[string]int64
+	// GetPartitionInSyncReplicas returns the current ISR for a local partition,
+	// including the leader node ID.
+	GetPartitionInSyncReplicas(partitionID int32) []string
 }
 
 // Router handles routing requests to the correct node/partition
@@ -413,6 +416,22 @@ func (r *Router) UpdatePartitionAssignment(partitionID int32, leaderID string, r
 		info.ISR = nil
 	}
 	info.State = PartitionStateOnline
+}
+
+// UpdatePartitionISR updates the in-sync replica set for a partition.
+func (r *Router) UpdatePartitionISR(partitionID int32, isr []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	info, exists := r.assignments[partitionID]
+	if !exists {
+		return
+	}
+	if len(isr) > 0 {
+		info.ISR = append([]string(nil), isr...)
+	} else {
+		info.ISR = nil
+	}
 }
 
 // UpdateReplicaOffsets updates the per-replica high-watermark offsets for a partition.

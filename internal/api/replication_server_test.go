@@ -28,8 +28,6 @@ func (m *mockReplicationSyncStream) Send(resp *types.ReplicationSyncResponse) er
 }
 
 func TestReplicationServiceHandler_AppendAndSync(t *testing.T) {
-	skipWindows(t)
-
 	cfg := &types.Config{
 		DataDir:          t.TempDir(),
 		PartitionCount:   1,
@@ -84,8 +82,6 @@ func TestReplicationServiceHandler_AppendAndSync(t *testing.T) {
 }
 
 func TestReplicationServiceHandler_AppendOffsetMismatch(t *testing.T) {
-	skipWindows(t)
-
 	cfg := &types.Config{
 		DataDir:          t.TempDir(),
 		PartitionCount:   1,

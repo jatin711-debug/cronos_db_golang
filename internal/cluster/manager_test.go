@@ -11,6 +11,8 @@ type MockPartitionAccessor struct {
 	promoteCalls  map[int32]int64
 	followerCalls map[int32]string
 	demoteCalls   map[int32]bool
+	offsets       map[int32]map[string]int64
+	isr           map[int32][]string
 }
 
 func (m *MockPartitionAccessor) SyncPartitionFromLeader(partitionID int32, leaderAddr string) error {
@@ -38,7 +40,17 @@ func (m *MockPartitionAccessor) DemoteFromLeader(partitionID int32) error {
 }
 
 func (m *MockPartitionAccessor) GetPartitionReplicaOffsets(partitionID int32) map[string]int64 {
-	return nil
+	if m.offsets == nil {
+		return nil
+	}
+	return m.offsets[partitionID]
+}
+
+func (m *MockPartitionAccessor) GetPartitionInSyncReplicas(partitionID int32) []string {
+	if m.isr == nil {
+		return nil
+	}
+	return m.isr[partitionID]
 }
 
 func TestClusterManager_Initialization(t *testing.T) {
@@ -240,4 +252,68 @@ func (m *mockMembershipService) GetAliveNodes() []*Node {
 
 func (m *mockMembershipService) Events() <-chan MemberEvent {
 	return make(chan MemberEvent)
+}
+
+func TestManagerUpdateReplicaOffsetsUpdatesISR(t *testing.T) {
+	localNode := &Node{
+		ID:         "node-1",
+		Address:    "127.0.0.1:9001",
+		GossipAddr: "127.0.0.1:8001",
+		State:      NodeStateAlive,
+	}
+	followerNode := &Node{
+		ID:         "node-2",
+		Address:    "127.0.0.1:9002",
+		GossipAddr: "127.0.0.1:8002",
+		State:      NodeStateAlive,
+	}
+	mockMembership := &mockMembershipService{
+		local: localNode,
+		nodes: map[string]*Node{
+			"node-1": localNode,
+			"node-2": followerNode,
+		},
+	}
+
+	accessor := &MockPartitionAccessor{
+		syncCalls:     make(map[int32]string),
+		promoteCalls:  make(map[int32]int64),
+		followerCalls: make(map[int32]string),
+		demoteCalls:   make(map[int32]bool),
+		offsets: map[int32]map[string]int64{
+			0: {"node-1": 100, "node-2": 95},
+		},
+		isr: map[int32][]string{
+			0: {"node-1", "node-2"},
+		},
+	}
+
+	router := NewRouter(mockMembership, 4, 2, 150, accessor)
+	// Simulate stale ISR metadata (e.g. a follower that was temporarily out of sync).
+	router.UpdatePartitionISR(0, []string{"node-1"})
+
+	mgr := NewManager(&Config{
+		NodeID:            "node-1",
+		GossipAddr:        "127.0.0.1:8001",
+		GRPCAddr:          "127.0.0.1:9001",
+		RaftAddr:          "127.0.0.1:10001",
+		RaftDir:           t.TempDir(),
+		PartitionCount:    4,
+		ReplicationFactor: 2,
+	})
+	mgr.partitionAccessor = accessor
+	mgr.router = router
+
+	mgr.updateReplicaOffsets()
+
+	info, err := router.GetPartitionInfo(0)
+	if err != nil {
+		t.Fatalf("GetPartitionInfo failed: %v", err)
+	}
+	if !stringSliceSetEqual(info.ISR, []string{"node-1", "node-2"}) {
+		t.Errorf("expected ISR [node-1 node-2], got %v", info.ISR)
+	}
+	if info.ReplicaOffsets == nil || info.ReplicaOffsets["node-1"] != 100 || info.ReplicaOffsets["node-2"] != 95 {
+		t.Errorf("expected replica offsets node-1=100 node-2=95, got %v", info.ReplicaOffsets)
+	}
 }

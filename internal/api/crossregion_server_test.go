@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"runtime"
 	"testing"
 	"time"
 
@@ -10,14 +9,7 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 )
 
-func skipWindows(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Skipping on Windows due to PebbleDB file locking in partition cleanup")
-	}
-}
-
 func TestCrossRegionServer_ReplicateEvents_LWW(t *testing.T) {
-	skipWindows(t)
 
 	// Create temporary directory for testing
 	dataDir := t.TempDir()

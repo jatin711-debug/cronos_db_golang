@@ -102,6 +102,7 @@ type Scheduler struct {
 	dataDir          string
 	active           bool
 	workerDone       chan struct{}
+	wg               sync.WaitGroup
 	stats            *SchedulerStats
 	lastCheckpointTS int64
 	startTimeMs      int64 // Scheduler start time (Unix ms)
@@ -339,9 +340,19 @@ func (s *Scheduler) Start() {
 	}
 
 	s.active = true
-	utils.GoSafe("scheduler-worker", s.worker)
-	utils.GoSafe("scheduler-checkpoint", s.checkpointLoop)
-	utils.GoSafe("scheduler-hydrator", s.hydratorLoop)
+	s.wg.Add(3)
+	utils.GoSafe("scheduler-worker", func() {
+		defer s.wg.Done()
+		s.worker()
+	})
+	utils.GoSafe("scheduler-checkpoint", func() {
+		defer s.wg.Done()
+		s.checkpointLoop()
+	})
+	utils.GoSafe("scheduler-hydrator", func() {
+		defer s.wg.Done()
+		s.hydratorLoop()
+	})
 }
 
 // worker is the scheduler worker loop
@@ -645,19 +656,26 @@ func (s *Scheduler) recover() error {
 // Stop stops the scheduler
 func (s *Scheduler) Stop() {
 	s.mu.Lock()
-	if !s.active {
-		s.mu.Unlock()
-		return
-	}
-
+	wasActive := s.active
 	s.active = false
-	close(s.workerDone)
+	if wasActive {
+		close(s.workerDone)
+	}
 	s.mu.Unlock()
 
-	// Final checkpoint after loops have stopped.
-	s.checkpoint()
+	if wasActive {
+		// Wait for worker, checkpoint, and hydrator goroutines to exit before
+		// closing the cold store. On Windows the hydrator may still hold Pebble
+		// file handles if we close the store concurrently with a scan.
+		s.wg.Wait()
 
-	// Close cold store if present
+		// Final checkpoint after loops have stopped.
+		s.checkpoint()
+	}
+
+	// Close cold store if present. This must happen even when the scheduler was
+	// never started; otherwise the underlying PebbleDB stays open and can block
+	// directory cleanup on Windows.
 	if s.coldStore != nil {
 		if err := s.coldStore.Close(); err != nil {
 			log.Printf("[SCHEDULER] Cold store close error: %v", err)

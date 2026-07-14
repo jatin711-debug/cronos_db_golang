@@ -1163,6 +1163,26 @@ func (pm *PartitionManager) GetPartitionReplicaOffsets(partitionID int32) map[st
 	return offsets
 }
 
+// GetPartitionInSyncReplicas returns the IDs of replicas currently in the ISR
+// for a locally-led partition, including the leader itself.
+func (pm *PartitionManager) GetPartitionInSyncReplicas(partitionID int32) []string {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+
+	partition, exists := pm.partitions[partitionID]
+	if !exists || partition == nil || partition.ReplLeader == nil {
+		return nil
+	}
+
+	isr := []string{pm.nodeID}
+	for _, id := range partition.ReplLeader.GetInSyncReplicas() {
+		if id != pm.nodeID {
+			isr = append(isr, id)
+		}
+	}
+	return isr
+}
+
 // PartitionLoadStatus exposes backpressure signals for a partition.
 type PartitionLoadStatus struct {
 	PartitionID        int32

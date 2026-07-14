@@ -195,12 +195,10 @@ func main() {
 			NodeID:     cfg.NodeID,
 			DataDir:    cfg.DataDir,
 			GossipAddr: cfg.ClusterGossipAddr,
-			// Advertise the main gRPC address as the node's cluster address: that
-			// is where the internal ReplicationService / RaftService are served, so
-			// it is the address a partition leader must dial to replicate to this
-			// node. (ClusterGRPCAddr is not bound to any listener; a leader dialing
-			// it would fail, which is why streaming replication never connected.)
-			GRPCAddr:          cfg.GPRCAddress,
+			// Advertise the dedicated cluster gRPC address. This is where the
+			// internal ReplicationService / RaftService are served, separate from
+			// the public client-facing gRPC port.
+			GRPCAddr:          cfg.ClusterGRPCAddr,
 			RaftAddr:          cfg.ClusterRaftAddr,
 			RaftDir:           raftDir,
 			SeedNodes:         cfg.ClusterSeeds,
@@ -413,13 +411,35 @@ func main() {
 	crossRegionServer := api.NewCrossRegionServer(pm)
 	grpcServer.RegisterCrossRegionServer(crossRegionServer)
 
-	// Register internal replication and raft metadata services
+	// Create dedicated internal cluster gRPC listener for ReplicationService and
+	// RaftService. This keeps internal node traffic off the public client port
+	// and lets replication use its own mTLS credentials.
+	internalGRPCConfig := api.DefaultInternalConfig()
+	internalGRPCConfig.Address = cfg.ClusterGRPCAddr
+	if cfg.ReplicationTLSEnabled {
+		internalGRPCConfig.TLS = &replication.MTLSConfig{
+			Enabled:  cfg.ReplicationTLSEnabled,
+			CAFile:   cfg.ReplicationTLSCAFile,
+			CertFile: cfg.ReplicationTLSCertFile,
+			KeyFile:  cfg.ReplicationTLSKeyFile,
+		}
+	}
+	internalServer, err := api.NewInternalGRPCServer(internalGRPCConfig)
+	if err != nil {
+		slog.Error("Failed to create internal gRPC server", "error", err)
+		os.Exit(1)
+	}
+
+	// Register internal replication and raft metadata services on the internal listener.
 	replicationServer := api.NewReplicationServiceHandler(pm)
-	grpcServer.RegisterReplicationServer(replicationServer)
+	internalServer.RegisterReplicationServer(replicationServer)
 	if clusterMgr != nil {
 		raftServer := api.NewRaftServiceHandler(clusterMgr, cfg.NodeID)
-		grpcServer.RegisterRaftServer(raftServer)
+		internalServer.RegisterRaftServer(raftServer)
 	}
+
+	// Register services
+	grpcServer.RegisterServices(eventHandler, consumerHandler, partitionHandler)
 
 	// Load remote regions from environment
 	if regions := os.Getenv("CRONOS_REGIONS"); regions != "" {
@@ -434,9 +454,6 @@ func main() {
 		}
 	}
 
-	// Register services
-	grpcServer.RegisterServices(eventHandler, consumerHandler, partitionHandler)
-
 	// Start gRPC server
 	slog.Info("Starting gRPC server", "address", cfg.GPRCAddress)
 	if err := grpcServer.Start(); err != nil {
@@ -448,6 +465,21 @@ func main() {
 	utils.GoSafe("grpc-serve-monitor", func() {
 		if err := <-grpcServer.ServeError(); err != nil {
 			slog.Error("gRPC server exited unexpectedly", "error", err)
+			os.Exit(1)
+		}
+	})
+
+	// Start internal gRPC server.
+	slog.Info("Starting internal gRPC server", "address", cfg.ClusterGRPCAddr)
+	if err := internalServer.Start(); err != nil {
+		slog.Error("Failed to start internal gRPC server", "error", err)
+		os.Exit(1)
+	}
+
+	// Propagate unexpected internal gRPC server exits as fatal.
+	utils.GoSafe("internal-grpc-serve-monitor", func() {
+		if err := <-internalServer.ServeError(); err != nil {
+			slog.Error("Internal gRPC server exited unexpectedly", "error", err)
 			os.Exit(1)
 		}
 	})
@@ -620,7 +652,8 @@ func main() {
 		slog.Info("Shutdown phase 1: Draining incoming requests...")
 		grpcDrainCtx, grpcDrainCancel := context.WithTimeout(shutdownCtx, 25*time.Second)
 		defer grpcDrainCancel()
-		grpcServer.GracefulStopWithTimeout(grpcDrainCtx) // stop accepting new gRPC connections
+		grpcServer.GracefulStopWithTimeout(grpcDrainCtx)     // stop accepting new public gRPC connections
+		internalServer.GracefulStopWithTimeout(grpcDrainCtx) // stop accepting new internal cluster connections
 
 		// 2. Shutdown health server to stop new HTTP health checks
 		healthShutdownCtx, healthShutdownCancel := context.WithTimeout(shutdownCtx, 5*time.Second)
@@ -666,5 +699,6 @@ func main() {
 		slog.Error("Shutdown timed out after 60s, forcing exit")
 		// Force stop gRPC if still running
 		grpcServer.Stop()
+		internalServer.Stop()
 	}
 }

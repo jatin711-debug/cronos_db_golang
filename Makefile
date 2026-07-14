@@ -260,7 +260,7 @@ lint:
 	@echo Running lint checks...
 	$(GO_RUNTIME_PREFIX) go vet ./...
 ifeq ($(OS),Windows_NT)
-	@powershell -NoProfile -Command "$$u = gofmt -l .; if ($$u) { Write-Output 'Unformatted Go files:'; $$u; exit 1 }"
+	@powershell -NoProfile -Command "if (gofmt -l .) { Write-Output 'Unformatted Go files:'; gofmt -l .; exit 1 }"
 else
 	@u="$$(gofmt -l .)"; if [ -n "$$u" ]; then echo "Unformatted Go files:"; echo "$$u"; exit 1; fi
 endif
