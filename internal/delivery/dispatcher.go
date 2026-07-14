@@ -15,6 +15,69 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 )
 
+// dispatchPools recycle short-lived maps and slices used on the hot dispatch
+// path. Maps are cleared before reuse so the pooled instance does not retain
+// stale references.
+var dispatchPools = struct {
+	partitionEvents sync.Pool // map[int32][]*types.Event
+	groupSubs       sync.Pool // map[string][]*Subscription
+	batchesBySub    sync.Pool // map[*Subscription][]*types.Event
+	intMap          sync.Pool // map[string]int
+	stringSlice     sync.Pool // []string
+}{
+	partitionEvents: sync.Pool{New: func() interface{} { return make(map[int32][]*types.Event) }},
+	groupSubs:       sync.Pool{New: func() interface{} { return make(map[string][]*Subscription) }},
+	batchesBySub:    sync.Pool{New: func() interface{} { return make(map[*Subscription][]*types.Event) }},
+	intMap:          sync.Pool{New: func() interface{} { return make(map[string]int) }},
+	stringSlice:     sync.Pool{New: func() interface{} { return make([]string, 0, 16) }},
+}
+
+func acquirePartitionEventMap() map[int32][]*types.Event {
+	return dispatchPools.partitionEvents.Get().(map[int32][]*types.Event)
+}
+
+func releasePartitionEventMap(m map[int32][]*types.Event) {
+	clear(m)
+	dispatchPools.partitionEvents.Put(m)
+}
+
+func acquireGroupSubsMap() map[string][]*Subscription {
+	return dispatchPools.groupSubs.Get().(map[string][]*Subscription)
+}
+
+func releaseGroupSubsMap(m map[string][]*Subscription) {
+	clear(m)
+	dispatchPools.groupSubs.Put(m)
+}
+
+func acquireBatchesBySubMap() map[*Subscription][]*types.Event {
+	return dispatchPools.batchesBySub.Get().(map[*Subscription][]*types.Event)
+}
+
+func releaseBatchesBySubMap(m map[*Subscription][]*types.Event) {
+	clear(m)
+	dispatchPools.batchesBySub.Put(m)
+}
+
+func acquireIntMap() map[string]int {
+	return dispatchPools.intMap.Get().(map[string]int)
+}
+
+func releaseIntMap(m map[string]int) {
+	clear(m)
+	dispatchPools.intMap.Put(m)
+}
+
+func acquireStringSlice() []string {
+	return dispatchPools.stringSlice.Get().([]string)[:0]
+}
+
+func releaseStringSlice(s []string) {
+	if cap(s) <= 4096 {
+		dispatchPools.stringSlice.Put(s[:0])
+	}
+}
+
 // Dispatcher manages event delivery to subscribers.
 // It is optimized with sharding for reduced lock contention.
 type Dispatcher struct {
@@ -31,7 +94,11 @@ type Dispatcher struct {
 	partitionSubs map[int32][]*Subscription
 
 	// Per-consumer-group round-robin cursor that persists across batches so
-	// single-event batches (batchSize=1) still rotate across subscribers.
+	// events are evenly distributed across subscribers. snapshotGroupCursors
+	// (called once per batch) reads the current positions into a lock-free
+	// local map used for the duration of the batch; advanceGroupCursors
+	// writes the final positions back. This avoids acquiring the mutex once
+	// per event on the hot path.
 	groupCursorMu sync.Mutex
 	groupCursor   map[string]int
 
@@ -51,7 +118,11 @@ type DispatcherShard struct {
 	mu               sync.RWMutex
 	subscriptions    map[string]*Subscription
 	activeDeliveries map[string]*ActiveDelivery
-	dlq              *DeadLetterQueue
+	// expiry indexes activeDeliveries by ack deadline so the timeout loop pops
+	// only the entries that are actually due instead of scanning every active
+	// delivery. Guarded by mu, in lockstep with activeDeliveries.
+	expiry *deliveryExpiry
+	dlq    *DeadLetterQueue
 }
 
 // Subscription represents a subscriber.
@@ -156,6 +227,7 @@ func NewDispatcher(config *Config) *Dispatcher {
 		shards[i] = &DispatcherShard{
 			subscriptions:    make(map[string]*Subscription),
 			activeDeliveries: make(map[string]*ActiveDelivery),
+			expiry:           newDeliveryExpiry(),
 		}
 	}
 
@@ -284,6 +356,7 @@ func (d *Dispatcher) Unsubscribe(subscriptionID string) error {
 				log.Printf("[DISPATCHER] in-flight underflow: %v", err)
 			}
 			delete(shard.activeDeliveries, deliveryID)
+			shard.expiry.remove(deliveryID)
 		}
 	}
 
@@ -308,6 +381,10 @@ func (d *Dispatcher) Unsubscribe(subscriptionID string) error {
 	return nil
 }
 
+// nextGroupStart returns the next subscriber index for a consumer group and
+// advances the persistent cursor by one. Used by the single-event Dispatch
+// path; the batch path uses snapshotGroupCursors/advanceGroupCursors to avoid
+// a mutex acquire per event.
 func (d *Dispatcher) nextGroupStart(groupID string, numSubs int) int {
 	d.groupCursorMu.Lock()
 	defer d.groupCursorMu.Unlock()
@@ -317,8 +394,41 @@ func (d *Dispatcher) nextGroupStart(groupID string, numSubs int) int {
 	return start
 }
 
+// snapshotGroupCursors returns a snapshot of the current cursor position for
+// each group ID in groupIDs. The caller mutates the returned map locally
+// (per-event increment) without any locking, then commits the final positions
+// back via advanceGroupCursors.
+func (d *Dispatcher) snapshotGroupCursors(groupIDs []string) map[string]int {
+	d.groupCursorMu.Lock()
+	defer d.groupCursorMu.Unlock()
+	snapshot := make(map[string]int, len(groupIDs))
+	for _, gid := range groupIDs {
+		snapshot[gid] = d.groupCursor[gid]
+	}
+	return snapshot
+}
+
+// advanceGroupCursors commits the (locally incremented) cursor positions back
+// into the persistent store. Called once per batch, not per event.
+func (d *Dispatcher) advanceGroupCursors(snapshots map[string]int, numSubsByGroup map[string]int) {
+	if len(snapshots) == 0 {
+		return
+	}
+	d.groupCursorMu.Lock()
+	defer d.groupCursorMu.Unlock()
+	for gid, pos := range snapshots {
+		if numSubs, ok := numSubsByGroup[gid]; ok && numSubs > 0 {
+			d.groupCursor[gid] = pos % numSubs
+		} else {
+			d.groupCursor[gid] = pos
+		}
+	}
+}
+
 func groupSubscriptionsByConsumer(allSubs []*Subscription) map[string][]*Subscription {
-	// Fast path: if all subs share the same consumer group, skip map allocation
+	consumerGroupSubs := acquireGroupSubsMap()
+
+	// Fast path: if all subs share the same consumer group, avoid appending.
 	if len(allSubs) > 0 {
 		firstGroup := allSubs[0].ConsumerGroup
 		allSame := true
@@ -329,11 +439,11 @@ func groupSubscriptionsByConsumer(allSubs []*Subscription) map[string][]*Subscri
 			}
 		}
 		if allSame {
-			return map[string][]*Subscription{firstGroup: allSubs}
+			consumerGroupSubs[firstGroup] = allSubs
+			return consumerGroupSubs
 		}
 	}
 
-	consumerGroupSubs := make(map[string][]*Subscription)
 	for _, sub := range allSubs {
 		consumerGroupSubs[sub.ConsumerGroup] = append(consumerGroupSubs[sub.ConsumerGroup], sub)
 	}
@@ -472,7 +582,8 @@ func (d *Dispatcher) DispatchBatch(events []*types.Event) error {
 	}
 
 	// Support mixed-partition batches without additional caller assumptions.
-	byPartition := make(map[int32][]*types.Event)
+	byPartition := acquirePartitionEventMap()
+	defer releasePartitionEventMap(byPartition)
 	for _, ev := range events {
 		byPartition[ev.GetPartitionId()] = append(byPartition[ev.GetPartitionId()], ev)
 	}
@@ -501,8 +612,26 @@ func (d *Dispatcher) dispatchPartitionBatch(partitionID int32, events []*types.E
 	}
 
 	consumerGroupSubs := groupSubscriptionsByConsumer(allSubs)
+	defer releaseGroupSubsMap(consumerGroupSubs)
 
-	batchesBySub := make(map[*Subscription][]*types.Event)
+	// Snapshot the persistent per-group cursors ONCE for the whole batch and
+	// rotate them in a lock-free local map. This reduces mutex acquisitions
+	// from O(numEvents × numGroups) per batch down to 2 (snapshot + commit).
+	// Cross-batch fairness is preserved because we commit the final positions
+	// back to the persistent store after the loop.
+	groupIDs := acquireStringSlice()
+	defer releaseStringSlice(groupIDs)
+	numSubsByGroup := acquireIntMap()
+	defer releaseIntMap(numSubsByGroup)
+	for gid, subs := range consumerGroupSubs {
+		groupIDs = append(groupIDs, gid)
+		numSubsByGroup[gid] = len(subs)
+	}
+	localCursors := d.snapshotGroupCursors(groupIDs)
+	defer releaseIntMap(localCursors)
+
+	batchesBySub := acquireBatchesBySubMap()
+	defer releaseBatchesBySubMap(batchesBySub)
 
 	for _, event := range events {
 		for groupID, groupSubs := range consumerGroupSubs {
@@ -510,7 +639,9 @@ func (d *Dispatcher) dispatchPartitionBatch(partitionID int32, events []*types.E
 				continue
 			}
 
-			start := d.nextGroupStart(groupID, len(groupSubs))
+			numSubs := numSubsByGroup[groupID]
+			start := localCursors[groupID] % numSubs
+			localCursors[groupID] = start + 1
 
 			selectedSub := d.pickSubscriber(groupSubs, start)
 			if selectedSub == nil {
@@ -520,6 +651,10 @@ func (d *Dispatcher) dispatchPartitionBatch(partitionID int32, events []*types.E
 			batchesBySub[selectedSub] = append(batchesBySub[selectedSub], event)
 		}
 	}
+
+	// Commit the locally advanced cursor positions back to the persistent store
+	// so the next batch continues round-robin from where this one left off.
+	d.advanceGroupCursors(localCursors, numSubsByGroup)
 
 	for sub, batchEvents := range batchesBySub {
 		if len(batchEvents) == 0 {
@@ -582,6 +717,8 @@ func (d *Dispatcher) trackDelivery(delivery *DeliveryMessage, sub *Subscription)
 	// Single time.Now() call instead of two separate calls
 	now := time.Now()
 
+	ackDeadline := now.Add(d.config.DefaultAckTimeout)
+
 	shard := d.getShard(sub.ID)
 	shard.mu.Lock()
 	shard.activeDeliveries[delivery.DeliveryID] = &ActiveDelivery{
@@ -589,9 +726,12 @@ func (d *Dispatcher) trackDelivery(delivery *DeliveryMessage, sub *Subscription)
 		Subscription:    sub,
 		Attempt:         delivery.Attempt,
 		CreatedTS:       now.UnixMilli(),
-		AckDeadline:     now.Add(d.config.DefaultAckTimeout),
+		AckDeadline:     ackDeadline,
 		CreditsConsumed: creditsConsumed,
 	}
+	// Index by deadline for O(k log n) expiry. A retry re-tracks the same
+	// delivery id, which updates the existing deadline in place.
+	shard.expiry.add(delivery.DeliveryID, ackDeadline.UnixNano())
 	shard.mu.Unlock()
 }
 
@@ -672,23 +812,34 @@ func (d *Dispatcher) timeoutLoop() {
 }
 
 func (d *Dispatcher) scanExpiredDeliveries(now time.Time) {
+	nowNano := now.UnixNano()
 	for _, shard := range d.shards {
 		shard.mu.Lock()
-		for deliveryID, active := range shard.activeDeliveries {
-			if now.After(active.AckDeadline) {
-				delete(shard.activeDeliveries, deliveryID)
-				if err := d.decInFlight(1); err != nil {
-					log.Printf("[DISPATCHER] in-flight underflow: %v", err)
-				}
+		// Pop only the deliveries whose deadline has passed; the heap yields them
+		// in deadline order and stops at the first entry still in the future.
+		for {
+			deliveryID, ok := shard.expiry.popExpired(nowNano)
+			if !ok {
+				break
+			}
+			active, exists := shard.activeDeliveries[deliveryID]
+			if !exists {
+				// Already acked/removed; the expiry entry was stale. (Removal on
+				// ack normally prevents this, but stay defensive.)
+				continue
+			}
+			delete(shard.activeDeliveries, deliveryID)
+			if err := d.decInFlight(1); err != nil {
+				log.Printf("[DISPATCHER] in-flight underflow: %v", err)
+			}
 
-				if active.Attempt < d.config.MaxRetries {
-					// Non-blocking: push to retry heap instead of sleeping inline
-					backoff := time.Duration(active.Attempt) * d.config.RetryBackoff
-					d.retryHeap.PushEntry(NewRetryEntry(active, backoff))
-				} else {
-					d.releaseCredits(active.Subscription, active.CreditsConsumed)
-					d.sendToDLQ(active, "delivery timeout after max retries")
-				}
+			if active.Attempt < d.config.MaxRetries {
+				// Non-blocking: push to retry heap instead of sleeping inline
+				backoff := time.Duration(active.Attempt) * d.config.RetryBackoff
+				d.retryHeap.PushEntry(NewRetryEntry(active, backoff))
+			} else {
+				d.releaseCredits(active.Subscription, active.CreditsConsumed)
+				d.sendToDLQ(active, "delivery timeout after max retries")
 			}
 		}
 		shard.mu.Unlock()
@@ -842,6 +993,7 @@ func (d *Dispatcher) HandleAck(deliveryID string, success bool, nextOffset int64
 		return nil
 	}
 	delete(shard.activeDeliveries, deliveryID)
+	shard.expiry.remove(deliveryID)
 	shard.mu.Unlock()
 
 	if err := d.decInFlight(1); err != nil {
@@ -1022,6 +1174,7 @@ func (d *Dispatcher) Close() {
 			}
 			delete(shard.activeDeliveries, deliveryID)
 		}
+		shard.expiry = newDeliveryExpiry()
 		shard.subscriptions = make(map[string]*Subscription)
 		shard.mu.Unlock()
 	}

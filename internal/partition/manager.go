@@ -27,17 +27,24 @@ import (
 
 // Partition represents a data partition
 type Partition struct {
-	ID               int32
-	Topic            string
-	DataDir          string
-	Wal              *storage.WAL
-	Scheduler        *scheduler.Scheduler
-	ConsumerGroup    *consumer.GroupManager
-	DedupStore       *dedup.Manager
-	Dispatcher       *delivery.Dispatcher
-	Worker           *delivery.Worker
-	Follower         *replication.Follower // For receiving replicated data
-	ReplLeader       *replication.Leader   // For sending replication to followers
+	ID            int32
+	Topic         string
+	DataDir       string
+	Wal           *storage.WAL
+	Scheduler     *scheduler.Scheduler
+	ConsumerGroup *consumer.GroupManager
+	DedupStore    *dedup.Manager
+	Dispatcher    *delivery.Dispatcher
+	Worker        *delivery.Worker
+	Follower      *replication.Follower // For receiving replicated data
+	ReplLeader    *replication.Leader   // For sending replication to followers
+	// ReplicateMu serializes WAL append + replication for this partition when it
+	// is a replication leader, so events reach followers in strict offset order
+	// (Leader.Replicate requires contiguous offsets and is not safe to call
+	// concurrently out of order). It is only taken on the replicated write path;
+	// RF=1 / non-leader partitions (ReplLeader == nil) never acquire it, keeping
+	// the single-node fast path fully pipelined.
+	ReplicateMu      sync.Mutex
 	Leader           bool
 	Epoch            int64  // Cluster-assigned epoch for split-brain fencing
 	MinKey           string // Minimum key boundary (inclusive)
@@ -106,6 +113,7 @@ type PartitionManager struct {
 	splitting        map[int32]bool // tracks partitions currently undergoing split
 	splittingMu      sync.RWMutex
 	backpressureMgr  *BackpressureManager
+	fsyncCoalescer   *storage.FsyncCoalescer
 }
 
 // tenantAccountant is the minimal interface needed for delivery callbacks.
@@ -115,13 +123,17 @@ type tenantAccountant interface {
 
 // NewPartitionManager creates a new partition manager
 func NewPartitionManager(nodeID string, config *types.Config) *PartitionManager {
-	return &PartitionManager{
+	pm := &PartitionManager{
 		partitions:      make(map[int32]*Partition),
 		nodeID:          nodeID,
 		config:          config,
 		splitting:       make(map[int32]bool),
 		backpressureMgr: NewBackpressureManager(config.MaxMemoryUsagePercent, config.MemoryCheckIntervalMs),
 	}
+	if config.FlushIntervalMS > 0 {
+		pm.fsyncCoalescer = storage.NewFsyncCoalescer(time.Duration(config.FlushIntervalMS) * time.Millisecond)
+	}
+	return pm
 }
 
 // SetTenantAccountant configures the tenant accountant for delivery tracking.
@@ -182,7 +194,7 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 			return fmt.Errorf("create cipher: %w", err)
 		}
 	}
-	wal, err := storage.NewWAL(dataDir, partitionID, walConfig, cipher)
+	wal, err := storage.NewWALWithCoalescer(dataDir, partitionID, walConfig, cipher, pm.fsyncCoalescer)
 	if err != nil {
 		return fmt.Errorf("create WAL: %w", err)
 	}
@@ -229,8 +241,11 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 	dispatcherConfig := delivery.DefaultConfig()
 	dispatcher := delivery.NewDispatcher(dispatcherConfig)
 
-	// Create worker
-	worker := delivery.NewWorker(dispatcher, 1)
+	// Create worker. Batch size of 100 amortizes DispatchBatch overhead
+	// (metrics observe, map allocations, in-flight CAS, shard write-lock)
+	// across many events. Round-robin fairness across subscribers within a
+	// consumer group is handled by the dispatcher's per-group cursor.
+	worker := delivery.NewWorker(dispatcher, 100)
 
 	// Wire tenant delivery callback if configured
 	if pm.tenantAccountant != nil {
@@ -407,8 +422,17 @@ func (pm *PartitionManager) GetPartitionForKey(key string) (*types.Partition, er
 
 // CanAccept returns true if the partition can accept new publishes without exceeding capacity limits.
 func (pm *PartitionManager) CanAccept(partitionID int32) bool {
+	return pm.CanAcceptBatch(partitionID, 1)
+}
+
+// CanAcceptBatch performs admission checks once for a batch. Queue, timing
+// wheel, and in-flight limits include the incoming batch cardinality.
+func (pm *PartitionManager) CanAcceptBatch(partitionID int32, count int64) bool {
+	if count <= 0 {
+		return true
+	}
 	// Check backpressure first (memory + rate limiting)
-	if pm.backpressureMgr != nil && !pm.backpressureMgr.CanAccept(partitionID) {
+	if pm.backpressureMgr != nil && !pm.backpressureMgr.CanAcceptN(partitionID, count) {
 		return false
 	}
 
@@ -422,24 +446,24 @@ func (pm *PartitionManager) CanAccept(partitionID int32) bool {
 	// Check admission control limits
 	if pm.config.MaxReadyQueueSize > 0 {
 		depth := partition.Scheduler.GetReadyQueueDepth()
-		if depth >= pm.config.MaxReadyQueueSize {
+		if depth+count > pm.config.MaxReadyQueueSize {
 			return false
 		}
 		// Load shedding: reject if above threshold percentage of max
 		if pm.config.LoadSheddingThreshold > 0 {
 			threshold := int64(float64(pm.config.MaxReadyQueueSize) * pm.config.LoadSheddingThreshold)
-			if depth >= threshold {
+			if depth+count >= threshold {
 				return false
 			}
 		}
 	}
 	if pm.config.MaxTimingWheelSize > 0 {
-		if partition.Scheduler.GetTimingWheelDepth() >= pm.config.MaxTimingWheelSize {
+		if partition.Scheduler.GetTimingWheelDepth()+count > pm.config.MaxTimingWheelSize {
 			return false
 		}
 	}
 	if pm.config.MaxInFlightPerPartition > 0 {
-		if partition.Dispatcher.GetStats().ActiveDeliveries >= pm.config.MaxInFlightPerPartition {
+		if partition.Dispatcher.GetStats().ActiveDeliveries+count > pm.config.MaxInFlightPerPartition {
 			return false
 		}
 	}
@@ -756,12 +780,9 @@ func (pm *PartitionManager) writeTimerCheckpoint(partition *Partition, lastOffse
 		return
 	}
 	cpPath := fmt.Sprintf("%s/timer_replay_checkpoint.json", partition.DataDir)
-	tmpPath := cpPath + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+	if err := utils.AtomicWriteFile(cpPath, data, 0644); err != nil {
 		log2.Warn("Failed to write timer checkpoint", "error", err)
-		return
 	}
-	os.Rename(tmpPath, cpPath)
 }
 
 // runCompaction calculates the minimum consumed offset across all consumer groups
@@ -926,6 +947,24 @@ func (pm *PartitionManager) StopAllPartitions() error {
 	return nil
 }
 
+// Close stops all partitions and shuts down the global fsync coalescer.
+// It should be called once during application shutdown after all partitions
+// have been drained.
+func (pm *PartitionManager) Close() error {
+	var errs []error
+	if err := pm.StopAllPartitions(); err != nil {
+		errs = append(errs, err)
+	}
+	if pm.fsyncCoalescer != nil {
+		pm.fsyncCoalescer.Close()
+		pm.fsyncCoalescer = nil
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("partition manager close: %v", errs[0])
+	}
+	return nil
+}
+
 // GetStats returns partition manager statistics
 func (pm *PartitionManager) GetStats() *PartitionManagerStats {
 	pm.mu.RLock()
@@ -1019,7 +1058,16 @@ func (pm *PartitionManager) PromoteToLeader(partitionID int32, epoch int64) erro
 
 	partition, exists := pm.partitions[partitionID]
 	if !exists {
-		return fmt.Errorf("partition %d not found", partitionID)
+		// Partitions are lazily created in cluster mode; a node assigned as leader
+		// for a partition it has not written to yet must materialize and start it
+		// so it can serve reads/writes and replicate to followers.
+		if err := pm.createPartitionLocked(partitionID, fmt.Sprintf("partition-%d", partitionID)); err != nil {
+			return fmt.Errorf("create partition %d for promotion: %w", partitionID, err)
+		}
+		partition = pm.partitions[partitionID]
+		if err := pm.startPartitionInternal(partition); err != nil {
+			log.Printf("[PARTITION] Failed to start partition %d on promotion: %v", partitionID, err)
+		}
 	}
 
 	if partition.ReplLeader != nil {

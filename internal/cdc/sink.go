@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
@@ -94,22 +95,53 @@ func (p *sinkPipeline) worker() {
 }
 
 func (p *sinkPipeline) write(evt *ChangeEvent) {
-	ctx, cancel := context.WithTimeout(context.Background(), DefaultCDCWriteTimeout)
-	defer cancel()
-	if err := p.sink.Write(ctx, evt); err != nil {
-		slog.Warn("CDC sink write failed", "sink", p.sink.Name(), "error", err)
+	// Retry transient write failures up to 3 times with exponential backoff
+	// before giving up. This provides at-least-once semantics for sink writes
+	// without blocking the worker indefinitely.
+	maxRetries := 3
+	backoff := 100 * time.Millisecond
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), DefaultCDCWriteTimeout)
+		err := p.sink.Write(ctx, evt)
+		cancel()
+		if err == nil {
+			return
+		}
+		if attempt < maxRetries {
+			slog.Warn("CDC sink write failed, retrying",
+				"sink", p.sink.Name(), "attempt", attempt+1, "error", err)
+			time.Sleep(backoff)
+			backoff *= 2
+		} else {
+			slog.Warn("CDC sink write failed after retries, event lost",
+				"sink", p.sink.Name(), "error", err,
+				"partition", evt.PartitionID, "offset", evt.Offset)
+		}
 	}
 }
 
+// emit sends an event to the sink queue. When the queue is full it blocks up
+// to DefaultCDCWriteTimeout rather than dropping the event, preventing silent
+// data loss under burst loads. If the timeout expires the event is dropped
+// with a warning (last-resort backpressure relief).
 func (p *sinkPipeline) emit(evt *ChangeEvent) {
+	timer := time.NewTimer(DefaultCDCWriteTimeout)
+	defer timer.Stop()
+
 	select {
 	case p.queue <- evt:
-	default:
+		return
+	case <-p.quit:
+		return
+	case <-timer.C:
 		p.droppedMu.Lock()
 		p.dropped++
 		d := p.dropped
 		p.droppedMu.Unlock()
-		slog.Warn("CDC sink queue full, dropping event", "sink", p.sink.Name(), "dropped", d)
+		slog.Warn("CDC sink queue full after timeout, dropping event",
+			"sink", p.sink.Name(), "dropped", d,
+			"partition", evt.PartitionID, "offset", evt.Offset)
 	}
 }
 
@@ -129,6 +161,11 @@ type Manager struct {
 	mu        sync.RWMutex
 	quit      chan struct{}
 	quitOnce  sync.Once
+	// hasSinks is an atomic fast-path flag checked on every Emit call. It lets
+	// the WAL append hook skip ChangeEvent allocation + time.Now() entirely
+	// when no sinks are registered (the common case in dev / load-test mode).
+	// Flips false→true once at registration time and never goes back.
+	hasSinks atomic.Bool
 }
 
 // NewManager creates a CDC manager.
@@ -146,10 +183,18 @@ func (m *Manager) RegisterSink(sink Sink) {
 	pipeline := newSinkPipeline(sink, DefaultCDCQueueSize, DefaultCDCWorkers)
 	pipeline.start()
 	m.pipelines = append(m.pipelines, pipeline)
+	m.hasSinks.Store(true) // flip the fast-path flag; stays true for the process lifetime
 }
 
 // Emit sends an event to all registered sinks.
 func (m *Manager) Emit(ctx context.Context, event *ChangeEvent) {
+	// Atomic fast path: skip the RLock entirely when no sinks are registered.
+	// This is the common case in dev / load-test mode where CDC is not
+	// configured, and Emit is called once per appended WAL event.
+	if !m.hasSinks.Load() {
+		return
+	}
+
 	m.mu.RLock()
 	pipelines := m.pipelines
 	m.mu.RUnlock()
@@ -160,6 +205,13 @@ func (m *Manager) Emit(ctx context.Context, event *ChangeEvent) {
 	for _, p := range pipelines {
 		p.emit(event)
 	}
+}
+
+// HasSinks reports whether any sinks are registered. Intended as a lock-free
+// guard so callers (e.g. the WAL append hook) can avoid allocating a
+// ChangeEvent when CDC is inactive.
+func (m *Manager) HasSinks() bool {
+	return m.hasSinks.Load()
 }
 
 // SinkCount returns the number of registered sinks.

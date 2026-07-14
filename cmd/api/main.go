@@ -192,10 +192,15 @@ func main() {
 		}
 
 		clusterConfig := &cluster.Config{
-			NodeID:            cfg.NodeID,
-			DataDir:           cfg.DataDir,
-			GossipAddr:        cfg.ClusterGossipAddr,
-			GRPCAddr:          cfg.ClusterGRPCAddr,
+			NodeID:     cfg.NodeID,
+			DataDir:    cfg.DataDir,
+			GossipAddr: cfg.ClusterGossipAddr,
+			// Advertise the main gRPC address as the node's cluster address: that
+			// is where the internal ReplicationService / RaftService are served, so
+			// it is the address a partition leader must dial to replicate to this
+			// node. (ClusterGRPCAddr is not bound to any listener; a leader dialing
+			// it would fail, which is why streaming replication never connected.)
+			GRPCAddr:          cfg.GPRCAddress,
 			RaftAddr:          cfg.ClusterRaftAddr,
 			RaftDir:           raftDir,
 			SeedNodes:         cfg.ClusterSeeds,
@@ -261,7 +266,11 @@ func main() {
 			continue
 		}
 		p.Wal.SetAppendHook(func(event *types.Event) {
-			if cdcManager != nil {
+			// Fast path: skip the ChangeEvent allocation + time.Now() syscall
+			// entirely when there are no CDC sinks and no cross-region
+			// replicator configured. This is the common case in dev / load
+			// test mode and avoids per-event heap pressure at 1M+ events/sec.
+			if cdcManager != nil && cdcManager.HasSinks() {
 				cdcManager.Emit(context.Background(), &cdc.ChangeEvent{
 					Timestamp:   time.Now(),
 					Op:          "append",
@@ -494,15 +503,28 @@ func main() {
 		ticker := time.NewTicker(statsPrintInterval)
 		defer ticker.Stop()
 
+		// To keep the stats loop O(1) regardless of partition count, we sample
+		// a fixed window of partitions each tick and rotate the window.
+		const sampleSize int32 = 16
+		partitionCount := int32(cfg.PartitionCount)
+		window := sampleSize
+		if partitionCount < window {
+			window = partitionCount
+		}
+		var offset int32
+
 		for {
 			select {
 			case <-ticker.C:
 				// Refresh low-frequency gauges on the same interval as stats logging.
-				for i := int32(0); i < int32(cfg.PartitionCount); i++ {
+				sampled := 0
+				for j := int32(0); j < window; j++ {
+					i := (offset + j) % partitionCount
 					p, err := pm.GetInternalPartition(i)
 					if err != nil || p == nil {
 						continue
 					}
+					sampled++
 
 					partitionLabel := strconv.FormatInt(int64(i), 10)
 
@@ -559,8 +581,10 @@ func main() {
 					}
 				}
 
+				offset = (offset + window) % partitionCount
+
 				stats := pm.GetStats()
-				slog.Info("Stats", "stats", stats)
+				slog.Info("Stats", "stats", stats, "sampled_partitions", sampled)
 				if cfg.ClusterEnabled && clusterMgr != nil {
 					clusterStats := clusterMgr.GetStats()
 					metrics.SetClusterMetrics(
@@ -607,7 +631,7 @@ func main() {
 
 		// 3. Stop all partitions gracefully (drains in-flight deliveries, flushes WAL)
 		slog.Info("Shutdown phase 2: Stopping partitions (draining deliveries, flushing WAL)...")
-		if err := pm.StopAllPartitions(); err != nil {
+		if err := pm.Close(); err != nil {
 			slog.Error("Failed to cleanly stop all partitions", "error", err)
 		}
 

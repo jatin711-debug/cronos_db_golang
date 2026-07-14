@@ -343,3 +343,112 @@ func TestBloomPebbleStore_LWW(t *testing.T) {
 		t.Errorf("Expected timestamp %d, got %d", expectedTS, ts.UnixNano())
 	}
 }
+
+func TestBloomPebbleStore_BatchClaimsDuplicatesWithinRequest(t *testing.T) {
+	store, err := NewBloomPebbleStore(t.TempDir(), 0, 1, 1000, 0.01, nil)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer store.Close()
+
+	duplicates, err := store.CheckAndStoreBatch(
+		[]string{"same", "same", "other"},
+		[]int64{1, 2, 3},
+	)
+	if err != nil {
+		t.Fatalf("batch check: %v", err)
+	}
+	expected := []bool{false, true, false}
+	for i := range expected {
+		if duplicates[i] != expected[i] {
+			t.Fatalf("result[%d]: expected %v, got %v", i, expected[i], duplicates[i])
+		}
+	}
+
+	duplicates, err = store.CheckAndStoreBatch(
+		[]string{"same", "other"},
+		[]int64{4, 5},
+	)
+	if err != nil {
+		t.Fatalf("repeat batch check: %v", err)
+	}
+	if !duplicates[0] || !duplicates[1] {
+		t.Fatalf("expected both IDs to be duplicates on retry, got %v", duplicates)
+	}
+}
+
+func TestBloomPebbleStore_ConcurrentClaimHasSingleWinner(t *testing.T) {
+	store, err := NewBloomPebbleStore(t.TempDir(), 0, 1, 1000, 0.01, nil)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer store.Close()
+
+	const workers = 64
+	results := make(chan bool, workers)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(offset int) {
+			defer wg.Done()
+			duplicate, err := store.CheckAndStore("concurrent-id", int64(offset))
+			if err != nil {
+				t.Errorf("claim %d: %v", offset, err)
+				return
+			}
+			results <- duplicate
+		}(i)
+	}
+	wg.Wait()
+	close(results)
+
+	nonDuplicates := 0
+	for duplicate := range results {
+		if !duplicate {
+			nonDuplicates++
+		}
+	}
+	if nonDuplicates != 1 {
+		t.Fatalf("expected exactly one successful claim, got %d", nonDuplicates)
+	}
+}
+
+func TestBloomPebbleStore_RebuildPreservesExistingID(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewBloomPebbleStore(dir, 0, 1, 1000, 0.01, nil)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	if duplicate, err := store.CheckAndStore("restart-id", 7); err != nil || duplicate {
+		t.Fatalf("initial claim: duplicate=%v err=%v", duplicate, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close first store: %v", err)
+	}
+
+	reopened, err := NewBloomPebbleStore(dir, 0, 1, 1000, 0.01, nil)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	defer reopened.Close()
+	duplicate, err := reopened.CheckAndStore("restart-id", 8)
+	if err != nil {
+		t.Fatalf("reopened claim: %v", err)
+	}
+	if !duplicate {
+		t.Fatal("existing ID was accepted after restart")
+	}
+}
+
+func TestPebbleStore_CloseIsIdempotent(t *testing.T) {
+	store, err := NewPebbleStore(t.TempDir(), 0, 1, nil)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("first close: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("second close: %v", err)
+	}
+}

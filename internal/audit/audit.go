@@ -20,13 +20,38 @@ const (
 
 	// auditSyncEvery is the number of encoded events after which the audit log
 	// file is explicitly flushed and fsynced. This keeps fsyncs off the gRPC
-	// hot path while bounding durability window.
-	auditSyncEvery = 100
+	// hot path while bounding durability window. Tuned to 1000 so that at
+	// ~1ms SSD fsync latency the single-worker drain capacity (~1M
+	// events/sec) comfortably exceeds typical RPC rates.
+	auditSyncEvery = 1000
 
 	// auditFlushInterval is the maximum time between fsyncs when events are
 	// trickling in slowly.
 	auditFlushInterval = 1 * time.Second
+
+	// auditBatchSize is the maximum number of events the worker drains from
+	// the channel per iteration. Batching amortizes the mutex acquisition and
+	// bufio overhead across many events instead of one-at-a-time.
+	auditBatchSize = 256
 )
+
+// Option configures a Logger at construction time.
+type Option func(*loggerConfig)
+
+type loggerConfig struct {
+	bufferSize int
+}
+
+// WithBufferSize overrides the event channel buffer size (default
+// DefaultBufferSize). Useful for high-throughput deployments that want to
+// absorb larger bursts without dropping audit events.
+func WithBufferSize(n int) Option {
+	return func(c *loggerConfig) {
+		if n > 0 {
+			c.bufferSize = n
+		}
+	}
+}
 
 // Event represents a single audit log entry.
 type Event struct {
@@ -62,6 +87,17 @@ type Logger struct {
 
 // NewLogger creates an audit logger and starts the background writer.
 func NewLogger(dataDir string) (*Logger, error) {
+	return NewLoggerWithOptions(dataDir)
+}
+
+// NewLoggerWithOptions creates an audit logger with the supplied functional
+// options (e.g. WithBufferSize).
+func NewLoggerWithOptions(dataDir string, opts ...Option) (*Logger, error) {
+	lc := loggerConfig{bufferSize: DefaultBufferSize}
+	for _, o := range opts {
+		o(&lc)
+	}
+
 	logDir := filepath.Join(dataDir, "audit")
 	if err := os.MkdirAll(logDir, 0750); err != nil {
 		return nil, fmt.Errorf("create audit dir: %w", err)
@@ -77,7 +113,7 @@ func NewLogger(dataDir string) (*Logger, error) {
 		file:      f,
 		bufWriter: bufio.NewWriterSize(f, 64*1024),
 		logDir:    logDir,
-		events:    make(chan Event, DefaultBufferSize),
+		events:    make(chan Event, lc.bufferSize),
 		quit:      make(chan struct{}),
 	}
 	l.encoder = json.NewEncoder(l.bufWriter)
@@ -148,57 +184,92 @@ func (l *Logger) Flush() error {
 	return nil
 }
 
-// worker drains the event queue and writes each event to disk. It exits when
+// worker drains the event queue and writes events to disk. It exits when
 // quit is closed, flushing any remaining queued events before returning.
+//
+// To keep up with high RPC rates, the worker drains up to auditBatchSize
+// events per iteration under a single mutex acquisition, amortizing the lock
+// and bufio overhead across many events.
 func (l *Logger) worker() {
 	defer l.wg.Done()
 	ticker := time.NewTicker(auditFlushInterval)
 	defer ticker.Stop()
 
+	batch := make([]Event, 0, auditBatchSize)
+
 	for {
 		select {
 		case evt := <-l.events:
-			l.writeLocked(evt)
+			// Seed the batch with the first event, then drain as many more as
+			// are immediately available (non-blocking) up to the batch cap.
+			batch = append(batch, evt)
+			for len(batch) < auditBatchSize {
+				select {
+				case e := <-l.events:
+					batch = append(batch, e)
+				default:
+					goto write
+				}
+			}
+		write:
+			l.writeBatch(batch)
+			batch = batch[:0]
 		case <-ticker.C:
-			l.flushAndSyncLocked()
+			l.flushAndSync()
 		case <-l.quit:
 			// Drain the remaining buffered events before stopping.
 			for {
 				select {
 				case evt := <-l.events:
-					l.writeLocked(evt)
+					batch = append(batch, evt)
+					// Keep draining non-blockingly into the same batch.
+					for len(batch) < auditBatchSize {
+						select {
+						case e := <-l.events:
+							batch = append(batch, e)
+						default:
+							l.writeBatch(batch)
+							batch = batch[:0]
+							goto done
+						}
+					}
+					l.writeBatch(batch)
+					batch = batch[:0]
 				default:
-					l.flushAndSyncLocked()
+					l.flushAndSync()
 					return
 				}
 			}
+		done:
+			l.flushAndSync()
+			return
 		}
 	}
 }
 
-// writeLocked writes a single event to the audit log file under the mutex.
-func (l *Logger) writeLocked(evt Event) {
+// writeBatch encodes a batch of events under a single mutex acquisition and
+// flushes+fsyncs if the unflushed count crosses the auditSyncEvery threshold.
+func (l *Logger) writeBatch(events []Event) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if err := l.encoder.Encode(evt); err != nil {
-		slog.Warn("Audit log encode failed", "error", err)
-		return
-	}
-	l.unflushed++
-	if l.unflushed >= auditSyncEvery {
-		l.flushAndSyncLocked()
+	for _, evt := range events {
+		if err := l.encoder.Encode(evt); err != nil {
+			slog.Warn("Audit log encode failed", "error", err)
+			continue
+		}
+		l.unflushed++
+		if l.unflushed >= auditSyncEvery {
+			l.flushLocked()
+		}
 	}
 }
 
-// flushAndSyncLocked flushes the buffered audit writer and fsyncs the file.
-// l.mu must NOT be held; it acquires the lock internally.
-func (l *Logger) flushAndSyncLocked() {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.bufWriter == nil {
-		return
-	}
-	if l.unflushed == 0 {
+// flushLocked flushes the buffered audit writer and fsyncs the file. The
+// caller MUST already hold l.mu. (writeBatch calls this directly when the
+// unflushed threshold is crossed — previously this was a self-deadlock
+// because the old flushAndSyncLocked re-acquired the mutex.)
+func (l *Logger) flushLocked() {
+	if l.bufWriter == nil || l.unflushed == 0 {
 		return
 	}
 	if err := l.bufWriter.Flush(); err != nil {
@@ -210,6 +281,14 @@ func (l *Logger) flushAndSyncLocked() {
 		return
 	}
 	l.unflushed = 0
+}
+
+// flushAndSync acquires l.mu and flushes+fsyncs. Used by the worker ticker
+// and shutdown path where the lock is not already held.
+func (l *Logger) flushAndSync() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.flushLocked()
 }
 
 // Close signals the background worker to stop, waits for queued events to be
@@ -228,14 +307,6 @@ func (l *Logger) Close() error {
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.bufWriter != nil && l.unflushed > 0 {
-		if err := l.bufWriter.Flush(); err != nil {
-			slog.Warn("Audit log flush on close failed", "error", err)
-		} else if err := l.file.Sync(); err != nil {
-			slog.Warn("Audit log sync on close failed", "error", err)
-		} else {
-			l.unflushed = 0
-		}
-	}
+	l.flushLocked()
 	return l.file.Close()
 }

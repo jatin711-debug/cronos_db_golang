@@ -2,23 +2,38 @@ package dedup
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/cockroachdb/pebble"
 	"github.com/jatin711-debug/cronos_db_golang/internal/metrics"
 )
 
-// PebbleStore is a PebbleDB-backed dedup store
+// PebbleStore is a PebbleDB-backed dedup store with an in-memory pending-write
+// buffer. New entries are accumulated in memory and flushed to PebbleDB either
+// when the buffer reaches 1k entries or every 1ms. This collapses many small
+// writes into larger batches and dramatically reduces L0 pressure under high
+// throughput.
 type PebbleStore struct {
 	db          *pebble.DB
 	dataDir     string
 	partitionID int32
 	ttlHours    int32
+
+	pendingMu sync.RWMutex
+	pending   map[string]int64 // messageID -> offset
+	claimMu   sync.Mutex       // serializes check-and-buffer for direct users
+
+	quit      chan struct{}
+	wg        sync.WaitGroup
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // NewPebbleStore creates a new PebbleStore
@@ -48,16 +63,27 @@ func NewPebbleStore(dataDir string, partitionID int32, ttlHours int32, cache *pe
 		return nil, fmt.Errorf("open pebble db: %w", err)
 	}
 
-	return &PebbleStore{
+	store := &PebbleStore{
 		db:          db,
 		dataDir:     dir,
 		partitionID: partitionID,
 		ttlHours:    ttlHours,
-	}, nil
+		pending:     make(map[string]int64),
+		quit:        make(chan struct{}),
+	}
+
+	store.startFlushLoop()
+
+	return store, nil
 }
 
-// CheckAndStore checks if message ID exists, and stores it if not
+// CheckAndStore checks if message ID exists, and stores it if not.
+// The pending-write buffer is scanned first so duplicates that were recently
+// inserted but not yet flushed are detected.
 func (p *PebbleStore) CheckAndStore(messageID string, offset int64) (bool, error) {
+	p.claimMu.Lock()
+	defer p.claimMu.Unlock()
+
 	start := time.Now()
 	defer func() {
 		metrics.ObserveDedupCheck(strconv.FormatInt(int64(p.partitionID), 10), "pebble_slow", time.Since(start))
@@ -65,7 +91,15 @@ func (p *PebbleStore) CheckAndStore(messageID string, offset int64) (bool, error
 
 	key := []byte(messageID)
 
-	// Check if exists
+	// 1. Check pending buffer first.
+	p.pendingMu.RLock()
+	if _, exists := p.pending[messageID]; exists {
+		p.pendingMu.RUnlock()
+		return true, nil
+	}
+	p.pendingMu.RUnlock()
+
+	// 2. Check PebbleDB.
 	_, closer, err := p.db.Get(key)
 	if err == nil {
 		closer.Close()
@@ -75,57 +109,125 @@ func (p *PebbleStore) CheckAndStore(messageID string, offset int64) (bool, error
 		return false, fmt.Errorf("check key: %w", err)
 	}
 
-	// Store new entry - use NoSync for performance (WAL provides durability)
-	expirationTS := time.Now().UnixMilli() + int64(p.ttlHours)*60*60*1000
-	value := p.buildValue(offset, expirationTS, time.Now().UnixNano())
-
-	if err := p.db.Set(key, value, pebble.NoSync); err != nil {
-		return false, fmt.Errorf("set key: %w", err)
+	// 3. Buffer the new entry.
+	if err := p.bufferWrite(messageID, offset); err != nil {
+		return false, err
 	}
-
 	return false, nil // Not a duplicate
 }
 
-// StoreOnly stores a message ID without checking if it exists
-// Used by BloomPebbleStore when bloom filter confirms key is new
-func (p *PebbleStore) StoreOnly(messageID string, offset int64) error {
-	key := []byte(messageID)
-	expirationTS := time.Now().UnixMilli() + int64(p.ttlHours)*60*60*1000
-	value := p.buildValue(offset, expirationTS, time.Now().UnixNano())
+// bufferWrite adds a message ID to the pending buffer and triggers a flush if
+// the buffer is full.
+func (p *PebbleStore) bufferWrite(messageID string, offset int64) error {
+	p.pendingMu.Lock()
+	p.pending[messageID] = offset
+	full := len(p.pending) >= 1000
+	var toFlush map[string]int64
+	if full {
+		toFlush = p.pending
+		p.pending = make(map[string]int64)
+	}
+	p.pendingMu.Unlock()
 
-	if err := p.db.Set(key, value, pebble.NoSync); err != nil {
-		return fmt.Errorf("set key: %w", err)
+	if full {
+		if err := p.flushPendingMap(toFlush); err != nil {
+			p.requeuePending(toFlush)
+			return fmt.Errorf("flush pending entry: %w", err)
+		}
 	}
 	return nil
 }
 
-// StoreBatch stores multiple message IDs in a single PebbleDB batch commit.
-// indices specifies which elements from messageIDs/offsets to store.
-// This is much faster than individual StoreOnly calls because it uses a single
-// write batch with one commit instead of N individual Set calls.
-func (p *PebbleStore) StoreBatch(messageIDs []string, offsets []int64, indices []int) error {
-	batch := p.db.NewBatch()
-	defer batch.Close()
-
-	expirationTS := time.Now().UnixMilli() + int64(p.ttlHours)*60*60*1000
-	nowNano := time.Now().UnixNano()
-
-	for _, idx := range indices {
-		key := []byte(messageIDs[idx])
-		value := p.buildValue(offsets[idx], expirationTS, nowNano)
-		if err := batch.Set(key, value, nil); err != nil {
-			return fmt.Errorf("batch set key: %w", err)
+// requeuePending puts failed flushes back into the live buffer. A newer value
+// already present in pending wins, so an older failed flush cannot overwrite a
+// subsequent claim.
+func (p *PebbleStore) requeuePending(entries map[string]int64) {
+	p.pendingMu.Lock()
+	defer p.pendingMu.Unlock()
+	for id, offset := range entries {
+		if _, exists := p.pending[id]; !exists {
+			p.pending[id] = offset
 		}
 	}
+}
 
+// StoreOnly stores a message ID without checking if it exists.
+// Used by BloomPebbleStore when bloom filter confirms key is new.
+func (p *PebbleStore) StoreOnly(messageID string, offset int64) error {
+	p.claimMu.Lock()
+	defer p.claimMu.Unlock()
+	return p.bufferWrite(messageID, offset)
+}
+
+// StoreBatch stores multiple message IDs in a single buffered write.
+// indices specifies which elements from messageIDs/offsets to store.
+func (p *PebbleStore) StoreBatch(messageIDs []string, offsets []int64, indices []int) error {
+	p.claimMu.Lock()
+	defer p.claimMu.Unlock()
+
+	p.pendingMu.Lock()
+	for _, idx := range indices {
+		p.pending[messageIDs[idx]] = offsets[idx]
+	}
+	full := len(p.pending) >= 1000
+	var toFlush map[string]int64
+	if full {
+		toFlush = p.pending
+		p.pending = make(map[string]int64)
+	}
+	p.pendingMu.Unlock()
+
+	if full {
+		if err := p.flushPendingMap(toFlush); err != nil {
+			p.requeuePending(toFlush)
+			return fmt.Errorf("flush pending batch: %w", err)
+		}
+	}
+	return nil
+}
+
+// RollbackClaim removes previously-claimed message IDs from the store. It undoes
+// a dedup claim when the durable write that was supposed to follow it failed, so
+// that a client retry of the same message ID is not incorrectly rejected as a
+// duplicate. IDs are removed from both the in-memory pending buffer and PebbleDB
+// (deleting an absent key is a no-op, so IDs still only in the pending buffer are
+// handled correctly). claimMu is held so this cannot interleave with a concurrent
+// flush of the pending buffer.
+func (p *PebbleStore) RollbackClaim(messageIDs []string) error {
+	if len(messageIDs) == 0 {
+		return nil
+	}
+	p.claimMu.Lock()
+	defer p.claimMu.Unlock()
+
+	p.pendingMu.Lock()
+	for _, id := range messageIDs {
+		delete(p.pending, id)
+	}
+	p.pendingMu.Unlock()
+
+	batch := p.db.NewBatch()
+	defer batch.Close()
+	for _, id := range messageIDs {
+		if err := batch.Delete([]byte(id), nil); err != nil {
+			return fmt.Errorf("rollback delete key: %w", err)
+		}
+	}
 	if err := batch.Commit(pebble.NoSync); err != nil {
-		return fmt.Errorf("batch commit: %w", err)
+		return fmt.Errorf("rollback commit: %w", err)
 	}
 	return nil
 }
 
 // GetOffset returns stored offset for message ID
 func (p *PebbleStore) GetOffset(messageID string) (int64, bool, error) {
+	p.pendingMu.RLock()
+	if offset, ok := p.pending[messageID]; ok {
+		p.pendingMu.RUnlock()
+		return offset, true, nil
+	}
+	p.pendingMu.RUnlock()
+
 	key := []byte(messageID)
 	value, closer, err := p.db.Get(key)
 	if err == pebble.ErrNotFound {
@@ -142,6 +244,13 @@ func (p *PebbleStore) GetOffset(messageID string) (int64, bool, error) {
 
 // Exists checks if message ID exists
 func (p *PebbleStore) Exists(messageID string) (bool, error) {
+	p.pendingMu.RLock()
+	if _, ok := p.pending[messageID]; ok {
+		p.pendingMu.RUnlock()
+		return true, nil
+	}
+	p.pendingMu.RUnlock()
+
 	key := []byte(messageID)
 	_, closer, err := p.db.Get(key)
 	if err == pebble.ErrNotFound {
@@ -154,8 +263,77 @@ func (p *PebbleStore) Exists(messageID string) (bool, error) {
 	return true, nil
 }
 
+// startFlushLoop runs a 1ms ticker that flushes the pending buffer.
+func (p *PebbleStore) startFlushLoop() {
+	p.wg.Add(1)
+	go func() {
+		defer p.wg.Done()
+		ticker := time.NewTicker(time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if err := p.flushPending(); err != nil {
+					log.Printf("[DEDUP-%d] pending flush failed: %v", p.partitionID, err)
+				}
+			case <-p.quit:
+				return
+			}
+		}
+	}()
+}
+
+// flushPending moves all buffered entries into PebbleDB as one batch.
+func (p *PebbleStore) flushPending() error {
+	p.claimMu.Lock()
+	defer p.claimMu.Unlock()
+
+	p.pendingMu.Lock()
+	if len(p.pending) == 0 {
+		p.pendingMu.Unlock()
+		return nil
+	}
+	toFlush := p.pending
+	p.pending = make(map[string]int64)
+	p.pendingMu.Unlock()
+
+	if err := p.flushPendingMap(toFlush); err != nil {
+		p.requeuePending(toFlush)
+		return err
+	}
+	return nil
+}
+
+// flushPendingMap writes the provided pending map to PebbleDB in a single batch.
+func (p *PebbleStore) flushPendingMap(pending map[string]int64) error {
+	if len(pending) == 0 {
+		return nil
+	}
+
+	batch := p.db.NewBatch()
+	defer batch.Close()
+
+	expirationTS := time.Now().UnixMilli() + int64(p.ttlHours)*60*60*1000
+	nowNano := time.Now().UnixNano()
+
+	for id, offset := range pending {
+		value := p.buildValue(offset, expirationTS, nowNano)
+		if err := batch.Set([]byte(id), value, nil); err != nil {
+			return fmt.Errorf("batch set key: %w", err)
+		}
+	}
+
+	if err := batch.Commit(pebble.NoSync); err != nil {
+		return fmt.Errorf("batch commit: %w", err)
+	}
+	return nil
+}
+
 // PruneExpired removes expired entries
 func (p *PebbleStore) PruneExpired() (int, error) {
+	if err := p.flushPending(); err != nil {
+		return 0, fmt.Errorf("flush pending before prune: %w", err)
+	}
 	now := time.Now().UnixMilli()
 	pruned := 0
 
@@ -186,6 +364,13 @@ func (p *PebbleStore) PruneExpired() (int, error) {
 
 // GetTimestamp returns stored timestamp for message ID
 func (p *PebbleStore) GetTimestamp(messageID string) (time.Time, bool, error) {
+	p.pendingMu.RLock()
+	if _, ok := p.pending[messageID]; ok {
+		p.pendingMu.RUnlock()
+		return time.Now(), true, nil
+	}
+	p.pendingMu.RUnlock()
+
 	key := []byte(messageID)
 	value, closer, err := p.db.Get(key)
 	if err == pebble.ErrNotFound {
@@ -203,8 +388,13 @@ func (p *PebbleStore) GetTimestamp(messageID string) (time.Time, bool, error) {
 	return time.Unix(0, createdTS), true, nil
 }
 
-// Put inserts or overwrites an entry directly with a given created timestamp
+// Put inserts or overwrites an entry directly with a given created timestamp.
+// This bypasses the pending buffer to ensure the entry is durable immediately.
 func (p *PebbleStore) Put(messageID string, offset int64, createdTS int64) error {
+	if err := p.flushPending(); err != nil {
+		return fmt.Errorf("flush pending before put: %w", err)
+	}
+
 	key := []byte(messageID)
 	expirationTS := time.Now().UnixMilli() + int64(p.ttlHours)*60*60*1000
 	value := p.buildValue(offset, expirationTS, createdTS)
@@ -219,6 +409,10 @@ func (p *PebbleStore) Put(messageID string, offset int64, createdTS int64) error
 // This is used for observability and test verification, so we compute key count
 // exactly via iteration rather than using file-size based approximations.
 func (p *PebbleStore) GetStats() (*DedupStats, error) {
+	p.pendingMu.RLock()
+	pendingCount := int64(len(p.pending))
+	p.pendingMu.RUnlock()
+
 	iter, err := p.db.NewIter(nil)
 	if err != nil {
 		return nil, fmt.Errorf("create iterator: %w", err)
@@ -234,7 +428,7 @@ func (p *PebbleStore) GetStats() (*DedupStats, error) {
 	}
 
 	return &DedupStats{
-		ApproximateCount: count,
+		ApproximateCount: count + pendingCount,
 		TTLHours:         p.ttlHours,
 		LastPruneTS:      time.Now().UnixMilli(),
 	}, nil
@@ -242,16 +436,30 @@ func (p *PebbleStore) GetStats() (*DedupStats, error) {
 
 // Close closes the store
 func (p *PebbleStore) Close() error {
-	if err := p.db.Flush(); err != nil {
-		return fmt.Errorf("flush before close: %w", err)
-	}
-	return p.db.Close()
+	p.closeOnce.Do(func() {
+		close(p.quit)
+		p.wg.Wait()
+		var errs []error
+		if err := p.flushPending(); err != nil {
+			errs = append(errs, fmt.Errorf("flush pending before close: %w", err))
+		}
+		if err := p.db.Flush(); err != nil {
+			errs = append(errs, fmt.Errorf("flush before close: %w", err))
+		}
+		if err := p.db.Close(); err != nil {
+			errs = append(errs, err)
+		}
+		p.closeErr = errors.Join(errs...)
+	})
+	return p.closeErr
 }
 
 // Checkpoint creates a PebbleDB checkpoint of the dedup store at destDir.
-// The checkpoint is a consistent, point-in-time snapshot that can be used for
-// backups or seeding a new replica.
+// Pending writes are flushed before the checkpoint so it is consistent.
 func (p *PebbleStore) Checkpoint(destDir string) error {
+	if err := p.flushPending(); err != nil {
+		return fmt.Errorf("flush pending before checkpoint: %w", err)
+	}
 	if err := p.db.Checkpoint(destDir); err != nil {
 		return fmt.Errorf("dedup checkpoint: %w", err)
 	}

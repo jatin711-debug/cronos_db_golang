@@ -1,12 +1,11 @@
 package replication
 
 import (
-	"crypto/tls"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
 	"log"
-	"net"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,6 +15,9 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 var replicationLag = promauto.NewGaugeVec(
@@ -26,15 +28,19 @@ var replicationLag = promauto.NewGaugeVec(
 	[]string{"follower", "partition"},
 )
 
-// Leader manages replication to followers
+// Leader replicates a partition's WAL to its followers over gRPC
+// (ReplicationService.Append). It sends synchronously and waits for a quorum of
+// in-sync replicas (including itself) before returning success, so a publish
+// that requires min-insync-replicas durability blocks until that many replicas
+// have the data.
 type Leader struct {
 	mu                sync.RWMutex
 	partitionID       int32
-	nodeID            string // identity of this leader node used in replication handshakes
+	nodeID            string // identity of this leader node
 	epoch             int64
 	followers         map[string]*FollowerInfo
-	batchSize         int32
-	flushInterval     time.Duration
+	batchSize         int32         // catch-up chunk size
+	flushInterval     time.Duration // reconnect/maintenance tick
 	replicateTimeout  time.Duration
 	minInSyncReplicas int // minimum ISR size (including leader) required to ack a write
 	quit              chan struct{}
@@ -43,28 +49,34 @@ type Leader struct {
 	tlsConfig         *MTLSConfig // optional mTLS for replication connections
 }
 
-// FollowerInfo represents metadata about a follower replica
+// FollowerInfo represents a follower replica and its gRPC replication client.
 type FollowerInfo struct {
-	mu            sync.Mutex // Protects mutable fields below from concurrent goroutine access
+	mu            sync.Mutex
 	ID            string
-	Address       string
+	Address       string // follower's cluster gRPC address (serves ReplicationService)
 	NextOffset    int64
 	LastAckTS     int64
 	HighWatermark int64
 	Connected     bool
-	Buffer        []*types.Event
 	LastError     error
-	InSync        bool // Whether follower is in-sync with leader
-	transport     *Transport
+	InSync        bool // whether the follower has acked the leader's latest sends
+	conn          *grpc.ClientConn
+	client        types.ReplicationServiceClient
 }
 
 // NewLeader creates a new leader. minInSyncReplicas is the minimum ISR size
 // (including the leader itself) required to acknowledge a write as durable;
-// 0 is treated as 1 (single-replica mode). nodeID is advertised to followers
-// during the replication handshake; tlsConfig may be nil for plaintext dev mode.
+// 0 is treated as 1 (single-replica mode). nodeID is this leader's identity;
+// tlsConfig may be nil for plaintext dev mode.
 func NewLeader(partitionID int32, batchSize int32, flushInterval time.Duration, wal *storage.WAL, minInSyncReplicas int, nodeID string, tlsConfig *MTLSConfig) *Leader {
 	if minInSyncReplicas <= 0 {
 		minInSyncReplicas = 1
+	}
+	if batchSize <= 0 {
+		batchSize = 500
+	}
+	if flushInterval <= 0 {
+		flushInterval = 500 * time.Millisecond
 	}
 	if nodeID == "" {
 		nodeID = "leader"
@@ -87,20 +99,40 @@ func NewLeader(partitionID int32, batchSize int32, flushInterval time.Duration, 
 	}
 }
 
-// AddFollower adds a follower
+// dialCredentials returns the gRPC transport credentials for replication:
+// mTLS when configured, otherwise insecure (dev mode).
+func (l *Leader) dialCredentials() (credentials.TransportCredentials, error) {
+	if l.tlsConfig != nil && l.tlsConfig.Enabled {
+		tlsCfg, err := BuildClientTLSConfig(l.tlsConfig)
+		if err != nil {
+			return nil, err
+		}
+		return credentials.NewTLS(tlsCfg), nil
+	}
+	return insecure.NewCredentials(), nil
+}
+
+// AddFollower registers a follower and establishes its gRPC client. address is
+// the follower's cluster gRPC address (where ReplicationService is served).
 func (l *Leader) AddFollower(id, address string) error {
 	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	if _, exists := l.followers[id]; exists {
-		return fmt.Errorf("follower %s already exists", id)
+	if existing, ok := l.followers[id]; ok {
+		// Update the address if it changed; otherwise idempotent no-op so the
+		// cluster reconcile loop can call this repeatedly.
+		if existing.Address == address {
+			l.mu.Unlock()
+			return nil
+		}
+		existing.Address = address
+		l.mu.Unlock()
+		l.connectFollower(id, address)
+		return nil
 	}
 
 	nextOffset := int64(0)
 	if l.wal != nil {
 		nextOffset = l.wal.GetNextOffset()
 	}
-
 	l.followers[id] = &FollowerInfo{
 		ID:         id,
 		Address:    address,
@@ -108,413 +140,264 @@ func (l *Leader) AddFollower(id, address string) error {
 		Connected:  false,
 		InSync:     false,
 	}
+	l.mu.Unlock()
 
-	// Establish connection
-	utils.GoSafe("leader-connect", func() { l.connectFollower(id, address) })
-
+	l.connectFollower(id, address)
 	return nil
 }
 
-// connectFollower establishes connection to follower. If mTLS is configured,
-// the connection is upgraded to TLS before the handshake.
+// connectFollower creates (or recreates) the gRPC client for a follower. The
+// gRPC client dials lazily, so connectivity is confirmed on the first Append.
 func (l *Leader) connectFollower(id, address string) {
-	var conn net.Conn
-	var err error
-
-	if l.tlsConfig != nil && l.tlsConfig.Enabled {
-		tlsCfg, err := BuildClientTLSConfig(l.tlsConfig)
-		if err != nil {
-			log.Printf("[LEADER] Failed to build TLS config for follower %s: %v", id, err)
-			return
-		}
-		conn, err = tls.Dial("tcp", address, tlsCfg)
-	} else {
-		conn, err = net.DialTimeout("tcp", address, 5*time.Second)
-	}
+	creds, err := l.dialCredentials()
 	if err != nil {
-		log.Printf("[LEADER] Failed to connect to follower %s at %s: %v", id, address, err)
+		log.Printf("[LEADER] Failed to build replication credentials for follower %s: %v", id, err)
 		return
 	}
 
-	transport := NewTransport(conn)
-
-	// Perform handshake using the real leader node identity.
-	handshake := &HandshakeMessage{NodeID: l.nodeID}
-	payload, err := handshake.Encode()
+	conn, err := grpc.NewClient(address,
+		grpc.WithTransportCredentials(creds),
+		grpc.WithDefaultCallOptions(
+			grpc.MaxCallRecvMsgSize(64*1024*1024),
+			grpc.MaxCallSendMsgSize(64*1024*1024),
+		),
+	)
 	if err != nil {
-		log.Printf("[LEADER] Handshake encode failed to %s: %v", id, err)
-		transport.Close()
+		log.Printf("[LEADER] Failed to create replication client to follower %s at %s: %v", id, address, err)
 		return
 	}
-	if err := transport.WriteMessage(MsgTypeHandshake, payload); err != nil {
-		log.Printf("[LEADER] Handshake failed to %s: %v", id, err)
-		transport.Close()
-		return
-	}
+	client := types.NewReplicationServiceClient(conn)
 
-	l.mu.Lock()
-	if follower, exists := l.followers[id]; exists {
-		follower.transport = transport
-		follower.Connected = true
-	}
-	l.mu.Unlock()
-
-	log.Printf("[LEADER] Connected to follower %s at %s (binary protocol)", id, address)
-
-	// Start reader loop for acks
-	utils.GoSafe("leader-read", func() { l.readLoop(id, transport) })
-}
-
-// readLoop reads messages from follower
-func (l *Leader) readLoop(id string, t *Transport) {
-	for {
-		msgType, payload, err := t.ReadMessage()
-		if err != nil {
-			log.Printf("[LEADER] Connection lost to %s: %v", id, err)
-			l.mu.Lock()
-			if f, ok := l.followers[id]; ok {
-				f.mu.Lock()
-				f.Connected = false
-				f.transport = nil
-				f.mu.Unlock()
-			}
-			l.mu.Unlock()
-			return
-		}
-
-		if msgType == MsgTypeAppendAck {
-			ack := &AppendAckMessage{}
-			if err := ack.Decode(payload); err == nil {
-				l.handleAck(id, ack)
-			}
-		}
-	}
-}
-
-// handleAck handles acknowledgment. ACKs from a different term are ignored.
-func (l *Leader) handleAck(id string, ack *AppendAckMessage) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	follower, ok := l.followers[id]
+	l.mu.RLock()
+	f, ok := l.followers[id]
+	l.mu.RUnlock()
 	if !ok {
+		_ = conn.Close()
 		return
 	}
 
-	// Ignore stale-term ACKs.
-	if ack.Term != l.epoch {
-		log.Printf("[LEADER] ignoring ack from follower %s with stale term %d (current %d)", id, ack.Term, l.epoch)
-		return
+	f.mu.Lock()
+	if f.conn != nil {
+		_ = f.conn.Close()
 	}
+	f.conn = conn
+	f.client = client
+	f.Connected = true
+	f.mu.Unlock()
 
-	if ack.Success {
-		if ack.Offset > follower.HighWatermark {
-			follower.HighWatermark = ack.Offset
-		}
-		// Advance NextOffset to the next expected entry. Prefer the follower's
-		// reported NextOffset; fall back to HighWatermark+1 for older followers.
-		if ack.NextOffset > follower.NextOffset {
-			follower.NextOffset = ack.NextOffset
-		} else if ack.Offset+1 > follower.NextOffset {
-			follower.NextOffset = ack.Offset + 1
-		}
-		follower.InSync = true
-	} else {
-		follower.InSync = false
-	}
-	// Compute and expose replication lag using WAL high watermark
-	var lag int64
-	if l.wal != nil {
-		lag = l.wal.GetHighWatermark() - follower.HighWatermark
-	}
-	if lag < 0 {
-		lag = 0
-	}
-	replicationLag.WithLabelValues(id, fmt.Sprintf("%d", l.partitionID)).Set(float64(lag))
+	log.Printf("[LEADER] Connected to follower %s at %s (gRPC replication)", id, address)
 }
 
-// RemoveFollower removes a follower
+// RemoveFollower removes a follower and closes its connection.
 func (l *Leader) RemoveFollower(id string) error {
 	l.mu.Lock()
-	defer l.mu.Unlock()
-
 	follower, exists := l.followers[id]
 	if !exists {
+		l.mu.Unlock()
 		return fmt.Errorf("follower %s not found", id)
 	}
+	delete(l.followers, id)
+	l.mu.Unlock()
 
-	// Close connection
 	follower.mu.Lock()
-	if follower.transport != nil {
-		follower.transport.Close()
-		follower.transport = nil
+	if follower.conn != nil {
+		_ = follower.conn.Close()
+		follower.conn = nil
+		follower.client = nil
 	}
 	follower.Connected = false
 	follower.mu.Unlock()
-
-	delete(l.followers, id)
 	return nil
 }
 
-// Replicate replicates an event batch to followers and waits for quorum ACKs.
-// It buffers events, flushes all followers, then waits for a majority of in-sync
-// followers to acknowledge the last offset before returning.
+// Replicate sends an event batch to all connected followers and returns success
+// once a quorum (min-insync-replicas, counting the leader) has durably acked.
+// events must be contiguous and start at the offset the followers expect; the
+// caller (publish path) serializes appends+replication per partition to keep
+// this ordering. RF=1 (no followers, minISR<=1) is a no-op.
 func (l *Leader) Replicate(events []*types.Event) error {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-
-	if len(l.followers) == 0 {
-		minISR := l.minInSyncReplicas
-		if minISR <= 0 {
-			minISR = 1
-		}
-		if minISR > 1 {
-			return fmt.Errorf("not enough replicas: min-insync-replicas=%d but no followers are configured", minISR)
-		}
-		return nil // Single-replica (RF=1) mode: leader-only is sufficient.
-	}
-
-	isr := l.inSyncReplicasLocked()
-
-	// minInSyncReplicas is the total ISR size including the leader. We need at
-	// least (minInSyncReplicas - 1) follower acks in addition to the leader's
-	// own local write. If there are fewer followers in ISR than required, the
-	// write is rejected rather than silently returning with zero durability.
-	minISR := l.minInSyncReplicas
-	if minISR <= 0 {
-		minISR = 1
-	}
-	if len(isr)+1 < minISR {
-		return fmt.Errorf("not enough replicas: min-insync-replicas=%d but only %d ISR members (incl. leader)", minISR, len(isr)+1)
-	}
-
-	neededAcks := (len(isr) + 1) / 2
-	if minISR-1 > neededAcks {
-		neededAcks = minISR - 1
-	}
-	if neededAcks == 0 {
-		// We already validated that there is at least one follower above; with
-		// minISR=1 and a single ISR follower we still need one follower ack to
-		// be safe (leader + follower = RF=2 durability).
-		neededAcks = 1
-	}
-
-	activeISR := 0
-	for _, id := range isr {
-		if f := l.followers[id]; f != nil && f.Connected {
-			activeISR++
-		}
-	}
-	if activeISR < neededAcks {
-		return fmt.Errorf("replication quorum failed: only %d of %d required ISR followers connected", activeISR, neededAcks)
-	}
-
-	lastOffset := events[len(events)-1].Offset
-
-	// Phase 1: Buffer events to all active ISR followers
-	sendChan := make(chan error, activeISR)
-	for _, id := range isr {
-		follower := l.followers[id]
-		if follower == nil || !follower.Connected {
-			continue
-		}
-		utils.GoSafe("leader-send-batch", func() {
-			f := follower
-			err := l.sendBatch(f, events)
-			if err != nil {
-				log.Printf("[LEADER] Failed to buffer for %s: %v", f.ID, err)
-			}
-			sendChan <- err
-		})
-	}
-
-	for i := 0; i < activeISR; i++ {
-		if err := <-sendChan; err != nil {
-			return fmt.Errorf("replication buffer failed: %w", err)
-		}
-	}
-
-	// Phase 2: Flush all active ISR followers so data is on the wire
-	flushChan := make(chan error, activeISR)
-	for _, id := range isr {
-		follower := l.followers[id]
-		if follower == nil || !follower.Connected {
-			continue
-		}
-		utils.GoSafe("leader-flush", func() {
-			f := follower
-			err := l.flushFollower(f)
-			if err != nil {
-				f.mu.Lock()
-				f.LastError = err
-				f.InSync = false
-				f.mu.Unlock()
-			} else {
-				f.mu.Lock()
-				f.LastError = nil
-				f.LastAckTS = time.Now().UnixMilli()
-				f.mu.Unlock()
-			}
-			flushChan <- err
-		})
-	}
-
-	successes := 0
-	failures := 0
-	maxFailures := activeISR - neededAcks
-	for i := 0; i < activeISR; i++ {
-		err := <-flushChan
-		if err == nil {
-			successes++
-			if successes >= neededAcks {
-				break // Enough followers flushed, wait for acks
-			}
-		} else {
-			failures++
-			if failures > maxFailures {
-				return fmt.Errorf("replication quorum failed: too many follower flush errors: %w", err)
-			}
-		}
-	}
-
-	// Phase 3: Wait for quorum of ISR followers to ack the last offset
-	return l.waitForQuorumAcks(lastOffset, neededAcks, l.replicateTimeout)
-}
-
-// inSyncReplicasLocked returns the list of follower IDs that are currently in ISR.
-func (l *Leader) inSyncReplicasLocked() []string {
-	var isr []string
-	for id, f := range l.followers {
-		if f.InSync && f.Connected {
-			isr = append(isr, id)
-		}
-	}
-	return isr
-}
-
-// waitForQuorumAcks blocks until neededAcks in-sync followers have acked an offset
-// >= targetOffset, or until timeout.
-func (l *Leader) waitForQuorumAcks(targetOffset int64, neededAcks int, timeout time.Duration) error {
-	if neededAcks <= 0 {
-		return nil
-	}
-	deadline := time.Now().Add(timeout)
-	pollInterval := 10 * time.Millisecond
-
-	for time.Now().Before(deadline) {
-		l.mu.RLock()
-		acks := 0
-		for _, f := range l.followers {
-			if f.InSync && f.Connected && f.HighWatermark >= targetOffset {
-				acks++
-			}
-		}
-		l.mu.RUnlock()
-
-		if acks >= neededAcks {
-			return nil
-		}
-
-		time.Sleep(pollInterval)
-	}
-
-	return fmt.Errorf("replication quorum timeout: not enough ISR followers acked offset %d within %v", targetOffset, timeout)
-}
-
-// sendBatch sends a batch to a follower (public, acquires f.mu)
-func (l *Leader) sendBatch(follower *FollowerInfo, events []*types.Event) error {
-	follower.mu.Lock()
-	defer follower.mu.Unlock()
-	return l.sendBatchLocked(follower, events)
-}
-
-// sendBatchLocked sends a batch to a follower (caller must hold f.mu)
-func (l *Leader) sendBatchLocked(follower *FollowerInfo, events []*types.Event) error {
 	if len(events) == 0 {
 		return nil
 	}
 
-	// Verify the buffer is contiguous with the follower's next expected offset.
-	if events[0].Offset != follower.NextOffset {
-		return fmt.Errorf("gap detected for follower %s: expected offset %d, got %d", follower.ID, follower.NextOffset, events[0].Offset)
+	l.mu.RLock()
+	followers := make([]*FollowerInfo, 0, len(l.followers))
+	for _, f := range l.followers {
+		followers = append(followers, f)
 	}
-	for i := 1; i < len(events); i++ {
-		if events[i].Offset != events[i-1].Offset+1 {
-			return fmt.Errorf("non-contiguous offsets for follower %s: %d followed by %d", follower.ID, events[i-1].Offset, events[i].Offset)
+	minISR := l.minInSyncReplicas
+	l.mu.RUnlock()
+	if minISR <= 0 {
+		minISR = 1
+	}
+
+	// Connected followers are those with a live gRPC client.
+	connected := make([]*FollowerInfo, 0, len(followers))
+	for _, f := range followers {
+		f.mu.Lock()
+		ok := f.client != nil
+		f.mu.Unlock()
+		if ok {
+			connected = append(connected, f)
 		}
 	}
 
-	// Add to follower's buffer
-	follower.Buffer = append(follower.Buffer, events...)
-
-	// Send batch if buffer is full
-	if int32(len(follower.Buffer)) >= l.batchSize {
-		return l.flushFollower(follower)
+	if len(connected) == 0 {
+		// No followers to replicate to. Only acceptable when the leader alone
+		// satisfies the durability requirement (RF=1 / minISR<=1).
+		if minISR > 1 {
+			return fmt.Errorf("not enough replicas: min-insync-replicas=%d but no connected followers for partition %d", minISR, l.partitionID)
+		}
+		return nil
 	}
 
+	// Send to all connected followers concurrently.
+	var wg sync.WaitGroup
+	var ackMu sync.Mutex
+	acks := 1 // the leader itself already has the data durably in its WAL
+	for _, f := range connected {
+		wg.Add(1)
+		go func(f *FollowerInfo) {
+			defer wg.Done()
+			if err := l.sendToFollower(f, events); err != nil {
+				log.Printf("[LEADER] Replicate to follower %s failed (partition %d): %v", f.ID, l.partitionID, err)
+				return
+			}
+			ackMu.Lock()
+			acks++
+			ackMu.Unlock()
+		}(f)
+	}
+	wg.Wait()
+
+	if acks < minISR {
+		return fmt.Errorf("replication quorum not met: %d of %d required in-sync replicas acked (partition %d, offset %d)",
+			acks, minISR, l.partitionID, events[len(events)-1].Offset)
+	}
 	return nil
 }
 
-// flushFollower flushes a follower's buffer
-func (l *Leader) flushFollower(follower *FollowerInfo) error {
-	follower.mu.Lock()
-	if len(follower.Buffer) == 0 {
-		follower.mu.Unlock()
+// sendToFollower delivers events to one follower, catching it up first if it is
+// behind the batch's starting offset (e.g. a follower that joined after the
+// leader already had data).
+func (l *Leader) sendToFollower(f *FollowerInfo, events []*types.Event) error {
+	startOffset := events[0].Offset
+
+	// Fast path: try a direct append at the expected offset.
+	err := l.appendToFollower(f, events)
+	if err == nil {
 		return nil
 	}
-	events := make([]*types.Event, len(follower.Buffer))
-	copy(events, follower.Buffer)
-	trans := follower.transport
-	nextOffset := follower.NextOffset
-	follower.mu.Unlock()
 
-	if trans == nil {
-		return fmt.Errorf("no connection to follower %s", follower.ID)
+	// If the follower is behind (its next offset < this batch's start), ship the
+	// missing range from the leader WAL, then retry the batch once.
+	f.mu.Lock()
+	next := f.NextOffset
+	client := f.client
+	f.mu.Unlock()
+	if client != nil && next >= 0 && next < startOffset {
+		if cuErr := l.catchUpFollower(f, next, startOffset); cuErr != nil {
+			return cuErr
+		}
+		return l.appendToFollower(f, events)
 	}
+	return err
+}
 
-	prevLogIndex := nextOffset - 1
-	prevLogTerm := l.getPrevLogTerm(prevLogIndex)
+// catchUpFollower ships events in [from, to) from the leader's WAL to the
+// follower in chunks, advancing on each ack.
+func (l *Leader) catchUpFollower(f *FollowerInfo, from, to int64) error {
+	if l.wal == nil {
+		return fmt.Errorf("no WAL available for catch-up")
+	}
+	chunk := int64(l.batchSize)
+	if chunk <= 0 {
+		chunk = 500
+	}
+	for from < to {
+		end := from + chunk
+		if end > to {
+			end = to
+		}
+		events, err := l.wal.ReadEvents(from, end-1)
+		if err != nil {
+			return fmt.Errorf("catch-up read [%d,%d) for follower %s: %w", from, end, f.ID, err)
+		}
+		if len(events) == 0 {
+			break
+		}
+		if err := l.appendToFollower(f, events); err != nil {
+			return err
+		}
+		f.mu.Lock()
+		from = f.NextOffset
+		f.mu.Unlock()
+	}
+	return nil
+}
 
-	// Populate per-event checksums and compute a batch-level checksum.
-	batchChecksum := computeBatchChecksum(events)
+// appendToFollower performs one ReplicationService.Append RPC for a contiguous
+// batch and updates the follower's tracked offsets/in-sync state from the reply.
+func (l *Leader) appendToFollower(f *FollowerInfo, events []*types.Event) error {
+	f.mu.Lock()
+	client := f.client
+	f.mu.Unlock()
+	if client == nil {
+		return fmt.Errorf("follower %s has no replication client", f.ID)
+	}
 
 	req := &types.ReplicationAppendRequest{
 		PartitionId:        l.partitionID,
 		Events:             events,
-		ExpectedNextOffset: nextOffset,
+		ExpectedNextOffset: events[0].Offset,
 		Term:               atomic.LoadInt64(&l.epoch),
-		PrevLogTerm:        prevLogTerm,
-		Checksum:           batchChecksum,
+		PrevLogTerm:        l.getPrevLogTerm(events[0].Offset - 1),
+		Checksum:           computeBatchChecksum(events),
 	}
 
-	if err := trans.WriteProtoMessage(MsgTypeAppendEntries, req); err != nil {
-		return err
+	ctx, cancel := context.WithTimeout(context.Background(), l.replicateTimeout)
+	defer cancel()
+	resp, err := client.Append(ctx, req)
+	if err != nil {
+		f.mu.Lock()
+		f.Connected = false
+		f.InSync = false
+		f.LastError = err
+		f.mu.Unlock()
+		return fmt.Errorf("append RPC to follower %s: %w", f.ID, err)
 	}
-
-	log.Printf("[LEADER] Replicating %d events to %s (binary)", len(events), follower.ID)
-
-	// Only advance NextOffset and remove sent events after a successful write.
-	follower.mu.Lock()
-	if len(events) > 0 {
-		lastSentOffset := events[len(events)-1].Offset
-		if lastSentOffset+1 > follower.NextOffset {
-			follower.NextOffset = lastSentOffset + 1
+	if !resp.GetSuccess() {
+		f.mu.Lock()
+		if resp.GetNextOffset() > 0 {
+			f.NextOffset = resp.GetNextOffset()
 		}
-		// Remove the exact prefix we just sent from the buffer.
-		if len(follower.Buffer) >= len(events) {
-			follower.Buffer = follower.Buffer[len(events):]
-		} else {
-			follower.Buffer = follower.Buffer[:0]
-		}
+		f.InSync = false
+		f.LastError = fmt.Errorf("%s", resp.GetError())
+		f.mu.Unlock()
+		return fmt.Errorf("follower %s rejected append: %s", f.ID, resp.GetError())
 	}
-	follower.mu.Unlock()
 
+	f.mu.Lock()
+	f.HighWatermark = resp.GetLastOffset()
+	f.NextOffset = resp.GetNextOffset()
+	f.InSync = true
+	f.Connected = true
+	f.LastAckTS = time.Now().UnixMilli()
+	f.LastError = nil
+	f.mu.Unlock()
+
+	if l.wal != nil {
+		lag := l.wal.GetHighWatermark() - resp.GetLastOffset()
+		if lag < 0 {
+			lag = 0
+		}
+		replicationLag.WithLabelValues(f.ID, fmt.Sprintf("%d", l.partitionID)).Set(float64(lag))
+	}
 	return nil
 }
 
-// getPrevLogTerm returns the term of the log entry at the given offset.
-// It reads the term from the WAL record when possible; otherwise it falls back
-// to the leader's current epoch.
+// getPrevLogTerm returns the term of the log entry at the given offset, read
+// from the WAL when possible; otherwise the leader's current epoch.
 func (l *Leader) getPrevLogTerm(offset int64) int64 {
 	if offset < 0 {
 		return 0
@@ -527,55 +410,59 @@ func (l *Leader) getPrevLogTerm(offset int64) int64 {
 	return atomic.LoadInt64(&l.epoch)
 }
 
-// GetHighWatermark returns the minimum high watermark across followers
+// GetHighWatermark returns the minimum high watermark across in-sync followers.
 func (l *Leader) GetHighWatermark() int64 {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	return l.getHighWatermarkLocked()
 }
 
-// getHighWatermarkLocked returns the min high watermark (caller must hold RLock)
 func (l *Leader) getHighWatermarkLocked() int64 {
 	if len(l.followers) == 0 {
 		return 0
 	}
-
 	minWatermark := int64(-1)
 	for _, follower := range l.followers {
-		if !follower.InSync {
+		follower.mu.Lock()
+		inSync := follower.InSync
+		hw := follower.HighWatermark
+		follower.mu.Unlock()
+		if !inSync {
 			continue
 		}
-		if minWatermark == -1 || follower.HighWatermark < minWatermark {
-			minWatermark = follower.HighWatermark
+		if minWatermark == -1 || hw < minWatermark {
+			minWatermark = hw
 		}
 	}
-
 	if minWatermark == -1 {
 		return 0
 	}
 	return minWatermark
 }
 
-// GetInSyncReplicas returns the list of in-sync replica IDs
+// GetInSyncReplicas returns the IDs of followers currently in sync and connected.
 func (l *Leader) GetInSyncReplicas() []string {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
-
 	var isr []string
 	for id, follower := range l.followers {
-		if follower.InSync && follower.Connected {
+		follower.mu.Lock()
+		ok := follower.InSync && follower.Connected
+		follower.mu.Unlock()
+		if ok {
 			isr = append(isr, id)
 		}
 	}
 	return isr
 }
 
-// GetEpoch returns the current epoch
+// GetEpoch returns the current epoch.
 func (l *Leader) GetEpoch() int64 {
 	return atomic.LoadInt64(&l.epoch)
 }
 
-// SetEpoch sets the epoch (used during leader election)
+// SetEpoch sets the epoch (used during leader election) and propagates the term
+// to the WAL so new records carry it.
 func (l *Leader) SetEpoch(epoch int64) {
 	l.mu.Lock()
 	l.epoch = epoch
@@ -589,72 +476,75 @@ func (l *Leader) SetEpoch(epoch int64) {
 func (l *Leader) GetFollowerOffsets() map[string]int64 {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
-
 	offsets := make(map[string]int64, len(l.followers))
 	for id, follower := range l.followers {
+		follower.mu.Lock()
 		offsets[id] = follower.HighWatermark
+		follower.mu.Unlock()
 	}
 	return offsets
 }
 
-// Start starts the leader replication
+// Start begins the leader maintenance loop (reconnecting dead follower clients).
 func (l *Leader) Start() {
-	utils.GoSafe("leader-replication", l.replicationLoop)
+	utils.GoSafe("leader-replication", l.maintenanceLoop)
 }
 
-// replicationLoop is the leader replication loop
-func (l *Leader) replicationLoop() {
+func (l *Leader) maintenanceLoop() {
 	ticker := time.NewTicker(l.flushInterval)
 	defer ticker.Stop()
-
 	for {
 		select {
 		case <-ticker.C:
-			l.flushAllFollowers()
+			l.reconnectDeadFollowers()
 		case <-l.quit:
 			return
 		}
 	}
 }
 
-// flushAllFollowers flushes all follower buffers
-func (l *Leader) flushAllFollowers() {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	for _, follower := range l.followers {
-		if len(follower.Buffer) > 0 && follower.Connected {
-			if err := l.flushFollower(follower); err != nil {
-				log.Printf("[LEADER] Failed to flush to %s: %v", follower.ID, err)
-			}
+// reconnectDeadFollowers re-establishes gRPC clients for followers whose client
+// was torn down (e.g. after a transport error).
+func (l *Leader) reconnectDeadFollowers() {
+	l.mu.RLock()
+	type reconn struct{ id, addr string }
+	var dead []reconn
+	for id, f := range l.followers {
+		f.mu.Lock()
+		if f.client == nil {
+			dead = append(dead, reconn{id: id, addr: f.Address})
 		}
+		f.mu.Unlock()
+	}
+	l.mu.RUnlock()
+	for _, r := range dead {
+		l.connectFollower(r.id, r.addr)
 	}
 }
 
-// Stop stops the leader. Safe to call multiple times.
+// Stop stops the leader and closes all follower connections. Safe to call
+// multiple times.
 func (l *Leader) Stop() {
 	l.quitOnce.Do(func() { close(l.quit) })
 
-	// Close all connections
 	l.mu.Lock()
 	defer l.mu.Unlock()
-
 	for _, f := range l.followers {
 		f.mu.Lock()
-		if f.transport != nil {
-			f.transport.Close()
-			f.transport = nil
+		if f.conn != nil {
+			_ = f.conn.Close()
+			f.conn = nil
+			f.client = nil
 		}
 		f.Connected = false
 		f.mu.Unlock()
 	}
 }
 
-// GetStats returns leader statistics
+// GetStats returns leader statistics.
 func (l *Leader) GetStats() *LeaderStats {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
-
 	return &LeaderStats{
 		Followers:          int64(len(l.followers)),
 		ConnectedFollowers: l.countConnectedFollowers(),
@@ -664,22 +554,26 @@ func (l *Leader) GetStats() *LeaderStats {
 	}
 }
 
-// countConnectedFollowers counts connected followers
 func (l *Leader) countConnectedFollowers() int64 {
 	var count int64
 	for _, follower := range l.followers {
-		if follower.Connected {
+		follower.mu.Lock()
+		ok := follower.Connected
+		follower.mu.Unlock()
+		if ok {
 			count++
 		}
 	}
 	return count
 }
 
-// countInSyncFollowers counts in-sync followers
 func (l *Leader) countInSyncFollowers() int64 {
 	var count int64
 	for _, follower := range l.followers {
-		if follower.InSync {
+		follower.mu.Lock()
+		ok := follower.InSync
+		follower.mu.Unlock()
+		if ok {
 			count++
 		}
 	}

@@ -22,9 +22,10 @@ const (
 	DefaultRetentionMaxAgeHours = 168 // 7 days
 	DefaultRetentionMaxSizeGB   = 0   // Disabled by default
 
-	// Scheduler configuration
-	DefaultTickMS    = 100
-	DefaultWheelSize = 60
+	// Scheduler configuration. 10ms tick + 600 slots = 6s wheel span, giving
+	// finer granularity for scheduled events without increasing CPU overhead.
+	DefaultTickMS    = 10
+	DefaultWheelSize = 600
 
 	// Delivery configuration
 	DefaultMaxRetries         = 5
@@ -85,7 +86,10 @@ const (
 	DefaultClusterGossipAddr = ":7946"
 	DefaultClusterGRPCAddr   = ":7947"
 	DefaultClusterRaftAddr   = ":7948"
-	DefaultVirtualNodes      = 150
+	// 150 virtual nodes is too sparse for low partition counts and can produce
+	// severe ownership skew in small clusters. Keep the direct binary default
+	// aligned with the benchmark/deployment defaults.
+	DefaultVirtualNodes      = 2048
 	DefaultHeartbeatInterval = 1 * time.Second
 	DefaultFailureTimeout    = 5 * time.Second
 	DefaultSuspectTimeout    = 3 * time.Second

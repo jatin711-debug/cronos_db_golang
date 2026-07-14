@@ -1,12 +1,9 @@
-//go:build !windows
+//go:build windows && cgo
 
 package dedup
 
 /*
-#cgo LDFLAGS: -L${SRCDIR}/rust/target/release -lcronos_dedup -lm
-// Windows specific: might need Reference to .lib?
-// Go on Windows usually links against .dll if -l specifies it?
-// Usually needs import library. Rust produces .dll.lib for .dll.
+#cgo LDFLAGS: -L${SRCDIR}/rust/target/release -lcronos_dedup
 
 #include <stdlib.h>
 #include <string.h>
@@ -28,17 +25,21 @@ import (
 	"unsafe"
 )
 
-// RustBloomFilter is a wrapper around the Rust implementation
+// RustBloomFilter is a wrapper around the Rust implementation.
+// On Windows this binds to the staged cronos_dedup.dll via its import library.
 type RustBloomFilter struct {
 	ptr unsafe.Pointer
 }
 
-// NewRustBloomFilter creates a new Rust-backed bloom filter
+// NewRustBloomFilter creates a new Rust-backed bloom filter.
 func NewRustBloomFilter(expectedItems uint64, fpr float64) *RustBloomFilter {
 	ptr := C.bloom_new(C.ulonglong(expectedItems), C.double(fpr))
+	if ptr == nil {
+		return nil
+	}
 	bf := &RustBloomFilter{ptr: ptr}
 
-	// Ensure memory is freed when Go object is GC'd
+	// Ensure memory is freed when the Go object is GC'd.
 	runtime.SetFinalizer(bf, func(f *RustBloomFilter) {
 		C.bloom_free(f.ptr)
 	})
@@ -47,8 +48,6 @@ func NewRustBloomFilter(expectedItems uint64, fpr float64) *RustBloomFilter {
 }
 
 func (bf *RustBloomFilter) Add(key string) {
-	// Unsafe string data access (no copy)
-	// Key is not stored by Rust, only read, so this is safe for duration of call
 	p := unsafe.StringData(key)
 	C.bloom_add(bf.ptr, (*C.uchar)(unsafe.Pointer(p)), C.size_t(len(key)))
 }
@@ -64,34 +63,20 @@ func (bf *RustBloomFilter) MayContainBatch(keys []string) []bool {
 		return nil
 	}
 
-	// CGo's pointer-passing rules forbid passing a Go pointer to memory that
-	// itself contains Go pointers (e.g. a []*C.uchar whose elements point at
-	// Go string buffers). However, a Go slice that contains ONLY C pointers
-	// (from C.malloc) is compliant. We exploit this to keep the pointer,
-	// length, and result arrays on the Go heap (fast, GC-managed) and copy
-	// all key bytes into a single contiguous C-allocated slab — collapsing
-	// what was previously N+3 C mallocs + N memcpys + N+3 frees down to a
-	// single C malloc + N memcpys + a single free per batch.
-
-	// 1. Compute total key bytes so we can allocate one contiguous slab.
 	totalLen := 0
 	for _, k := range keys {
 		totalLen += len(k)
 	}
-	// Allocate at least 1 byte so empty-key batches still have a non-nil
-	// pointer to pass into Rust (slice::from_raw_parts requires non-null).
 	keySlab := C.malloc(C.size_t(totalLen + 1))
 	if keySlab == nil {
 		panic("bloom_check_batch: cgo slab malloc failed")
 	}
 	defer C.free(keySlab)
 
-	// 2. Go-heap arrays holding C pointers / scalar values — cgo-rule-clean.
 	keyPtrs := make([]*C.uchar, n)
 	keyLens := make([]C.size_t, n)
 	results := make([]C.bool, n)
 
-	// 3. Copy each key back-to-back into the slab, recording its pointer + length.
 	offset := 0
 	for i, k := range keys {
 		keyPtrs[i] = (*C.uchar)(unsafe.Add(keySlab, offset))
@@ -106,9 +91,6 @@ func (bf *RustBloomFilter) MayContainBatch(keys []string) []bool {
 		offset += len(k)
 	}
 
-	// 4. Single cgo crossing: pass the Go arrays (containing only C pointers /
-	//    scalars) into Rust. &keyPtrs[0] points at Go memory holding C pointers,
-	//    which is the allowed case under the cgo pointer rules.
 	C.bloom_check_batch(
 		bf.ptr,
 		(**C.uchar)(unsafe.Pointer(&keyPtrs[0])),

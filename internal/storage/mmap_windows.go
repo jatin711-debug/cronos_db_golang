@@ -5,6 +5,7 @@ package storage
 import (
 	"fmt"
 	"os"
+	"reflect"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -15,6 +16,10 @@ import (
 func mmapFile(file *os.File, size int64) ([]byte, error) {
 	if size <= 0 {
 		return nil, fmt.Errorf("invalid mmap size: %d", size)
+	}
+	length := int(size)
+	if int64(length) != size {
+		return nil, fmt.Errorf("mmap size exceeds platform int range: %d", size)
 	}
 
 	// Get file handle
@@ -37,7 +42,11 @@ func mmapFile(file *os.File, size int64) ([]byte, error) {
 
 	// Convert to byte slice
 	// This is safe because the memory is backed by the file
-	data := unsafe.Slice((*byte)(unsafe.Pointer(addr)), size)
+	var data []byte
+	header := (*reflect.SliceHeader)(unsafe.Pointer(&data))
+	header.Data = addr
+	header.Len = length
+	header.Cap = length
 
 	return data, nil
 }

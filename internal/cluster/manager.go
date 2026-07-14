@@ -259,8 +259,60 @@ func (m *Manager) leaderTasks() {
 		case <-m.stopCh:
 			return
 		case <-ticker.C:
+			// Every node reconciles the partitions it leads so streaming
+			// replication is established on initial cluster formation, not only
+			// after a failover.
+			m.reconcileLocalLeadership()
 			if m.IsLeader() {
 				m.performLeaderTasks()
+			}
+		}
+	}
+}
+
+// reconcileLocalLeadership ensures that for every partition this node owns as
+// leader, the local replication leader is promoted and its alive replicas are
+// registered as followers. It runs on every node each tick and is idempotent,
+// which is what wires up leader->follower streaming replication on a freshly
+// formed (healthy) cluster — previously PromoteToLeader/AddFollower were only
+// invoked from the failover path, so a healthy cluster never replicated.
+func (m *Manager) reconcileLocalLeadership() {
+	m.mu.RLock()
+	pa := m.partitionAccessor
+	rt := m.router
+	mem := m.membership
+	nodeID := m.config.NodeID
+	m.mu.RUnlock()
+	if pa == nil || rt == nil || mem == nil {
+		return
+	}
+
+	aliveNodes := mem.GetAliveNodes()
+	nodeAddr := make(map[string]string, len(aliveNodes))
+	for _, n := range aliveNodes {
+		nodeAddr[n.ID] = n.Address
+	}
+
+	for partitionID, info := range rt.GetAllPartitions() {
+		if info == nil || info.LeaderID != nodeID {
+			continue // not led locally
+		}
+		// Idempotent: PromoteToLeader is a no-op (epoch refresh) once the local
+		// replication leader exists.
+		if err := pa.PromoteToLeader(partitionID, info.Epoch); err != nil {
+			log.Printf("[CLUSTER] reconcile: promote partition %d failed: %v", partitionID, err)
+			continue
+		}
+		for _, replicaID := range info.Replicas {
+			if replicaID == nodeID {
+				continue
+			}
+			addr := nodeAddr[replicaID]
+			if addr == "" {
+				continue // replica not currently alive/known
+			}
+			if err := pa.AddFollower(partitionID, replicaID, addr); err != nil {
+				log.Printf("[CLUSTER] reconcile: add follower %s to partition %d failed: %v", replicaID, partitionID, err)
 			}
 		}
 	}
