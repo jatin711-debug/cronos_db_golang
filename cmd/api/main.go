@@ -192,10 +192,15 @@ func main() {
 		}
 
 		clusterConfig := &cluster.Config{
-			NodeID:            cfg.NodeID,
-			DataDir:           cfg.DataDir,
-			GossipAddr:        cfg.ClusterGossipAddr,
-			GRPCAddr:          cfg.ClusterGRPCAddr,
+			NodeID:     cfg.NodeID,
+			DataDir:    cfg.DataDir,
+			GossipAddr: cfg.ClusterGossipAddr,
+			// Advertise the main gRPC address as the node's cluster address: that
+			// is where the internal ReplicationService / RaftService are served, so
+			// it is the address a partition leader must dial to replicate to this
+			// node. (ClusterGRPCAddr is not bound to any listener; a leader dialing
+			// it would fail, which is why streaming replication never connected.)
+			GRPCAddr:          cfg.GPRCAddress,
 			RaftAddr:          cfg.ClusterRaftAddr,
 			RaftDir:           raftDir,
 			SeedNodes:         cfg.ClusterSeeds,

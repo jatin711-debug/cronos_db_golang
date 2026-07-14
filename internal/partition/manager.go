@@ -1058,7 +1058,16 @@ func (pm *PartitionManager) PromoteToLeader(partitionID int32, epoch int64) erro
 
 	partition, exists := pm.partitions[partitionID]
 	if !exists {
-		return fmt.Errorf("partition %d not found", partitionID)
+		// Partitions are lazily created in cluster mode; a node assigned as leader
+		// for a partition it has not written to yet must materialize and start it
+		// so it can serve reads/writes and replicate to followers.
+		if err := pm.createPartitionLocked(partitionID, fmt.Sprintf("partition-%d", partitionID)); err != nil {
+			return fmt.Errorf("create partition %d for promotion: %w", partitionID, err)
+		}
+		partition = pm.partitions[partitionID]
+		if err := pm.startPartitionInternal(partition); err != nil {
+			log.Printf("[PARTITION] Failed to start partition %d on promotion: %v", partitionID, err)
+		}
 	}
 
 	if partition.ReplLeader != nil {
