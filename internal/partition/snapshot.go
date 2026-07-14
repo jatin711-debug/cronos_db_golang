@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 )
 
 // Snapshot represents a point-in-time snapshot of partition state.
@@ -66,22 +68,16 @@ func (sm *SnapshotManager) CreateSnapshot(partition *Partition) error {
 		}
 	}
 
-	// Write atomically
+	// Write atomically with fsync for crash safety.
 	data, err := json.Marshal(snapshot)
 	if err != nil {
 		return fmt.Errorf("marshal snapshot: %w", err)
 	}
 
 	snapshotPath := filepath.Join(sm.dataDir, snapshotFilename)
-	tmpPath := snapshotPath + ".tmp"
 
-	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
-		return fmt.Errorf("write snapshot temp: %w", err)
-	}
-
-	if err := os.Rename(tmpPath, snapshotPath); err != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("rename snapshot: %w", err)
+	if err := utils.AtomicWriteFile(snapshotPath, data, 0644); err != nil {
+		return fmt.Errorf("write snapshot: %w", err)
 	}
 
 	sm.mu.Lock()

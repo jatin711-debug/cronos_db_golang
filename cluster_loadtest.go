@@ -19,7 +19,9 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
 
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 )
@@ -36,6 +38,16 @@ type ClusterNode struct {
 	clients  []types.EventServiceClient   // Round-robin clients
 	client   types.EventServiceClient     // Legacy single client (for probing)
 	pclient  types.PartitionServiceClient // Partition metadata client
+	connRR   atomic.Uint64                // round-robin cursor for nextClient()
+}
+
+// nextClient returns the next client for this node using atomic round-robin
+// across all connsPerNode connections. This distributes load evenly across
+// all sockets instead of statically pinning publishers to one hot connection
+// (which amplifies any single-connection GOAWAY into a large error burst).
+func (n *ClusterNode) nextClient() types.EventServiceClient {
+	idx := n.connRR.Add(1)
+	return n.clients[idx%uint64(len(n.clients))]
 }
 
 // ClusterLoadTestConfig holds cluster load test configuration
@@ -52,6 +64,7 @@ type ClusterLoadTestConfig struct {
 	FailoverAfter  time.Duration // When to simulate node failure
 	BatchMode      bool          // Use batch publish API
 	BatchSize      int           // Events per batch
+	AllowDuplicate bool          // Skip deduplication for raw throughput benchmarks
 	PartitionCount int           // Total cluster partitions (for route discovery)
 }
 
@@ -176,6 +189,7 @@ func main() {
 	failoverAfter := flag.Duration("failover-after", 10*time.Second, "When to simulate failover")
 	batchMode := flag.Bool("batch", false, "Use batch publish API for higher throughput")
 	batchSize := flag.Int("batch-size", 100, "Events per batch when using batch mode")
+	allowDuplicate := flag.Bool("allow-duplicate", true, "Allow duplicate IDs to bypass deduplication in batch mode")
 	partitionCount := flag.Int("partition-count", 16, "Total number of partitions in the cluster")
 
 	flag.Parse()
@@ -202,6 +216,7 @@ func main() {
 		FailoverAfter:  *failoverAfter,
 		BatchMode:      *batchMode,
 		BatchSize:      *batchSize,
+		AllowDuplicate: *allowDuplicate,
 		PartitionCount: *partitionCount,
 	}
 
@@ -219,6 +234,7 @@ func main() {
 	fmt.Printf("║ Round Robin:  %-48v ║\n", config.RoundRobin)
 	fmt.Printf("║ Batch Mode:   %-48v ║\n", config.BatchMode)
 	fmt.Printf("║ Batch Size:   %-48d ║\n", config.BatchSize)
+	fmt.Printf("║ Allow Dup:    %-48v ║\n", config.AllowDuplicate)
 	fmt.Printf("║ Failover:     %-48v ║\n", config.TestFailover)
 	fmt.Println("╚═══════════════════════════════════════════════════════════════╝")
 	fmt.Println()
@@ -272,6 +288,20 @@ func runClusterLoadTest(config ClusterLoadTestConfig) *ClusterMetrics {
 				grpc.WithInitialConnWindowSize(32*1024*1024), // 32MB connection window
 				grpc.WithWriteBufferSize(4*1024*1024),        // 4MB write buffer
 				grpc.WithReadBufferSize(4*1024*1024),         // 4MB read buffer
+				grpc.WithKeepaliveParams(keepalive.ClientParameters{
+					Time:                10 * time.Second, // ping interval
+					Timeout:             5 * time.Second,  // ping timeout — detects dead connections fast
+					PermitWithoutStream: true,             // keep pinging even when idle
+				}),
+				grpc.WithConnectParams(grpc.ConnectParams{
+					Backoff: backoff.Config{
+						BaseDelay:  100 * time.Millisecond, // reconnect quickly after a GOAWAY
+						Multiplier: 1.6,
+						Jitter:     0.2,
+						MaxDelay:   1 * time.Second,
+					},
+					MinConnectTimeout: 3 * time.Second,
+				}),
 				grpc.WithDefaultCallOptions(
 					grpc.MaxCallRecvMsgSize(16*1024*1024),
 					grpc.MaxCallSendMsgSize(16*1024*1024),
@@ -299,6 +329,9 @@ func runClusterLoadTest(config ClusterLoadTestConfig) *ClusterMetrics {
 		log.Fatalf("Failed to discover partition leaders: %v", err)
 	}
 	logPartitionLeaders(config, leadersByPartition)
+	// Exclude health checks, connection setup, and metadata discovery from the
+	// throughput denominator.
+	metrics.StartTime = time.Now()
 
 	// Start progress reporter
 	done := make(chan struct{})
@@ -343,13 +376,13 @@ func runClusterLoadTest(config ClusterLoadTestConfig) *ClusterMetrics {
 		}
 	} else {
 		// Per-node: publishers are dedicated to specific nodes
-		for _, node := range config.Nodes {
+		for nodeIdx := range config.Nodes {
 			for pubIdx := 0; pubIdx < config.NumPublishers; pubIdx++ {
 				wg.Add(1)
-				go func(n ClusterNode, pid int) {
+				go func(nIdx, pid int) {
 					defer wg.Done()
-					runNodePublisher(config, metrics, n, pid)
-				}(node, pubIdx)
+					runNodePublisher(config, metrics, &config.Nodes[nIdx], pid)
+				}(nodeIdx, pubIdx)
 			}
 		}
 	}
@@ -486,18 +519,16 @@ func runBatchPublisher(config ClusterLoadTestConfig, metrics *ClusterMetrics, pu
 			partitionBatchCounts[partitionID]++
 		}
 
-		eventsInBatch := int64(batchEnd - batchStart)
-
 		// Send to different nodes IN PARALLEL
 		var batchWg sync.WaitGroup
 		for nodeIdx, events := range eventsByNode {
 			batchWg.Add(1)
 			go func(nIdx int, evts []*types.Event) {
 				defer batchWg.Done()
-				node := config.Nodes[nIdx]
+				node := &config.Nodes[nIdx]
 				// Round-robin across connections for this node
-				client := node.clients[publisherID%connsPerNode]
-				req := &types.PublishBatchRequest{Events: evts, AllowDuplicate: true}
+				client := node.nextClient()
+				req := &types.PublishBatchRequest{Events: evts, AllowDuplicate: config.AllowDuplicate}
 
 				start := time.Now()
 				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -527,7 +558,6 @@ func runBatchPublisher(config ClusterLoadTestConfig, metrics *ClusterMetrics, pu
 		batchWg.Wait()
 		metrics.recordPartitionBatch(partitionBatchCounts)
 
-		_ = eventsInBatch // Progress tracked via TotalPublished
 	}
 }
 
@@ -546,8 +576,8 @@ func runRoundRobinPublisher(config ClusterLoadTestConfig, metrics *ClusterMetric
 		if !ok {
 			nodeIdx = (publisherID + i) % len(config.Nodes)
 		}
-		node := config.Nodes[nodeIdx]
-		client := node.clients[publisherID%connsPerNode]
+		node := &config.Nodes[nodeIdx]
+		client := node.nextClient()
 		scheduleTime := time.Now().Add(config.ScheduleDelay)
 
 		event := &types.Event{
@@ -587,12 +617,12 @@ func runRoundRobinPublisher(config ClusterLoadTestConfig, metrics *ClusterMetric
 }
 
 // runNodePublisher sends all events to a specific node
-func runNodePublisher(config ClusterLoadTestConfig, metrics *ClusterMetrics, node ClusterNode, publisherID int) {
+func runNodePublisher(config ClusterLoadTestConfig, metrics *ClusterMetrics, node *ClusterNode, publisherID int) {
 	payload := make([]byte, config.PayloadSize)
 	rand.Read(payload)
 
 	pubIDStr := strconv.Itoa(publisherID)
-	client := node.clients[publisherID%connsPerNode]
+	client := node.nextClient()
 
 	for i := 0; i < config.EventsPerPub; i++ {
 		eventKey := fmt.Sprintf("%s-pub-%d-event-%d", node.ID, publisherID, i)

@@ -65,76 +65,60 @@ func (bf *RustBloomFilter) MayContainBatch(keys []string) []bool {
 	}
 
 	// CGo's pointer-passing rules forbid passing a Go pointer to memory that
-	// itself contains Go pointers (e.g. a [](*C.uchar) whose elements point at
-	// Go string buffers). To stay compliant on Go 1.23+ (which enforces this at
-	// runtime and panics otherwise), allocate the pointer/length/result arrays
-	// and per-key buffers in C and copy the key bytes across before the call.
-	ptrSize := C.size_t(unsafe.Sizeof(uintptr(0)))
-	sizeSize := C.size_t(unsafe.Sizeof(C.size_t(0)))
-	boolSize := C.size_t(unsafe.Sizeof(C.bool(false)))
+	// itself contains Go pointers (e.g. a []*C.uchar whose elements point at
+	// Go string buffers). However, a Go slice that contains ONLY C pointers
+	// (from C.malloc) is compliant. We exploit this to keep the pointer,
+	// length, and result arrays on the Go heap (fast, GC-managed) and copy
+	// all key bytes into a single contiguous C-allocated slab — collapsing
+	// what was previously N+3 C mallocs + N memcpys + N+3 frees down to a
+	// single C malloc + N memcpys + a single free per batch.
 
-	cKeys := C.calloc(C.size_t(n), ptrSize)
-	cLens := C.calloc(C.size_t(n), sizeSize)
-	cResults := C.calloc(C.size_t(n), boolSize)
-	if cKeys == nil || cLens == nil || cResults == nil {
-		if cKeys != nil {
-			C.free(cKeys)
-		}
-		if cLens != nil {
-			C.free(cLens)
-		}
-		if cResults != nil {
-			C.free(cResults)
-		}
-		panic("bloom_check_batch: cgo malloc failed")
+	// 1. Compute total key bytes so we can allocate one contiguous slab.
+	totalLen := 0
+	for _, k := range keys {
+		totalLen += len(k)
 	}
-	defer C.free(cKeys)
-	defer C.free(cLens)
-	defer C.free(cResults)
+	// Allocate at least 1 byte so empty-key batches still have a non-nil
+	// pointer to pass into Rust (slice::from_raw_parts requires non-null).
+	keySlab := C.malloc(C.size_t(totalLen + 1))
+	if keySlab == nil {
+		panic("bloom_check_batch: cgo slab malloc failed")
+	}
+	defer C.free(keySlab)
 
-	keyPtrArray := (*[1 << 30]*C.uchar)(cKeys)[:n:n]
-	lensArray := (*[1 << 30]C.size_t)(cLens)[:n:n]
-	resultsArray := (*[1 << 30]C.bool)(cResults)[:n:n]
+	// 2. Go-heap arrays holding C pointers / scalar values — cgo-rule-clean.
+	keyPtrs := make([]*C.uchar, n)
+	keyLens := make([]C.size_t, n)
+	results := make([]C.bool, n)
 
-	keyBuffers := make([]unsafe.Pointer, n)
+	// 3. Copy each key back-to-back into the slab, recording its pointer + length.
+	offset := 0
 	for i, k := range keys {
-		buf := C.malloc(C.size_t(len(k)))
-		if buf == nil {
-			for _, b := range keyBuffers[:i] {
-				if b != nil {
-					C.free(b)
-				}
-			}
-			panic("bloom_check_batch: cgo key malloc failed")
+		keyPtrs[i] = (*C.uchar)(unsafe.Add(keySlab, offset))
+		keyLens[i] = C.size_t(len(k))
+		if len(k) > 0 {
+			C.memcpy(
+				unsafe.Pointer(keyPtrs[i]),
+				unsafe.Pointer(unsafe.StringData(k)),
+				C.size_t(len(k)),
+			)
 		}
-		keyBuffers[i] = buf
-		if len(k) == 0 {
-			keyPtrArray[i] = (*C.uchar)(buf)
-			lensArray[i] = 0
-			continue
-		}
-		C.memcpy(buf, unsafe.Pointer(unsafe.StringData(k)), C.size_t(len(k)))
-		keyPtrArray[i] = (*C.uchar)(buf)
-		lensArray[i] = C.size_t(len(k))
+		offset += len(k)
 	}
-	defer func() {
-		for _, b := range keyBuffers {
-			if b != nil {
-				C.free(b)
-			}
-		}
-	}()
 
+	// 4. Single cgo crossing: pass the Go arrays (containing only C pointers /
+	//    scalars) into Rust. &keyPtrs[0] points at Go memory holding C pointers,
+	//    which is the allowed case under the cgo pointer rules.
 	C.bloom_check_batch(
 		bf.ptr,
-		(**C.uchar)(unsafe.Pointer(cKeys)),
-		(*C.size_t)(unsafe.Pointer(cLens)),
+		(**C.uchar)(unsafe.Pointer(&keyPtrs[0])),
+		(*C.size_t)(unsafe.Pointer(&keyLens[0])),
 		C.size_t(n),
-		(*C.bool)(unsafe.Pointer(cResults)),
+		(*C.bool)(unsafe.Pointer(&results[0])),
 	)
 
 	out := make([]bool, n)
-	for i, r := range resultsArray {
+	for i, r := range results {
 		out[i] = bool(r)
 	}
 	return out

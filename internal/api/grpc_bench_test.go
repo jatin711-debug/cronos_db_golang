@@ -25,6 +25,10 @@ func (benchNoopDedup) IsDuplicateBatch(messageIDs []string, offsets []int64) ([]
 	return out, nil
 }
 
+func (benchNoopDedup) RollbackBatch(messageIDs []string) error {
+	return nil
+}
+
 // startBenchServer starts an in-process gRPC server on localhost:0 and returns
 // the server, its address, and a cleanup function.
 func startBenchServer(b *testing.B, fsyncMode string) (*GRPCServer, string, func()) {

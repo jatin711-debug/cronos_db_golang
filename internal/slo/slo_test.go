@@ -68,9 +68,9 @@ func TestRecorder_P99(t *testing.T) {
 	}
 
 	p99 := r.P99()
-	// With 100 samples sorted 0..99ms, P99 should be ~99ms
-	if p99 < 95*time.Millisecond || p99 > 99*time.Millisecond {
-		t.Errorf("expected p99 ~99ms, got %v", p99)
+	// With 100 samples sorted 0..99ms, P99 falls in the 100ms bucket.
+	if p99 < 95*time.Millisecond || p99 > 100*time.Millisecond {
+		t.Errorf("expected p99 ~100ms, got %v", p99)
 	}
 }
 
@@ -87,23 +87,31 @@ func TestRecorder_P95(t *testing.T) {
 	}
 
 	p95 := r.P95()
-	// With 100 samples sorted 0..99ms, P95 should be ~95ms
-	if p95 < 93*time.Millisecond || p95 > 95*time.Millisecond {
-		t.Errorf("expected p95 ~95ms, got %v", p95)
+	// With 100 samples sorted 0..99ms, P95 falls in the 100ms bucket.
+	if p95 < 93*time.Millisecond || p95 > 100*time.Millisecond {
+		t.Errorf("expected p95 ~100ms, got %v", p95)
 	}
 }
 
 func TestRecorder_P99_BucketOverflow(t *testing.T) {
 	w := Window{Duration: time.Hour, MaxErrorRate: 0.01}
 	r := NewRecorder(w)
-	r.maxBuckets = 10
 
-	for i := 0; i < 20; i++ {
-		r.Record(time.Duration(i)*time.Millisecond, false)
+	for i := 0; i < 100000; i++ {
+		r.Record(time.Duration(i%100)*time.Millisecond, false)
 	}
 
-	if len(r.latencyBuckets) > r.maxBuckets {
-		t.Errorf("expected buckets <= %d, got %d", r.maxBuckets, len(r.latencyBuckets))
+	total := r.totalRequests.Load()
+	if total != 100000 {
+		t.Errorf("expected 100000 requests, got %d", total)
+	}
+	// Histogram buckets are atomic counters, so no overflow / dropping occurs.
+	var sum int64
+	for i := range r.buckets {
+		sum += r.buckets[i].Load()
+	}
+	if sum != total {
+		t.Errorf("expected bucket sum %d, got %d", total, sum)
 	}
 }
 
@@ -161,8 +169,12 @@ func TestRecorder_Reset(t *testing.T) {
 	if r.errorRequests.Load() != 0 {
 		t.Errorf("expected 0 errors after reset, got %d", r.errorRequests.Load())
 	}
-	if len(r.latencyBuckets) != 0 {
-		t.Errorf("expected 0 buckets after reset, got %d", len(r.latencyBuckets))
+	var sum int64
+	for i := range r.buckets {
+		sum += r.buckets[i].Load()
+	}
+	if sum != 0 {
+		t.Errorf("expected 0 buckets after reset, got %d", sum)
 	}
 }
 

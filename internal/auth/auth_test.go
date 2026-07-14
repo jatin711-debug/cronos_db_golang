@@ -360,10 +360,12 @@ func TestClaimsFromContext_Missing(t *testing.T) {
 	}
 }
 
-func TestCheckTopicPermission_NoClaims_NilPolicy_Allowed(t *testing.T) {
+func TestCheckTopicPermission_NilPolicy_Denied(t *testing.T) {
+	// A nil policy means auth is enabled but no policy file was loaded —
+	// fail closed instead of silently allowing all access.
 	err := CheckTopicPermission(context.Background(), "topic", "publish", nil)
-	if err != nil {
-		t.Fatalf("expected nil policy to allow unauthenticated requests, got: %v", err)
+	if err == nil {
+		t.Fatal("expected nil policy to be denied (fail-closed), got nil")
 	}
 }
 
@@ -383,12 +385,23 @@ func TestCheckTopicPermission_NoClaims_WithPolicy_Denied(t *testing.T) {
 	}
 }
 
-func TestCheckTopicPermission_WithClaims_NoPolicy(t *testing.T) {
+func TestCheckTopicPermission_WithClaims_NilPolicy_Denied(t *testing.T) {
+	// Even with valid claims, a nil policy should fail closed.
 	claims := ClaimsWithSubject("user")
 	ctx := WithClaims(context.Background(), claims)
 	err := CheckTopicPermission(ctx, "topic", "publish", nil)
+	if err == nil {
+		t.Fatal("expected nil policy to be denied even with claims (fail-closed)")
+	}
+}
+
+func TestCheckTopicPermission_AllowAllPolicy(t *testing.T) {
+	// AllowAllPolicy (non-nil, empty subjects) should explicitly allow all.
+	claims := ClaimsWithSubject("user")
+	ctx := WithClaims(context.Background(), claims)
+	err := CheckTopicPermission(ctx, "topic", "publish", AllowAllPolicy())
 	if err != nil {
-		t.Fatalf("unexpected error with nil policy: %v", err)
+		t.Fatalf("expected AllowAllPolicy to permit access, got: %v", err)
 	}
 }
 

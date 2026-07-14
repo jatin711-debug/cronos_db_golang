@@ -30,6 +30,7 @@ type TimingWheel struct {
 	timerPool     *sync.Pool
 	expiredBuf    []*Timer   // Reusable scratch buffer for tick processing
 	cascadeBuf    [][]*Timer // Reusable bucket buffer for cascade operations
+	overflowRetry []*Timer   // Timers deferred for re-insertion when the expired channel is full; drained outside the wheel lock to avoid blocking publishers.
 	tickMs        int32
 	wheelSize     int32
 	maxLevels     int32 // Maximum number of overflow wheel levels
@@ -208,9 +209,41 @@ func (tw *TimingWheel) RemoveTimer(eventID int64) error {
 // Tick advances the timing wheel by one tick
 func (tw *TimingWheel) Tick() {
 	tw.mu.Lock()
-	defer tw.mu.Unlock()
-
 	tw.tickLocked()
+	// Grab any deferred overflow-retry timers under the lock, then release so
+	// publishers can interleave while we re-insert. The previous implementation
+	// re-inserted these inside tickLocked via addTimerLocked, holding tw.mu for
+	// an O(N) critical section that blocked every concurrent AddTimer on the
+	// publish path. Draining here keeps the lock hold bounded.
+	retry := tw.overflowRetry
+	tw.overflowRetry = nil
+	tw.mu.Unlock()
+
+	// Re-insert the deferred timers outside the wheel lock. AddTimers re-takes
+	// the lock briefly for the batch, but publishers are no longer blocked for
+	// the entire burst-recovery window.
+	for len(retry) > 0 {
+		_ = tw.AddTimers(retry)
+		// AddTimers may have re-populated overflowRetry if the channel is still
+		// saturated; loop until stable. Guard against pathological livelock by
+		// bailing out (the next Tick will retry).
+		tw.mu.Lock()
+		next := tw.overflowRetry
+		tw.overflowRetry = nil
+		tw.mu.Unlock()
+		if len(next) == 0 || len(next) >= len(retry) {
+			// No progress — log and break to avoid a tight loop; the timers
+			// remain in next and will be retried by the following Tick.
+			if len(next) > 0 {
+				log.Printf("[TIMING-WHEEL] WARNING: expired channel still saturated, deferring %d timers to next tick", len(next))
+				tw.mu.Lock()
+				tw.overflowRetry = append(tw.overflowRetry, next...)
+				tw.mu.Unlock()
+			}
+			break
+		}
+		retry = next
+	}
 }
 
 // tickLocked advances the wheel (must be called with lock held)
@@ -251,9 +284,13 @@ func (tw *TimingWheel) tickLocked() {
 			select {
 			case tw.expired <- expiredCopy:
 			default:
-				// Return slice to pool since we couldn't send it
+				// Channel still full: defer re-insertion to overflowRetry and
+				// drain it AFTER releasing tw.mu (see Tick). The previous code
+				// called addTimerLocked in a loop here, which held tw.mu for an
+				// O(N) critical section and blocked all publishers on the same
+				// lock. Deferring keeps the lock hold to a single slice append.
 				expiredSlicePool.Put(expiredCopy)
-				log.Printf("[TIMING-WHEEL] WARNING: expired channel full, %d timers delayed", len(tw.expiredBuf))
+				tw.overflowRetry = append(tw.overflowRetry, tw.expiredBuf...)
 			}
 		}
 	}

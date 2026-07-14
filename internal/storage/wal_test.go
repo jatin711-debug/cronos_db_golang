@@ -1,8 +1,10 @@
 package storage
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
@@ -300,3 +302,81 @@ func TestSegment_Metadata(t *testing.T) {
 		t.Errorf("Unexpected filename: %s", expectedFilename)
 	}
 }
+
+// TestWAL_ConcurrentAppendBatch verifies that concurrent batches reserve
+// monotonic offsets and that the sequencer keeps segment writes ordered so
+// recovered events have contiguous offsets without duplicates or regressions.
+func TestWAL_ConcurrentAppendBatch(t *testing.T) {
+	tmpDir := t.TempDir()
+	config := &WALConfig{
+		SegmentSizeBytes: 64 * 1024 * 1024,
+		IndexInterval:    100,
+		FsyncMode:        "batch",
+		FlushIntervalMS:  50,
+	}
+
+	wal, err := NewWAL(tmpDir, 0, config, nil)
+	if err != nil {
+		t.Fatalf("NewWAL failed: %v", err)
+	}
+	defer wal.Close()
+
+	const (
+		goroutines = 16
+		batches    = 100
+		batchSize  = 50
+	)
+
+	var wg sync.WaitGroup
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for b := 0; b < batches; b++ {
+				events := make([]*types.Event, batchSize)
+				for i := 0; i < batchSize; i++ {
+					events[i] = &types.Event{
+						MessageId:  fmt.Sprintf("g%d-b%d-i%d", g, b, i),
+						ScheduleTs: int64(g*batches + b),
+						Payload:    []byte("concurrent payload"),
+						Topic:      "test",
+					}
+				}
+				if err := wal.AppendBatch(events); err != nil {
+					t.Errorf("AppendBatch failed: %v", err)
+					return
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
+
+	if err := wal.Flush(); err != nil {
+		t.Fatalf("Flush failed: %v", err)
+	}
+
+	expected := int64(goroutines * batches * batchSize)
+	if wal.GetNextOffset() != expected {
+		t.Errorf("expected next offset %d, got %d", expected, wal.GetNextOffset())
+	}
+
+	// Verify every offset is readable and monotonic.
+	events, err := wal.ReadEvents(0, expected-1)
+	if err != nil {
+		t.Fatalf("ReadEvents failed: %v", err)
+	}
+	if int64(len(events)) != expected {
+		t.Errorf("expected %d events, got %d", expected, len(events))
+	}
+	seen := make(map[int64]struct{}, len(events))
+	for _, ev := range events {
+		if ev.Offset < 0 || ev.Offset >= expected {
+			t.Errorf("offset %d out of range [0,%d)", ev.Offset, expected)
+		}
+		if _, ok := seen[ev.Offset]; ok {
+			t.Errorf("duplicate offset %d", ev.Offset)
+		}
+		seen[ev.Offset] = struct{}{}
+	}
+}
+

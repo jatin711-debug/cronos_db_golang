@@ -1,7 +1,6 @@
 package slo
 
 import (
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -17,15 +16,37 @@ type Window struct {
 	MaxErrorRate float64 // 0.0-1.0
 }
 
-// Recorder tracks latency and error rates for SLO compliance.
-type Recorder struct {
-	mu sync.RWMutex
+// latencyHistogramBounds are the upper bounds of each latency bucket in
+// microseconds. The last bucket is +Inf (represented by math.MaxInt64).
+// These buckets cover the range from 100us to 10s, which is sufficient for
+// publish/subscribe SLO monitoring.
+var latencyHistogramBounds = []int64{
+	100,        // 100us
+	250,        // 250us
+	500,        // 500us
+	1000,       // 1ms
+	2500,       // 2.5ms
+	5000,       // 5ms
+	10000,      // 10ms
+	25000,      // 25ms
+	50000,      // 50ms
+	100000,     // 100ms
+	250000,     // 250ms
+	500000,     // 500ms
+	1000000,    // 1s
+	2500000,    // 2.5s
+	5000000,    // 5s
+	10000000,   // 10s
+}
 
-	totalRequests  atomic.Int64
-	errorRequests  atomic.Int64
-	latencyBuckets []time.Duration // Copied before calculation
-	bucketMu       sync.Mutex
-	maxBuckets     int
+// Recorder tracks latency and error rates for SLO compliance using a lock-free
+// atomic histogram. Percentiles are estimated from bucket counts rather than
+// exact samples, which is standard for SLO monitoring and eliminates the mutex
+// contention of maintaining a sorted sample array.
+type Recorder struct {
+	totalRequests atomic.Int64
+	errorRequests atomic.Int64
+	buckets       []atomic.Int64 // one counter per latencyHistogramBounds, plus one for +Inf
 
 	window      Window
 	resetTicker *time.Ticker
@@ -35,10 +56,9 @@ type Recorder struct {
 // NewRecorder creates an SLO recorder.
 func NewRecorder(window Window) *Recorder {
 	return &Recorder{
-		latencyBuckets: make([]time.Duration, 0, 10000),
-		maxBuckets:     10000,
-		window:         window,
-		quit:           make(chan struct{}),
+		buckets: make([]atomic.Int64, len(latencyHistogramBounds)+1),
+		window:  window,
+		quit:    make(chan struct{}),
 	}
 }
 
@@ -75,13 +95,19 @@ func (r *Recorder) Record(latency time.Duration, err bool) {
 		r.errorRequests.Add(1)
 	}
 
-	r.bucketMu.Lock()
-	defer r.bucketMu.Unlock()
-	if len(r.latencyBuckets) >= r.maxBuckets {
-		// Drop oldest 10% to prevent unbounded growth
-		r.latencyBuckets = r.latencyBuckets[len(r.latencyBuckets)/10:]
+	us := latency.Microseconds()
+	idx := latencyBucketIndex(us)
+	r.buckets[idx].Add(1)
+}
+
+// latencyBucketIndex returns the bucket index for a latency in microseconds.
+func latencyBucketIndex(us int64) int {
+	for i, bound := range latencyHistogramBounds {
+		if us <= bound {
+			return i
+		}
 	}
-	r.latencyBuckets = append(r.latencyBuckets, latency)
+	return len(latencyHistogramBounds)
 }
 
 // ErrorRate returns current error rate.
@@ -93,76 +119,43 @@ func (r *Recorder) ErrorRate() float64 {
 	return float64(r.errorRequests.Load()) / float64(total)
 }
 
-// copyBuckets returns an unsorted copy of latency buckets.
-func (r *Recorder) copyBuckets() []time.Duration {
-	r.bucketMu.Lock()
-	defer r.bucketMu.Unlock()
-	buckets := make([]time.Duration, len(r.latencyBuckets))
-	copy(buckets, r.latencyBuckets)
-	return buckets
-}
-
-// percentile returns the p-th percentile (0.0-1.0) using Quickselect.
-func percentile(buckets []time.Duration, p float64) time.Duration {
-	n := len(buckets)
-	if n == 0 {
+// percentile returns the estimated p-th percentile (0.0-1.0) from the histogram.
+func (r *Recorder) percentile(p float64) time.Duration {
+	total := r.totalRequests.Load()
+	if total == 0 {
 		return 0
 	}
-	k := int(p * float64(n-1))
-	if k < 0 {
-		k = 0
-	}
-	if k >= n {
-		k = n - 1
-	}
-	return quickselect(buckets, k)
-}
 
-// quickselect finds the k-th smallest element in slice s (0-indexed).
-// It mutates s in-place. Average time complexity is O(n).
-func quickselect(s []time.Duration, k int) time.Duration {
-	if len(s) == 0 || k < 0 || k >= len(s) {
-		return 0
+	target := int64(p * float64(total-1)) + 1 // 1-indexed rank in [1,total]
+	if target < 1 {
+		target = 1
 	}
-	left, right := 0, len(s)-1
-	for left < right {
-		pivotIndex := partition(s, left, right)
-		if pivotIndex == k {
-			return s[k]
-		} else if pivotIndex < k {
-			left = pivotIndex + 1
-		} else {
-			right = pivotIndex - 1
+	if target > total {
+		target = total
+	}
+
+	var cumulative int64
+	for i := range r.buckets {
+		count := r.buckets[i].Load()
+		cumulative += count
+		if cumulative >= target {
+			if i < len(latencyHistogramBounds) {
+				return time.Duration(latencyHistogramBounds[i]) * time.Microsecond
+			}
+			return 10 * time.Second
 		}
 	}
-	return s[left]
+	return 10 * time.Second
 }
 
-func partition(s []time.Duration, left, right int) int {
-	mid := left + (right-left)/2
-	pivotVal := s[mid]
-	s[mid], s[right] = s[right], s[mid]
-	storeIndex := left
-	for i := left; i < right; i++ {
-		if s[i] < pivotVal {
-			s[i], s[storeIndex] = s[storeIndex], s[i]
-			storeIndex++
-		}
-	}
-	s[storeIndex], s[right] = s[right], s[storeIndex]
-	return storeIndex
-}
-
-// P99 returns the 99th percentile latency.
+// P99 returns the estimated 99th percentile latency.
 func (r *Recorder) P99() time.Duration {
-	buckets := r.copyBuckets()
-	return percentile(buckets, 0.99)
+	return r.percentile(0.99)
 }
 
-// P95 returns the 95th percentile latency.
+// P95 returns the estimated 95th percentile latency.
 func (r *Recorder) P95() time.Duration {
-	buckets := r.copyBuckets()
-	return percentile(buckets, 0.95)
+	return r.percentile(0.95)
 }
 
 // Compliant returns true if current metrics meet SLO targets.
@@ -180,9 +173,9 @@ func (r *Recorder) Compliant() bool {
 func (r *Recorder) Reset() {
 	r.totalRequests.Store(0)
 	r.errorRequests.Store(0)
-	r.bucketMu.Lock()
-	r.latencyBuckets = r.latencyBuckets[:0]
-	r.bucketMu.Unlock()
+	for i := range r.buckets {
+		r.buckets[i].Store(0)
+	}
 }
 
 type sloCollector struct {

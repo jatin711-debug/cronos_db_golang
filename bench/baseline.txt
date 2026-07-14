@@ -1,0 +1,9 @@
+goos: windows
+goarch: amd64
+pkg: github.com/jatin711-debug/cronos_db_golang/internal/storage
+cpu: AMD Ryzen 7 6800H with Radeon Graphics
+BenchmarkWAL_AppendBatch_Matrix/fsync=periodic/payload=256B/batch=1000/par=16-16          	    3592	    858047 ns/op	 298.35 MB/s
+BenchmarkWAL_AppendBatch_Matrix/fsync=periodic/payload=256B/batch=1000/par=16-16          	    4308	    860679 ns/op	 297.44 MB/s
+BenchmarkWAL_AppendBatch_Matrix/fsync=periodic/payload=256B/batch=1000/par=16-16          	    3810	    901836 ns/op	 283.87 MB/s
+PASS
+ok  	github.com/jatin711-debug/cronos_db_golang/internal/storage	26.176s
