@@ -66,7 +66,8 @@ services:
       - --index-interval=4096
       - --segment-size=1073741824
       - --partition-count=16
-      - --replication-factor=1
+      - --replication-factor=3
+      - --min-insync-replicas=2
       - --virtual-nodes=2048
       - --max-credits=50000
       - --ack-timeout=60s
@@ -115,7 +116,8 @@ services:
       - --index-interval=4096
       - --segment-size=1073741824
       - --partition-count=16
-      - --replication-factor=1
+      - --replication-factor=3
+      - --min-insync-replicas=2
       - --virtual-nodes=2048
       - --max-credits=50000
       - --ack-timeout=60s
@@ -166,7 +168,8 @@ services:
       - --index-interval=4096
       - --segment-size=1073741824
       - --partition-count=16
-      - --replication-factor=1
+      - --replication-factor=3
+      - --min-insync-replicas=2
       - --virtual-nodes=2048
       - --max-credits=50000
       - --ack-timeout=60s

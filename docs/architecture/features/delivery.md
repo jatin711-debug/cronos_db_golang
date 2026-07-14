@@ -6,12 +6,12 @@ The delivery module moves scheduled events to subscribers with backpressure, ret
 
 ## Key Files
 
-- [internal/delivery/worker.go](../../../internal/delivery/worker.go)
-- [internal/delivery/dispatcher.go](../../../internal/delivery/dispatcher.go)
-- [internal/delivery/retry_queue.go](../../../internal/delivery/retry_queue.go)
-- [internal/delivery/circuit_breaker.go](../../../internal/delivery/circuit_breaker.go)
-- [internal/delivery/dlq.go](../../../internal/delivery/dlq.go)
-- [internal/delivery/dlq_segment.go](../../../internal/delivery/dlq_segment.go)
+- [internal/delivery/worker.go](../../../internal/delivery/worker.go) — scheduler-driven worker that drains ready events.
+- [internal/delivery/dispatcher.go](../../../internal/delivery/dispatcher.go) — 32-shard dispatcher with credit-based flow control.
+- [internal/delivery/retry_queue.go](../../../internal/delivery/retry_queue.go) — non-blocking min-heap retry queue ordered by `retryAt`.
+- [internal/delivery/circuit_breaker.go](../../../internal/delivery/circuit_breaker.go) — per-subscription circuit breaker (Closed→Open→HalfOpen).
+- [internal/delivery/dlq.go](../../../internal/delivery/dlq.go), [internal/delivery/dlq_segment.go](../../../internal/delivery/dlq_segment.go) — append-only DLQ segments (binary, CRC32, 64MB rotation).
+- [internal/delivery/expiry.go](../../../internal/delivery/expiry.go) — message expiry handling for time-bounded deliveries.
 
 ## Main Flow
 
