@@ -326,9 +326,9 @@ bench-gate:
 
 proto:
 	@# Remove stale generated files so protoc always produces a clean output
-	@rm -f pkg/types/events.pb.go pkg/types/events_grpc.pb.go
+	@rm -f pkg/types/events.pb.go pkg/types/events_grpc.pb.go pkg/types/admin.pb.go pkg/types/admin_grpc.pb.go
 	@rm -rf cronos_db/pkg/types github.com
-	protoc --go_out=. --go_opt=module=github.com/jatin711-debug/cronos_db_golang --go-grpc_out=. --go-grpc_opt=module=github.com/jatin711-debug/cronos_db_golang proto/events.proto
+	protoc --go_out=. --go_opt=module=github.com/jatin711-debug/cronos_db_golang --go-grpc_out=. --go-grpc_opt=module=github.com/jatin711-debug/cronos_db_golang proto/events.proto proto/admin.proto
 
 tag: tag-preflight
 	@$(VERIFY_TAG_ABSENT_LOCAL_CMD)
