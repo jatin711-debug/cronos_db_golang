@@ -19,15 +19,15 @@ All numbers below are from single-machine benchmarks (3 nodes on one host, AMD R
 
 | Metric | Value |
 |--------|-------|
-| **Cluster Throughput** | **Up to ~1.0M events/sec** (`periodic` fsync, 256B payload, batch=4000, single machine) |
-| **Durable Throughput** | **~50–100K events/sec** (`batch` fsync, 256B payload, batch=4000, single machine) |
-| **Publish Latency P50** | **~100–150µs** (`batch` fsync, small payload, no cross-node replication) |
-| **Publish Latency P99** | **~1–5ms** (`batch` fsync, single machine; real networks add tail latency) |
-| **Success Rate** | **99.9-100%** in batch benchmark profiles |
+| **Cluster Throughput (max)** | **~790K events/sec** — `make loadtest-max`: RF=1, `periodic` fsync, 256B, batch=4000, 96 publishers, 19.2M events, 100% success |
+| **Standard batch profile** | **~767K events/sec** — `make loadtest-batch`: RF=1, 72 publishers, batch=4000, 7.2M events |
+| **Replicated durable (RF=3, minISR=2)** | **~50K events/sec** — synchronous quorum: every write waits for a follower ack before returning |
+| **Publish Latency (RF=1, `periodic`, batch)** | **P50 ~150µs · P95 ~400µs · P99 ~540µs** (max observed ~800µs — sub-millisecond tail) |
+| **Success Rate** | **100%** across batch benchmark profiles |
 | **Timer Precision** | 100ms tick (configurable) |
 | **Dedup False Positive Rate** | <1% (Rust bloom filter) |
 
-> Benchmarked on a **single machine** running all 3 cluster nodes simultaneously. Numbers will be lower with replication (RF≥3) and higher-latency storage.
+> Benchmarked on a **single machine** running all 3 cluster nodes simultaneously (AMD Ryzen 7 6800H). The ~790K figure is the throughput ceiling — RF=1 with `periodic` fsync (least durable). Replicated durability (RF=3 / minISR=2) is ~15× lower because each write blocks on quorum replication; that ~50K is the honest production-durability number. Real networks and higher-latency storage will lower both.
 
 ---
 
@@ -356,14 +356,16 @@ By default it bootstraps local cluster ports `9000,9001,9002`; use `-addr` to fo
 
 ### Benchmarks (3-Node Cluster on Single Machine)
 
+Measured on a 3-node cluster on one host (AMD Ryzen 7 6800H, NVMe SSD):
+
 | Profile | Throughput | Notes |
 |--------|------------|-------|
-| `make loadtest-max` | Up to ~1.0M events/sec | Batch 4000, 32 publishers/node, 9.6M events total |
-| Standard batch profile | ~550K events/sec | Batch 1000, 20 publishers/node |
-| Single-node batch | ~180K events/sec | One node, batch mode |
-| Single-event mode | ~10K events/sec | One event per RPC |
+| `make loadtest-max` | **~790K events/sec** | RF=1, `periodic` fsync, batch 4000, 32 publishers/node (96 total), 19.2M events, P99 ~540µs |
+| `make loadtest-batch` | **~767K events/sec** | RF=1, batch 4000, 24 publishers/node (72 total), 7.2M events, P99 ~416µs |
+| Replicated (RF=3, minISR=2) | **~50K events/sec** | Synchronous quorum durability — leader waits for a follower ack per write |
+| Single-event mode | ~10K events/sec | One event per RPC (no batching) |
 
-Representative latency in batch mode is typically P50 ~100-150µs and P99 under 1ms on a single-machine 3-node setup.
+Representative latency at the RF=1 ceiling (`periodic` fsync, batch mode): **P50 ~150µs, P95 ~400µs, P99 ~540µs** — sub-millisecond tail across all nodes.
 
 > Throughput varies by CPU, disk, scheduler settings, and payload size. Re-run the provided load tests in your environment for production sizing.
 
@@ -561,7 +563,7 @@ See [proto/events.proto](proto/events.proto) for the complete specification.
 - [x] Partition leader election on failure
 
 ### Performance ✅ Optimized (single-machine)
-- [x] Up to 1M+ events/sec (`periodic` fsync, batch mode, single machine)
+- [x] ~790K events/sec (`periodic` fsync, RF=1, batch mode, single machine — measured)
 - [x] Durable throughput validated with `batch` fsync
 - [x] Lock-free Rust bloom filter via CGO FFI
 - [x] sync.Pool for timers, record buffers, transport buffers
