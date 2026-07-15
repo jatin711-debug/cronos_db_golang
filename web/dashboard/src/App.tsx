@@ -13,12 +13,12 @@ const TABS: { id: View; label: string }[] = [
 export default function App() {
   const [view, setView] = useState<View>("dashboard");
   return (
-    <div className="min-h-screen bg-[var(--color-background)] text-[var(--color-foreground)]">
-      <header className="border-b border-[var(--color-border)]">
+    <div className="min-h-screen bg-(--color-background) text-(--color-foreground)">
+      <header className="border-b border-(--color-border)">
         <div className="mx-auto flex max-w-5xl items-center justify-between px-6 py-4">
           <div className="flex items-center gap-3">
             <span className="text-xl font-semibold">⏰ CronosDB Admin</span>
-            <span className="text-xs text-[var(--color-muted-foreground)]">step 4 scaffold</span>
+            <span className="text-xs text-muted-foreground">step 4 scaffold</span>
           </div>
           <nav className="flex gap-2">
             {TABS.map((tab) => (
