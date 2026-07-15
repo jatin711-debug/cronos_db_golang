@@ -2,6 +2,7 @@ package connpool
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -13,6 +14,9 @@ import (
 
 	"google.golang.org/grpc"
 )
+
+// ErrNodeNotFound is returned when the requested address is not present in the pool.
+var ErrNodeNotFound = errors.New("node not found in pool")
 
 // Config controls pool dialing behavior.
 type Config struct {
@@ -187,7 +191,7 @@ func (p *Pool) getConn(addr string) (*grpc.ClientConn, error) {
 	}
 	state, exists := p.nodes[addr]
 	if !exists || len(state.conns) == 0 {
-		return nil, fmt.Errorf("node %s not found in pool", addr)
+		return nil, fmt.Errorf("%w: %s", ErrNodeNotFound, addr)
 	}
 	idx := state.next.Add(1)
 	return state.conns[idx%uint64(len(state.conns))], nil

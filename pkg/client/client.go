@@ -4,9 +4,9 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
@@ -166,14 +166,14 @@ func (c *Client) eventClientForAddress(addr string) (types.EventServiceClient, e
 	if err == nil {
 		return client, nil
 	}
-	if !strings.Contains(err.Error(), "not found in pool") {
+	if !errors.Is(err, connpool.ErrNodeNotFound) {
 		return nil, err
 	}
 
 	bootstrapCtx, cancel := context.WithTimeout(context.Background(), c.cfg.DialTimeout)
 	defer cancel()
 	if addErr := c.pool.AddNode(bootstrapCtx, addr); addErr != nil {
-		return nil, err
+		return nil, addErr
 	}
 	return c.pool.EventClient(addr)
 }
@@ -183,14 +183,14 @@ func (c *Client) partitionClientForAddress(addr string) (types.PartitionServiceC
 	if err == nil {
 		return client, nil
 	}
-	if !strings.Contains(err.Error(), "not found in pool") {
+	if !errors.Is(err, connpool.ErrNodeNotFound) {
 		return nil, err
 	}
 
 	bootstrapCtx, cancel := context.WithTimeout(context.Background(), c.cfg.DialTimeout)
 	defer cancel()
 	if addErr := c.pool.AddNode(bootstrapCtx, addr); addErr != nil {
-		return nil, err
+		return nil, addErr
 	}
 	return c.pool.PartitionClient(addr)
 }

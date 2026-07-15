@@ -139,8 +139,12 @@ func (c *Client) ReplayByTimeRange(ctx context.Context, topic string, partitionI
 }
 
 // SeekEarliest returns the earliest replayable offset for a partition.
-func (c *Client) SeekEarliest(context.Context, int32) (int64, error) {
-	return 0, nil
+func (c *Client) SeekEarliest(ctx context.Context, partitionID int32) (int64, error) {
+	status, err := c.getWALStatus(ctx, partitionID)
+	if err != nil {
+		return 0, wrapError("client.seek_earliest", ErrorKindMetadataStale, err)
+	}
+	return status.GetFirstOffset(), nil
 }
 
 // SeekLatest returns the offset that points to new events after current tail.
@@ -244,6 +248,38 @@ func (c *Client) getPartitionInfo(ctx context.Context, partitionID int32) (*type
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("partition %d not found", partitionID)
+	}
+	return nil, lastErr
+}
+
+// getWALStatus fetches WAL status for a partition from one of the candidate nodes.
+func (c *Client) getWALStatus(ctx context.Context, partitionID int32) (*types.WALStatus, error) {
+	route, err := c.RouteForPartition(partitionID)
+	if err != nil {
+		return nil, err
+	}
+	var lastErr error
+	for _, addr := range route.CandidateAddresses {
+		partitionClient, clientErr := c.partitionClientForAddress(addr)
+		if clientErr != nil {
+			lastErr = clientErr
+			continue
+		}
+		reqCtx, cancel := c.requestContext(ctx)
+		start := time.Now()
+		status, reqErr := partitionClient.GetWALStatus(reqCtx, &types.GetWALStatusRequest{PartitionId: partitionID})
+		cancel()
+		c.observeRequest("partition.wal_status", addr, start, reqErr)
+		if reqErr != nil {
+			lastErr = reqErr
+			continue
+		}
+		if status != nil {
+			return status, nil
+		}
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("partition %d wal status not found", partitionID)
 	}
 	return nil, lastErr
 }

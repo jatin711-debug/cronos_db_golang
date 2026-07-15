@@ -113,6 +113,7 @@ func DefaultProducerConfig() ProducerConfig {
 }
 
 type asyncSendRequest struct {
+	ctx      context.Context
 	msg      Message
 	callback DeliveryCallback
 	future   *DeliveryFuture
@@ -223,14 +224,12 @@ func (p *Producer) Send(ctx context.Context, msg Message) (*SendResult, error) {
 				addr string
 			}
 			var addrIdx atomic.Int32
-			triedAddrs := make([]string, 0, len(route.CandidateAddresses))
 			hedgeRes, hedgeErr := hedging.Do[hedgeResult](ctx, p.cfg.Hedging, func(hctx context.Context) (hedgeResult, error) {
 				idx := int(addrIdx.Add(1) - 1)
 				if idx >= len(route.CandidateAddresses) {
 					return hedgeResult{}, fmt.Errorf("exhausted hedge candidates")
 				}
 				addr := route.CandidateAddresses[idx]
-				triedAddrs = append(triedAddrs, addr)
 				resp, innerErr, _ := p.tryPublishWithBreaker(hctx, addr, event, allowDuplicate)
 				return hedgeResult{resp: resp, addr: addr}, innerErr
 			})
@@ -308,7 +307,7 @@ func (p *Producer) Send(ctx context.Context, msg Message) (*SendResult, error) {
 		}
 
 		if !shouldRetry {
-			continue
+			break
 		}
 	}
 
@@ -346,7 +345,7 @@ func (p *Producer) tryPublishWithBreaker(ctx context.Context, addr string, event
 	}
 	resp, err := p.tryPublish(ctx, addr, event, allowDuplicate)
 	if err != nil {
-		if cb != nil && !errs.IsRetryable(err) {
+		if cb != nil && !errors.Is(err, context.Canceled) {
 			cb.RecordFailure()
 		}
 		return resp, err, false
@@ -366,15 +365,17 @@ func (p *Producer) SendBatch(ctx context.Context, msgs []Message) (*BatchSendRes
 	type batchGroup struct {
 		addr           string
 		allowDuplicate bool
+		partitionID    int32
+		leaderID       string
 		msgs           []Message
 		events         []*types.Event
 	}
 
-	groupKey := func(addr string, allowDuplicate bool) string {
+	groupKey := func(partitionID int32, addr string, allowDuplicate bool) string {
 		if allowDuplicate {
-			return addr + "|dup:1"
+			return fmt.Sprintf("%d|%s|dup:1", partitionID, addr)
 		}
-		return addr + "|dup:0"
+		return fmt.Sprintf("%d|%s|dup:0", partitionID, addr)
 	}
 
 	groups := make(map[string]*batchGroup)
@@ -401,12 +402,14 @@ func (p *Producer) SendBatch(ctx context.Context, msgs []Message) (*BatchSendRes
 
 		addr := route.CandidateAddresses[0]
 		allowDuplicate := p.cfg.DefaultAllowDuplicate || msg.AllowDuplicate
-		key := groupKey(addr, allowDuplicate)
+		key := groupKey(partitionID, addr, allowDuplicate)
 		group, exists := groups[key]
 		if !exists {
 			group = &batchGroup{
 				addr:           addr,
 				allowDuplicate: allowDuplicate,
+				partitionID:    partitionID,
+				leaderID:       route.LeaderID,
 				msgs:           make([]Message, 0, 64),
 				events:         make([]*types.Event, 0, 64),
 			}
@@ -463,12 +466,28 @@ func (p *Producer) SendBatch(ctx context.Context, msgs []Message) (*BatchSendRes
 		result.PublishedCount += resp.GetPublishedCount()
 		result.DuplicateCount += resp.GetDuplicateCount()
 		result.ErrorCount += resp.GetErrorCount()
-		for _, msg := range group.msgs {
-			result.Results = append(result.Results, &SendResult{
+
+		// Offsets are only reliably assigned per message when every message in
+		// the group was accepted (no duplicates or validation errors). In that
+		// case the server returns a contiguous range [FirstOffset, LastOffset]
+		// for the events in request order.
+		allPublished := resp.GetPublishedCount() == int32(len(group.msgs))
+		var baseOffset int64
+		if allPublished {
+			baseOffset = resp.GetFirstOffset()
+		}
+		for i, msg := range group.msgs {
+			sr := &SendResult{
 				MessageID:   msg.MessageID,
+				PartitionID: group.partitionID,
 				NodeAddress: group.addr,
 				ScheduleTS:  resolveScheduleTS(msg),
-			})
+				LeaderID:    group.leaderID,
+			}
+			if allPublished {
+				sr.Offset = baseOffset + int64(i)
+			}
+			result.Results = append(result.Results, sr)
 		}
 	}
 
@@ -497,6 +516,7 @@ func (p *Producer) SendAsyncContext(ctx context.Context, msg Message, callback D
 
 	future := newDeliveryFuture()
 	req := asyncSendRequest{
+		ctx:      ctx,
 		msg:      msg,
 		callback: callback,
 		future:   future,
@@ -559,7 +579,7 @@ func (p *Producer) CloseWithContext(ctx context.Context) error {
 func (p *Producer) worker() {
 	defer p.wg.Done()
 	for req := range p.queue {
-		ctx, cancel := context.WithTimeout(context.Background(), p.client.cfg.RequestTimeout)
+		ctx, cancel := context.WithTimeout(req.ctx, p.client.cfg.RequestTimeout)
 		res, err := p.Send(ctx, req.msg)
 		cancel()
 		p.releaseQueuedBytes(req.sizeHint)
