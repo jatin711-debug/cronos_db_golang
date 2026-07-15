@@ -1,9 +1,10 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useClusterTopology, useRunRetention, useRunCompaction, useTriggerRebalance } from "@/lib/api";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Loading } from "@/components/Loading";
 import { ErrorAlert } from "@/components/ErrorAlert";
+import { useToast } from "@/components/ToastProvider";
 
 export function OperationsView() {
   const topology = useClusterTopology();
@@ -39,6 +40,28 @@ function RetentionPanel({ partitions }: { partitions: number[] }) {
   const [partitionId, setPartitionId] = useState<number>(partitions[0] ?? 0);
   const [maxAgeHours, setMaxAgeHours] = useState<number>(24);
   const retention = useRunRetention();
+  const { addToast } = useToast();
+
+  useEffect(() => {
+    if (!retention.data && !retention.error) return;
+    if (retention.error) {
+      addToast({ title: "Retention failed", description: retention.error, variant: "error" });
+      return;
+    }
+    if (retention.data?.success) {
+      addToast({
+        title: "Retention completed",
+        description: `Removed ${retention.data.events_removed} events.`,
+        variant: "success",
+      });
+    } else {
+      addToast({
+        title: "Retention completed with issues",
+        description: retention.data?.error || "No events removed.",
+        variant: "error",
+      });
+    }
+  }, [retention.data, retention.error, addToast]);
 
   return (
     <div className="rounded-lg border border-[var(--color-border)] p-4">
@@ -74,12 +97,6 @@ function RetentionPanel({ partitions }: { partitions: number[] }) {
         </Button>
       </div>
       {retention.error && <ErrorAlert message={retention.error} onRetry={retention.reset} isAuth={retention.error.startsWith("401")} />}
-      {retention.data && (
-        <p className="mt-3 text-sm">
-          {retention.data.success ? "✅" : "⚠️"} Events removed: {retention.data.events_removed}
-          {retention.data.error && ` — ${retention.data.error}`}
-        </p>
-      )}
     </div>
   );
 }
@@ -87,6 +104,28 @@ function RetentionPanel({ partitions }: { partitions: number[] }) {
 function CompactionPanel({ partitions }: { partitions: number[] }) {
   const [partitionId, setPartitionId] = useState<number>(partitions[0] ?? 0);
   const compaction = useRunCompaction();
+  const { addToast } = useToast();
+
+  useEffect(() => {
+    if (!compaction.data && !compaction.error) return;
+    if (compaction.error) {
+      addToast({ title: "Compaction failed", description: compaction.error, variant: "error" });
+      return;
+    }
+    if (compaction.data?.success) {
+      addToast({
+        title: "Compaction completed",
+        description: `Compacted ${compaction.data.segments_compacted} segments.`,
+        variant: "success",
+      });
+    } else {
+      addToast({
+        title: "Compaction completed with issues",
+        description: compaction.data?.error || "No segments compacted.",
+        variant: "error",
+      });
+    }
+  }, [compaction.data, compaction.error, addToast]);
 
   return (
     <div className="rounded-lg border border-[var(--color-border)] p-4">
@@ -109,19 +148,34 @@ function CompactionPanel({ partitions }: { partitions: number[] }) {
         </Button>
       </div>
       {compaction.error && <ErrorAlert message={compaction.error} onRetry={compaction.reset} isAuth={compaction.error.startsWith("401")} />}
-      {compaction.data && (
-        <p className="mt-3 text-sm">
-          {compaction.data.success ? "✅" : "⚠️"} Segments compacted:{" "}
-          {compaction.data.segments_compacted}
-          {compaction.data.error && ` — ${compaction.data.error}`}
-        </p>
-      )}
     </div>
   );
 }
 
 function RebalancePanel() {
   const rebalance = useTriggerRebalance();
+  const { addToast } = useToast();
+
+  useEffect(() => {
+    if (!rebalance.data && !rebalance.error) return;
+    if (rebalance.error) {
+      addToast({ title: "Rebalance failed", description: rebalance.error, variant: "error" });
+      return;
+    }
+    if (rebalance.data?.success) {
+      addToast({
+        title: "Rebalance triggered",
+        description: `Partitions moved: ${rebalance.data.partitions_moved}. ${rebalance.data.error || ""}`,
+        variant: rebalance.data.partitions_moved > 0 ? "success" : "default",
+      });
+    } else {
+      addToast({
+        title: "Rebalance completed with issues",
+        description: rebalance.data?.error || "No partitions moved.",
+        variant: "error",
+      });
+    }
+  }, [rebalance.data, rebalance.error, addToast]);
 
   return (
     <div className="rounded-lg border border-[var(--color-border)] p-4">
@@ -134,12 +188,6 @@ function RebalancePanel() {
         {rebalance.loading ? "Triggering..." : "Trigger Rebalance"}
       </Button>
       {rebalance.error && <ErrorAlert message={rebalance.error} onRetry={rebalance.reset} isAuth={rebalance.error.startsWith("401")} />}
-      {rebalance.data && (
-        <p className="mt-3 text-sm">
-          {rebalance.data.success ? "✅" : "⚠️"} Partitions moved: {rebalance.data.partitions_moved}
-          {rebalance.data.error && ` — ${rebalance.data.error}`}
-        </p>
-      )}
     </div>
   );
 }
