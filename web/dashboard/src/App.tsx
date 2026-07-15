@@ -1,5 +1,6 @@
 import { Link, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { cn } from "@/lib/utils";
+import { ThemeToggle } from "@/components/ThemeToggle";
 import { TokenInput } from "@/components/TokenInput";
 import { DashboardHome } from "@/views/DashboardHome";
 import { ClusterTopologyView } from "@/views/ClusterTopologyView";
@@ -46,7 +47,10 @@ export default function App() {
               );
             })}
           </nav>
-          <TokenInput />
+          <div className="flex items-center gap-2">
+            <ThemeToggle />
+            <TokenInput />
+          </div>
         </div>
       </header>
       <main className="mx-auto max-w-6xl px-6 py-8">
