@@ -24,12 +24,12 @@ const NAV = [
 function Layout({ children }: { children: React.ReactNode }) {
   const location = useLocation();
   return (
-    <div className="min-h-screen bg-[var(--color-background)] text-[var(--color-foreground)]">
-      <header className="border-b border-[var(--color-border)]">
+    <div className="min-h-screen bg-(--color-background) text-(--color-foreground)">
+      <header className="border-b border-(--color-border)">
         <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
           <div className="flex items-center gap-3">
             <span className="text-xl font-semibold">⏰ CronosDB Admin</span>
-            <span className="text-xs text-[var(--color-muted-foreground)]">v0.2</span>
+            <span className="text-xs text-muted-foreground">v0.2</span>
           </div>
           <nav className="hidden items-center gap-1 md:flex">
             {NAV.map((item) => {
@@ -41,8 +41,8 @@ function Layout({ children }: { children: React.ReactNode }) {
                   className={cn(
                     "rounded-md px-3 py-1.5 text-sm transition-colors",
                     active
-                      ? "bg-[var(--color-primary)] text-[var(--color-primary-foreground)]"
-                      : "text-[var(--color-muted-foreground)] hover:bg-[var(--color-accent)]",
+                      ? "bg-(--color-primary) text-(--color-primary-foreground)"
+                      : "text-muted-foreground hover:bg-(--color-accent)",
                   )}
                 >
                   {item.label}
