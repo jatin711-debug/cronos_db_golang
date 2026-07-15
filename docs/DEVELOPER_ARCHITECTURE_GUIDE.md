@@ -250,6 +250,8 @@ This section is organized by feature area and tells you where to read first, wha
   - `internal/api/raft_server.go`
   - `internal/api/crossregion_server.go`
   - `internal/api/transaction_handler.go` (registered on public listener via `RegisterTransactionServiceServer`)
+  - `internal/api/admin_handler.go` (operator-facing `AdminService`)
+  - `internal/api/web_handler.go` (HTTP JSON proxy for `AdminService` + embedded dashboard SPA)
   - `internal/api/health.go`
 - Main flow:
   - Requests enter interceptor chain (tracing, SLO, version, auth, topic limit, audit, metrics, IP limit).
@@ -611,6 +613,23 @@ stateDiagram-v2
   - Publish and delivery paths record resource usage.
 - Reliability decisions:
   - Token-bucket based controls protect shared clusters from noisy tenants.
+
+### 6.22 Admin Dashboard and CLI
+
+- Purpose: operator-facing visibility and control without writing custom clients.
+- Key files:
+  - `internal/api/admin_handler.go` — gRPC `AdminService` implementation (topology, partition health, replication lag, consumer groups, schemas, tenant usage, retention, compaction, rebalance).
+  - `internal/api/web_handler.go` — HTTP JSON proxy for `AdminService` and SPA static file serving.
+  - `web/dashboard/*` — React 19 + Vite admin dashboard, embedded via `//go:embed`.
+  - `cmd/admin/main.go` — `cronos-admin` gRPC CLI.
+- Main flow:
+  - The dashboard calls `/api/admin/*` endpoints served by the JSON proxy.
+  - In dev mode (`--dev`) the proxy allows anonymous requests; with auth enabled it validates the `Authorization: Bearer <jwt>` header via `auth.ParseToken` and `auth.CheckAdminPermission`.
+  - The dashboard polls topology/health/lag endpoints and renders snapshot bar charts for replication and consumer lag.
+- Reliability decisions:
+  - The SPA is built into the Go binary, so the UI is always version-locked to the server.
+  - Background refetches keep existing data visible to avoid scroll jumps.
+  - Read-only accessors in `internal/schema` and `internal/tenant` limit the admin surface while reusing existing registries.
 
 ## 7. Reliability and Production Decisions
 
