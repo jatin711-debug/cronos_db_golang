@@ -90,6 +90,30 @@ func TestWebHandler_ServesDashboardIndex(t *testing.T) {
 	}
 }
 
+func TestWebHandler_SPAFallbackServesIndexHTML(t *testing.T) {
+	// Hard refresh on a client-side route like /ui/partitions should
+	// return the SPA's index.html, not a 404.
+	h := newTestWebHandler(t, nil)
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	req := httptest.NewRequest("GET", "/ui/partitions", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("expected 200 OK for SPA fallback, got %d (body=%q)", rr.Code, rr.Body.String())
+	}
+	ct := rr.Header().Get("Content-Type")
+	if !strings.HasPrefix(ct, "text/html") {
+		t.Errorf("expected text/html Content-Type for fallback, got %q", ct)
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "<!doctype html") && !strings.Contains(body, "<!DOCTYPE html") {
+		t.Errorf("expected HTML doctype in fallback body, got: %.200s", body)
+	}
+}
+
 func TestWebHandler_JSONProxy_DevModeAllowsAnonymous(t *testing.T) {
 	// authCfg == nil means dev mode: no auth required.
 	h := newTestWebHandler(t, nil)

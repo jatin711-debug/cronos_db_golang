@@ -95,8 +95,11 @@ func (h *WebHandler) Register(mux *http.ServeMux) {
 			http.Error(w, "dashboard not built; run `make dashboard`", http.StatusNotFound)
 		})
 	} else {
-		fileServer := http.FileServer(http.FS(sub))
-		mux.Handle("/ui/", http.StripPrefix("/ui/", fileServer))
+		// SPA file server: serve static assets when they exist, otherwise
+		// fall back to index.html so React Router can handle client-side
+		// routes like /ui/partitions on hard refresh.
+		spa := spaFileServer(sub)
+		mux.Handle("/ui/", http.StripPrefix("/ui/", spa))
 	}
 	// Redirect /ui -> /ui/ and / -> /ui/ so a bare host root lands on
 	// the dashboard.
@@ -413,6 +416,35 @@ func (h *WebHandler) handleRebalance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.writeJSON(w, http.StatusOK, resp)
+}
+
+// spaFileServer serves files from the embedded SPA dist. If the requested
+// path does not match an existing file, it serves index.html so the React
+// Router SPA can render the route client-side.
+func spaFileServer(root fs.FS) http.Handler {
+	fileServer := http.FileServer(http.FS(root))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		// Clean the path to prevent directory traversal.
+		if path == "" || path == "/" {
+			path = "index.html"
+		}
+		// Try to open the requested file. If it exists and is not a
+		// directory, serve it directly. This preserves hashed asset files
+		// like /ui/assets/index-abc.js.
+		f, err := root.Open(path)
+		if err == nil {
+			defer f.Close()
+			stat, err := f.Stat()
+			if err == nil && !stat.IsDir() {
+				fileServer.ServeHTTP(w, r)
+				return
+			}
+		}
+		// Fall back to index.html for any non-file path.
+		r.URL.Path = "/"
+		fileServer.ServeHTTP(w, r)
+	})
 }
 
 // ---------------------------------------------------------------------------
