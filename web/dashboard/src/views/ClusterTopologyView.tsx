@@ -1,27 +1,34 @@
-import { useAdmin } from "@/lib/api-mock";
+import { useClusterTopology } from "@/lib/api";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Loading } from "@/components/Loading";
+import { ErrorAlert } from "@/components/ErrorAlert";
 
 export function ClusterTopologyView() {
-  const admin = useAdmin();
+  const { data, loading, error, refetch } = useClusterTopology();
+
+  if (loading) return <Loading message="Loading cluster topology..." />;
+  if (error) return <ErrorAlert message={error} onRetry={refetch} />;
+  if (!data) return <ErrorAlert message="No topology available." onRetry={refetch} />;
+
   return (
     <div className="space-y-6">
       <Card>
         <CardHeader>
           <CardTitle>Cluster Topology</CardTitle>
           <CardDescription>
-            Snapshot from <span className="font-mono">{admin.local_node_id}</span> at{" "}
+            Snapshot from <span className="font-mono">{data.local_node_id}</span> at{" "}
             <span className="font-mono">
-              {new Date(admin.captured_at_unix_ms).toISOString()}
+              {new Date(data.captured_at_unix_ms).toISOString()}
             </span>
           </CardDescription>
         </CardHeader>
         <CardContent>
           <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-            <Stat label="Total Nodes" value={admin.total_nodes} />
-            <Stat label="Alive Nodes" value={admin.alive_nodes} />
-            <Stat label="Total Partitions" value={admin.total_partitions} />
-            <Stat label="Leader Partitions" value={admin.leader_partitions} />
+            <Stat label="Total Nodes" value={data.total_nodes} />
+            <Stat label="Alive Nodes" value={data.alive_nodes} />
+            <Stat label="Total Partitions" value={data.total_partitions} />
+            <Stat label="Leader Partitions" value={data.leader_partitions} />
           </div>
         </CardContent>
       </Card>
@@ -31,21 +38,23 @@ export function ClusterTopologyView() {
           <CardTitle>Nodes</CardTitle>
         </CardHeader>
         <CardContent>
-          {admin.nodes.length === 0 ? (
+          {data.nodes.length === 0 ? (
             <p className="text-sm text-[var(--color-muted-foreground)]">No nodes reported.</p>
           ) : (
             <table className="w-full text-sm">
               <thead className="text-left text-[var(--color-muted-foreground)]">
                 <tr>
                   <th className="py-2 font-medium">Node ID</th>
+                  <th className="py-2 font-medium">Address</th>
                   <th className="py-2 font-medium">State</th>
                   <th className="py-2 font-medium">Local</th>
                 </tr>
               </thead>
               <tbody>
-                {admin.nodes.map((n) => (
+                {data.nodes.map((n) => (
                   <tr key={n.node_id} className="border-t border-[var(--color-border)]">
                     <td className="py-2 font-mono">{n.node_id}</td>
+                    <td className="py-2 font-mono text-[var(--color-muted-foreground)]">{n.address || "-"}</td>
                     <td className="py-2">
                       <Badge variant={n.is_alive ? "success" : "destructive"}>{n.state}</Badge>
                     </td>
@@ -63,7 +72,7 @@ export function ClusterTopologyView() {
           <CardTitle>Partitions</CardTitle>
         </CardHeader>
         <CardContent>
-          {admin.partitions.length === 0 ? (
+          {data.partitions.length === 0 ? (
             <p className="text-sm text-[var(--color-muted-foreground)]">
               No partitions assigned to this node in the current snapshot.
             </p>
@@ -73,16 +82,18 @@ export function ClusterTopologyView() {
                 <tr>
                   <th className="py-2 font-medium">ID</th>
                   <th className="py-2 font-medium">Leader</th>
-                  <th className="py-2 font-medium">In-Sync Count</th>
+                  <th className="py-2 font-medium">Replicas</th>
+                  <th className="py-2 font-medium">ISR</th>
                   <th className="py-2 font-medium">HWM</th>
                 </tr>
               </thead>
               <tbody>
-                {admin.partitions.map((p) => (
+                {data.partitions.map((p) => (
                   <tr key={p.partition_id} className="border-t border-[var(--color-border)]">
                     <td className="py-2 font-mono">{p.partition_id}</td>
                     <td className="py-2 font-mono">{p.leader_id}</td>
-                    <td className="py-2">{p.in_sync_count}</td>
+                    <td className="py-2 font-mono">{p.replicas.join(", ") || "-"}</td>
+                    <td className="py-2 font-mono">{p.isr.join(", ") || "-"}</td>
                     <td className="py-2 font-mono">{p.leader_high_watermark}</td>
                   </tr>
                 ))}
