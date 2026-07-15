@@ -9,8 +9,9 @@ Deduplication prevents duplicate message processing while keeping publish latenc
 - [internal/dedup/store.go](../../../internal/dedup/store.go)
 - [internal/dedup/bloom_store.go](../../../internal/dedup/bloom_store.go)
 - [internal/dedup/pebble_store.go](../../../internal/dedup/pebble_store.go)
-- [internal/dedup/rust_bloom_unix.go](../../../internal/dedup/rust_bloom_unix.go)
-- [internal/dedup/rust_bloom_windows.go](../../../internal/dedup/rust_bloom_windows.go)
+- [internal/dedup/rust_bloom_unix.go](../../../internal/dedup/rust_bloom_unix.go) — Unix CGO bindings for the Rust bloom filter.
+- [internal/dedup/rust_bloom_windows_cgo.go](../../../internal/dedup/rust_bloom_windows_cgo.go) / [internal/dedup/rust_bloom_windows_nocgo.go](../../../internal/dedup/rust_bloom_windows_nocgo.go) — Windows CGO and non-CGO bindings (the older `rust_bloom_windows.go` was split into these two files when the Windows build added a non-CGO fallback path).
+- [internal/dedup/rust/src/lib.rs](../../../internal/dedup/rust/src/lib.rs) — Rust crate: lock-free `AtomicU64` arrays, XxHash64, Rayon parallel batch.
 
 ## Main Flow
 

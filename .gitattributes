@@ -1,0 +1,38 @@
+# Auto-detect text files and normalize to LF on checkout.
+* text=auto eol=lf
+
+# Go source files and module metadata must use LF.
+*.go text eol=lf
+*.mod text eol=lf
+*.sum text eol=lf
+
+# Shell / build scripts
+*.sh text eol=lf
+Makefile text eol=lf
+*.mk text eol=lf
+
+# Configuration / docs
+*.md text eol=lf
+*.txt text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.json text eol=lf
+*.proto text eol=lf
+*.toml text eol=lf
+
+# Windows PowerShell scripts may keep CRLF if desired by Windows tooling.
+*.ps1 text eol=crlf
+
+# Binary files — do not normalize.
+*.dll binary
+*.dll.lib binary
+*.dll.exp binary
+*.so binary
+*.dylib binary
+*.exe binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary

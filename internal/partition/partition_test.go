@@ -3,7 +3,6 @@ package partition
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 	"time"
 
@@ -28,14 +27,7 @@ func TestNewPartitionManager(t *testing.T) {
 	}
 }
 
-func skipWindows(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Skipping on Windows due to PebbleDB file locking in partition cleanup")
-	}
-}
-
 func TestPartitionManager_CreatePartition(t *testing.T) {
-	skipWindows(t)
 	cfg := &types.Config{
 		DataDir:        t.TempDir(),
 		PartitionCount: 8,
@@ -58,7 +50,6 @@ func TestPartitionManager_CreatePartition(t *testing.T) {
 }
 
 func TestPartitionManager_GetPartition(t *testing.T) {
-	skipWindows(t)
 	cfg := &types.Config{
 		DataDir:        t.TempDir(),
 		PartitionCount: 8,
@@ -151,7 +142,6 @@ func TestPartitionManager_GetPartitionID_MatchesHashToPartitionID(t *testing.T) 
 }
 
 func TestPartitionManager_ListPartitions(t *testing.T) {
-	skipWindows(t)
 	cfg := &types.Config{
 		DataDir:        t.TempDir(),
 		PartitionCount: 8,
@@ -175,7 +165,6 @@ func TestPartitionManager_ListPartitions(t *testing.T) {
 }
 
 func TestPartitionManager_GetStats(t *testing.T) {
-	skipWindows(t)
 	cfg := &types.Config{
 		DataDir:        t.TempDir(),
 		PartitionCount: 8,
@@ -215,7 +204,6 @@ func TestPartitionManager_CanAccept_NonExistent(t *testing.T) {
 }
 
 func TestPartitionManager_GetOrCreatePartition(t *testing.T) {
-	skipWindows(t)
 	cfg := &types.Config{
 		DataDir:        t.TempDir(),
 		PartitionCount: 8,

@@ -143,8 +143,6 @@ func TestEventServiceHandler_Publish_Validations(t *testing.T) {
 }
 
 func TestEventServiceHandler_Publish_Duplicate(t *testing.T) {
-	skipWindows(t)
-
 	cfg := &types.Config{
 		DataDir:        t.TempDir(),
 		PartitionCount: 8,
@@ -195,8 +193,6 @@ func TestEventServiceHandler_Publish_Duplicate(t *testing.T) {
 }
 
 func TestEventServiceHandler_Publish_DurableAck(t *testing.T) {
-	skipWindows(t)
-
 	cfg := &types.Config{
 		DataDir:        t.TempDir(),
 		PartitionCount: 8,
@@ -242,8 +238,6 @@ func TestEventServiceHandler_Publish_DurableAck(t *testing.T) {
 }
 
 func TestEventServiceHandler_PublishBatch_DurableAck(t *testing.T) {
-	skipWindows(t)
-
 	cfg := &types.Config{
 		DataDir:        t.TempDir(),
 		PartitionCount: 8,
@@ -296,8 +290,6 @@ func TestEventServiceHandler_PublishBatch_DurableAck(t *testing.T) {
 }
 
 func TestEventServiceHandler_PublishBatch_DuplicateIsIdempotentResult(t *testing.T) {
-	skipWindows(t)
-
 	cfg := &types.Config{
 		DataDir:         t.TempDir(),
 		PartitionCount:  1,
@@ -334,8 +326,6 @@ func TestEventServiceHandler_PublishBatch_DuplicateIsIdempotentResult(t *testing
 }
 
 func TestEventServiceHandler_Publish_Authorization(t *testing.T) {
-	skipWindows(t)
-
 	cfg := &types.Config{
 		DataDir:        t.TempDir(),
 		PartitionCount: 8,
@@ -363,8 +353,8 @@ func TestEventServiceHandler_Publish_Authorization(t *testing.T) {
 	h := &EventServiceHandler{
 		partitionManager: pm,
 		dedupManager:     &MockDedupManager{},
-		authPolicy:       policy,
 	}
+	h.SetAuthPolicy(policy)
 
 	claims := &auth.Claims{
 		RegisteredClaims: jwt.RegisteredClaims{Subject: "user"},

@@ -289,6 +289,59 @@ message ReplicationSyncResponse {
 }
 
 // ============================================================================
+// Replication Snapshot RPCs (Internal, leader -> follower bulk catch-up)
+// ============================================================================
+
+message ReplicationSnapshotRequest {
+  int32 partition_id = 1;
+
+  // Earliest offset the follower needs. 0 means transfer everything available.
+  int64 start_offset = 2;
+
+  // Soft cap on total bytes to transfer. 0 means no cap.
+  int64 max_bytes = 3;
+}
+
+message ReplicationSnapshotHeader {
+  // File name, e.g. "00000000000000001234.log" or "...index".
+  string filename = 1;
+
+  // First offset covered by this file.
+  int64 first_offset = 2;
+
+  // Last offset covered by this file (for indexes, same as first_offset).
+  int64 last_offset = 3;
+
+  // Total file size in bytes.
+  int64 file_size = 4;
+
+  // CRC32 checksum of the whole file.
+  uint32 crc32 = 5;
+
+  // True for sparse-index files, false for segment log files.
+  bool is_index = 6;
+}
+
+message ReplicationSnapshotTrailer {
+  bool success = 1;
+  string error = 2;
+
+  // Last replicated offset after the snapshot.
+  int64 last_offset = 3;
+
+  // Leader epoch at snapshot time.
+  int64 epoch = 4;
+}
+
+message ReplicationSnapshotChunk {
+  oneof payload {
+    ReplicationSnapshotHeader header = 1;
+    bytes data = 2;
+    ReplicationSnapshotTrailer trailer = 3;
+  }
+}
+
+// ============================================================================
 // Partition Management
 // ============================================================================
 
@@ -536,6 +589,9 @@ service ReplicationService {
 
   // Internal: Sync from leader
   rpc Sync(ReplicationSyncRequest) returns (stream ReplicationSyncResponse);
+
+  // Internal: Bulk snapshot install from leader
+  rpc Snapshot(ReplicationSnapshotRequest) returns (stream ReplicationSnapshotChunk);
 }
 
 service RaftService {

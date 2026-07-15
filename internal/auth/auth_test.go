@@ -15,7 +15,9 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 )
 
 func TestAllowAllPolicy(t *testing.T) {
@@ -60,9 +62,9 @@ func TestGenerateToken(t *testing.T) {
 	}
 
 	// Parse it back
-	claims, err := parseToken(token, &Config{JWTSecret: secret})
+	claims, err := ParseToken(token, &Config{JWTSecret: secret})
 	if err != nil {
-		t.Fatalf("parseToken failed: %v", err)
+		t.Fatalf("ParseToken failed: %v", err)
 	}
 	if claims.Subject != "user-1" {
 		t.Errorf("expected subject user-1, got %s", claims.Subject)
@@ -76,7 +78,7 @@ func TestGenerateToken_Expired(t *testing.T) {
 	secret := []byte("test-secret-key-min-32-bytes-long")
 	token, _ := GenerateToken("user-1", secret, -time.Hour)
 
-	_, err := parseToken(token, &Config{JWTSecret: secret})
+	_, err := ParseToken(token, &Config{JWTSecret: secret})
 	if err == nil {
 		t.Error("expected error for expired token")
 	}
@@ -87,14 +89,14 @@ func TestParseToken_InvalidSecret(t *testing.T) {
 	secret2 := []byte("wrong-secret-key-min-32-bytes-long")
 	token, _ := GenerateToken("user-1", secret1, time.Hour)
 
-	_, err := parseToken(token, &Config{JWTSecret: secret2})
+	_, err := ParseToken(token, &Config{JWTSecret: secret2})
 	if err == nil {
 		t.Error("expected error for wrong secret")
 	}
 }
 
 func TestParseToken_InvalidFormat(t *testing.T) {
-	_, err := parseToken("not-a-token", &Config{JWTSecret: []byte("secret")})
+	_, err := ParseToken("not-a-token", &Config{JWTSecret: []byte("secret")})
 	if err == nil {
 		t.Error("expected error for invalid token")
 	}
@@ -120,7 +122,7 @@ func TestParseToken_Ed25519(t *testing.T) {
 		t.Fatalf("sign token: %v", err)
 	}
 
-	parsed, err := parseToken(token, &Config{JWTPublicKey: priv.Public()})
+	parsed, err := ParseToken(token, &Config{JWTPublicKey: priv.Public()})
 	if err != nil {
 		t.Fatalf("parse ed25519 token: %v", err)
 	}
@@ -149,7 +151,7 @@ func TestParseToken_RSA(t *testing.T) {
 		t.Fatalf("sign token: %v", err)
 	}
 
-	parsed, err := parseToken(token, &Config{JWTPublicKey: &priv.PublicKey})
+	parsed, err := ParseToken(token, &Config{JWTPublicKey: &priv.PublicKey})
 	if err != nil {
 		t.Fatalf("parse rsa token: %v", err)
 	}
@@ -178,7 +180,7 @@ func TestParseToken_ECDSA(t *testing.T) {
 		t.Fatalf("sign token: %v", err)
 	}
 
-	parsed, err := parseToken(token, &Config{JWTPublicKey: &priv.PublicKey})
+	parsed, err := ParseToken(token, &Config{JWTPublicKey: &priv.PublicKey})
 	if err != nil {
 		t.Fatalf("parse ecdsa token: %v", err)
 	}
@@ -487,6 +489,136 @@ func jwtNewWithClaims(method jwt.SigningMethod, claims Claims) *jwt.Token {
 	return jwt.NewWithClaims(method, claims)
 }
 
+// ---------------------------------------------------------------------------
+// CheckAdminPermission tests
+// ---------------------------------------------------------------------------
+//
+// These mirror the TestCheckTopicPermission_* family but exercise the
+// global Subject.Admin flag instead of the per-topic TopicPerms.Admin.
+// The semantics we want to lock in:
+//
+//   1. nil policy + auth enabled  -> FailedPrecondition (fail closed)
+//   2. policy with no claims      -> Unauthenticated
+//   3. subject not in policy      -> PermissionDenied
+//   4. subject present, Admin==false -> PermissionDenied
+//   5. subject present, Admin==true  -> nil
+//   6. AllowAllPolicy (non-nil, empty subjects) -> nil for any subject
+//   7. Per-topic TopicPerms.Admin does NOT satisfy Subject.Admin
+//
+
+func TestCheckAdminPermission_NilPolicy_Denied(t *testing.T) {
+	// nil policy means auth is enabled but no policy file was loaded.
+	// Fail closed rather than silently allow.
+	err := CheckAdminPermission(context.Background(), nil)
+	if err == nil {
+		t.Fatal("expected nil policy to be denied (fail-closed), got nil")
+	}
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("expected FailedPrecondition, got %v", status.Code(err))
+	}
+}
+
+func TestCheckAdminPermission_NoClaims_WithPolicy_Denied(t *testing.T) {
+	policy := &Policy{
+		Subjects: map[string]*Subject{
+			"admin-user": {Admin: true},
+		},
+	}
+	err := CheckAdminPermission(context.Background(), policy)
+	if err == nil {
+		t.Fatal("expected error when claims are missing")
+	}
+	if status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("expected Unauthenticated, got %v", status.Code(err))
+	}
+}
+
+func TestCheckAdminPermission_SubjectNotInPolicy_Denied(t *testing.T) {
+	claims := ClaimsWithSubject("unknown")
+	ctx := WithClaims(context.Background(), claims)
+	policy := &Policy{
+		Subjects: map[string]*Subject{
+			"someone-else": {Admin: true},
+		},
+	}
+	err := CheckAdminPermission(ctx, policy)
+	if err == nil {
+		t.Fatal("expected PermissionDenied for unknown subject")
+	}
+	if status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("expected PermissionDenied, got %v", status.Code(err))
+	}
+}
+
+func TestCheckAdminPermission_SubjectWithoutAdminFlag_Denied(t *testing.T) {
+	// Subject exists in policy but has Admin=false (even though they have
+	// per-topic TopicPerms.Admin set; that must NOT satisfy the global check).
+	claims := ClaimsWithSubject("user")
+	ctx := WithClaims(context.Background(), claims)
+	policy := &Policy{
+		Subjects: map[string]*Subject{
+			"user": {
+				Admin: false,
+				Topics: map[string]TopicPerms{
+					"orders": {Publish: true, Subscribe: true, Admin: true},
+				},
+			},
+		},
+	}
+	err := CheckAdminPermission(ctx, policy)
+	if err == nil {
+		t.Fatal("expected PermissionDenied when Subject.Admin is false")
+	}
+	if status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("expected PermissionDenied, got %v", status.Code(err))
+	}
+}
+
+func TestCheckAdminPermission_SubjectWithAdminFlag_Allowed(t *testing.T) {
+	claims := ClaimsWithSubject("ops")
+	ctx := WithClaims(context.Background(), claims)
+	policy := &Policy{
+		Subjects: map[string]*Subject{
+			"ops": {Admin: true},
+		},
+	}
+	if err := CheckAdminPermission(ctx, policy); err != nil {
+		t.Fatalf("expected nil, got: %v", err)
+	}
+}
+
+func TestCheckAdminPermission_AllowAllPolicy(t *testing.T) {
+	// AllowAllPolicy is non-nil with empty Subjects; it explicitly
+	// permits any authenticated principal.
+	claims := ClaimsWithSubject("any-principal")
+	ctx := WithClaims(context.Background(), claims)
+	if err := CheckAdminPermission(ctx, AllowAllPolicy()); err != nil {
+		t.Fatalf("expected AllowAllPolicy to permit, got: %v", err)
+	}
+}
+
+func TestCheckAdminPermission_TopicAdminDoesNotImplySubjectAdmin(t *testing.T) {
+	// A subject with TopicPerms.Admin set on every topic, but no global
+	// Subject.Admin, must still be denied. This is the explicit decoupling
+	// we want between per-topic admin rights and global admin privileges.
+	claims := ClaimsWithSubject("topic-admin")
+	ctx := WithClaims(context.Background(), claims)
+	policy := &Policy{
+		Subjects: map[string]*Subject{
+			"topic-admin": {
+				Admin: false,
+				Topics: map[string]TopicPerms{
+					"orders": {Admin: true},
+					"events": {Admin: true},
+				},
+			},
+		},
+	}
+	if err := CheckAdminPermission(ctx, policy); err == nil {
+		t.Fatal("topic-level admin must not satisfy global admin check")
+	}
+}
+
 var jwtSigningMethodHS256 = jwt.SigningMethodHS256
 var jwtSigningMethodEdDSA = jwt.SigningMethodEdDSA
 var jwtSigningMethodRS256 = jwt.SigningMethodRS256
@@ -494,5 +626,5 @@ var jwtSigningMethodES256 = jwt.SigningMethodES256
 
 // ParseTokenForTest parses a token for use in other package tests
 func ParseTokenForTest(tokenStr string, secret []byte) (*Claims, error) {
-	return parseToken(tokenStr, &Config{JWTSecret: secret})
+	return ParseToken(tokenStr, &Config{JWTSecret: secret})
 }

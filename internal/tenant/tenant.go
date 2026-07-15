@@ -1,6 +1,7 @@
 package tenant
 
 import (
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -261,6 +262,36 @@ func (a *Accountant) RecordDelivery(tenant ID) {
 	if ok {
 		usage.InFlight.Add(-1)
 	}
+}
+
+// GetLimits returns the configured limits for a tenant and whether any limits
+// were configured. A nil/empty limits map returns (Limits{}, false).
+func (a *Accountant) GetLimits(tenant ID) (Limits, bool) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	limits, ok := a.limits[tenant]
+	return limits, ok
+}
+
+// AllTenants returns every tenant ID that has limits or usage recorded.
+func (a *Accountant) AllTenants() []ID {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	seen := make(map[ID]struct{}, len(a.limits)+len(a.usage))
+	for id := range a.limits {
+		seen[id] = struct{}{}
+	}
+	for id := range a.usage {
+		seen[id] = struct{}{}
+	}
+
+	tenants := make([]ID, 0, len(seen))
+	for id := range seen {
+		tenants = append(tenants, id)
+	}
+	sort.Slice(tenants, func(i, j int) bool { return tenants[i] < tenants[j] })
+	return tenants
 }
 
 // GetUsage returns current usage for a tenant.

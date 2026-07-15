@@ -64,8 +64,8 @@ All numbers below are from single-machine benchmarks (3 nodes on one host, AMD R
 - **Raft Consensus** — Metadata consistency (HashiCorp Raft)
 - **Pluggable Gossip** — Choose custom TCP heartbeats or HashiCorp Memberlist (SWIM protocol) via config
 - **Consistent Hashing** — FNV-1a ring with configurable virtual nodes (`-virtual-nodes`, default 150)
-- **Binary Replication Protocol** — Custom wire format (0xCAFEBABE magic)
-- **Bulk File Sync** — Segment-level transfer for new node bootstrap
+- **Leader-follower replication over dedicated internal gRPC** — `InternalGRPCServer` on a separate listener (default `:7947`) with optional cluster-only mTLS. Replication traffic is isolated from the public API on `:9000`.
+- **Bulk snapshot install** — `ReplicationService.Snapshot` streams segment + sparse-index files with per-file IEEE CRC32; follower stages under `<dataDir>/snapshot-staging/{segments,index}`, verifies, and atomically swaps into place via `WAL.ReloadSegments()`. Used for new-node bootstrap and follower-wipe recovery.
 - **Clock Skew Detection** — Cross-node heartbeat timestamp comparison; warns if absolute skew exceeds 5 seconds
 
 ### API
@@ -169,6 +169,78 @@ make node3
 make health
 ```
 
+### Admin Dashboard
+
+CronosDB ships with a self-hosted React admin dashboard embedded in the
+`cronos-api` binary. After `make build`, it is served from `/ui/` on the HTTP
+address.
+
+```bash
+# Start a node with the HTTP UI exposed
+./bin/cronos-api --dev --node-id=node1 --http-addr=127.0.0.1:8080 --data-dir=./data
+
+# Open the dashboard
+open http://127.0.0.1:8080/ui/
+```
+
+The dashboard includes:
+
+- **Cluster topology** — nodes, partitions, ISR, and follower offsets.
+- **Partition health** — per-partition WAL, scheduler, dedup, and replay stats.
+- **Replication lag** — leader HWM and per-follower lag with a snapshot bar chart.
+- **Consumer groups** — group/partition listing and committed-vs-HWM lag charts.
+- **Schema registry** — browse registered topic schemas (`/ui/schemas`).
+- **Tenant usage** — per-tenant in-flight and storage accounting (`/ui/tenants`).
+- **Operations** — run retention, compaction, and trigger rebalancing.
+- **Dark / light / system theme** toggle.
+- **Toast notifications** for async operations.
+
+When auth is enabled, sign in through the UI with a JWT or generate one with the
+admin CLI:
+
+```bash
+./bin/cronos-admin generate-token --secret "$(cat jwt-secret.txt)" --subject admin --ttl 24h
+```
+
+### Admin CLI
+
+`cronos-admin` is the operator gRPC CLI. Build it with:
+
+```bash
+go build -o bin/cronos-admin ./cmd/admin/main.go
+```
+
+Common commands:
+
+```bash
+# Cluster status
+./bin/cronos-admin --server=localhost:9000 topology
+
+# Per-partition runtime health
+./bin/cronos-admin --server=localhost:9000 partition-health 0
+
+# Replication lag (omit partition-id for all local leaders)
+./bin/cronos-admin --server=localhost:9000 replication-lag
+
+# Consumer groups
+./bin/cronos-admin --server=localhost:9000 consumer-groups list
+./bin/cronos-admin --server=localhost:9000 consumer-group-lag my-group 0
+
+# Schema registry
+./bin/cronos-admin --server=localhost:9000 schema-list
+./bin/cronos-admin --server=localhost:9000 schema-get my-topic 0
+
+# Tenant accounting
+./bin/cronos-admin --server=localhost:9000 tenant-usage
+
+# Operations (require Subject.Admin=true when auth is enabled)
+./bin/cronos-admin --server=localhost:9000 retention-run --partition-id=0
+./bin/cronos-admin --server=localhost:9000 compaction-run --partition-id=0
+./bin/cronos-admin --server=localhost:9000 cluster-rebalance
+```
+
+Use `--jwt-token <token>` for authenticated clusters.
+
 ### Load Test
 
 ```bash
@@ -180,6 +252,32 @@ make loadtest-batch PUBLISHERS=20 EVENTS=50000 BATCH_SIZE=1000
 
 # Custom profile (example)
 make loadtest-batch PUBLISHERS=32 EVENTS=100000 BATCH_SIZE=4000
+```
+
+### Windows Development
+
+The Rust bloom-filter DLL lives in `internal/dedup/cronos_dedup.dll`. On Windows,
+both the built binary and `go test` binaries need it on `PATH` because they run
+outside the repository root.
+
+**Run a single node:**
+
+```powershell
+.\scripts\run-node-windows.ps1 -NodeID node1 -GRPCAddr localhost:9000
+```
+
+**Run unit tests:**
+
+```powershell
+# From repository root
+$env:PATH = "$PWD\internal\dedup;$env:PATH"
+go test ./internal/storage/... ./internal/scheduler/... ./internal/dedup/... ./internal/partition/... ./internal/cluster/... ./internal/api/...
+```
+
+Or use the provided helper:
+
+```powershell
+.\scripts\run-tests-windows.ps1
 ```
 
 ### Docker
@@ -428,36 +526,86 @@ This is the intended safety property: the system refuses to acknowledge a write 
 
 ### Flags
 
+Defaults are sourced from `internal/config/defaults.go`. Every flag has an
+equivalent `CRONOS_*` environment variable override (see [Environment
+Variables](#environment-variables)).
+
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-node-id` | *(required)* | Unique node identifier |
-| `-data-dir` | `./data` | Data directory for WAL, dedup, offsets |
-| `-grpc-addr` | `:9000` | gRPC listen address |
+| `-node-id` | *(empty)* | Unique node identifier |
+| `-data-dir` | `./data` | Data directory for WAL, dedup, offsets, snapshots |
+| `-grpc-addr` | `:9000` | Public gRPC listen address |
 | `-http-addr` | `:8080` | HTTP health + metrics address |
 | `-partition-count` | `1` | Number of partitions (use 8-16 for clusters) |
+| `-replication-factor` | `1` | Replication factor (production target ≥3) |
 | `-segment-size` | `512MB` | WAL segment size before rotation |
-| `-fsync-mode` | `every_event` | `every_event` \| `batch` \| `periodic` — use `batch` for durable throughput; `periodic` for max throughput with a small loss window |
+| `-index-interval` | `1000` | Sparse index interval (events per entry) |
+| `-fsync-mode` | `batch` | `every_event` \| `batch` \| `periodic` — `batch` is the durable default, `periodic` is the throughput ceiling |
 | `-flush-interval` | `1000` | Background flush interval (ms) |
-| `-tick-ms` | `100` | Timing wheel tick duration |
-| `-wheel-size` | `60` | Slots per timing wheel level |
-| `-ack-timeout` | `30s` | Delivery ack timeout |
-| `-max-retries` | `5` | Max delivery retry attempts |
-| `-max-credits` | `1000` | Max delivery credits per subscriber |
-| `-dedup-ttl` | `168` | Dedup TTL in hours (7 days) |
-| `-bloom-capacity` | `100000000` | Bloom filter capacity (100M items) |
-| `-cluster` | `false` | Enable cluster mode |
-| `-cluster-seeds` | *(empty)* | Comma-separated seed node addresses |
-| `-virtual-nodes` | `150` | Virtual nodes per physical node in hash ring |
-| `-hot-window-minutes` | `60` | Events beyond this window go to cold store (0 = disabled) |
+| `-retention-max-age-hours` | `168` | Delete WAL segments older than this many hours (0 = disable) |
+| `-retention-max-size-gb` | `0` | Keep WAL segments within this many GB by deleting oldest (0 = disable) |
+| `-dev` | `false` | Developer mode: disables production security requirements |
+| `-tick-ms` | `10` | Timing wheel tick duration in ms |
+| `-wheel-size` | `600` | Slots per timing wheel level |
+| `-hot-window-minutes` | `60` | Events beyond this window go to cold store (0 = disable) |
 | `-hydrator-min-interval` | `5000` | Minimum adaptive hydrator scan interval in ms |
 | `-hydrator-max-interval` | `300000` | Maximum adaptive hydrator scan interval in ms |
-| `-max-ready-queue` | `1000000` | Max ready queue depth per partition |
-| `-max-timing-wheel-size` | `10000000` | Max active timers in hot timing wheel |
-| `-max-in-flight` | `500000` | Max in-flight deliveries per partition |
+| `-max-ready-queue` | `1000000` | Max ready queue depth per partition (admission control) |
+| `-max-timing-wheel-size` | `10000000` | Max active timers in hot timing wheel (admission control) |
+| `-max-in-flight` | `500000` | Max in-flight deliveries per partition (admission control) |
+| `-ack-timeout` | `30s` | Default delivery ack timeout |
+| `-max-retries` | `5` | Maximum delivery retry attempts |
+| `-retry-backoff` | `1s` | Initial retry backoff |
+| `-max-credits` | `1000` | Max delivery credits per subscriber |
 | `-cb-failure-threshold` | `0.5` | Circuit breaker failure rate to trip (0.0–1.0) |
 | `-cb-min-attempts` | `10` | Min attempts before circuit breaker evaluates |
 | `-cb-open-duration-ms` | `30000` | Circuit breaker open duration in milliseconds |
+| `-dedup-ttl` | `168` | Dedup TTL in hours (7 days) |
+| `-bloom-capacity` | `100000000` | Bloom filter capacity per partition (100M items) |
+| `-replication-batch` | `100` | Replication batch size |
+| `-replication-timeout` | `10s` | Replication RPC timeout |
+| `-min-insync-replicas` | `1` | Minimum in-sync replicas (incl. leader) required to ack a write; production target ≥2 |
+| `-snapshot-catchup-threshold` | `10000` | Replication lag (events) above which a follower would request a full snapshot; **automatic lag-driven trigger not yet wired** — currently invoked only by `SyncPartitionFromLeader` on node join |
+| `-raft-dir` | `./raft` | Raft data directory |
+| `-raft-join` | *(empty)* | Raft cluster join address |
+| `-cluster` | `false` | Enable cluster mode |
+| `-cluster-gossip-addr` | `:7946` | Cluster gossip UDP listen address |
+| `-cluster-grpc-addr` | `:7947` | Cluster internal gRPC listener (`InternalGRPCServer`, replication + Raft) |
+| `-cluster-raft-addr` | `:7948` | Cluster Raft listen address |
+| `-cluster-seeds` | *(empty)* | Comma-separated seed node addresses |
+| `-virtual-nodes` | `2048` | Virtual nodes per physical node in hash ring |
+| `-heartbeat-interval` | `1s` | Cluster heartbeat interval |
+| `-failure-timeout` | `5s` | Node failure detection timeout |
+| `-suspect-timeout` | `3s` | Node suspect timeout |
 | `-use-memberlist` | `false` | Use HashiCorp Memberlist (SWIM) instead of custom TCP gossip |
+| `-clock-skew-threshold-ms` | `5000` | Max allowed clock skew from leader in ms (0 = disabled) |
+| `-node-rack` | *(empty)* | Rack / AZ label for topology-aware placement |
+| `-node-zone` | *(empty)* | Zone label for topology-aware placement |
+| `-node-region` | *(empty)* | Region label for topology-aware placement |
+| `-tls-enabled` | `false` | Enable TLS for the public gRPC listener |
+| `-tls-ca-file` | *(empty)* | Path to CA certificate for public gRPC TLS |
+| `-tls-cert-file` | *(empty)* | Path to TLS certificate for public gRPC |
+| `-tls-key-file` | *(empty)* | Path to TLS private key for public gRPC |
+| `-tls-client-auth` | `false` | Require client certificates on public gRPC (mTLS) |
+| `-replication-tls-enabled` | `false` | Enable CA-pinned mTLS for internal replication traffic |
+| `-replication-tls-ca-file` | *(empty)* | Path to internal replication CA certificate |
+| `-replication-tls-cert-file` | *(empty)* | Path to internal replication certificate |
+| `-replication-tls-key-file` | *(empty)* | Path to internal replication private key |
+| `-auth-enabled` | `false` | Enable JWT authentication |
+| `-auth-jwt-secret` | *(empty)* | HMAC secret for JWT verification |
+| `-auth-jwt-public-key` | *(empty)* | Path to Ed25519/RSA public key for JWT verification |
+| `-auth-policy-file` | *(empty)* | Path to RBAC policy JSON file |
+| `-exactly-once-commits` | `false` | Enable exactly-once consumer offset commits (forward-only monotonic) |
+| `-follower-reads` | `false` | Allow follower nodes to serve replay reads |
+| `-load-shedding-threshold` | `0.0` | Load shedding threshold (0.0-1.0, 0 = disabled) |
+| `-encryption-enabled` | `false` | Enable AES-256-GCM encryption at rest for WAL segments |
+| `-encryption-key-file` | *(empty)* | Path to 32-byte encryption key file |
+| `-topic-rate-limit` | `0` | Per-subject per-topic rate limit (events/sec, 0 = disabled) |
+| `-topic-rate-burst` | `0` | Per-subject per-topic rate limit burst (0 = disabled) |
+| `-max-memory-percent` | `0` | Max memory usage % before rejecting publishes (0 = disabled) |
+| `-memory-check-interval` | `5000` | Memory check interval in milliseconds |
+| `-max-ingest-rate` | `0` | Max events/sec per partition (0 = unlimited) |
+| `-ingest-burst-size` | `0` | Token bucket burst size for ingest rate limit |
 | `-tracing-enabled` | `false` | Enable OpenTelemetry tracing |
 | `-tracing-exporter` | `none` | Tracing exporter (`none`, `stdout`, `otlp`) |
 | `-tracing-otlp-endpoint` | `127.0.0.1:4317` | OTLP gRPC endpoint for trace export |
@@ -466,14 +614,36 @@ This is the intended safety property: the system refuses to acknowledge a write 
 
 ### Environment Variables
 
+Every flag in the table above has an equivalent `CRONOS_*` environment
+variable. The variables registered in `internal/config/config.go` are:
+
 | Variable | Overrides |
 |----------|-----------|
 | `CRONOS_NODE_ID` | `-node-id` |
 | `CRONOS_DATA_DIR` | `-data-dir` |
 | `CRONOS_GRPC_ADDR` | `-grpc-addr` |
 | `CRONOS_HTTP_ADDR` | `-http-addr` |
+| `CRONOS_DEV` | `-dev` |
 | `CRONOS_CLUSTER` | `-cluster` |
 | `CRONOS_CLUSTER_SEEDS` | `-cluster-seeds` |
+| `CRONOS_TLS_ENABLED` | `-tls-enabled` |
+| `CRONOS_TLS_CA_FILE` | `-tls-ca-file` |
+| `CRONOS_TLS_CERT_FILE` | `-tls-cert-file` |
+| `CRONOS_TLS_KEY_FILE` | `-tls-key-file` |
+| `CRONOS_REPLICATION_TLS_ENABLED` | `-replication-tls-enabled` |
+| `CRONOS_REPLICATION_TLS_CA_FILE` | `-replication-tls-ca-file` |
+| `CRONOS_REPLICATION_TLS_CERT_FILE` | `-replication-tls-cert-file` |
+| `CRONOS_REPLICATION_TLS_KEY_FILE` | `-replication-tls-key-file` |
+| `CRONOS_AUTH_ENABLED` | `-auth-enabled` |
+| `CRONOS_AUTH_JWT_SECRET` | `-auth-jwt-secret` |
+| `CRONOS_MIN_IN_SYNC_REPLICAS` | `-min-insync-replicas` |
+| `CRONOS_SNAPSHOT_CATCHUP_THRESHOLD` | `-snapshot-catchup-threshold` |
+| `CRONOS_EXACTLY_ONCE_COMMITS` | `-exactly-once-commits` |
+| `CRONOS_ENCRYPTION_ENABLED` | `-encryption-enabled` |
+| `CRONOS_ENCRYPTION_KEY_FILE` | `-encryption-key-file` |
+| `CRONOS_NODE_RACK` | `-node-rack` |
+| `CRONOS_NODE_ZONE` | `-node-zone` |
+| `CRONOS_NODE_REGION` | `-node-region` |
 | `CRONOS_TRACING_ENABLED` | `-tracing-enabled` |
 | `CRONOS_TRACING_EXPORTER` | `-tracing-exporter` |
 | `CRONOS_TRACING_OTLP_ENDPOINT` | `-tracing-otlp-endpoint` |
@@ -488,27 +658,36 @@ This is the intended safety property: the system refuses to acknowledge a write 
 cronos_db/
 ├── cmd/api/main.go                 # Entry point, bootstrap, graceful shutdown
 ├── internal/
-│   ├── api/                        # gRPC server, handlers, metrics, rate limiting
+│   ├── api/                        # Public gRPC server + dedicated internal cluster listener
+│   ├── audit/                      # Audit interceptor + structured audit logger
+│   ├── auth/                       # JWT + policy-file authentication
+│   ├── cdc/                        # Change data capture sinks (Kafka, webhook)
 │   ├── cluster/                    # Raft, gossip, hash ring, router, rebalancing
-│   ├── config/                     # Flag parsing, defaults, validation
+│   ├── compliance/                 # Retention enforcer + protected-paths policy
+│   ├── config/                     # Flag parsing, defaults, validation, env overrides, SIGHUP reload
 │   ├── consumer/                   # Consumer groups, persistent offset store
 │   ├── dedup/                      # Bloom filter (Rust FFI) + PebbleDB two-tier
 │   │   └── rust/src/lib.rs         # Rust: lock-free bloom, Rayon parallel batch
-│   ├── delivery/                   # Dispatcher (32 shards), circuit breaker, retry heap, DLQ segments
-│   ├── partition/                  # Partition lifecycle, WAL replay, compaction
+│   ├── delivery/                   # Dispatcher (32 shards), circuit breaker, retry heap, DLQ, expiry
+│   ├── metrics/                    # Prometheus metric definitions shared across modules
+│   ├── partition/                  # Partition lifecycle, WAL replay, admission control, recovery snapshot
 │   ├── replay/                     # Time-range and offset-based replay engine
-│   ├── replication/                # Binary protocol, leader/follower, bulk sync
-│   ├── scheduler/                  # Timing wheel, cold store, hydrator, checkpoint, recovery
-│   ├── storage/                    # WAL, segments, sparse index, mmap
-│   └── tracing/                    # OpenTelemetry integration
+│   ├── replication/                # Leader/follower replication, mTLS, gRPC snapshot install, cross-region
+│   ├── scheduler/                  # Hierarchical timing wheel, cold store, hydrator, checkpoint
+│   ├── schema/                     # Topic schema registry, compatibility, Avro/protobuf
+│   ├── slo/                        # SLO recorder (latency, error rate) + bounded windows
+│   ├── storage/                    # WAL v2, segments, sparse index, mmap, fsync coalescer, encryption
+│   ├── tenant/                     # Per-tenant resource accounting + token-bucket controls
+│   ├── tracing/                    # OpenTelemetry provider + gRPC interceptor
+│   └── tx/                         # 2PC coordinator + transaction service handler
 ├── pkg/
 │   ├── client/                     # Go SDK (connection pool, metadata cache/routing foundation)
 │   ├── types/                      # Config, protobuf generated, errors
-│   └── utils/                      # FNV-1a hashing, CRC32
+│   └── utils/                      # FNV-1a hashing, CRC32, atomic file writes
 ├── proto/events.proto              # Complete gRPC API specification
 ├── Makefile                        # Build, test, cluster, loadtest, docker
 ├── Dockerfile                      # Multi-stage: Rust → Go → Debian slim
-├── docker-compose.yml              # Single node + 3-node cluster
+├── docker-compose.yml              # Single node + 3-node cluster (RF=3 / minISR=2)
 └── ARCHITECTURE.md                 # Deep-dive with 30+ Mermaid diagrams
 ```
 
@@ -535,9 +714,10 @@ cronos_db/
 | **EventService** | `Publish`, `PublishBatch`, `Subscribe`, `Ack`, `Replay` | Core pub/sub |
 | **PartitionService** | `GetPartition`, `ListPartitions`, `GetWALStatus`, `GetSchedulerStatus`, `Compact`, `RunRetention`, `SplitPartition` | Partition metadata and admin |
 | **ConsumerGroupService** | `Create`, `Get`, `List`, `Rebalance` | Group management |
-| **ReplicationService** | `Append`, `Sync` | Internal replication |
-| **RaftService** | `Join`, `Leave`, `Status` | Internal cluster |
+| **ReplicationService** | `Append`, `Sync`, `Snapshot` | Internal replication (intra-cluster, internal listener) |
+| **RaftService** | `Join`, `Leave`, `Status` | Internal cluster (intra-cluster, internal listener) |
 | **CrossRegionService** | `ReplicateEvents`, `FetchEvents` | Cross-region replication |
+| **TransactionService** | `BeginTransaction`, `PrepareTransaction`, `CommitTransaction`, `AbortTransaction` | 2PC distributed transactions |
 
 ### Key RPCs
 
@@ -581,8 +761,10 @@ See [proto/events.proto](proto/events.proto) for the complete specification.
 - [x] Gossip-based membership & failure detection
 - [x] Consistent hashing with virtual nodes
 - [x] Automatic partition rebalancing on join/leave
-- [x] Leader-follower async replication (binary protocol)
-- [x] Bulk segment file sync for new node bootstrap
+- [x] Leader-follower async replication over gRPC (dedicated internal listener)
+- [x] Replication mTLS on internal cluster channel
+- [x] ISR reconciliation from replication leader state
+- [x] Bulk segment snapshot install over gRPC for new node bootstrap / far-behind followers
 - [x] Partition leader election on failure
 
 ### Performance ✅ Optimized (single-machine)
@@ -622,13 +804,13 @@ See [proto/events.proto](proto/events.proto) for the complete specification.
 - [x] TLS/mTLS support (enable in production)
 - [x] JWT auth support (enable in production)
 - [x] At-rest encryption support (enable in production)
-- [ ] Consumer-group metadata persistence across restarts
+- [x] Consumer-group metadata persistence across restarts
 - [ ] Replication wire checksums
-- [ ] Per-entry terms in WAL
-- [ ] Chaos testing suite
+- [x] Per-entry terms in WAL
+- [x] Chaos testing suite (Docker-based replication failover, below-minISR, follower restart, follower wipe + bulk catch-up)
 
 ### Remaining 🚧
-- [ ] Admin CLI & dashboard
+- [x] Admin CLI & dashboard
 - [ ] Topic-level ACLs
 
 ---
@@ -674,7 +856,7 @@ This is a reference implementation demonstrating production-grade patterns for d
 
 - Hierarchical timing wheels for O(1) scheduling
 - Two-tier deduplication with Rust FFI
-- Custom binary replication protocol
+- gRPC-based replication with mTLS and snapshot install
 - Consistent hashing with virtual nodes
 - Credit-based backpressure flow control
 - Lock-free concurrent data structures
