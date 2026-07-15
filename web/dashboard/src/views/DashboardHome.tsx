@@ -5,10 +5,10 @@ import { Loading } from "@/components/Loading";
 import { ErrorAlert } from "@/components/ErrorAlert";
 
 export function DashboardHome() {
-  const { data, loading, error, refetch } = useClusterTopology();
+  const { data, loading, error, refetch, updatedAt } = useClusterTopology();
 
   if (loading) return <Loading message="Loading cluster snapshot..." />;
-  if (error) return <ErrorAlert message={error} onRetry={refetch} />;
+  if (error) return <ErrorAlert message={error} onRetry={refetch} isAuth={error.startsWith("401")} />;
   if (!data) return <ErrorAlert message="No cluster snapshot available." onRetry={refetch} />;
 
   const mode = data.is_cluster_mode ? "cluster" : "standalone";
@@ -21,6 +21,11 @@ export function DashboardHome() {
             Connected to <span className="font-mono">{data.local_node_id}</span> in{" "}
             <Badge variant={data.is_cluster_mode ? "default" : "secondary"}>{mode}</Badge>{" "}
             mode.
+            {updatedAt && (
+              <span className="ml-2 text-[var(--color-muted-foreground)]">
+                Updated {Math.round((Date.now() - updatedAt) / 1000)}s ago
+              </span>
+            )}
           </CardDescription>
         </CardHeader>
         <CardContent>
