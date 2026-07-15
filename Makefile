@@ -213,7 +213,7 @@ help:
 	@echo   make node1          - Start node 1 (bootstrap)
 	@echo   make node2          - Start node 2 (joins node1)
 	@echo   make node3          - Start node 3 (joins node1)
-	@echo   (set TRACING_ENABLED=true to export traces with low sample ratio)
+	@echo '  (set TRACING_ENABLED=true to export traces with low sample ratio)'
 	@echo   make cluster        - Print cluster startup order
 	@echo   make health         - Check node health endpoints
 	@echo.
@@ -241,7 +241,7 @@ help:
 	@echo   make tag VERSION=v0.2.1      - Create local annotated tag (requires clean git state)
 	@echo   make tag-push VERSION=v0.2.1 - Push an existing local tag to REMOTE (default: origin)
 	@echo   make release VERSION=v0.2.1  - Create GitHub Release from pushed tag using gh CLI
-	@echo   make publish VERSION=v0.2.1  - Run ci (includes rust-dedup), tag, push, and release
+	@echo '  make publish VERSION=v0.2.1  - Run ci (includes rust-dedup), tag, push, and release'
 	@echo   Optional overrides: REMOTE=origin RELEASE_NOTES_FILE=notes.md RELEASE_DRAFT=true RELEASE_PRERELEASE=true
 
 verify-env:
@@ -378,7 +378,7 @@ release: release-preflight
 	@echo Created GitHub release for $(VERSION)
 
 publish: tag-preflight
-	@echo [publish] Step 1/4: ci (includes rust dedup build for $(PLATFORM))
+	@echo '[publish] Step 1/4: ci (includes rust dedup build for $(PLATFORM))'
 	@$(MAKE) ci
 	@echo [publish] Step 2/4: tag
 	@$(MAKE) tag VERSION=$(VERSION) REMOTE=$(REMOTE)
