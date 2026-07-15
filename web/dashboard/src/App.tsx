@@ -1,18 +1,20 @@
+import { lazy, Suspense } from "react";
 import { Link, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { UserMenu } from "@/components/UserMenu";
 import { MobileNav } from "@/components/MobileNav";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
-import { DashboardHome } from "@/views/DashboardHome";
-import { ClusterTopologyView } from "@/views/ClusterTopologyView";
-import { PartitionHealthView } from "@/views/PartitionHealthView";
-import { ReplicationLagView } from "@/views/ReplicationLagView";
-import { ConsumerGroupsView } from "@/views/ConsumerGroupsView";
-import { OperationsView } from "@/views/OperationsView";
-import { SchemasView } from "@/views/SchemasView";
-import { TenantUsageView } from "@/views/TenantUsageView";
-import { LoginView } from "@/views/LoginView";
+
+const DashboardHome = lazy(() => import("@/views/DashboardHome").then((m) => ({ default: m.DashboardHome })));
+const ClusterTopologyView = lazy(() => import("@/views/ClusterTopologyView").then((m) => ({ default: m.ClusterTopologyView })));
+const PartitionHealthView = lazy(() => import("@/views/PartitionHealthView").then((m) => ({ default: m.PartitionHealthView })));
+const ReplicationLagView = lazy(() => import("@/views/ReplicationLagView").then((m) => ({ default: m.ReplicationLagView })));
+const ConsumerGroupsView = lazy(() => import("@/views/ConsumerGroupsView").then((m) => ({ default: m.ConsumerGroupsView })));
+const OperationsView = lazy(() => import("@/views/OperationsView").then((m) => ({ default: m.OperationsView })));
+const SchemasView = lazy(() => import("@/views/SchemasView").then((m) => ({ default: m.SchemasView })));
+const TenantUsageView = lazy(() => import("@/views/TenantUsageView").then((m) => ({ default: m.TenantUsageView })));
+const LoginView = lazy(() => import("@/views/LoginView").then((m) => ({ default: m.LoginView })));
 
 export const NAV = [
   { path: "/dashboard", label: "Dashboard" },
@@ -66,6 +68,14 @@ function Layout({ children }: { children: React.ReactNode }) {
   );
 }
 
+function RouteSkeleton() {
+  return (
+    <div className="flex h-64 items-center justify-center text-sm text-muted-foreground">
+      Loading view…
+    </div>
+  );
+}
+
 export default function App() {
   return (
     <Routes>
@@ -75,18 +85,20 @@ export default function App() {
         element={
           <Layout>
             <ErrorBoundary>
-              <Routes>
-                <Route path="/dashboard" element={<DashboardHome />} />
-                <Route path="/cluster" element={<ClusterTopologyView />} />
-                <Route path="/partitions" element={<PartitionHealthView />} />
-                <Route path="/replication" element={<ReplicationLagView />} />
-                <Route path="/consumers" element={<ConsumerGroupsView />} />
-                <Route path="/schemas" element={<SchemasView />} />
-                <Route path="/tenants" element={<TenantUsageView />} />
-                <Route path="/operations" element={<OperationsView />} />
-                <Route path="/" element={<Navigate to="/dashboard" replace />} />
-                <Route path="*" element={<Navigate to="/dashboard" replace />} />
-              </Routes>
+              <Suspense fallback={<RouteSkeleton />}>
+                <Routes>
+                  <Route path="/dashboard" element={<DashboardHome />} />
+                  <Route path="/cluster" element={<ClusterTopologyView />} />
+                  <Route path="/partitions" element={<PartitionHealthView />} />
+                  <Route path="/replication" element={<ReplicationLagView />} />
+                  <Route path="/consumers" element={<ConsumerGroupsView />} />
+                  <Route path="/schemas" element={<SchemasView />} />
+                  <Route path="/tenants" element={<TenantUsageView />} />
+                  <Route path="/operations" element={<OperationsView />} />
+                  <Route path="/" element={<Navigate to="/dashboard" replace />} />
+                  <Route path="*" element={<Navigate to="/dashboard" replace />} />
+                </Routes>
+              </Suspense>
             </ErrorBoundary>
           </Layout>
         }
