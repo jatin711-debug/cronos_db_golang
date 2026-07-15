@@ -522,7 +522,7 @@ func adminSchemaListCmd() *cobra.Command {
 				return err
 			}
 			if len(resp.GetSchemas()) == 0 {
-				fmt.Println("(no schemas; schema registry is not yet wired into AdminService)")
+				fmt.Println("(no schemas registered)")
 				return nil
 			}
 			for _, s := range resp.GetSchemas() {
@@ -578,7 +578,7 @@ func adminTenantUsageCmd() *cobra.Command {
 			fmt.Printf("tenant=%s in_flight=%d storage=%d limits_configured=%v\n",
 				resp.GetTenantId(), resp.GetInFlight(), resp.GetStorageBytes(), resp.GetLimitsConfigured())
 			if !resp.GetLimitsConfigured() {
-				fmt.Println("(tenant accountant is not yet wired into AdminService)")
+				fmt.Println("(tenant limits not configured)")
 			}
 			return nil
 		},

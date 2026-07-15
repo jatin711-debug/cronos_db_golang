@@ -169,6 +169,78 @@ make node3
 make health
 ```
 
+### Admin Dashboard
+
+CronosDB ships with a self-hosted React admin dashboard embedded in the
+`cronos-api` binary. After `make build`, it is served from `/ui/` on the HTTP
+address.
+
+```bash
+# Start a node with the HTTP UI exposed
+./bin/cronos-api --dev --node-id=node1 --http-addr=127.0.0.1:8080 --data-dir=./data
+
+# Open the dashboard
+open http://127.0.0.1:8080/ui/
+```
+
+The dashboard includes:
+
+- **Cluster topology** — nodes, partitions, ISR, and follower offsets.
+- **Partition health** — per-partition WAL, scheduler, dedup, and replay stats.
+- **Replication lag** — leader HWM and per-follower lag with a snapshot bar chart.
+- **Consumer groups** — group/partition listing and committed-vs-HWM lag charts.
+- **Schema registry** — browse registered topic schemas (`/ui/schemas`).
+- **Tenant usage** — per-tenant in-flight and storage accounting (`/ui/tenants`).
+- **Operations** — run retention, compaction, and trigger rebalancing.
+- **Dark / light / system theme** toggle.
+- **Toast notifications** for async operations.
+
+When auth is enabled, sign in through the UI with a JWT or generate one with the
+admin CLI:
+
+```bash
+./bin/cronos-admin generate-token --secret "$(cat jwt-secret.txt)" --subject admin --ttl 24h
+```
+
+### Admin CLI
+
+`cronos-admin` is the operator gRPC CLI. Build it with:
+
+```bash
+go build -o bin/cronos-admin ./cmd/admin/main.go
+```
+
+Common commands:
+
+```bash
+# Cluster status
+./bin/cronos-admin --server=localhost:9000 topology
+
+# Per-partition runtime health
+./bin/cronos-admin --server=localhost:9000 partition-health 0
+
+# Replication lag (omit partition-id for all local leaders)
+./bin/cronos-admin --server=localhost:9000 replication-lag
+
+# Consumer groups
+./bin/cronos-admin --server=localhost:9000 consumer-groups list
+./bin/cronos-admin --server=localhost:9000 consumer-group-lag my-group 0
+
+# Schema registry
+./bin/cronos-admin --server=localhost:9000 schema-list
+./bin/cronos-admin --server=localhost:9000 schema-get my-topic 0
+
+# Tenant accounting
+./bin/cronos-admin --server=localhost:9000 tenant-usage
+
+# Operations (require Subject.Admin=true when auth is enabled)
+./bin/cronos-admin --server=localhost:9000 retention-run --partition-id=0
+./bin/cronos-admin --server=localhost:9000 compaction-run --partition-id=0
+./bin/cronos-admin --server=localhost:9000 cluster-rebalance
+```
+
+Use `--jwt-token <token>` for authenticated clusters.
+
 ### Load Test
 
 ```bash
@@ -738,7 +810,7 @@ See [proto/events.proto](proto/events.proto) for the complete specification.
 - [x] Chaos testing suite (Docker-based replication failover, below-minISR, follower restart, follower wipe + bulk catch-up)
 
 ### Remaining 🚧
-- [ ] Admin CLI & dashboard
+- [x] Admin CLI & dashboard
 - [ ] Topic-level ACLs
 
 ---
