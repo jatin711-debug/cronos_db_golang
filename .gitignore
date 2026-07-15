@@ -8,3 +8,7 @@ build/
 *.dll.exp
 .bench.*.txt
 .zcode/
+
+# Admin dashboard SPA (step 4)
+node_modules/
+web/dashboard/dist/
