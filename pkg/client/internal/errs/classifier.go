@@ -50,5 +50,23 @@ func IsLeaderRelated(err error) bool {
 // that suggests the request was sent to the wrong node (e.g. stale leader metadata).
 func IsLeaderRelatedMessage(message string) bool {
 	m := strings.ToLower(message)
-	return strings.Contains(m, "leader") || strings.Contains(m, "partition")
+	phrases := []string{
+		"not leader",
+		"not the leader",
+		"wrong leader",
+		"stale leader",
+		"leader changed",
+		"leader not found",
+		"no leader",
+		"leader mismatch",
+		"not current leader",
+		"leader id mismatch",
+		"leader election",
+	}
+	for _, p := range phrases {
+		if strings.Contains(m, p) {
+			return true
+		}
+	}
+	return false
 }

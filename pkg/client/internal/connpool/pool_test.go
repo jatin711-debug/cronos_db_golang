@@ -2,6 +2,7 @@ package connpool
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"testing"
 	"time"
@@ -40,6 +41,29 @@ func TestNew_WithBootstrap(t *testing.T) {
 		defer pool.Close()
 	}
 	_ = err
+}
+
+func TestPool_ClientForMissingNodeReturnsTypedError(t *testing.T) {
+	cfg := Config{
+		ConnectionsPerNode: 1,
+		DialTimeout:        100 * time.Millisecond,
+		DialOptions:        defaultDialOpts(),
+	}
+	pool, _ := New(context.Background(), []string{}, cfg)
+	if pool == nil {
+		t.Skip("pool creation failed, skipping")
+	}
+	defer pool.Close()
+
+	_, err := pool.EventClient("127.0.0.1:9999")
+	if !errors.Is(err, ErrNodeNotFound) {
+		t.Fatalf("expected ErrNodeNotFound, got %v", err)
+	}
+
+	_, err = pool.PartitionClient("127.0.0.1:9999")
+	if !errors.Is(err, ErrNodeNotFound) {
+		t.Fatalf("expected ErrNodeNotFound, got %v", err)
+	}
 }
 
 func TestPool_AddNode(t *testing.T) {
