@@ -61,7 +61,7 @@ RUST_SHARED_LIB := $(RUST_LIB_BASENAME).dll
 
 MKDIR_BUILD_CMD = powershell -NoProfile -Command "New-Item -ItemType Directory -Force '$(BUILD_DIR)' | Out-Null"
 VERIFY_RUST_LIB_CMD = powershell -NoProfile -Command "if (!(Test-Path '$(RUST_TARGET_DIR)/$(RUST_SHARED_LIB)')) { throw 'Rust artifact missing: $(RUST_TARGET_DIR)/$(RUST_SHARED_LIB)' }"
-STAGE_RUST_LIB_CMD = powershell -NoProfile -Command "New-Item -ItemType Directory -Force '$(RUST_STAGE_DIR)' | Out-Null; New-Item -ItemType Directory -Force '$(BUILD_DIR)' | Out-Null; Copy-Item -Force '$(RUST_TARGET_DIR)/$(RUST_SHARED_LIB)' '$(RUST_STAGE_DIR)/'; Copy-Item -Force '$(RUST_TARGET_DIR)/$(RUST_SHARED_LIB)' './'; Copy-Item -Force '$(RUST_TARGET_DIR)/$(RUST_SHARED_LIB)' '$(BUILD_DIR)/'; if (Test-Path '$(RUST_TARGET_DIR)/$(RUST_LIB_BASENAME).dll.lib') { Copy-Item -Force '$(RUST_TARGET_DIR)/$(RUST_LIB_BASENAME).dll.lib' '$(RUST_STAGE_DIR)/'; Copy-Item -Force '$(RUST_TARGET_DIR)/$(RUST_LIB_BASENAME).dll.lib' './'; Copy-Item -Force '$(RUST_TARGET_DIR)/$(RUST_LIB_BASENAME).dll.lib' '$(BUILD_DIR)/'; Copy-Item -Force '$(RUST_TARGET_DIR)/$(RUST_LIB_BASENAME).dll.exp' '$(RUST_STAGE_DIR)/' -ErrorAction SilentlyContinue }"
+STAGE_RUST_LIB_CMD = powershell -NoProfile -ExecutionPolicy Bypass -File scripts/stage-rust-lib.ps1 -SourceDir '$(RUST_TARGET_DIR)' -BaseName '$(RUST_LIB_BASENAME)' -Destinations '$(RUST_STAGE_DIR);$(BUILD_DIR);.'
 # Copy web/dashboard/dist/ into internal/api/web/dist/ so //go:embed
 # picks up the SPA at compile time. internal/api/web_handler.go embeds
 # web/dist/* (the relative path from the Go file's package directory).
