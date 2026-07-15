@@ -176,7 +176,46 @@ func (r *Registry) Validate(topic string, payload []byte) error {
 	}
 }
 
-// Load restores schemas from disk.
+// SchemaSummary is a lightweight summary of a registered topic suitable for
+// admin/listing APIs.
+type SchemaSummary struct {
+	Topic             string
+	LatestVersion     int
+	CompatibilityMode CompatibilityMode
+}
+
+// List returns a summary for every topic registered in the registry,
+// ordered by topic name. If no schemas are registered the result is empty
+// (not nil), which makes the wire response shape stable.
+func (r *Registry) List() []SchemaSummary {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	topics := make([]string, 0, len(r.schemas))
+	for topic := range r.schemas {
+		topics = append(topics, topic)
+	}
+	sort.Strings(topics)
+
+	summaries := make([]SchemaSummary, 0, len(topics))
+	for _, topic := range topics {
+		versions := r.schemas[topic]
+		if len(versions) == 0 {
+			continue
+		}
+		latest := versions[len(versions)-1]
+		mode := r.compatModes[topic]
+		if mode == "" {
+			mode = CompatBackward
+		}
+		summaries = append(summaries, SchemaSummary{
+			Topic:             topic,
+			LatestVersion:     latest.Version,
+			CompatibilityMode: mode,
+		})
+	}
+	return summaries
+}
 func (r *Registry) Load() error {
 	entries, err := os.ReadDir(r.dir)
 	if err != nil {

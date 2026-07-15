@@ -10,14 +10,18 @@ import { PartitionHealthView } from "@/views/PartitionHealthView";
 import { ReplicationLagView } from "@/views/ReplicationLagView";
 import { ConsumerGroupsView } from "@/views/ConsumerGroupsView";
 import { OperationsView } from "@/views/OperationsView";
+import { SchemasView } from "@/views/SchemasView";
+import { TenantUsageView } from "@/views/TenantUsageView";
 import { LoginView } from "@/views/LoginView";
 
-const NAV = [
+export const NAV = [
   { path: "/dashboard", label: "Dashboard" },
   { path: "/cluster", label: "Cluster" },
   { path: "/partitions", label: "Partitions" },
   { path: "/replication", label: "Replication" },
   { path: "/consumers", label: "Consumers" },
+  { path: "/schemas", label: "Schemas" },
+  { path: "/tenants", label: "Tenants" },
   { path: "/operations", label: "Operations" },
 ];
 
@@ -31,7 +35,7 @@ function Layout({ children }: { children: React.ReactNode }) {
             <span className="text-xl font-semibold">⏰ CronosDB Admin</span>
             <span className="text-xs text-muted-foreground">v0.2</span>
           </div>
-          <nav className="hidden items-center gap-1 md:flex">
+          <nav className="hidden items-center gap-1 lg:flex">
             {NAV.map((item) => {
               const active = location.pathname === item.path;
               return (
@@ -77,6 +81,8 @@ export default function App() {
                 <Route path="/partitions" element={<PartitionHealthView />} />
                 <Route path="/replication" element={<ReplicationLagView />} />
                 <Route path="/consumers" element={<ConsumerGroupsView />} />
+                <Route path="/schemas" element={<SchemasView />} />
+                <Route path="/tenants" element={<TenantUsageView />} />
                 <Route path="/operations" element={<OperationsView />} />
                 <Route path="/" element={<Navigate to="/dashboard" replace />} />
                 <Route path="*" element={<Navigate to="/dashboard" replace />} />

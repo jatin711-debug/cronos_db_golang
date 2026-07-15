@@ -54,7 +54,7 @@ func TestAdminServiceHandler_StandaloneMode(t *testing.T) {
 	// pm is nil-safe because GetClusterTopology does not touch it in
 	// standalone mode. authCfg is nil (dev mode) so the auth check is
 	// permissive.
-	h := NewAdminServiceHandler(nil, nil, nil, "test-node", t.TempDir())
+	h := NewAdminServiceHandler(nil, nil, nil, "test-node", t.TempDir(), nil, nil)
 	client, teardown := dialAdminServer(t, h)
 	defer teardown()
 
@@ -91,7 +91,7 @@ func TestAdminServiceHandler_AdminAuth_Allowed(t *testing.T) {
 		},
 	}
 	authCfg := &auth.Config{Enabled: true, Policy: policy}
-	h := NewAdminServiceHandler(nil, nil, authCfg, "test-node", t.TempDir())
+	h := NewAdminServiceHandler(nil, nil, authCfg, "test-node", t.TempDir(), nil, nil)
 
 	if err := h.checkAdmin(auth.WithClaims(context.Background(), auth.ClaimsWithSubject("ops"))); err != nil {
 		t.Fatalf("expected admin subject to be allowed, got: %v", err)
@@ -107,7 +107,7 @@ func TestAdminServiceHandler_AdminAuth_Denied(t *testing.T) {
 		},
 	}
 	authCfg := &auth.Config{Enabled: true, Policy: policy}
-	h := NewAdminServiceHandler(nil, nil, authCfg, "test-node", t.TempDir())
+	h := NewAdminServiceHandler(nil, nil, authCfg, "test-node", t.TempDir(), nil, nil)
 
 	err := h.checkAdmin(auth.WithClaims(context.Background(), auth.ClaimsWithSubject("user")))
 	if err == nil {
@@ -122,7 +122,7 @@ func TestAdminServiceHandler_AdminAuth_Denied(t *testing.T) {
 // is nil (--dev mode), the handler does not enforce auth. This mirrors
 // the rest of the auth interceptor behavior in dev mode.
 func TestAdminServiceHandler_DevMode_AllowsAdmin(t *testing.T) {
-	h := NewAdminServiceHandler(nil, nil, nil, "test-node", t.TempDir())
+	h := NewAdminServiceHandler(nil, nil, nil, "test-node", t.TempDir(), nil, nil)
 	if err := h.checkAdmin(context.Background()); err != nil {
 		t.Fatalf("expected dev mode (nil authCfg) to permit, got: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestAdminServiceHandler_DevMode_AllowsAdmin(t *testing.T) {
 // than fake data or Unimplemented. The CLI depends on this contract
 // to surface the gap clearly to operators.
 func TestAdminServiceHandler_StubRPCs_ReturnDeferred(t *testing.T) {
-	h := NewAdminServiceHandler(nil, nil, nil, "test-node", t.TempDir())
+	h := NewAdminServiceHandler(nil, nil, nil, "test-node", t.TempDir(), nil, nil)
 	client, teardown := dialAdminServer(t, h)
 	defer teardown()
 
@@ -191,7 +191,7 @@ func TestAdminServiceHandler_RunRetention_PermissionDenied(t *testing.T) {
 		},
 	}
 	authCfg := &auth.Config{Enabled: true, Policy: policy}
-	h := NewAdminServiceHandler(nil, nil, authCfg, "test-node", t.TempDir())
+	h := NewAdminServiceHandler(nil, nil, authCfg, "test-node", t.TempDir(), nil, nil)
 	client, teardown := dialAdminServer(t, h)
 	defer teardown()
 
@@ -213,7 +213,7 @@ func TestAdminServiceHandler_RunRetention_PermissionDenied(t *testing.T) {
 // RunCompaction returns a structured failure (not Unimplemented) when
 // partition_id=0, because the underlying primitive is per-partition.
 func TestAdminServiceHandler_RunCompaction_RequiresPartitionID(t *testing.T) {
-	h := NewAdminServiceHandler(nil, nil, nil, "test-node", t.TempDir())
+	h := NewAdminServiceHandler(nil, nil, nil, "test-node", t.TempDir(), nil, nil)
 	client, teardown := dialAdminServer(t, h)
 	defer teardown()
 

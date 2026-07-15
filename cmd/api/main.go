@@ -443,7 +443,7 @@ func main() {
 	// and reuses the existing auth config. authConfig is nil when auth is
 	// disabled (--dev), in which case the handler treats admin RPCs as
 	// permitted (mirroring the rest of the auth interceptor behavior).
-	adminHandler := api.NewAdminServiceHandler(pm, clusterMgr, authConfig, cfg.NodeID, cfg.DataDir)
+	adminHandler := api.NewAdminServiceHandler(pm, clusterMgr, authConfig, cfg.NodeID, cfg.DataDir, schemaRegistry, tenantAccountant)
 
 	// Register services
 	grpcServer.RegisterServices(eventHandler, consumerHandler, partitionHandler, adminHandler)

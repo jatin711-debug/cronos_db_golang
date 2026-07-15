@@ -11,6 +11,8 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/internal/cluster"
 	"github.com/jatin711-debug/cronos_db_golang/internal/compliance"
 	"github.com/jatin711-debug/cronos_db_golang/internal/partition"
+	"github.com/jatin711-debug/cronos_db_golang/internal/schema"
+	"github.com/jatin711-debug/cronos_db_golang/internal/tenant"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -54,6 +56,14 @@ type AdminServiceHandler struct {
 	// minimal standalone response or Unimplemented.
 	cluster *cluster.Manager
 
+	// schemaRegistry is the topic schema registry. May be nil if the server
+	// was started without schema support; schema RPCs will return empty/unimplemented.
+	schemaRegistry *schema.Registry
+
+	// tenantAccountant tracks per-tenant resource usage. May be nil if the
+	// server was started without tenant quotas; usage RPCs return zero values.
+	tenantAccountant *tenant.Accountant
+
 	// authCfg is the runtime auth configuration. May be nil in dev mode
 	// (auth disabled), in which case CheckAdminPermission is a no-op.
 	authCfg *auth.Config
@@ -87,6 +97,8 @@ func NewAdminServiceHandler(
 	authCfg *auth.Config,
 	localNodeID string,
 	dataDir string,
+	schemaRegistry *schema.Registry,
+	tenantAccountant *tenant.Accountant,
 ) *AdminServiceHandler {
 	logger := slog.Default()
 	if clusterMgr == nil {
@@ -94,12 +106,14 @@ func NewAdminServiceHandler(
 			slog.String("local_node_id", localNodeID))
 	}
 	return &AdminServiceHandler{
-		pm:          pm,
-		cluster:     clusterMgr,
-		authCfg:     authCfg,
-		localNodeID: localNodeID,
-		dataDir:     dataDir,
-		logger:      logger,
+		pm:               pm,
+		cluster:          clusterMgr,
+		authCfg:          authCfg,
+		localNodeID:      localNodeID,
+		dataDir:          dataDir,
+		schemaRegistry:   schemaRegistry,
+		tenantAccountant: tenantAccountant,
+		logger:           logger,
 	}
 }
 
@@ -622,15 +636,6 @@ func (h *AdminServiceHandler) RunCompaction(
 // trigger is not exposed in cluster.Manager. Returning success with a
 // descriptive error message lets callers detect the gap explicitly
 // rather than via a generic Unimplemented.
-//
-// Implementing this for real would require either:
-//   - a new cluster.Manager.RebalanceNow() method that walks the router
-//     and forces a reassignment, or
-//   - exposing the existing router.SetOnRebalance plumbing as a
-//     public trigger.
-//
-// Both are small cluster-package changes and are deliberately out of
-// scope for step 2.
 func (h *AdminServiceHandler) TriggerRebalance(
 	ctx context.Context,
 	_ *types.RebalanceRequest,
@@ -646,15 +651,12 @@ func (h *AdminServiceHandler) TriggerRebalance(
 }
 
 // ---------------------------------------------------------------------------
-// Deferred stubs: Schemas, Tenant usage
+// Schemas
 // ---------------------------------------------------------------------------
 
-// ListSchemas is deferred. The schema.Registry is not currently wired
-// into AdminServiceHandler — wiring it requires a new field on the
-// handler and a construction-time dependency from cmd/api/main.go to
-// schema.NewRegistry(dataDir). The RPC returns an empty success
-// response rather than Unimplemented so the wire surface is stable and
-// the CLI can show "registry not wired" without a misleading error.
+// ListSchemas returns a summary of every topic registered in the schema
+// registry. If the registry is not wired into this handler, the response
+// is empty (Schemas: []).
 func (h *AdminServiceHandler) ListSchemas(
 	ctx context.Context,
 	_ *types.ListSchemasRequest,
@@ -662,25 +664,59 @@ func (h *AdminServiceHandler) ListSchemas(
 	if err := h.checkAdmin(ctx); err != nil {
 		return nil, err
 	}
-	return &types.ListSchemasResponse{Schemas: nil}, nil
+	if h.schemaRegistry == nil {
+		return &types.ListSchemasResponse{Schemas: []*types.SchemaSummary{}}, nil
+	}
+
+	summaries := h.schemaRegistry.List()
+	protoSummaries := make([]*types.SchemaSummary, 0, len(summaries))
+	for _, s := range summaries {
+		protoSummaries = append(protoSummaries, &types.SchemaSummary{
+			Topic:             s.Topic,
+			LatestVersion:     int32(s.LatestVersion),
+			CompatibilityMode: string(s.CompatibilityMode),
+		})
+	}
+	return &types.ListSchemasResponse{Schemas: protoSummaries}, nil
 }
 
-// GetSchema is a deferred stub. Returns the canonical gRPC
-// Unimplemented error so the CLI can detect the gap explicitly.
+// GetSchema returns a specific schema version for a topic. version=0 means
+// "latest". Returns NotFound when the topic or version is missing.
 func (h *AdminServiceHandler) GetSchema(
 	ctx context.Context,
-	_ *types.GetSchemaRequest,
+	req *types.GetSchemaRequest,
 ) (*types.GetSchemaResponse, error) {
 	if err := h.checkAdmin(ctx); err != nil {
 		return nil, err
 	}
-	return nil, statusUnimplementedErr()
+	if h.schemaRegistry == nil {
+		return nil, status.Error(codes.Unimplemented, "schema registry not available")
+	}
+	if req.GetTopic() == "" {
+		return nil, status.Error(codes.InvalidArgument, "topic is required")
+	}
+
+	var sch schema.Schema
+	var ok bool
+	if req.GetVersion() == 0 {
+		sch, ok = h.schemaRegistry.Get(req.GetTopic())
+	} else {
+		sch, ok = h.schemaRegistry.GetVersion(req.GetTopic(), int(req.GetVersion()))
+	}
+	if !ok {
+		return nil, status.Errorf(codes.NotFound, "schema not found for topic %q version %d", req.GetTopic(), req.GetVersion())
+	}
+
+	return &types.GetSchemaResponse{
+		Topic:      sch.Topic,
+		Version:    int32(sch.Version),
+		SchemaType: string(sch.Type),
+		Definition: sch.Definition,
+	}, nil
 }
 
-// GetTenantUsage is a deferred stub. Same wiring problem as ListSchemas:
-// the tenant.Accountant is not currently injected into the handler.
-// Returns a structured "no usage available" response rather than
-// Unimplemented so the CLI can render a clear "not wired" message.
+// GetTenantUsage returns current usage and configured limits for a tenant.
+// An empty tenant_id aggregates usage across all known tenants.
 func (h *AdminServiceHandler) GetTenantUsage(
 	ctx context.Context,
 	req *types.TenantUsage,
@@ -688,8 +724,37 @@ func (h *AdminServiceHandler) GetTenantUsage(
 	if err := h.checkAdmin(ctx); err != nil {
 		return nil, err
 	}
-	return &types.TenantUsageResponse{
+	if h.tenantAccountant == nil {
+		return &types.TenantUsageResponse{
+			TenantId:         req.GetTenantId(),
+			LimitsConfigured: false,
+		}, nil
+	}
+
+	tenantID := tenant.ID(req.GetTenantId())
+	inFlight, storageBytes := h.tenantAccountant.GetUsage(tenantID)
+	limits, hasLimits := h.tenantAccountant.GetLimits(tenantID)
+
+	// If no specific tenant was requested, aggregate across all tenants.
+	if req.GetTenantId() == "" {
+		inFlight, storageBytes = 0, 0
+		for _, id := range h.tenantAccountant.AllTenants() {
+			ifInf, stor := h.tenantAccountant.GetUsage(id)
+			inFlight += ifInf
+			storageBytes += stor
+		}
+		limits, hasLimits = tenant.Limits{}, false
+	}
+
+	resp := &types.TenantUsageResponse{
 		TenantId:         req.GetTenantId(),
-		LimitsConfigured: false,
-	}, nil
+		InFlight:         inFlight,
+		StorageBytes:     storageBytes,
+		LimitsConfigured: hasLimits,
+	}
+	if hasLimits {
+		resp.PublishRatePerSec = int64(limits.MaxEventsPerSecond)
+		resp.MaxInFlight = limits.MaxInFlight
+	}
+	return resp, nil
 }

@@ -2,22 +2,14 @@ import { useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { Menu, X } from "lucide-react";
 import { cn } from "@/lib/utils";
-
-const NAV = [
-  { path: "/dashboard", label: "Dashboard" },
-  { path: "/cluster", label: "Cluster" },
-  { path: "/partitions", label: "Partitions" },
-  { path: "/replication", label: "Replication" },
-  { path: "/consumers", label: "Consumers" },
-  { path: "/operations", label: "Operations" },
-];
+import { NAV } from "@/App";
 
 export function MobileNav() {
   const [open, setOpen] = useState(false);
   const location = useLocation();
 
   return (
-    <div className="md:hidden">
+    <div className="lg:hidden">
       <button
         onClick={() => setOpen((o) => !o)}
         className="rounded-md p-2 text-[var(--color-muted-foreground)] hover:bg-[var(--color-accent)]"
