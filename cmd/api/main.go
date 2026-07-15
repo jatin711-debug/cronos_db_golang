@@ -497,6 +497,14 @@ func main() {
 	healthChecker := api.NewHealthChecker(cfg, pm, clusterMgr)
 	healthChecker.Register(mux)
 
+	// Admin dashboard SPA + JSON proxy. Same *http.ServeMux as
+	// /health and /metrics; no new listener. Reuses the same
+	// authConfig the gRPC service uses, so dev mode bypasses auth
+	// and production deployments with auth enabled require
+	// Subject.Admin=true via Bearer token.
+	webHandler := api.NewWebHandler(adminHandler, authConfig)
+	webHandler.Register(mux)
+
 	mux.Handle("/metrics", promhttp.Handler())
 
 	healthServer := &http.Server{

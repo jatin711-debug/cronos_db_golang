@@ -62,7 +62,11 @@ RUST_SHARED_LIB := $(RUST_LIB_BASENAME).dll
 MKDIR_BUILD_CMD = powershell -NoProfile -Command "New-Item -ItemType Directory -Force '$(BUILD_DIR)' | Out-Null"
 VERIFY_RUST_LIB_CMD = powershell -NoProfile -Command "if (!(Test-Path '$(RUST_TARGET_DIR)/$(RUST_SHARED_LIB)')) { throw 'Rust artifact missing: $(RUST_TARGET_DIR)/$(RUST_SHARED_LIB)' }"
 STAGE_RUST_LIB_CMD = powershell -NoProfile -Command "New-Item -ItemType Directory -Force '$(RUST_STAGE_DIR)' | Out-Null; New-Item -ItemType Directory -Force '$(BUILD_DIR)' | Out-Null; Copy-Item -Force '$(RUST_TARGET_DIR)/$(RUST_SHARED_LIB)' '$(RUST_STAGE_DIR)/'; Copy-Item -Force '$(RUST_TARGET_DIR)/$(RUST_SHARED_LIB)' './'; Copy-Item -Force '$(RUST_TARGET_DIR)/$(RUST_SHARED_LIB)' '$(BUILD_DIR)/'; if (Test-Path '$(RUST_TARGET_DIR)/$(RUST_LIB_BASENAME).dll.lib') { Copy-Item -Force '$(RUST_TARGET_DIR)/$(RUST_LIB_BASENAME).dll.lib' '$(RUST_STAGE_DIR)/'; Copy-Item -Force '$(RUST_TARGET_DIR)/$(RUST_LIB_BASENAME).dll.lib' './'; Copy-Item -Force '$(RUST_TARGET_DIR)/$(RUST_LIB_BASENAME).dll.lib' '$(BUILD_DIR)/'; Copy-Item -Force '$(RUST_TARGET_DIR)/$(RUST_LIB_BASENAME).dll.exp' '$(RUST_STAGE_DIR)/' -ErrorAction SilentlyContinue }"
-CLEAN_BUILD_CMD = powershell -NoProfile -Command "if (Test-Path '$(BUILD_DIR)') { Remove-Item -Recurse -Force '$(BUILD_DIR)' }"
+# Copy web/dashboard/dist/ into internal/api/web/dist/ so //go:embed
+# picks up the SPA at compile time. internal/api/web_handler.go embeds
+# web/dist/* (the relative path from the Go file's package directory).
+STAGE_DASHBOARD_DIST_CMD = powershell -NoProfile -Command "if (Test-Path 'web/dashboard/dist') { if (Test-Path 'internal/api/web/dist') { Get-ChildItem 'internal/api/web/dist' -Exclude 'README.txt' -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force }; New-Item -ItemType Directory -Force 'internal/api/web/dist' | Out-Null; Copy-Item -Recurse -Force 'web/dashboard/dist/*' 'internal/api/web/dist/' }"
+CLEAN_BUILD_CMD = powershell -NoProfile -Command "if (Test-Path '$(BUILD_DIR)') { Remove-Item -Recurse -Force '$(BUILD_DIR)' }; if (Test-Path 'internal/api/web/dist') { Get-ChildItem 'internal/api/web/dist' -Exclude 'README.txt' | Remove-Item -Recurse -Force }"
 CLEAN_DATA_CMD = powershell -NoProfile -Command "foreach ($$d in @('$(DATA_ROOT)/node1','$(DATA_ROOT)/node2','$(DATA_ROOT)/node3')) { if (Test-Path $$d) { Remove-Item -Recurse -Force $$d } }"
 
 # On Windows the cgo-linked cronos_dedup.dll must be on the DLL search path when
@@ -112,7 +116,11 @@ endif
 MKDIR_BUILD_CMD = mkdir -p "$(BUILD_DIR)"
 VERIFY_RUST_LIB_CMD = test -f "$(RUST_TARGET_DIR)/$(RUST_SHARED_LIB)" || (echo "Rust artifact missing: $(RUST_TARGET_DIR)/$(RUST_SHARED_LIB)" && exit 1)
 STAGE_RUST_LIB_CMD = mkdir -p "$(RUST_STAGE_DIR)" && mkdir -p "$(BUILD_DIR)" && cp -f "$(RUST_TARGET_DIR)/$(RUST_SHARED_LIB)" "$(RUST_STAGE_DIR)/" && cp -f "$(RUST_TARGET_DIR)/$(RUST_SHARED_LIB)" "$(BUILD_DIR)/"
-CLEAN_BUILD_CMD = rm -rf "$(BUILD_DIR)"
+# Copy web/dashboard/dist/ into internal/api/web/dist/ so //go:embed
+# picks up the SPA at compile time. internal/api/web_handler.go embeds
+# web/dist/* (the relative path from the Go file's package directory).
+STAGE_DASHBOARD_DIST_CMD = if [ -d web/dashboard/dist ]; then mkdir -p internal/api/web/dist && find internal/api/web/dist -mindepth 1 -not -name 'README.txt' -delete 2>/dev/null || true && cp -R web/dashboard/dist/. internal/api/web/dist/; fi
+CLEAN_BUILD_CMD = rm -rf "$(BUILD_DIR)" && find internal/api/web/dist -mindepth 1 -not -name 'README.txt' -delete 2>/dev/null || true
 CLEAN_DATA_CMD = rm -rf "$(DATA_ROOT)/node1" "$(DATA_ROOT)/node2" "$(DATA_ROOT)/node3"
 
 # Ensure the Rust shared library is discoverable by dynamic linker for run/test.
@@ -298,7 +306,9 @@ rust-dedup:
 	@$(STAGE_RUST_LIB_CMD)
 
 # Build server binaries.
-build: rust-dedup ensure-build-dir
+build: dashboard rust-dedup ensure-build-dir
+	@# Stage SPA dist into the Go-embeddable location before compiling.
+	@$(STAGE_DASHBOARD_DIST_CMD)
 	$(GO_RUNTIME_PREFIX) go build -o $(BUILD_DIR)/$(BINARY)$(EXE_EXT) ./cmd/api/main.go
 	$(GO_RUNTIME_PREFIX) go build -tags clustertest -o $(BUILD_DIR)/cluster_loadtest$(EXE_EXT) cluster_loadtest.go
 

@@ -32,6 +32,7 @@ Recent changes reflected across these docs:
 - Compliance and Retention: [features/compliance.md](features/compliance.md)
 - Config and Reload: [features/config.md](features/config.md)
 - Consumer Groups: [features/consumer.md](features/consumer.md)
+- Dashboard: [features/dashboard.md](features/dashboard.md)
 - Deduplication: [features/dedup.md](features/dedup.md)
 - Delivery Pipeline: [features/delivery.md](features/delivery.md)
 - Partition Runtime: [features/partition.md](features/partition.md)

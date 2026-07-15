@@ -62,9 +62,9 @@ func TestGenerateToken(t *testing.T) {
 	}
 
 	// Parse it back
-	claims, err := parseToken(token, &Config{JWTSecret: secret})
+	claims, err := ParseToken(token, &Config{JWTSecret: secret})
 	if err != nil {
-		t.Fatalf("parseToken failed: %v", err)
+		t.Fatalf("ParseToken failed: %v", err)
 	}
 	if claims.Subject != "user-1" {
 		t.Errorf("expected subject user-1, got %s", claims.Subject)
@@ -78,7 +78,7 @@ func TestGenerateToken_Expired(t *testing.T) {
 	secret := []byte("test-secret-key-min-32-bytes-long")
 	token, _ := GenerateToken("user-1", secret, -time.Hour)
 
-	_, err := parseToken(token, &Config{JWTSecret: secret})
+	_, err := ParseToken(token, &Config{JWTSecret: secret})
 	if err == nil {
 		t.Error("expected error for expired token")
 	}
@@ -89,14 +89,14 @@ func TestParseToken_InvalidSecret(t *testing.T) {
 	secret2 := []byte("wrong-secret-key-min-32-bytes-long")
 	token, _ := GenerateToken("user-1", secret1, time.Hour)
 
-	_, err := parseToken(token, &Config{JWTSecret: secret2})
+	_, err := ParseToken(token, &Config{JWTSecret: secret2})
 	if err == nil {
 		t.Error("expected error for wrong secret")
 	}
 }
 
 func TestParseToken_InvalidFormat(t *testing.T) {
-	_, err := parseToken("not-a-token", &Config{JWTSecret: []byte("secret")})
+	_, err := ParseToken("not-a-token", &Config{JWTSecret: []byte("secret")})
 	if err == nil {
 		t.Error("expected error for invalid token")
 	}
@@ -122,7 +122,7 @@ func TestParseToken_Ed25519(t *testing.T) {
 		t.Fatalf("sign token: %v", err)
 	}
 
-	parsed, err := parseToken(token, &Config{JWTPublicKey: priv.Public()})
+	parsed, err := ParseToken(token, &Config{JWTPublicKey: priv.Public()})
 	if err != nil {
 		t.Fatalf("parse ed25519 token: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestParseToken_RSA(t *testing.T) {
 		t.Fatalf("sign token: %v", err)
 	}
 
-	parsed, err := parseToken(token, &Config{JWTPublicKey: &priv.PublicKey})
+	parsed, err := ParseToken(token, &Config{JWTPublicKey: &priv.PublicKey})
 	if err != nil {
 		t.Fatalf("parse rsa token: %v", err)
 	}
@@ -180,7 +180,7 @@ func TestParseToken_ECDSA(t *testing.T) {
 		t.Fatalf("sign token: %v", err)
 	}
 
-	parsed, err := parseToken(token, &Config{JWTPublicKey: &priv.PublicKey})
+	parsed, err := ParseToken(token, &Config{JWTPublicKey: &priv.PublicKey})
 	if err != nil {
 		t.Fatalf("parse ecdsa token: %v", err)
 	}
@@ -626,5 +626,5 @@ var jwtSigningMethodES256 = jwt.SigningMethodES256
 
 // ParseTokenForTest parses a token for use in other package tests
 func ParseTokenForTest(tokenStr string, secret []byte) (*Claims, error) {
-	return parseToken(tokenStr, &Config{JWTSecret: secret})
+	return ParseToken(tokenStr, &Config{JWTSecret: secret})
 }
