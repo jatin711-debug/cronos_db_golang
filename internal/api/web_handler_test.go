@@ -36,7 +36,7 @@ func newTestWebHandler(t *testing.T, authCfg *auth.Config) *WebHandler {
 		BloomCapacity:    1000,
 	}
 	pm := partition.NewPartitionManager("test-node", cfg)
-	admin := NewAdminServiceHandler(pm, nil, authCfg, "test-node", t.TempDir())
+	admin := NewAdminServiceHandler(pm, nil, authCfg, "test-node", t.TempDir(), nil, nil)
 	return NewWebHandler(admin, authCfg)
 }
 
