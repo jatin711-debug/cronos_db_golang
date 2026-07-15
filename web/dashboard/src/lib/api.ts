@@ -241,7 +241,12 @@ function useQuery<T>(
 
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
+    // Only show a full loading state on the initial fetch. On background
+    // refetches keep the existing data visible so the page doesn't jump/reset
+    // scroll position every poll interval.
+    if (data === null) {
+      setLoading(true);
+    }
     setError(null);
     fetcher()
       .then((value) => {
