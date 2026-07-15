@@ -4,6 +4,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Badge } from "@/components/ui/badge";
 import { Loading } from "@/components/Loading";
 import { ErrorAlert } from "@/components/ErrorAlert";
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from "recharts";
 
 export function ReplicationLagView() {
   const topology = useClusterTopology();
@@ -66,44 +67,84 @@ function LagDetail({ partitionId }: { partitionId?: number }) {
   if (error) return <ErrorAlert message={error} onRetry={refetch} isAuth={error.startsWith("401")} />;
   if (!data) return <ErrorAlert message="No lag data returned." onRetry={refetch} />;
 
+  const chartData = data.followers.map((f) => ({
+    name: f.follower_id,
+    lag: f.lag_events,
+    inSync: f.in_sync,
+  }));
+
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>
-          {data.partition_id === 0 ? "All Partitions" : `Partition ${data.partition_id}`}
-        </CardTitle>
-        <CardDescription>Leader HWM: {data.leader_high_watermark}</CardDescription>
-      </CardHeader>
-      <CardContent>
-        {data.followers.length === 0 ? (
-          <p className="text-sm text-[var(--color-muted-foreground)]">No follower offsets reported.</p>
-        ) : (
-          <table className="w-full text-sm">
-            <thead className="text-left text-[var(--color-muted-foreground)]">
-              <tr>
-                <th className="py-2 font-medium">Follower</th>
-                <th className="py-2 font-medium">Offset</th>
-                <th className="py-2 font-medium">Lag Events</th>
-                <th className="py-2 font-medium">Lag Seconds</th>
-                <th className="py-2 font-medium">In Sync</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.followers.map((f) => (
-                <tr key={f.follower_id} className="border-t border-[var(--color-border)]">
-                  <td className="py-2 font-mono">{f.follower_id}</td>
-                  <td className="py-2 font-mono">{f.offset}</td>
-                  <td className="py-2 font-mono">{f.lag_events}</td>
-                  <td className="py-2 font-mono">{f.lag_seconds}</td>
-                  <td className="py-2">
-                    <Badge variant={f.in_sync ? "success" : "warning"}>{f.in_sync ? "yes" : "no"}</Badge>
-                  </td>
+    <div className="space-y-6">
+      <Card>
+        <CardHeader>
+          <CardTitle>
+            {data.partition_id === 0 ? "All Partitions" : `Partition ${data.partition_id}`}
+          </CardTitle>
+          <CardDescription>Leader HWM: {data.leader_high_watermark}</CardDescription>
+        </CardHeader>
+        <CardContent>
+          {data.followers.length === 0 ? (
+            <p className="text-sm text-[var(--color-muted-foreground)]">No follower offsets reported.</p>
+          ) : (
+            <div className="h-64 w-full">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={chartData}>
+                  <XAxis dataKey="name" tick={{ fontSize: 12 }} />
+                  <YAxis tick={{ fontSize: 12 }} />
+                  <Tooltip
+                    contentStyle={{
+                      backgroundColor: "var(--color-popover)",
+                      borderColor: "var(--color-border)",
+                      color: "var(--color-popover-foreground)",
+                    }}
+                  />
+                  <Bar dataKey="lag" name="Lag events">
+                    {chartData.map((entry, index) => (
+                      <Cell key={`cell-${index}`} fill={entry.inSync ? "#10b981" : "#f59e0b"} />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Follower Details</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {data.followers.length === 0 ? (
+            <p className="text-sm text-[var(--color-muted-foreground)]">No follower offsets reported.</p>
+          ) : (
+            <table className="w-full text-sm">
+              <thead className="text-left text-[var(--color-muted-foreground)]">
+                <tr>
+                  <th className="py-2 font-medium">Follower</th>
+                  <th className="py-2 font-medium">Offset</th>
+                  <th className="py-2 font-medium">Lag Events</th>
+                  <th className="py-2 font-medium">Lag Seconds</th>
+                  <th className="py-2 font-medium">In Sync</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </CardContent>
-    </Card>
+              </thead>
+              <tbody>
+                {data.followers.map((f) => (
+                  <tr key={f.follower_id} className="border-t border-[var(--color-border)]">
+                    <td className="py-2 font-mono">{f.follower_id}</td>
+                    <td className="py-2 font-mono">{f.offset}</td>
+                    <td className="py-2 font-mono">{f.lag_events}</td>
+                    <td className="py-2 font-mono">{f.lag_seconds}</td>
+                    <td className="py-2">
+                      <Badge variant={f.in_sync ? "success" : "warning"}>{f.in_sync ? "yes" : "no"}</Badge>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </CardContent>
+      </Card>
+    </div>
   );
 }

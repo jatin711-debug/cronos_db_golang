@@ -3,6 +3,7 @@ import { useClusterTopology, useConsumerGroups, useConsumerGroupLag } from "@/li
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Loading } from "@/components/Loading";
 import { ErrorAlert } from "@/components/ErrorAlert";
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend } from "recharts";
 
 export function ConsumerGroupsView() {
   const groups = useConsumerGroups();
@@ -109,11 +110,36 @@ function LagResult({ groupId, partitionId }: { groupId: string; partitionId: num
   if (error) return <ErrorAlert message={error} onRetry={refetch} isAuth={error.startsWith("401")} />;
   if (!data) return <ErrorAlert message="No lag data returned." onRetry={refetch} />;
 
+  const chartData = [
+    { name: "Committed", value: data.committed_offset },
+    { name: "HWM", value: data.partition_high_watermark },
+    { name: "Lag", value: data.lag },
+  ];
+
   return (
-    <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-      <Stat label="Committed Offset" value={data.committed_offset} />
-      <Stat label="Partition HWM" value={data.partition_high_watermark} />
-      <Stat label="Lag" value={data.lag} />
+    <div className="space-y-6">
+      <div className="h-48 w-full">
+        <ResponsiveContainer width="100%" height="100%">
+          <BarChart data={chartData}>
+            <XAxis dataKey="name" tick={{ fontSize: 12 }} />
+            <YAxis tick={{ fontSize: 12 }} />
+            <Tooltip
+              contentStyle={{
+                backgroundColor: "var(--color-popover)",
+                borderColor: "var(--color-border)",
+                color: "var(--color-popover-foreground)",
+              }}
+            />
+            <Legend />
+            <Bar dataKey="value" name={`${groupId} / partition ${partitionId}`} fill="var(--color-primary)" />
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+        <Stat label="Committed Offset" value={data.committed_offset} />
+        <Stat label="Partition HWM" value={data.partition_high_watermark} />
+        <Stat label="Lag" value={data.lag} />
+      </div>
     </div>
   );
 }
