@@ -307,7 +307,6 @@ rust-dedup:
 
 # Build server binaries.
 build: dashboard rust-dedup ensure-build-dir
-	@# Stage SPA dist into the Go-embeddable location before compiling.
 	@$(STAGE_DASHBOARD_DIST_CMD)
 	$(GO_RUNTIME_PREFIX) go build -o $(BUILD_DIR)/$(BINARY)$(EXE_EXT) ./cmd/api/main.go
 	$(GO_RUNTIME_PREFIX) go build -tags clustertest -o $(BUILD_DIR)/cluster_loadtest$(EXE_EXT) cluster_loadtest.go
@@ -343,8 +342,8 @@ bench-baseline:
 bench-gate:
 	@bash scripts/check-benchmark-gate.sh
 
+# Remove stale generated files so protoc always produces a clean output.
 proto:
-	@# Remove stale generated files so protoc always produces a clean output
 	@rm -f pkg/types/events.pb.go pkg/types/events_grpc.pb.go pkg/types/admin.pb.go pkg/types/admin_grpc.pb.go
 	@rm -rf cronos_db/pkg/types github.com
 	protoc --go_out=. --go_opt=module=github.com/jatin711-debug/cronos_db_golang --go-grpc_out=. --go-grpc_opt=module=github.com/jatin711-debug/cronos_db_golang proto/events.proto proto/admin.proto
