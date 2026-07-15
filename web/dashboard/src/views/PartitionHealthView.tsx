@@ -19,7 +19,7 @@ export function PartitionHealthView() {
         </CardHeader>
         <CardContent>
           {topology.loading && <Loading message="Loading partitions..." />}
-          {topology.error && <ErrorAlert message={topology.error} onRetry={topology.refetch} />}
+          {topology.error && <ErrorAlert message={topology.error} onRetry={topology.refetch} isAuth={topology.error.startsWith("401")} />}
           {topology.data && partitionIds.length === 0 && (
             <p className="text-sm text-[var(--color-muted-foreground)]">No partitions available on this node.</p>
           )}
@@ -52,7 +52,7 @@ function HealthDetail({ partitionId }: { partitionId: number }) {
   const { data, loading, error, refetch } = usePartitionHealth(partitionId);
 
   if (loading) return <Loading message="Loading partition health..." />;
-  if (error) return <ErrorAlert message={error} onRetry={refetch} />;
+  if (error) return <ErrorAlert message={error} onRetry={refetch} isAuth={error.startsWith("401")} />;
   if (!data) return <ErrorAlert message="No health data returned." onRetry={refetch} />;
 
   return (

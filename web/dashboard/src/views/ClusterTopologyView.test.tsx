@@ -44,6 +44,7 @@ describe("ClusterTopologyView", () => {
       loading: false,
       error: null,
       refetch: vi.fn(),
+      updatedAt: Date.now(),
     });
 
     render(<ClusterTopologyView />);
@@ -73,6 +74,7 @@ describe("ClusterTopologyView", () => {
       loading: true,
       error: null,
       refetch: vi.fn(),
+      updatedAt: null,
     });
 
     render(<ClusterTopologyView />);
@@ -85,6 +87,7 @@ describe("ClusterTopologyView", () => {
       loading: false,
       error: "network error",
       refetch: vi.fn(),
+      updatedAt: null,
     });
 
     render(<ClusterTopologyView />);

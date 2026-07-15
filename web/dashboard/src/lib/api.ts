@@ -57,6 +57,9 @@ export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise
     } catch {
       // Fall back to statusText.
     }
+    if (resp.status === 401) {
+      throw new AuthError(detail);
+    }
     throw new Error(`${resp.status} ${detail}`);
   }
 
@@ -67,6 +70,15 @@ export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise
     return null as unknown as T;
   }
   return JSON.parse(text) as T;
+}
+
+// AuthError is raised when the server responds with HTTP 401. The UI can
+// detect this and prompt the user to log in.
+export class AuthError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AuthError";
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -206,12 +218,23 @@ export interface QueryState<T> {
   loading: boolean;
   error: string | null;
   refetch: () => void;
+  updatedAt: number | null;
 }
 
-function useQuery<T>(fetcher: () => Promise<T>, deps: unknown[] = []): QueryState<T> {
+interface UseQueryOptions {
+  refetchInterval?: number;
+}
+
+function useQuery<T>(
+  fetcher: () => Promise<T>,
+  deps: unknown[] = [],
+  options: UseQueryOptions = {},
+): QueryState<T> {
+  const { refetchInterval } = options;
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
+  const [updatedAt, setUpdatedAt] = useState<number | null>(null);
   const [tick, setTick] = useState(0);
 
   const refetch = useCallback(() => setTick((t) => t + 1), []);
@@ -224,6 +247,7 @@ function useQuery<T>(fetcher: () => Promise<T>, deps: unknown[] = []): QueryStat
       .then((value) => {
         if (!cancelled) {
           setData(value);
+          setUpdatedAt(Date.now());
           setLoading(false);
         }
       })
@@ -239,7 +263,13 @@ function useQuery<T>(fetcher: () => Promise<T>, deps: unknown[] = []): QueryStat
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tick, ...deps]);
 
-  return { data, loading, error, refetch };
+  useEffect(() => {
+    if (!refetchInterval || refetchInterval <= 0) return;
+    const id = setInterval(() => setTick((t) => t + 1), refetchInterval);
+    return () => clearInterval(id);
+  }, [refetchInterval, ...deps]);
+
+  return { data, loading, error, refetch, updatedAt };
 }
 
 // ---------------------------------------------------------------------------
@@ -247,23 +277,30 @@ function useQuery<T>(fetcher: () => Promise<T>, deps: unknown[] = []): QueryStat
 // ---------------------------------------------------------------------------
 
 export function useClusterTopology(): QueryState<ClusterTopology> {
-  return useQuery(() => apiFetch<ClusterTopology>("/api/admin/topology"));
+  return useQuery(() => apiFetch<ClusterTopology>("/api/admin/topology"), [], {
+    refetchInterval: 5000,
+  });
 }
 
 export function usePartitionHealth(partitionId: number): QueryState<PartitionHealthResponse> {
   return useQuery(
     () => apiFetch<PartitionHealthResponse>(`/api/admin/partition-health?partition_id=${partitionId}`),
     [partitionId],
+    { refetchInterval: 10000 },
   );
 }
 
 export function useReplicationLag(partitionId?: number): QueryState<ReplicationLagResponse> {
   const qs = partitionId === undefined ? "" : `?partition_id=${partitionId}`;
-  return useQuery(() => apiFetch<ReplicationLagResponse>(`/api/admin/replication-lag${qs}`), [partitionId]);
+  return useQuery(() => apiFetch<ReplicationLagResponse>(`/api/admin/replication-lag${qs}`), [partitionId], {
+    refetchInterval: 10000,
+  });
 }
 
 export function useConsumerGroups(): QueryState<AdminListConsumerGroupsResponse> {
-  return useQuery(() => apiFetch<AdminListConsumerGroupsResponse>("/api/admin/consumer-groups"));
+  return useQuery(() => apiFetch<AdminListConsumerGroupsResponse>("/api/admin/consumer-groups"), [], {
+    refetchInterval: 10000,
+  });
 }
 
 export function useConsumerGroupLag(
@@ -276,21 +313,26 @@ export function useConsumerGroupLag(
         `/api/admin/consumer-group-lag?group_id=${encodeURIComponent(groupId)}&partition_id=${partitionId}`,
       ),
     [groupId, partitionId],
+    { refetchInterval: 10000 },
   );
 }
 
 export function useListSchemas(): QueryState<ListSchemasResponse> {
-  return useQuery(() => apiFetch<ListSchemasResponse>("/api/admin/schemas"));
+  return useQuery(() => apiFetch<ListSchemasResponse>("/api/admin/schemas"), [], { refetchInterval: 30000 });
 }
 
 export function useGetSchema(topic: string, version?: number): QueryState<GetSchemaResponse> {
   const qs = version === undefined ? `?topic=${encodeURIComponent(topic)}` : `?topic=${encodeURIComponent(topic)}&version=${version}`;
-  return useQuery(() => apiFetch<GetSchemaResponse>(`/api/admin/schema${qs}`), [topic, version]);
+  return useQuery(() => apiFetch<GetSchemaResponse>(`/api/admin/schema${qs}`), [topic, version], {
+    refetchInterval: 30000,
+  });
 }
 
 export function useTenantUsage(tenantId?: string): QueryState<TenantUsageResponse> {
   const qs = tenantId ? `?tenant_id=${encodeURIComponent(tenantId)}` : "";
-  return useQuery(() => apiFetch<TenantUsageResponse>(`/api/admin/tenant-usage${qs}`), [tenantId]);
+  return useQuery(() => apiFetch<TenantUsageResponse>(`/api/admin/tenant-usage${qs}`), [tenantId], {
+    refetchInterval: 30000,
+  });
 }
 
 // ---------------------------------------------------------------------------

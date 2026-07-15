@@ -18,7 +18,7 @@ export function ConsumerGroupsView() {
         </CardHeader>
         <CardContent>
           {groups.loading && <Loading message="Loading consumer groups..." />}
-          {groups.error && <ErrorAlert message={groups.error} onRetry={groups.refetch} />}
+          {groups.error && <ErrorAlert message={groups.error} onRetry={groups.refetch} isAuth={groups.error.startsWith("401")} />}
           {groups.data && groups.data.groups.length === 0 && (
             <p className="text-sm text-[var(--color-muted-foreground)]">No consumer groups found.</p>
           )}
@@ -54,7 +54,7 @@ export function ConsumerGroupsView() {
         </CardHeader>
         <CardContent className="space-y-4">
           {topology.loading && <Loading message="Loading partitions..." />}
-          {topology.error && <ErrorAlert message={topology.error} onRetry={topology.refetch} />}
+          {topology.error && <ErrorAlert message={topology.error} onRetry={topology.refetch} isAuth={topology.error.startsWith("401")} />}
           {topology.data && (
             <div className="flex flex-col gap-4 sm:flex-row">
               <select
@@ -106,7 +106,7 @@ function LagResult({ groupId, partitionId }: { groupId: string; partitionId: num
   const { data, loading, error, refetch } = useConsumerGroupLag(groupId, partitionId);
 
   if (loading) return <Loading message="Loading lag..." />;
-  if (error) return <ErrorAlert message={error} onRetry={refetch} />;
+  if (error) return <ErrorAlert message={error} onRetry={refetch} isAuth={error.startsWith("401")} />;
   if (!data) return <ErrorAlert message="No lag data returned." onRetry={refetch} />;
 
   return (

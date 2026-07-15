@@ -18,7 +18,7 @@ export function OperationsView() {
         </CardHeader>
         <CardContent className="space-y-8">
           {topology.loading && <Loading message="Loading partitions..." />}
-          {topology.error && <ErrorAlert message={topology.error} onRetry={topology.refetch} />}
+          {topology.error && <ErrorAlert message={topology.error} onRetry={topology.refetch} isAuth={topology.error.startsWith("401")} />}
           {topology.data && partitionIds.length === 0 && (
             <p className="text-sm text-[var(--color-muted-foreground)]">No partitions available on this node.</p>
           )}
@@ -73,7 +73,7 @@ function RetentionPanel({ partitions }: { partitions: number[] }) {
           {retention.loading ? "Running..." : "Run Retention"}
         </Button>
       </div>
-      {retention.error && <ErrorAlert message={retention.error} onRetry={retention.reset} />}
+      {retention.error && <ErrorAlert message={retention.error} onRetry={retention.reset} isAuth={retention.error.startsWith("401")} />}
       {retention.data && (
         <p className="mt-3 text-sm">
           {retention.data.success ? "✅" : "⚠️"} Events removed: {retention.data.events_removed}
@@ -108,7 +108,7 @@ function CompactionPanel({ partitions }: { partitions: number[] }) {
           {compaction.loading ? "Running..." : "Run Compaction"}
         </Button>
       </div>
-      {compaction.error && <ErrorAlert message={compaction.error} onRetry={compaction.reset} />}
+      {compaction.error && <ErrorAlert message={compaction.error} onRetry={compaction.reset} isAuth={compaction.error.startsWith("401")} />}
       {compaction.data && (
         <p className="mt-3 text-sm">
           {compaction.data.success ? "✅" : "⚠️"} Segments compacted:{" "}
@@ -133,7 +133,7 @@ function RebalancePanel() {
       <Button onClick={() => rebalance.mutate()} disabled={rebalance.loading}>
         {rebalance.loading ? "Triggering..." : "Trigger Rebalance"}
       </Button>
-      {rebalance.error && <ErrorAlert message={rebalance.error} onRetry={rebalance.reset} />}
+      {rebalance.error && <ErrorAlert message={rebalance.error} onRetry={rebalance.reset} isAuth={rebalance.error.startsWith("401")} />}
       {rebalance.data && (
         <p className="mt-3 text-sm">
           {rebalance.data.success ? "✅" : "⚠️"} Partitions moved: {rebalance.data.partitions_moved}

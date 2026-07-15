@@ -1,13 +1,16 @@
 import { Link, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { ThemeToggle } from "@/components/ThemeToggle";
-import { TokenInput } from "@/components/TokenInput";
+import { UserMenu } from "@/components/UserMenu";
+import { MobileNav } from "@/components/MobileNav";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { DashboardHome } from "@/views/DashboardHome";
 import { ClusterTopologyView } from "@/views/ClusterTopologyView";
 import { PartitionHealthView } from "@/views/PartitionHealthView";
 import { ReplicationLagView } from "@/views/ReplicationLagView";
 import { ConsumerGroupsView } from "@/views/ConsumerGroupsView";
 import { OperationsView } from "@/views/OperationsView";
+import { LoginView } from "@/views/LoginView";
 
 const NAV = [
   { path: "/dashboard", label: "Dashboard" },
@@ -18,7 +21,7 @@ const NAV = [
   { path: "/operations", label: "Operations" },
 ];
 
-export default function App() {
+function Layout({ children }: { children: React.ReactNode }) {
   const location = useLocation();
   return (
     <div className="min-h-screen bg-[var(--color-background)] text-[var(--color-foreground)]">
@@ -49,22 +52,39 @@ export default function App() {
           </nav>
           <div className="flex items-center gap-2">
             <ThemeToggle />
-            <TokenInput />
+            <UserMenu />
+            <MobileNav />
           </div>
         </div>
       </header>
-      <main className="mx-auto max-w-6xl px-6 py-8">
-        <Routes>
-          <Route path="/dashboard" element={<DashboardHome />} />
-          <Route path="/cluster" element={<ClusterTopologyView />} />
-          <Route path="/partitions" element={<PartitionHealthView />} />
-          <Route path="/replication" element={<ReplicationLagView />} />
-          <Route path="/consumers" element={<ConsumerGroupsView />} />
-          <Route path="/operations" element={<OperationsView />} />
-          <Route path="/" element={<Navigate to="/dashboard" replace />} />
-          <Route path="*" element={<Navigate to="/dashboard" replace />} />
-        </Routes>
-      </main>
+      <main className="mx-auto max-w-6xl px-6 py-8">{children}</main>
     </div>
+  );
+}
+
+export default function App() {
+  return (
+    <Routes>
+      <Route path="/login" element={<LoginView />} />
+      <Route
+        path="/*"
+        element={
+          <Layout>
+            <ErrorBoundary>
+              <Routes>
+                <Route path="/dashboard" element={<DashboardHome />} />
+                <Route path="/cluster" element={<ClusterTopologyView />} />
+                <Route path="/partitions" element={<PartitionHealthView />} />
+                <Route path="/replication" element={<ReplicationLagView />} />
+                <Route path="/consumers" element={<ConsumerGroupsView />} />
+                <Route path="/operations" element={<OperationsView />} />
+                <Route path="/" element={<Navigate to="/dashboard" replace />} />
+                <Route path="*" element={<Navigate to="/dashboard" replace />} />
+              </Routes>
+            </ErrorBoundary>
+          </Layout>
+        }
+      />
+    </Routes>
   );
 }

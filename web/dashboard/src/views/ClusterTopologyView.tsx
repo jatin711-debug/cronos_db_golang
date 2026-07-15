@@ -5,10 +5,10 @@ import { Loading } from "@/components/Loading";
 import { ErrorAlert } from "@/components/ErrorAlert";
 
 export function ClusterTopologyView() {
-  const { data, loading, error, refetch } = useClusterTopology();
+  const { data, loading, error, refetch, updatedAt } = useClusterTopology();
 
   if (loading) return <Loading message="Loading cluster topology..." />;
-  if (error) return <ErrorAlert message={error} onRetry={refetch} />;
+  if (error) return <ErrorAlert message={error} onRetry={refetch} isAuth={error.startsWith("401")} />;
   if (!data) return <ErrorAlert message="No topology available." onRetry={refetch} />;
 
   return (
@@ -21,6 +21,11 @@ export function ClusterTopologyView() {
             <span className="font-mono">
               {new Date(data.captured_at_unix_ms).toISOString()}
             </span>
+            {updatedAt && (
+              <span className="ml-2 text-[var(--color-muted-foreground)]">
+                Refreshed {Math.round((Date.now() - updatedAt) / 1000)}s ago
+              </span>
+            )}
           </CardDescription>
         </CardHeader>
         <CardContent>
