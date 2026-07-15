@@ -82,10 +82,10 @@ VERIFY_GO_CMD = powershell -NoProfile -Command "if (-not (Get-Command go -ErrorA
 VERIFY_CARGO_CMD = powershell -NoProfile -Command "if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) { Write-Error '[verify-env] Missing required tool: cargo'; exit 1 }"
 VERIFY_PROTOC_CMD = powershell -NoProfile -Command "if (-not (Get-Command protoc -ErrorAction SilentlyContinue)) { Write-Error '[verify-env] Missing required tool: protoc'; exit 1 }"
 VERIFY_DOCKER_CMD = powershell -NoProfile -Command "if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { Write-Error '[verify-env] Missing required tool: docker'; exit 1 }"
-VERIFY_DOCKER_COMPOSE_CMD = powershell -NoProfile -Command 'docker compose version *> $$null; if ($$LASTEXITCODE -ne 0) { Write-Error "[verify-env] Missing required tool: docker compose"; exit 1 }'
+VERIFY_DOCKER_COMPOSE_CMD = powershell -NoProfile -Command 'docker compose version *> $$null; if ($$LASTEXITCODE -ne 0) { Write-Error '[verify-env] Missing required tool: docker compose'; exit 1 }'
 VERIFY_GIT_CMD = powershell -NoProfile -Command "if (-not (Get-Command git -ErrorAction SilentlyContinue)) { Write-Error '[verify-tag-env] Missing required tool: git'; exit 1 }"
 VERIFY_GH_CMD = powershell -NoProfile -Command "if (-not (Get-Command gh -ErrorAction SilentlyContinue)) { Write-Error '[verify-release-env] Missing required tool: gh'; exit 1 }"
-VERIFY_GH_AUTH_CMD = powershell -NoProfile -Command 'gh auth status *> $$null; if ($$LASTEXITCODE -ne 0) { Write-Error "[verify-release-env] Not authenticated. Run: gh auth login"; exit 1 }"
+VERIFY_GH_AUTH_CMD = powershell -NoProfile -Command 'gh auth status *> $$null; if ($$LASTEXITCODE -ne 0) { Write-Error '[verify-release-env] Not authenticated. Run: gh auth login'; exit 1 }'
 
 # Windows resolves `npm` via `npm.cmd`. .cmd shims are not directly executable
 # from MSYS make, so we use the .cmd form. The invocation body itself is
