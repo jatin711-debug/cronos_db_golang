@@ -151,14 +151,18 @@ graph LR
     api --> delivery[internal/delivery]
     api --> replay[internal/replay]
     api --> tracing[internal/tracing]
+    api --> replication[internal/replication]
+    api --> internal_grpc[internal/api/internal_grpc_server.go<br/>separate listener :7947]
 
     partition --> storage[internal/storage]
     partition --> scheduler[internal/scheduler]
     partition --> dedup[internal/dedup]
     partition --> consumer
     partition --> delivery
-    partition --> replication[internal/replication]
+    partition --> replication
+    partition --> snapshot[internal/partition/snapshot.go<br/>recovery snapshot.json]
 
+    replication --> mtls[internal/replication/mtls.go]
     cluster --> raft_pkg[hashicorp/raft]
     dedup --> pebble[cockroachdb/pebble]
     dedup --> rust[Rust FFI - cronos_dedup]
@@ -1001,8 +1005,8 @@ sequenceDiagram
 
     par State Transfer
         ROUTER->>N4: You own partitions 3 7 11
-        N4->>N1: SyncFilesFromLeader partition=3
-        Note over N4,N1: Bulk segment file transfer via binary protocol
+        N4->>N1: SyncPartitionFromLeader partition=3
+        Note over N4,N1: ReplicationService.Snapshot over internal gRPC<br/>per-file IEEE CRC32 + atomic dir swap
         N4->>N4: WAL.ReloadSegments
         N4->>N4: replayWALTimers
     end
@@ -1053,97 +1057,149 @@ flowchart TD
 
 ## Replication Protocol
 
-CronosDB uses a **hybrid replication model**: Raft for metadata, custom binary protocol for data.
+CronosDB uses a **hybrid replication model**: HashiCorp Raft for cluster
+metadata (partition ownership, leader election, peer set), and a
+dedicated internal gRPC channel for partition data. Public client
+traffic never reaches the replication listener.
 
-### Why Hybrid?
-
-| Layer | Protocol | Reason |
-|-------|----------|--------|
-| **Metadata** (partition ownership, offsets, leader election) | Raft | Strong consistency required |
-| **Data** (WAL events) | Custom async binary | Throughput over consistency; lower latency |
-
-### Binary Wire Format
+### Replication channel layout
 
 ```mermaid
 graph LR
-    subgraph Wire Format - 10 byte header
-        H1[Magic: 0xCAFEBABE - 4B]
-        H2[Version: 1 - 1B]
-        H3[MsgType - 1B]
-        H4[PayloadLen - 4B]
+    subgraph "Public API listener"
+      PUB[gRPC :9000<br/>EventService, PartitionService,<br/>ConsumerGroupService, TransactionService]
     end
-
-    subgraph Message Types
-        MT1[1 Handshake]
-        MT2[2 HandshakeAck]
-        MT3[3 AppendEntries]
-        MT4[4 AppendAck]
-        MT5[5 Heartbeat]
-        MT6[6 HeartbeatAck]
-        MT7[7 FileTransferRequest]
-        MT8[8 FileTransferStart]
-        MT9[9 FileTransferData]
-        MT10[10 FileTransferEnd]
+    subgraph "Internal cluster listener"
+      INT[InternalGRPCServer :7947<br/>ReplicationService, RaftService]
     end
-
-    H1 --> H2 --> H3 --> H4
+    subgraph "Public client traffic"
+      C[Client SDK] --> PUB
+    end
+    subgraph "Intra-cluster traffic"
+      L[Leader partition] -->|Append / Sync / Snapshot| INT
+      F[Follower partition] -->|mTLS optional| INT
+    end
 ```
 
-### Leader to Follower Replication
+The internal listener is `InternalGRPCServer`
+(`internal/api/internal_grpc_server.go`, default `:7947`, configurable
+via `--cluster-grpc-addr`). It registers `ReplicationServiceServer` and
+`RaftServiceServer` only — no public API surface is exposed on this
+socket. Cross-region replication uses a third, separate gRPC service
+(`CrossRegionService`); see [Cross-Region Replication](#cross-region-replication).
+
+### `ReplicationService` RPCs
+
+```mermaid
+graph TB
+    subgraph ReplicationService
+      A[Append - unary]
+      S[Sync - server streaming]
+      SN[Snapshot - server streaming]
+    end
+    subgraph Use
+      A -->|happy path| U1[per-batch CRC32, term-fenced]
+      S -->|incremental catch-up| U2[event batches via Leader.catchUpFollower]
+      SN -->|bulk install| U3[per-file CRC32, atomic dir swap]
+    end
+```
+
+| RPC | Direction | Body | Used by |
+|-----|-----------|------|---------|
+| `Append` | client → server (unary) | `ReplicationAppendRequest{PartitionId, Events, ExpectedNextOffset, Term, PrevLogTerm, Checksum}` → `ReplicationAppendResponse{Success, LastOffset, NextOffset, Term}` | `Leader.sendToFollower` on every replicated batch |
+| `Sync` | client → server (server streaming) | `ReplicationSyncRequest{PartitionId, StartOffset, MaxBytes}` → stream of `ReplicationSyncResponse{Events, HasMore}` | `Leader.catchUpFollower` for incremental catch-up of lagging followers |
+| `Snapshot` | client → server (server streaming) | `ReplicationSnapshotRequest{PartitionId, StartOffset, MaxBytes}` → stream of `ReplicationSnapshotChunk{Header, Data, Trailer}` with per-file IEEE CRC32 | `Follower.InstallSnapshot` on node join / wipe |
+
+### Leader → Follower Replication
 
 ```mermaid
 sequenceDiagram
-    participant L as Leader
+    participant L as Leader (partition)
     participant F as Follower
+    participant INT as InternalGRPCServer :7947
 
-    L->>F: TCP Connect
-    L->>F: Handshake with node_id
-
-    loop Replication Loop at flush interval
-        L->>L: Buffer events up to batch_size 100
-        L->>L: Compute batch CRC32 checksum
-        L->>F: AppendEntries with partition events, term, and batch CRC32
-        Note over L,F: Protobuf-encoded single TCP write
-        F->>F: Verify batch CRC32 and stamp each event with term/checksum
-        F->>F: WAL.AppendReplicatedBatch events
-        F->>L: AppendAck with success and last_offset
-        L->>L: Advance follower NextOffset only on success
-        L->>L: Update follower HighWatermark
-    end
-
-    loop Heartbeat when idle
-        L->>F: Heartbeat
-        F->>L: HeartbeatAck with last_offset
-    end
+    L->>L: Buffer events up to batch_size 100
+    L->>L: Compute batch CRC32 checksum
+    L->>INT: gRPC Append(ReplicationAppendRequest)
+    INT->>F: ReplicationServiceHandler.Append
+    F->>F: Verify batch CRC32 + term fencing
+    F->>F: WAL.AppendReplicatedBatch events
+    F-->>INT: ReplicationAppendResponse{Success, LastOffset, Term}
+    INT-->>L: response
+    L->>L: Advance follower NextOffset only on success
+    L->>L: Update follower HighWatermark and ISR state
 ```
 
-**Replication reliability improvements:**
-- AppendEntries includes a batch CRC32 checksum; followers verify it before appending.
-- Followers stamp each replicated event with the leader's Raft term and checksum before `WAL.AppendReplicatedBatch`.
-- The leader advances `NextOffset` only on successful writes.
-- Each follower has a dedicated transport connection stored by the leader.
+### Incremental Catch-Up (`Sync`)
 
-### Bulk File Sync for New Node Join
+When a follower is connected but reports `NextOffset < events[0].Offset`,
+`Leader.catchUpFollower(f, from, to)` slices `[from, to)` from the
+leader's WAL into `batchSize`-sized chunks and replays them through
+`Append`. For very long ranges the leader can also serve the
+`ReplicationService.Sync` streaming RPC directly, which emits
+`ReplicationSyncResponse{Events, HasMore}` chunks until the follower's
+watermark is reached or `MaxBytes` is hit.
+
+### Bulk Snapshot Install (`Snapshot`)
 
 ```mermaid
 sequenceDiagram
     participant F as New Follower
     participant L as Leader
+    participant INT as InternalGRPCServer :7947
 
-    F->>L: TCP Connect + Handshake
-    F->>L: FileTransferRequest with partition_id
-
-    loop For each segment file
-        L->>F: FileTransferStart with filename and size
-        loop Chunks
-            L->>F: FileTransferData with bytes
+    F->>L: gRPC Snapshot(ReplicationSnapshotRequest)
+    L->>L: Flush active segment
+    loop For each segment + .index file
+        L-->>F: ReplicationSnapshotChunk{Header filename, first/last_offset, file_size, crc32, is_index}
+        loop 1 MB chunks
+            L-->>F: ReplicationSnapshotChunk{Data}
         end
     end
-
-    L->>F: FileTransferEnd with success
-    F->>F: WAL.ReloadSegments
-    F->>F: Rebuild index and replay timers
+    L-->>F: ReplicationSnapshotChunk{Trailer success=true, last_offset, epoch}
+    F->>F: Verify last-file CRC32 against header
+    F->>F: WAL.Close (release Windows handles)
+    F->>F: rename segments → segments.old, index → index.old
+    F->>F: rename snapshot-staging/segments → segments, snapshot-staging/index → index
+    F->>F: rm *.old
+    F->>F: WAL.ReloadSegments(); update nextOffset + epoch from trailer
 ```
+
+Trigger policy:
+
+| Path | Trigger | Code |
+|------|---------|------|
+| `InstallSnapshot` | New node joins and owns partitions it does not yet have data for | `Manager.JoinCluster` → `PartitionManager.SyncPartitionFromLeader` (10-minute context) |
+| `catchUpFollower` / `Sync` | Connected follower reports lag during normal `Replicate` | `Leader.catchUpFollower` |
+| Automatic lag-driven `InstallSnapshot` | **Not implemented.** `--snapshot-catchup-threshold` is plumbed but not consumed. | (gap) |
+
+### Replication mTLS
+
+Replication traffic can run over a CA-pinned mTLS channel independent of
+public-API TLS. The mTLS configuration is read into
+`replication.MTLSConfig{Enabled, CAFile, CertFile, KeyFile, ServerName}`
+(`internal/replication/mtls.go`) and consumed by
+`replication.BuildClientTLSConfig` (follower side) and
+`replication.BuildServerTLSConfig` (leader side, `tls.RequireAndVerifyClientCert`).
+The follower falls back to insecure credentials when the flag is off —
+intentional for `--dev`, refused in production by the validation in
+`config.ValidateConfig`.
+
+### Reliability notes
+
+- **Append path**: per-batch CRC32 verified before `WAL.AppendReplicatedBatch`;
+  term fencing rejects stale-leader replays; leader advances `NextOffset`
+  only on success.
+- **Snapshot path**: per-file CRC32 verified; atomic directory swap with
+  WAL closed first; WAL `ReloadSegments` rebuilds the in-memory segment
+  list and sparse index from the newly-staged files.
+- **Quorum**: `Leader.Replicate` returns success only after
+  `min-insync-replicas` followers have appended. Default is 1 (leader-only);
+  production target is RF=3 / minISR=2 (see [Durability & Fault
+  Tolerance](#durability--fault-tolerance)).
+- **Trigger gap**: `--snapshot-catchup-threshold` is exposed but not yet
+  read by any automatic lag-driven code path. Documented as a future-work
+  knob so configuration is forward-compatible.
 
 ### Raft FSM - Metadata State Machine
 

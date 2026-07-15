@@ -6,9 +6,11 @@ The partition module is the core execution unit that groups WAL, scheduler, dedu
 
 ## Key Files
 
-- [internal/partition/manager.go](../../../internal/partition/manager.go)
-- [internal/partition/split.go](../../../internal/partition/split.go)
-- [internal/partition/disk_pressure.go](../../../internal/partition/disk_pressure.go)
+- [internal/partition/manager.go](../../../internal/partition/manager.go) — partition lifecycle, leader promotion/demotion, `SyncPartitionFromLeader` (bulk install trigger).
+- [internal/partition/split.go](../../../internal/partition/split.go) — partition split operations.
+- [internal/partition/disk_pressure.go](../../../internal/partition/disk_pressure.go) — disk-pressure monitoring, emergency compaction callback.
+- [internal/partition/backpressure.go](../../../internal/partition/backpressure.go) — admission control across ready queue, timing wheel depth, and in-flight deliveries.
+- [internal/partition/snapshot.go](../../../internal/partition/snapshot.go) — partition-recovery `snapshot.json` (HWM + consumer offsets); distinct from the gRPC `ReplicationService.Snapshot` install path used for follower bootstrap.
 
 ## Main Flow
 

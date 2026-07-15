@@ -21,22 +21,22 @@ type Window struct {
 // These buckets cover the range from 100us to 10s, which is sufficient for
 // publish/subscribe SLO monitoring.
 var latencyHistogramBounds = []int64{
-	100,        // 100us
-	250,        // 250us
-	500,        // 500us
-	1000,       // 1ms
-	2500,       // 2.5ms
-	5000,       // 5ms
-	10000,      // 10ms
-	25000,      // 25ms
-	50000,      // 50ms
-	100000,     // 100ms
-	250000,     // 250ms
-	500000,     // 500ms
-	1000000,    // 1s
-	2500000,    // 2.5s
-	5000000,    // 5s
-	10000000,   // 10s
+	100,      // 100us
+	250,      // 250us
+	500,      // 500us
+	1000,     // 1ms
+	2500,     // 2.5ms
+	5000,     // 5ms
+	10000,    // 10ms
+	25000,    // 25ms
+	50000,    // 50ms
+	100000,   // 100ms
+	250000,   // 250ms
+	500000,   // 500ms
+	1000000,  // 1s
+	2500000,  // 2.5s
+	5000000,  // 5s
+	10000000, // 10s
 }
 
 // Recorder tracks latency and error rates for SLO compliance using a lock-free
@@ -126,7 +126,7 @@ func (r *Recorder) percentile(p float64) time.Duration {
 		return 0
 	}
 
-	target := int64(p * float64(total-1)) + 1 // 1-indexed rank in [1,total]
+	target := int64(p*float64(total-1)) + 1 // 1-indexed rank in [1,total]
 	if target < 1 {
 		target = 1
 	}

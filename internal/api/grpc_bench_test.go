@@ -52,7 +52,7 @@ func startBenchServer(b *testing.B, fsyncMode string) (*GRPCServer, string, func
 
 	handler := NewEventServiceHandler(pm, &benchNoopDedup{}, nil)
 	partitionHandler := NewPartitionServiceHandler(pm, nil, "bench-node")
-	grpcServer.RegisterServices(handler, nil, partitionHandler)
+	grpcServer.RegisterServices(handler, nil, partitionHandler, nil)
 
 	if err := grpcServer.Start(); err != nil {
 		b.Fatalf("Start: %v", err)

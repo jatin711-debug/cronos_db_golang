@@ -183,11 +183,17 @@ func (g *GRPCServer) SetTransactionHandler(h *tx.Handler) {
 	g.txHandler = h
 }
 
-// RegisterServices registers all gRPC services
+// RegisterServices registers all gRPC services on the public listener.
+//
+// adminHandler is optional (nil-safe). When non-nil, the operator-facing
+// AdminService is registered. AdminService is served on the same public
+// listener as EventService / PartitionService / ConsumerGroupService /
+// TransactionService and reuses the existing TLS / mTLS configuration.
 func (g *GRPCServer) RegisterServices(
 	eventHandler *EventServiceHandler,
 	consumerHandler *ConsumerGroupServiceHandler,
 	partitionHandler *PartitionServiceHandler,
+	adminHandler *AdminServiceHandler,
 ) {
 	types.RegisterEventServiceServer(g.server, eventHandler)
 	if consumerHandler != nil {
@@ -199,11 +205,21 @@ func (g *GRPCServer) RegisterServices(
 	if g.txHandler != nil {
 		types.RegisterTransactionServiceServer(g.server, g.txHandler)
 	}
+	if adminHandler != nil {
+		types.RegisterAdminServiceServer(g.server, adminHandler)
+	}
 }
 
 // RegisterCrossRegionServer registers the cross-region replication service.
 func (g *GRPCServer) RegisterCrossRegionServer(srv types.CrossRegionServiceServer) {
 	types.RegisterCrossRegionServiceServer(g.server, srv)
+}
+
+// RegisterAdminServer registers the operator-facing AdminService. Use this
+// for late / optional registration; otherwise pass adminHandler to
+// RegisterServices.
+func (g *GRPCServer) RegisterAdminServer(srv types.AdminServiceServer) {
+	types.RegisterAdminServiceServer(g.server, srv)
 }
 
 // RegisterReplicationServer registers the internal replication service.

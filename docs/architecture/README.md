@@ -8,8 +8,12 @@ Recent changes reflected across these docs:
 
 - **WAL v2 record format** with Raft term and trailing checksum; upgrading requires a clean data dir.
 - **Persistent consumer group metadata** (assignments, group state) and exactly-once commit IDs in `OffsetStore`.
-- **Bounded CDC worker pool** (`DefaultCDCWorkers=4`, queue size 10000) with non-blocking `Emit` and graceful `Close`.
+- **Bounded CDC worker pool** (`DefaultCDCWorkers=4`, `DefaultCDCQueueSize=10000`) with non-blocking `Emit` and graceful `Close`.
 - **Rewritten retention enforcer** that parses segment headers, protects active segments/system dirs, and removes aged/size-eligible segments plus their `.index` files.
+- **Dedicated internal cluster listener** (`InternalGRPCServer`, default `:7947`) carries `ReplicationService` and `RaftService` only — replication traffic is fully isolated from the public API on `:9000`.
+- **Replication mTLS** via `replication.MTLSConfig` + `BuildClientTLSConfig` / `BuildServerTLSConfig`; CA-pinned, `tls.RequireAndVerifyClientCert` on the server.
+- **Bulk snapshot install** (`ReplicationService.Snapshot` streaming RPC) — segment + sparse-index files with per-file IEEE CRC32, atomic dir swap, `WAL.ReloadSegments()`. Used for new-node bootstrap and follower-wipe recovery.
+- **`--snapshot-catchup-threshold`** is defined and exposed (default `10000`); currently invoked only by `PartitionManager.SyncPartitionFromLeader` on node join — automatic lag-driven trigger is not yet wired.
 - **Production security requirements**: TLS, auth, encryption at rest, replication mTLS; disabled by the `--dev` flag.
 
 ## Start Here
@@ -28,6 +32,7 @@ Recent changes reflected across these docs:
 - Compliance and Retention: [features/compliance.md](features/compliance.md)
 - Config and Reload: [features/config.md](features/config.md)
 - Consumer Groups: [features/consumer.md](features/consumer.md)
+- Dashboard: [features/dashboard.md](features/dashboard.md)
 - Deduplication: [features/dedup.md](features/dedup.md)
 - Delivery Pipeline: [features/delivery.md](features/delivery.md)
 - Partition Runtime: [features/partition.md](features/partition.md)

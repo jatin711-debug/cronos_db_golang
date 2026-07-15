@@ -2,5 +2,19 @@
 data
 target
 bin/
+build/
 *.dll
+*.dll.lib
+*.dll.exp
 .bench.*.txt
+.zcode/
+
+# Admin dashboard SPA (step 4)
+node_modules/
+web/dashboard/dist/
+
+# Embedded SPA dist (step 5) is NOT gitignored: //go:embed reads
+# files at compile time, so they must be present in the working
+# tree. The Makefile's STAGE_DASHBOARD_DIST_CMD copies
+# web/dashboard/dist/ into internal/api/web/dist/ before go build.
+# In CI, `make build` runs the stage command automatically.

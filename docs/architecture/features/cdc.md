@@ -21,7 +21,7 @@ The CDC module publishes change events to external systems without blocking the 
 ## Production Decisions
 
 - Async emission prevents external sink latency from impacting publish SLA.
-- A bounded worker pool (`DefaultCDCWorkers=4`, queue length 10000) limits memory and fan-out concurrency.
+- A bounded worker pool (`DefaultCDCWorkers=4`, `DefaultCDCQueueSize=10000`) limits memory and fan-out concurrency.
 - `Emit` is non-blocking and drops events when the queue is full to protect the write path.
 - `Close` drains queued events gracefully before shutdown.
 - Sink abstraction allows independent extension for new destinations.

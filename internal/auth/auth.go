@@ -36,6 +36,13 @@ type Policy struct {
 // Subject holds permissions for a principal.
 type Subject struct {
 	Topics map[string]TopicPerms `json:"topics"`
+
+	// Admin grants the principal access to the AdminService RPCs
+	// (operator-facing cluster, partition, replication, retention, schema,
+	// tenant, and rebalance operations). It is a global flag, not
+	// per-topic. JSON tag uses omitempty so existing policy files without
+	// this field decode unchanged (Admin == false).
+	Admin bool `json:"admin,omitempty"`
 }
 
 // TopicPerms holds allowed operations on a topic.
@@ -119,7 +126,7 @@ func Interceptor(cfg *Config) grpc.UnaryServerInterceptor {
 			return nil, status.Error(codes.Unauthenticated, "missing bearer token")
 		}
 
-		claims, err := parseToken(tokenStr, cfg)
+		claims, err := ParseToken(tokenStr, cfg)
 		if err != nil {
 			return nil, status.Errorf(codes.Unauthenticated, "invalid token: %v", err)
 		}
@@ -148,7 +155,7 @@ func StreamInterceptor(cfg *Config) grpc.StreamServerInterceptor {
 			return status.Error(codes.Unauthenticated, "missing bearer token")
 		}
 
-		claims, err := parseToken(tokenStr, cfg)
+		claims, err := ParseToken(tokenStr, cfg)
 		if err != nil {
 			return status.Errorf(codes.Unauthenticated, "invalid token: %v", err)
 		}
@@ -175,7 +182,11 @@ func extractBearer(md metadata.MD) string {
 	return ""
 }
 
-func parseToken(tokenStr string, cfg *Config) (*Claims, error) {
+// ParseToken verifies a signed JWT and returns the embedded Claims.
+// Supports HMAC (HS256/384/512), Ed25519, RSA, and ECDSA per the
+// signing method. Used by both the gRPC auth.Interceptor and the
+// HTTP auth middleware in internal/api/web_handler.go.
+func ParseToken(tokenStr string, cfg *Config) (*Claims, error) {
 	token, err := jwt.ParseWithClaims(tokenStr, &Claims{}, func(t *jwt.Token) (interface{}, error) {
 		switch t.Method.(type) {
 		case *jwt.SigningMethodHMAC:
@@ -281,6 +292,47 @@ func CheckTopicPermission(ctx context.Context, topic string, op string, policy *
 		}
 	default:
 		return status.Errorf(codes.InvalidArgument, "unknown operation %q", op)
+	}
+
+	return nil
+}
+
+// CheckAdminPermission verifies if the authenticated subject has admin
+// privileges (the global Subject.Admin flag, not the per-topic admin flag
+// inside TopicPerms). It is the RBAC gate for AdminService RPCs.
+//
+// Semantics mirror CheckTopicPermission:
+//
+//   - If policy is nil and auth is enabled, fail closed (the policy file
+//     was not loaded; without a file we cannot prove the subject is
+//     authorized, so refuse).
+//   - If policy is the empty AllowAll policy (Subjects map is empty), allow
+//     every authenticated principal.
+//   - Otherwise look up the subject; missing subject -> PermissionDenied,
+//     subject present but Admin==false -> PermissionDenied,
+//     subject present and Admin==true -> allow.
+func CheckAdminPermission(ctx context.Context, policy *Policy) error {
+	if policy == nil {
+		return status.Error(codes.FailedPrecondition, "authorization policy not configured")
+	}
+
+	if len(policy.Subjects) == 0 {
+		// Explicit AllowAllPolicy().
+		return nil
+	}
+
+	claims, ok := ClaimsFromContext(ctx)
+	if !ok {
+		return status.Error(codes.Unauthenticated, "missing auth context")
+	}
+
+	subject, ok := policy.Subjects[claims.Subject]
+	if !ok {
+		return status.Errorf(codes.PermissionDenied, "subject %q not found in policy", claims.Subject)
+	}
+
+	if !subject.Admin {
+		return status.Errorf(codes.PermissionDenied, "subject %q is not an admin", claims.Subject)
 	}
 
 	return nil

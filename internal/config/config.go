@@ -39,6 +39,7 @@ func LoadConfig() (*types.Config, error) {
 	config.ReplicationBatchSize = DefaultReplicationBatchSize
 	config.ReplicationTimeout = 10 * time.Second
 	config.MinInSyncReplicas = DefaultMinInSyncReplicas
+	config.SnapshotCatchupThreshold = DefaultSnapshotCatchupThreshold
 	config.RaftDir = DefaultRaftDir
 	config.StatsPrintInterval = DefaultStatsPrintInterval
 	config.CheckpointInterval = DefaultCheckpointInterval
@@ -155,6 +156,7 @@ func LoadConfig() (*types.Config, error) {
 	flag.IntVar(&config.ReplicationBatchSize, "replication-batch", DefaultReplicationBatchSize, "Replication batch size")
 	flag.DurationVar(&config.ReplicationTimeout, "replication-timeout", 10*time.Second, "Replication timeout")
 	flag.IntVar(&config.MinInSyncReplicas, "min-insync-replicas", DefaultMinInSyncReplicas, "Minimum in-sync replicas (incl. leader) required to ack a write; 0 = 1")
+	flag.Int64Var(&config.SnapshotCatchupThreshold, "snapshot-catchup-threshold", DefaultSnapshotCatchupThreshold, "Replication lag (events) above which a follower requests a full snapshot; 0 = disable")
 
 	// Raft configuration
 	flag.StringVar(&config.RaftDir, "raft-dir", DefaultRaftDir, "Raft data directory")
@@ -347,6 +349,11 @@ func LoadConfig() (*types.Config, error) {
 	if minISR := os.Getenv("CRONOS_MIN_IN_SYNC_REPLICAS"); minISR != "" {
 		if parsed, err := strconv.Atoi(minISR); err == nil {
 			config.MinInSyncReplicas = parsed
+		}
+	}
+	if snapshotThreshold := os.Getenv("CRONOS_SNAPSHOT_CATCHUP_THRESHOLD"); snapshotThreshold != "" {
+		if parsed, err := strconv.ParseInt(snapshotThreshold, 10, 64); err == nil {
+			config.SnapshotCatchupThreshold = parsed
 		}
 	}
 

@@ -9,8 +9,6 @@ import (
 )
 
 func TestSplitPartition_Success(t *testing.T) {
-	skipWindows(t)
-
 	cfg := &types.Config{
 		DataDir:        t.TempDir(),
 		PartitionCount: 8,
@@ -116,8 +114,6 @@ func TestSplitPartition_Success(t *testing.T) {
 }
 
 func TestSplitPartition_EpochFencing(t *testing.T) {
-	skipWindows(t)
-
 	cfg := &types.Config{
 		DataDir:        t.TempDir(),
 		PartitionCount: 8,
@@ -149,8 +145,6 @@ func TestSplitPartition_EpochFencing(t *testing.T) {
 }
 
 func TestSplitPartition_BoundsValidation(t *testing.T) {
-	skipWindows(t)
-
 	cfg := &types.Config{
 		DataDir:        t.TempDir(),
 		PartitionCount: 8,
@@ -185,8 +179,6 @@ func TestSplitPartition_BoundsValidation(t *testing.T) {
 }
 
 func TestSplitPartition_AtomicRollback(t *testing.T) {
-	skipWindows(t)
-
 	cfg := &types.Config{
 		DataDir:        t.TempDir(),
 		PartitionCount: 8,

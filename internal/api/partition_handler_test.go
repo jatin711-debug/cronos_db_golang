@@ -11,8 +11,6 @@ import (
 )
 
 func TestPartitionServiceHandler_Standalone(t *testing.T) {
-	skipWindows(t)
-
 	cfg := &types.Config{
 		DataDir:        t.TempDir(),
 		PartitionCount: 8,
@@ -73,8 +71,6 @@ func TestPartitionServiceHandler_Standalone(t *testing.T) {
 }
 
 func TestPartitionServiceHandler_CompactAndRetentionImplemented(t *testing.T) {
-	skipWindows(t)
-
 	cfg := &types.Config{
 		DataDir:          t.TempDir(),
 		PartitionCount:   1,

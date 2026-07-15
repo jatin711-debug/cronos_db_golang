@@ -1266,14 +1266,39 @@ func (s *Segment) truncateToPosition(pos int64) error {
 		return nil // Nothing to truncate
 	}
 
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
+
 	// Sync before truncating to ensure data integrity
 	if err := s.segmentFile.Sync(); err != nil {
 		return fmt.Errorf("sync before truncate: %w", err)
 	}
 
+	// Windows cannot truncate a file while it has an active memory mapping.
+	// Unmap before truncating, then remap to the new size so reads/writes can
+	// continue. Do this under flushMu to serialize with flush/sync/remap.
+	hadMmap := s.mmapData != nil
+	if hadMmap {
+		if err := munmapFile(s.mmapData); err != nil {
+			return fmt.Errorf("unmap before truncate: %w", err)
+		}
+		s.mmapData = nil
+	}
+
 	// Truncate the file
 	if err := s.segmentFile.Truncate(pos); err != nil {
 		return fmt.Errorf("truncate to %d: %w", pos, err)
+	}
+
+	// Remap if the segment was memory-mapped.
+	if hadMmap {
+		mmapData, err := mmapFile(s.segmentFile, pos)
+		if err != nil {
+			return fmt.Errorf("remap after truncate: %w", err)
+		}
+		s.mmapData = mmapData
+		s.mmapSize = pos
+		s.mmapWritePos = pos
 	}
 
 	// Sync again to ensure truncation is persisted

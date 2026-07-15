@@ -1,0 +1,275 @@
+syntax = "proto3";
+
+package cronos_db_admin;
+
+option go_package = "github.com/jatin711-debug/cronos_db_golang/pkg/types;types";
+
+// =============================================================================
+// AdminService - Operator-facing read & control surface
+// =============================================================================
+//
+// All RPCs require an authenticated principal with `subject.admin = true` in
+// the RBAC policy file. Auth is enforced inside the handler via
+// auth.CheckAdminPermission; the interceptor chain only authenticates.
+//
+// RPCs marked [stub] in the comments below are placeholders that return
+// Unimplemented at this step. They are part of the proto so the wire
+// surface is stable; the corresponding implementations land in steps 2-4
+// of the Admin CLI & Dashboard project.
+
+// -----------------------------------------------------------------------------
+// Cluster topology
+// -----------------------------------------------------------------------------
+
+// One node in the cluster as seen by the responding peer.
+message AdminNode {
+  string node_id = 1;
+  string address = 2;
+  bool is_local = 3;
+  bool is_alive = 4;
+  string state = 5;
+  string rack = 6;
+  string zone = 7;
+  string region = 8;
+}
+
+// One partition as seen by the responding peer.
+message AdminPartition {
+  int32 partition_id = 1;
+  string leader_id = 2;
+  repeated string replicas = 3;
+  repeated string isr = 4;
+  int64 epoch = 5;
+  int64 leader_high_watermark = 6;
+  map<string, int64> follower_offsets = 7;
+  int32 in_sync_count = 8;
+}
+
+// Snapshot of the whole cluster topology from the responding peer's view.
+message ClusterTopology {
+  string local_node_id = 1;
+  bool is_cluster_mode = 2;
+  int64 total_nodes = 3;
+  int64 alive_nodes = 4;
+  int32 total_partitions = 5;
+  int32 leader_partitions = 6;
+  repeated AdminNode nodes = 7;
+  repeated AdminPartition partitions = 8;
+  int64 captured_at_unix_ms = 9;
+}
+
+message GetClusterTopologyRequest {
+  // Reserved for future filtering (e.g. only show partitions led locally).
+}
+
+// -----------------------------------------------------------------------------
+// Per-partition health  [stub]
+// -----------------------------------------------------------------------------
+
+message PartitionHealth {
+  int32 partition_id = 1;
+}
+
+message PartitionHealthResponse {
+  int32 partition_id = 1;
+  int64 high_watermark = 2;
+  int64 first_offset = 3;
+  int32 segment_count = 4;
+  int64 disk_usage_bytes = 5;
+  int64 active_timers = 6;
+  int64 ready_events = 7;
+  int64 cold_store_entries = 8;
+  bool replay_error = 9;
+  string last_error = 10;
+}
+
+// -----------------------------------------------------------------------------
+// Replication lag  [stub]
+// -----------------------------------------------------------------------------
+
+message ReplicationLag {
+  int32 partition_id = 1; // 0 means all partitions
+}
+
+message ReplicationLagResponse {
+  int32 partition_id = 1;
+  int64 leader_high_watermark = 2;
+  repeated FollowerLag followers = 3;
+}
+
+message FollowerLag {
+  string follower_id = 1;
+  int64 offset = 2;
+  int64 lag_events = 3;
+  int64 lag_seconds = 4;
+  bool in_sync = 5;
+}
+
+// -----------------------------------------------------------------------------
+// Consumer groups  [stub]
+// -----------------------------------------------------------------------------
+
+// Names in this section are prefixed with `Admin` to avoid collision
+// with the existing ConsumerGroupService messages in events.proto
+// (ListConsumerGroupsRequest, ListConsumerGroupsResponse), which share
+// the same Go package.
+
+message AdminConsumerGroupSummary {
+  string group_id = 1;
+  string topic = 2;
+  repeated int32 partitions = 3;
+  int32 member_count = 4;
+}
+
+message AdminListConsumerGroupsRequest {}
+
+message AdminListConsumerGroupsResponse {
+  repeated AdminConsumerGroupSummary groups = 1;
+}
+
+message AdminConsumerGroupLag {
+  string group_id = 1;
+  int32 partition_id = 2;
+}
+
+message AdminConsumerGroupLagResponse {
+  string group_id = 1;
+  int32 partition_id = 2;
+  int64 committed_offset = 3;
+  int64 partition_high_watermark = 4;
+  int64 lag = 5;
+}
+
+// -----------------------------------------------------------------------------
+// Retention & compaction  [stub]
+// -----------------------------------------------------------------------------
+
+message RunRetentionRequest {
+  int32 partition_id = 1; // 0 means all partitions
+  int64 max_age_hours = 2;
+  int64 max_size_bytes = 3;
+}
+
+message RunRetentionResponse {
+  bool success = 1;
+  string error = 2;
+  int64 segments_deleted = 3;
+  int64 bytes_freed = 4;
+}
+
+message RunCompactionRequest {
+  int32 partition_id = 1; // 0 means all partitions
+  int64 before_offset = 2;
+}
+
+message RunCompactionResponse {
+  bool success = 1;
+  string error = 2;
+  int64 segments_compacted = 3;
+  int64 bytes_reclaimed = 4;
+}
+
+// -----------------------------------------------------------------------------
+// Schema registry  [stub]
+// -----------------------------------------------------------------------------
+
+message SchemaSummary {
+  string topic = 1;
+  int32 latest_version = 2;
+  string compatibility_mode = 3;
+}
+
+message ListSchemasRequest {}
+
+message ListSchemasResponse {
+  repeated SchemaSummary schemas = 1;
+}
+
+message GetSchemaRequest {
+  string topic = 1;
+  int32 version = 2; // 0 means latest
+}
+
+message GetSchemaResponse {
+  string topic = 1;
+  int32 version = 2;
+  string schema_type = 3;
+  string definition = 4;
+}
+
+// -----------------------------------------------------------------------------
+// Tenant accounting  [stub]
+// -----------------------------------------------------------------------------
+
+message TenantUsage {
+  string tenant_id = 1; // empty means all tenants
+}
+
+message TenantUsageResponse {
+  string tenant_id = 1;
+  int64 in_flight = 2;
+  int64 storage_bytes = 3;
+  bool limits_configured = 4;
+  int64 publish_rate_per_sec = 5;
+  int64 max_in_flight = 6;
+}
+
+// -----------------------------------------------------------------------------
+// Cluster rebalance  [stub]
+// -----------------------------------------------------------------------------
+
+message RebalanceRequest {
+  // Empty: triggers a router rebalance based on current membership.
+}
+
+message RebalanceResponse {
+  bool success = 1;
+  string error = 2;
+  int32 partitions_moved = 3;
+}
+
+// =============================================================================
+// Service definition
+// =============================================================================
+
+service AdminService {
+  // GetClusterTopology returns the responding peer's view of the cluster
+  // (nodes + partition assignments + ISR + per-follower offsets).
+  rpc GetClusterTopology(GetClusterTopologyRequest) returns (ClusterTopology);
+
+  // GetPartitionHealth returns per-partition runtime stats (WAL, scheduler,
+  // dedup, replay status). [stub]
+  rpc GetPartitionHealth(PartitionHealth) returns (PartitionHealthResponse);
+
+  // GetReplicationLag returns leader HWM and per-follower lag for one or all
+  // partitions. [stub]
+  rpc GetReplicationLag(ReplicationLag) returns (ReplicationLagResponse);
+
+  // ListConsumerGroups returns every consumer group known to the cluster.
+  // [stub]
+  rpc ListConsumerGroups(AdminListConsumerGroupsRequest) returns (AdminListConsumerGroupsResponse);
+
+  // GetConsumerGroupLag returns the committed-vs-high-watermark lag for a
+  // single (group, partition). [stub]
+  rpc GetConsumerGroupLag(AdminConsumerGroupLag) returns (AdminConsumerGroupLagResponse);
+
+  // RunRetention runs age/size-based retention once. [stub]
+  rpc RunRetention(RunRetentionRequest) returns (RunRetentionResponse);
+
+  // RunCompaction runs consumer-offset-bounded compaction once. [stub]
+  rpc RunCompaction(RunCompactionRequest) returns (RunCompactionResponse);
+
+  // ListSchemas returns every registered topic schema. [stub]
+  rpc ListSchemas(ListSchemasRequest) returns (ListSchemasResponse);
+
+  // GetSchema returns one schema version (or the latest if version=0). [stub]
+  rpc GetSchema(GetSchemaRequest) returns (GetSchemaResponse);
+
+  // GetTenantUsage returns in-flight + storage usage for one or all tenants.
+  // [stub]
+  rpc GetTenantUsage(TenantUsage) returns (TenantUsageResponse);
+
+  // TriggerRebalance forces a router rebalance based on current membership.
+  // [stub]
+  rpc TriggerRebalance(RebalanceRequest) returns (RebalanceResponse);
+}

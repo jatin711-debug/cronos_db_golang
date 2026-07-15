@@ -36,6 +36,12 @@ type GoBloomFilter struct {
 // It prefers the Rust-backed implementation when available and falls back to a
 // pure-Go implementation on platforms without cgo or if the Rust filter fails.
 func NewBloomFilter(expectedItems uint64, targetFPR float64) BloomFilter {
+	// A capacity of zero produces an invalid Rust bloom filter (modulo-by-zero
+	// on first use). Use a small minimum so tests that don't set BloomCapacity
+	// still get a working filter.
+	if expectedItems == 0 {
+		expectedItems = 1024
+	}
 	bf := NewRustBloomFilter(expectedItems, targetFPR)
 	if bf == nil {
 		return NewGoBloomFilter(expectedItems, targetFPR)

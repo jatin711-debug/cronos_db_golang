@@ -1,13 +1,12 @@
 package replication
 
 import (
-	"crypto/tls"
+	"context"
 	"fmt"
 	"hash"
 	"hash/crc32"
 	"io"
 	"log"
-	"net"
 	"os"
 	"path/filepath"
 	"sync"
@@ -15,7 +14,10 @@ import (
 
 	"github.com/jatin711-debug/cronos_db_golang/internal/storage"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
-	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 // Follower handles replication from leader
@@ -28,13 +30,11 @@ type Follower struct {
 	nextOffset   int64
 	wal          *storage.WAL
 	quit         chan struct{}
-	active       bool
 	lastSyncTime time.Time
 	syncInterval time.Duration
 	catchupMode  bool // True when catching up with leader
-	listener     net.Listener
 	nodeID       string
-	tlsConfig    *MTLSConfig // optional mTLS for replication listener
+	tlsConfig    *MTLSConfig // optional mTLS for replication connections
 }
 
 // NewFollower creates a new follower. tlsConfig may be nil for plaintext dev mode.
@@ -51,400 +51,221 @@ func NewFollower(partitionID int32, wal *storage.WAL, nodeID string, tlsConfig *
 	}
 }
 
-// Start starts the follower replication server. If mTLS is configured, the
-// listener requires and verifies a client certificate from the leader.
-func (f *Follower) Start(port int) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	if f.active {
-		return nil
-	}
-
-	// Listen for connections from leader
-	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
-	if err != nil {
-		return fmt.Errorf("failed to listen: %w", err)
-	}
-	if f.tlsConfig != nil && f.tlsConfig.Enabled {
-		tlsCfg, err := BuildServerTLSConfig(f.tlsConfig)
-		if err != nil {
-			listener.Close()
-			return fmt.Errorf("failed to build replication server TLS config: %w", err)
-		}
-		listener = tls.NewListener(listener, tlsCfg)
-	}
-	f.listener = listener
-	f.active = true
-
-	log.Printf("[FOLLOWER] Started replication server on port %d (tls=%v)", port, f.tlsConfig != nil && f.tlsConfig.Enabled)
-
-	utils.GoSafe("follower-accept", f.acceptLoop)
-	return nil
-}
-
-// acceptLoop accepts connections
-func (f *Follower) acceptLoop() {
-	for {
-		conn, err := f.listener.Accept()
-		if err != nil {
-			select {
-			case <-f.quit:
-				return
-			default:
-				log.Printf("[FOLLOWER] Accept error: %v", err)
-				continue
-			}
-		}
-
-		utils.GoSafe("follower-connection", func() { f.handleConnection(conn) })
-	}
-}
-
-// handleConnection handles leader connection
-func (f *Follower) handleConnection(conn net.Conn) {
-	defer conn.Close()
-
-	transport := NewTransport(conn)
-	log.Printf("[FOLLOWER] Accepted connection from %s", conn.RemoteAddr())
-
-	for {
-		msgType, payload, err := transport.ReadMessage()
-		if err != nil {
-			log.Printf("[FOLLOWER] Connection error: %v", err)
-			return
-		}
-
-		if err := f.handleMessage(transport, msgType, payload); err != nil {
-			log.Printf("[FOLLOWER] Handle message error: %v", err)
-			return
-		}
-	}
-}
-
-// handleMessage handles a protocol message
-func (f *Follower) handleMessage(t *Transport, msgType uint8, payload []byte) error {
-	switch msgType {
-	case MsgTypeHandshake:
-		hs := &HandshakeMessage{}
-		if err := hs.Decode(payload); err != nil {
-			return err
-		}
-		log.Printf("[FOLLOWER] Handshake from node %s", hs.NodeID)
-		// Ack? For now assume OK if connection accepted.
-
-	case MsgTypeAppendEntries:
-		msg := &AppendEntriesMessage{}
-		if err := msg.Decode(payload); err != nil {
-			return err
-		}
-
-		f.mu.Lock()
-
-		// Term validation: reject stale leaders, step up on newer term.
-		if msg.Term < f.epoch {
-			term := f.epoch
-			nextOffset := f.nextOffset
-			f.mu.Unlock()
-			ack := &types.ReplicationAppendResponse{
-				Success:    false,
-				LastOffset: nextOffset - 1,
-				NextOffset: nextOffset,
-				Term:       term,
-			}
-			return t.WriteProtoMessage(MsgTypeAppendAck, ack)
-		}
-		if msg.Term > f.epoch {
-			f.epoch = msg.Term
-		}
-
-		// Gap detection: the new entries must start exactly where the WAL expects.
-		expectedNext := msg.PrevLogIndex + 1
-		if expectedNext != f.nextOffset {
-			term := f.epoch
-			localNext := f.nextOffset
-			f.mu.Unlock()
-			log.Printf("[FOLLOWER] Append entries gap for partition %d: expected %d, local %d", f.partitionID, expectedNext, localNext)
-			ack := &types.ReplicationAppendResponse{
-				Success:    false,
-				LastOffset: localNext - 1,
-				NextOffset: localNext,
-				Term:       term,
-				Error:      fmt.Sprintf("offset mismatch: expected %d, local %d", expectedNext, localNext),
-			}
-			return t.WriteProtoMessage(MsgTypeAppendAck, ack)
-		}
-
-		// Append replicated events, preserving leader-assigned offsets.
-		if f.wal != nil && len(msg.Events) > 0 {
-			// Verify the batch-level checksum from the leader.
-			if msg.Checksum != 0 {
-				computed := computeBatchChecksum(msg.Events)
-				if computed != msg.Checksum {
-					term := f.epoch
-					nextOffset := f.nextOffset
-					f.mu.Unlock()
-					log.Printf("[FOLLOWER] Replication batch checksum mismatch from leader for partition %d", f.partitionID)
-					ack := &types.ReplicationAppendResponse{
-						Success:    false,
-						LastOffset: nextOffset - 1,
-						NextOffset: nextOffset,
-						Term:       term,
-						Error:      "replication batch checksum mismatch",
-					}
-					return t.WriteProtoMessage(MsgTypeAppendAck, ack)
-				}
-			}
-
-			// Stamp each event with the leader's term and a per-payload checksum.
-			for _, e := range msg.Events {
-				if e.Term == 0 {
-					e.Term = msg.Term
-				}
-				if e.Checksum == 0 && len(e.Payload) > 0 {
-					e.Checksum = crc32.ChecksumIEEE(e.Payload)
-				}
-			}
-
-			f.wal.SetCurrentTerm(msg.Term)
-			if err := f.wal.AppendReplicatedBatch(msg.Events); err != nil {
-				term := f.epoch
-				nextOffset := f.nextOffset
-				f.mu.Unlock()
-				log.Printf("[FOLLOWER] Failed to append replicated batch: %v", err)
-				ack := &types.ReplicationAppendResponse{
-					Success:    false,
-					LastOffset: nextOffset - 1,
-					NextOffset: nextOffset,
-					Term:       term,
-					Error:      err.Error(),
-				}
-				return t.WriteProtoMessage(MsgTypeAppendAck, ack)
-			}
-		}
-
-		f.nextOffset = f.wal.GetNextOffset()
-		term := f.epoch
-		lastOffset := f.nextOffset - 1
-		f.mu.Unlock()
-
-		// Send success ack
-		ack := &types.ReplicationAppendResponse{
-			Success:    true,
-			LastOffset: lastOffset,
-			NextOffset: f.nextOffset,
-			Term:       term,
-		}
-		return t.WriteProtoMessage(MsgTypeAppendAck, ack)
-
-	case MsgTypeHeartbeat:
-		msg := &HeartbeatMessage{}
-		if err := msg.Decode(payload); err != nil {
-			return err
-		}
-
-		f.mu.Lock()
-		if msg.Term < f.epoch {
-			term := f.epoch
-			lastOffset := f.nextOffset - 1
-			f.mu.Unlock()
-			ack := &types.ReplicationAppendResponse{
-				Success:    false,
-				LastOffset: lastOffset,
-				Term:       term,
-				Error:      "heartbeat term is stale",
-			}
-			return t.WriteProtoMessage(MsgTypeHeartbeatAck, ack)
-		}
-		if msg.Term > f.epoch {
-			f.epoch = msg.Term
-		}
-		term := f.epoch
-		lastOffset := f.nextOffset - 1
-		f.mu.Unlock()
-
-		// Respond to heartbeat
-		ack := &types.ReplicationAppendResponse{
-			Success:    true,
-			LastOffset: lastOffset,
-			Term:       term,
-		}
-		return t.WriteProtoMessage(MsgTypeHeartbeatAck, ack)
-	}
-
-	return nil
-}
-
-// SyncFilesFromLeader actively pulls raw disk segment files from the leader
-func (f *Follower) SyncFilesFromLeader() error {
+// InstallSnapshot pulls a bulk segment snapshot from the leader over the
+// internal replication gRPC channel and installs it locally. It is used when a
+// follower is far behind or when a brand-new replica joins the partition.
+func (f *Follower) InstallSnapshot(ctx context.Context, leaderAddr string, partitionID int32, startOffset int64) error {
 	f.mu.Lock()
 	if f.catchupMode {
 		f.mu.Unlock()
 		return fmt.Errorf("already catching up")
 	}
 	f.catchupMode = true
-	leaderAddr := f.leaderAddr
-	partitionID := f.partitionID
 	walDataDir := f.wal.GetDataDir()
 	f.mu.Unlock()
 
 	defer func() {
 		f.mu.Lock()
 		f.catchupMode = false
+		f.lastSyncTime = time.Now()
 		f.mu.Unlock()
 	}()
 
-	log.Printf("[FOLLOWER] Connecting to leader %s for bulk file sync...", leaderAddr)
-	conn, err := net.DialTimeout("tcp", leaderAddr, 5*time.Second)
+	log.Printf("[FOLLOWER] Requesting bulk snapshot from leader %s for partition %d", leaderAddr, partitionID)
+
+	creds, err := f.dialCredentials()
 	if err != nil {
-		return fmt.Errorf("dial leader: %w", err)
+		return fmt.Errorf("build replication credentials: %w", err)
+	}
+
+	conn, err := grpc.NewClient(leaderAddr,
+		grpc.WithTransportCredentials(creds),
+		grpc.WithDefaultCallOptions(
+			grpc.MaxCallRecvMsgSize(64*1024*1024),
+			grpc.MaxCallSendMsgSize(64*1024*1024),
+		),
+	)
+	if err != nil {
+		return fmt.Errorf("dial leader %s: %w", leaderAddr, err)
 	}
 	defer conn.Close()
 
-	transport := NewTransport(conn)
-
-	// Send Handshake
-	hs := &HandshakeMessage{NodeID: f.nodeID}
-	pl, _ := hs.Encode()
-	if err := transport.WriteMessage(MsgTypeHandshake, pl); err != nil {
-		return err
+	client := types.NewReplicationServiceClient(conn)
+	stream, err := client.Snapshot(ctx, &types.ReplicationSnapshotRequest{
+		PartitionId: partitionID,
+		StartOffset: startOffset,
+		MaxBytes:    0,
+	})
+	if err != nil {
+		return fmt.Errorf("snapshot RPC: %w", err)
 	}
 
-	// Request bulk file stream
-	req := &FileTransferRequestMessage{PartitionId: partitionID}
-	pl, _ = req.Encode()
-	if err := transport.WriteMessage(MsgTypeFileTransferRequest, pl); err != nil {
-		return fmt.Errorf("request file transfer: %w", err)
+	// Stage files in a temporary directory so the existing WAL is not touched
+	// until the whole snapshot is received and verified.
+	stagingDir := filepath.Join(walDataDir, "snapshot-staging")
+	stagingSegments := filepath.Join(stagingDir, "segments")
+	stagingIndex := filepath.Join(stagingDir, "index")
+	if err := os.RemoveAll(stagingDir); err != nil {
+		return fmt.Errorf("clean staging dir: %w", err)
+	}
+	if err := os.MkdirAll(stagingSegments, 0755); err != nil {
+		return fmt.Errorf("create staging segments dir: %w", err)
+	}
+	if err := os.MkdirAll(stagingIndex, 0755); err != nil {
+		return fmt.Errorf("create staging index dir: %w", err)
 	}
 
-	segmentsDir := filepath.Join(walDataDir, "segments")
 	var currentFile *os.File
-	var currentFilePath string
+	var currentPath string
 	var currentHash hash.Hash32
+	var currentHeader *types.ReplicationSnapshotHeader
+	var trailer *types.ReplicationSnapshotTrailer
 
 	for {
-		msgType, payload, err := transport.ReadMessage()
-		if err != nil {
-			if currentFile != nil {
-				currentFile.Close()
-			}
-			if err == io.EOF {
-				return fmt.Errorf("leader disconnected during bulk sync")
-			}
-			return fmt.Errorf("read message: %w", err)
+		chunk, recvErr := stream.Recv()
+		if recvErr == io.EOF {
+			break
+		}
+		if recvErr != nil {
+			cleanupFile(currentFile)
+			return fmt.Errorf("receive snapshot chunk: %w", recvErr)
 		}
 
-		switch msgType {
-		case MsgTypeFileTransferStart:
-			msg := &FileTransferStartMessage{}
-			if err := msg.Decode(payload); err != nil {
-				if currentFile != nil {
-					currentFile.Close()
-				}
-				return err
-			}
+		if header := chunk.GetHeader(); header != nil {
+			cleanupFile(currentFile)
+			currentFile = nil
+			currentHash = nil
+			currentHeader = header
 
-			f.mu.RLock()
-			localEpoch := f.epoch
-			f.mu.RUnlock()
-			if msg.Epoch < localEpoch {
-				if currentFile != nil {
-					currentFile.Close()
-				}
-				return fmt.Errorf("bulk sync rejected stale leader epoch %d (local %d)", msg.Epoch, localEpoch)
+			currentPath = stagingSegments
+			if header.GetIsIndex() {
+				currentPath = stagingIndex
 			}
+			currentPath = filepath.Join(currentPath, header.GetFilename())
 
-			currentFilePath = filepath.Join(segmentsDir, msg.Filename)
-
-			// Open new file for writing
-			log.Printf("[FOLLOWER] Receiving segment file: %s (%d bytes)", msg.Filename, msg.FileSize)
-			if currentFile != nil {
-				currentFile.Close()
+			file, openErr := os.OpenFile(currentPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+			if openErr != nil {
+				return fmt.Errorf("create staged file %s: %w", header.GetFilename(), openErr)
 			}
-			currentFile, err = os.OpenFile(currentFilePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
-			if err != nil {
-				return fmt.Errorf("create segment file %s: %w", msg.Filename, err)
-			}
+			currentFile = file
 			currentHash = crc32.NewIEEE()
-
-		case MsgTypeFileTransferData:
-			msg := &FileTransferDataMessage{}
-			if err := msg.Decode(payload); err != nil {
-				if currentFile != nil {
-					currentFile.Close()
-				}
-				return err
-			}
-			if currentFile == nil {
-				return fmt.Errorf("received data without FileTransferStart")
-			}
-			if _, err := currentFile.Write(msg.Data); err != nil {
-				currentFile.Close()
-				return fmt.Errorf("write segment data: %w", err)
-			}
-			if currentHash != nil {
-				currentHash.Write(msg.Data)
-			}
-
-		case MsgTypeFileTransferEnd:
-			msg := &FileTransferEndMessage{}
-			if err := msg.Decode(payload); err != nil {
-				if currentFile != nil {
-					currentFile.Close()
-				}
-				return err
-			}
-			if currentFile != nil {
-				if err := currentFile.Sync(); err != nil {
-					currentFile.Close()
-					return fmt.Errorf("sync segment file %s: %w", currentFilePath, err)
-				}
-				currentFile.Close()
-				currentFile = nil
-			}
-			if !msg.Success {
-				return fmt.Errorf("leader reported failure during bulk transfer")
-			}
-
-			f.mu.RLock()
-			localEpoch := f.epoch
-			f.mu.RUnlock()
-			if msg.Epoch < localEpoch {
-				return fmt.Errorf("bulk sync end rejected stale leader epoch %d (local %d)", msg.Epoch, localEpoch)
-			}
-
-			if currentHash != nil {
-				receivedChecksum := currentHash.Sum32()
-				if msg.FileChecksum != 0 && receivedChecksum != msg.FileChecksum {
-					return fmt.Errorf("bulk sync checksum mismatch for %s: computed %x, expected %x", currentFilePath, receivedChecksum, msg.FileChecksum)
-				}
-				currentHash = nil
-			}
-
-			log.Printf("[FOLLOWER] Bulk file sync completed successfully")
-
-			// Reload WAL to pick up new segments
-			f.mu.Lock()
-			if msg.Epoch > f.epoch {
-				f.epoch = msg.Epoch
-			}
-			f.wal.ReloadSegments()
-			f.nextOffset = f.wal.GetNextOffset()
-			f.mu.Unlock()
-
-			return nil
-		default:
-			log.Printf("[FOLLOWER] Ignored unexpected msg type %d during bulk sync", msgType)
+			log.Printf("[FOLLOWER] Receiving snapshot file %s (%d bytes)", header.GetFilename(), header.GetFileSize())
+			continue
 		}
+
+		if data := chunk.GetData(); data != nil {
+			if currentFile == nil {
+				return fmt.Errorf("received data before header")
+			}
+			if _, writeErr := currentFile.Write(data); writeErr != nil {
+				cleanupFile(currentFile)
+				return fmt.Errorf("write staged file %s: %w", currentHeader.GetFilename(), writeErr)
+			}
+			if currentHash != nil {
+				currentHash.Write(data)
+			}
+			continue
+		}
+
+		if tr := chunk.GetTrailer(); tr != nil {
+			trailer = tr
+			break
+		}
+	}
+
+	cleanupFile(currentFile)
+	currentFile = nil
+
+	if trailer == nil {
+		_ = os.RemoveAll(stagingDir)
+		return fmt.Errorf("snapshot stream closed without trailer")
+	}
+	if !trailer.GetSuccess() {
+		_ = os.RemoveAll(stagingDir)
+		return fmt.Errorf("leader snapshot failed: %s", trailer.GetError())
+	}
+
+	// Verify the last received file's checksum if we were mid-file.
+	if currentHeader != nil && currentHeader.GetCrc32() != 0 && currentHash != nil {
+		if got := currentHash.Sum32(); got != currentHeader.GetCrc32() {
+			_ = os.RemoveAll(stagingDir)
+			return fmt.Errorf("snapshot checksum mismatch for %s: computed %08x, expected %08x", currentHeader.GetFilename(), got, currentHeader.GetCrc32())
+		}
+	}
+
+	// Close the local WAL before replacing segment files. This releases file
+	// handles on Windows so the directory swap can succeed.
+	f.mu.Lock()
+	wal := f.wal
+	f.mu.Unlock()
+	if wal != nil {
+		if closeErr := wal.Close(); closeErr != nil {
+			_ = os.RemoveAll(stagingDir)
+			return fmt.Errorf("close local WAL before snapshot install: %w", closeErr)
+		}
+	}
+
+	// Atomically swap staged directories into place.
+	segmentsDir := filepath.Join(walDataDir, "segments")
+	indexDir := filepath.Join(walDataDir, "index")
+	oldSegmentsDir := filepath.Join(walDataDir, "segments.old")
+	oldIndexDir := filepath.Join(walDataDir, "index.old")
+
+	if err := os.RemoveAll(oldSegmentsDir); err != nil {
+		return fmt.Errorf("remove old segments dir: %w", err)
+	}
+	if err := os.RemoveAll(oldIndexDir); err != nil {
+		return fmt.Errorf("remove old index dir: %w", err)
+	}
+	if err := os.Rename(segmentsDir, oldSegmentsDir); err != nil {
+		return fmt.Errorf("rename segments dir: %w", err)
+	}
+	if err := os.Rename(indexDir, oldIndexDir); err != nil {
+		return fmt.Errorf("rename index dir: %w", err)
+	}
+	if err := os.Rename(stagingSegments, segmentsDir); err != nil {
+		return fmt.Errorf("move staged segments: %w", err)
+	}
+	if err := os.Rename(stagingIndex, indexDir); err != nil {
+		return fmt.Errorf("move staged index: %w", err)
+	}
+	_ = os.RemoveAll(oldSegmentsDir)
+	_ = os.RemoveAll(oldIndexDir)
+
+	// Reload WAL to pick up the new segments.
+	f.mu.Lock()
+	if reloadErr := f.wal.ReloadSegments(); reloadErr != nil {
+		f.mu.Unlock()
+		return fmt.Errorf("reload WAL after snapshot install: %w", reloadErr)
+	}
+	f.nextOffset = f.wal.GetNextOffset()
+	if trailer.GetEpoch() > f.epoch {
+		f.epoch = trailer.GetEpoch()
+	}
+	f.mu.Unlock()
+
+	log.Printf("[FOLLOWER] Snapshot installed for partition %d up to offset %d (epoch %d)", partitionID, trailer.GetLastOffset(), trailer.GetEpoch())
+	return nil
+}
+
+// cleanupFile closes and ignores errors; helper for defers during failure paths.
+func cleanupFile(f *os.File) {
+	if f != nil {
+		_ = f.Close()
 	}
 }
 
-// AppendEvents appends replicated events to WAL (Logic moved to handleMessage)
-func (f *Follower) AppendEvents(events []*types.Event, leaderEpoch int64) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	// ... (Existing logic can be kept if needed for other paths, but we are using binary protocol now)
-	return nil
+// dialCredentials returns the gRPC transport credentials for replication:
+// mTLS when configured, otherwise insecure (dev mode).
+func (f *Follower) dialCredentials() (credentials.TransportCredentials, error) {
+	if f.tlsConfig != nil && f.tlsConfig.Enabled {
+		tlsCfg, err := BuildClientTLSConfig(f.tlsConfig)
+		if err != nil {
+			return nil, err
+		}
+		return credentials.NewTLS(tlsCfg), nil
+	}
+	return insecure.NewCredentials(), nil
 }
 
 // GetNextOffset returns next offset to replicate
@@ -468,45 +289,17 @@ func (f *Follower) SetEpoch(epoch int64) {
 	f.epoch = epoch
 }
 
-// PromoteToLeader promotes this follower to become the leader
-func (f *Follower) PromoteToLeader() (*Leader, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	if !f.active {
-		return nil, fmt.Errorf("follower not active")
-	}
-
-	// Stop follower replication
-	f.active = false
-	if f.listener != nil {
-		f.listener.Close()
-	}
-
-	// Create new leader (follower-side promotion uses minISR=1; partition manager
-	// provides the configured value during normal promotion).
-	leader := NewLeader(f.partitionID, 100, 100*time.Millisecond, f.wal, 1, f.nodeID, f.tlsConfig)
-	leader.SetEpoch(f.epoch + 1)
-
-	log.Printf("[FOLLOWER] Promoted to leader for partition %d (new epoch: %d)", f.partitionID, f.epoch+1)
-	return leader, nil
-}
-
 // Stop stops the follower
 func (f *Follower) Stop() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	if !f.active {
+	select {
+	case <-f.quit:
 		return
+	default:
 	}
-
-	f.active = false
 	close(f.quit)
-
-	if f.listener != nil {
-		f.listener.Close()
-	}
 
 	log.Printf("[FOLLOWER] Stopped replication for partition %d", f.partitionID)
 }
@@ -549,7 +342,6 @@ func (f *Follower) GetStats() *FollowerStats {
 		LeaderID:     f.leaderID,
 		Epoch:        f.epoch,
 		NextOffset:   f.nextOffset,
-		Active:       f.active,
 		CatchingUp:   f.catchupMode,
 		LastSyncTime: f.lastSyncTime,
 	}
@@ -561,7 +353,6 @@ type FollowerStats struct {
 	LeaderID     string
 	Epoch        int64
 	NextOffset   int64
-	Active       bool
 	CatchingUp   bool
 	LastSyncTime time.Time
 }

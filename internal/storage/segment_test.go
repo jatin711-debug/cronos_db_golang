@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
@@ -548,10 +547,6 @@ func TestSegment_TruncateCorruptTail(t *testing.T) {
 }
 
 func TestSegment_TruncateToPosition(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skip on Windows due to file locking issues with truncate on open files")
-	}
-
 	tmpDir := t.TempDir()
 
 	seg, err := NewSegment(tmpDir, 0, true, nil)
