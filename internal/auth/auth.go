@@ -126,7 +126,7 @@ func Interceptor(cfg *Config) grpc.UnaryServerInterceptor {
 			return nil, status.Error(codes.Unauthenticated, "missing bearer token")
 		}
 
-		claims, err := parseToken(tokenStr, cfg)
+		claims, err := ParseToken(tokenStr, cfg)
 		if err != nil {
 			return nil, status.Errorf(codes.Unauthenticated, "invalid token: %v", err)
 		}
@@ -155,7 +155,7 @@ func StreamInterceptor(cfg *Config) grpc.StreamServerInterceptor {
 			return status.Error(codes.Unauthenticated, "missing bearer token")
 		}
 
-		claims, err := parseToken(tokenStr, cfg)
+		claims, err := ParseToken(tokenStr, cfg)
 		if err != nil {
 			return status.Errorf(codes.Unauthenticated, "invalid token: %v", err)
 		}
@@ -182,7 +182,11 @@ func extractBearer(md metadata.MD) string {
 	return ""
 }
 
-func parseToken(tokenStr string, cfg *Config) (*Claims, error) {
+// ParseToken verifies a signed JWT and returns the embedded Claims.
+// Supports HMAC (HS256/384/512), Ed25519, RSA, and ECDSA per the
+// signing method. Used by both the gRPC auth.Interceptor and the
+// HTTP auth middleware in internal/api/web_handler.go.
+func ParseToken(tokenStr string, cfg *Config) (*Claims, error) {
 	token, err := jwt.ParseWithClaims(tokenStr, &Claims{}, func(t *jwt.Token) (interface{}, error) {
 		switch t.Method.(type) {
 		case *jwt.SigningMethodHMAC:
