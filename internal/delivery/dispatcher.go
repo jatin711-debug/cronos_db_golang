@@ -507,6 +507,7 @@ func (d *Dispatcher) Dispatch(event *types.Event) error {
 		if !d.tryReserveInFlight(1) {
 			deliveryMessagePool.Put(delivery)
 			d.releaseCredit(selectedSub)
+			metrics.IncDispatcherBackpressureSkip(strconv.FormatInt(int64(event.GetPartitionId()), 10), "in_flight_cap", 1)
 			return fmt.Errorf("in-flight limit exceeded")
 		}
 
@@ -645,6 +646,11 @@ func (d *Dispatcher) dispatchPartitionBatch(partitionID int32, events []*types.E
 
 			selectedSub := d.pickSubscriber(groupSubs, start)
 			if selectedSub == nil {
+				// No subscriber in this group currently has credits. The event is
+				// not delivered on this pass; surface it as backpressure rather than
+				// dropping silently. It remains durable in the WAL and is re-driven
+				// when the consumer reconnects from its committed offset.
+				metrics.IncDispatcherBackpressureSkip(strconv.FormatInt(int64(partitionID), 10), "no_credits", 1)
 				continue
 			}
 
@@ -678,6 +684,7 @@ func (d *Dispatcher) dispatchPartitionBatch(partitionID int32, events []*types.E
 			deliveryMessagePool.Put(delivery)
 			// Credits were consumed per event while assigning.
 			d.releaseCredits(sub, int32(len(batchEvents)))
+			metrics.IncDispatcherBackpressureSkip(strconv.FormatInt(int64(partitionID), 10), "in_flight_cap", len(batchEvents))
 			return fmt.Errorf("in-flight limit exceeded")
 		}
 

@@ -357,6 +357,20 @@ func (c *Coordinator) Begin(txID TxID, participants []Participant) (*Transaction
 		return nil, fmt.Errorf("transaction %s already exists", txID)
 	}
 
+	// Inject the partition manager into any PartitionParticipant that lacks one.
+	// Callers (e.g. the gRPC TransactionService handler) build participants with
+	// only a PartitionID; without PM wired, Prepare/Commit silently write no WAL
+	// markers — a durable no-op. Centralizing the injection here makes every entry
+	// path correct.
+	if c.pm != nil {
+		for i, p := range participants {
+			if pp, ok := p.(PartitionParticipant); ok && pp.PM == nil {
+				pp.PM = c.pm
+				participants[i] = pp
+			}
+		}
+	}
+
 	tx := &Transaction{
 		ID:           txID,
 		Participants: participants,

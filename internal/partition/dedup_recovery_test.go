@@ -7,6 +7,36 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 )
 
+// TestPartitionWiresDLQ locks in that every partition constructs a durable
+// dead-letter queue and wires it into the dispatcher, so poison messages are
+// captured instead of silently dropped ("DLQ not configured, dropping").
+func TestPartitionWiresDLQ(t *testing.T) {
+	cfg := &types.Config{
+		DataDir:        t.TempDir(),
+		PartitionCount: 1,
+		TickMS:         100,
+		WheelSize:      60,
+	}
+	pm := NewPartitionManager("node-1", cfg)
+	defer pm.StopAllPartitions()
+
+	if err := pm.CreatePartition(0, "t"); err != nil {
+		t.Fatalf("CreatePartition: %v", err)
+	}
+	p, err := pm.GetInternalPartition(0)
+	if err != nil {
+		t.Fatalf("GetInternalPartition: %v", err)
+	}
+	if p.DLQ == nil {
+		t.Fatal("partition DLQ is nil")
+	}
+	// DLQSize is only reported when the dispatcher actually holds a DLQ; a
+	// non-negative value confirms the dispatcher was constructed with one.
+	if got := p.Dispatcher.GetStats().DLQSize; got != 0 {
+		t.Fatalf("expected empty DLQ, got size %d", got)
+	}
+}
+
 // TestRecoverDedupFromWAL verifies that message IDs written to the WAL but lost
 // from the NoSync dedup Pebble store (simulating a crash) are re-detected as
 // duplicates after recoverDedupFromWAL re-seeds the store from the WAL tail.

@@ -129,6 +129,13 @@ var (
 		},
 		[]string{"partition"},
 	)
+	dispatcherBackpressureSkips = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "cronos_dispatcher_backpressure_skips_total",
+			Help: "Deliveries skipped due to backpressure (no subscriber credits or in-flight cap), by reason",
+		},
+		[]string{"partition", "reason"},
+	)
 	consumerGroupMembers = promauto.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "cronos_consumer_group_members",
@@ -307,6 +314,15 @@ func SetDeliveryMetrics(partitionID string, activeDeliveries int64, creditsInUse
 	dispatcherActiveDeliveries.WithLabelValues(partitionID).Set(float64(activeDeliveries))
 	dispatcherCreditsInUse.WithLabelValues(partitionID).Set(float64(creditsInUse))
 	workerQueueDepth.WithLabelValues(partitionID).Set(float64(queueDepth))
+}
+
+// IncDispatcherBackpressureSkip records a delivery skipped due to backpressure.
+// reason is a low-cardinality label such as "no_credits" or "in_flight_cap".
+func IncDispatcherBackpressureSkip(partitionID, reason string, n int) {
+	if n <= 0 {
+		n = 1
+	}
+	dispatcherBackpressureSkips.WithLabelValues(partitionID, reason).Add(float64(n))
 }
 
 // ObserveWALAppend records WAL append latency.
