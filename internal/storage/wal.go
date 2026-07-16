@@ -943,13 +943,14 @@ func (w *WAL) rotateSegment() error {
 	w.activeSegment = nextSeg
 	w.preCreateTriggered.Store(false)
 
-	// Now close the old active segment safely
+	// Deactivate (not Close) the old active segment: release its write-side/mmap
+	// resources but keep its read handle + index open so historical reads of this
+	// now-rotated segment keep working (Replay, follower catch-up, cross-region
+	// fetch). Closing the handle here previously made every read of a rotated
+	// segment fail with os.ErrClosed. Retention/Delete closes it for good later.
 	if oldActive != nil {
-		oldActive.mu.Lock()
-		oldActive.isActive = false // mark old segment as inactive
-		oldActive.mu.Unlock()
-		if err := oldActive.Close(); err != nil {
-			log.Printf("[WAL-%d] Failed to close rotated segment %s: %v", w.partitionID, oldActive.GetFilename(), err)
+		if err := oldActive.Deactivate(); err != nil {
+			log.Printf("[WAL-%d] Failed to deactivate rotated segment %s: %v", w.partitionID, oldActive.GetFilename(), err)
 			// Don't fail the rotation because the new active segment is already open and active!
 		}
 	}
