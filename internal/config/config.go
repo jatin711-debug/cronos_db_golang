@@ -458,6 +458,13 @@ func ValidateConfig(c *types.Config) error {
 		if c.AuthJWTSecret == "" && c.AuthJWTPublicKey == "" {
 			return fmt.Errorf("production mode requires auth-jwt-secret or auth-jwt-public-key")
 		}
+		if c.AuthPolicyFile == "" {
+			// Without a policy file the server falls back to AllowAllPolicy(), which
+			// makes every authenticated subject an admin on every topic — i.e. "auth
+			// enabled" would silently mean "no authorization". Require an explicit
+			// policy in production.
+			return fmt.Errorf("production mode requires auth-policy-file (use --dev to bypass); without it every authenticated subject is admin")
+		}
 		if !c.EncryptionEnabled {
 			return fmt.Errorf("production mode requires encryption at rest to be enabled (use --dev to bypass)")
 		}

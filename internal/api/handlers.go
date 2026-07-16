@@ -995,6 +995,13 @@ func (h *EventServiceHandler) Ack(stream types.EventService_AckServer) error {
 
 // Replay handles replay requests
 func (h *EventServiceHandler) Replay(req *types.ReplayRequest, stream types.EventService_ReplayServer) error {
+	// Topic-level authorization: Replay reads full partition history, so it
+	// requires at least subscribe permission on the topic. Skipped when auth is
+	// disabled (checkTopicAuth is a no-op then).
+	if err := h.checkTopicAuth(stream.Context(), req.GetTopic(), "subscribe"); err != nil {
+		return err
+	}
+
 	// Get partition
 	partitionID := req.GetPartitionId()
 	if partitionID < 0 {
