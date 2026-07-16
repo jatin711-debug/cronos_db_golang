@@ -427,6 +427,7 @@ func (s *Scheduler) checkpoint() {
 		NextTickMs:       int64(twStats.TickMs),
 		WheelSize:        int64(twStats.WheelSize),
 		LastCheckpointTS: now,
+		StartTimeMs:      s.startTimeMs,
 	}
 
 	// Write to file via temp+fsync+rename for crash safety.
@@ -646,9 +647,34 @@ func (s *Scheduler) recover() error {
 		return fmt.Errorf("unmarshal checkpoint: %w", err)
 	}
 
-	// Restore state
-	s.timingWheel.currentTick = checkpoint.CurrentTick
 	s.stats.ActiveTimers = checkpoint.ActiveTimers
+
+	// Rebase the timing wheel's absolute-time origin so its notion of "now"
+	// matches wall-clock time after a restart. The wheel is empty at this point
+	// (timers are re-added from the WAL after recovery), so we set currentTick
+	// directly rather than advancing through slots.
+	//
+	// Legacy checkpoints (no StartTimeMs) fall back to a fresh origin: keep the
+	// boot-sampled startTimeMs and reset currentTick to 0, which also yields
+	// currentAbsoluteMs == now. Either way, delays are computed against real time,
+	// so timers no longer fire spuriously on restart. Events that matured during
+	// downtime are handled separately by WAL replay (see replayWALTimers).
+	if checkpoint.StartTimeMs > 0 {
+		s.startTimeMs = checkpoint.StartTimeMs
+		s.timingWheel.startTimeMs = checkpoint.StartTimeMs
+		now := time.Now().UnixMilli()
+		tickMs := int64(s.timingWheel.tickMs)
+		if tickMs <= 0 {
+			tickMs = 1
+		}
+		rebased := (now - checkpoint.StartTimeMs) / tickMs
+		if rebased < 0 {
+			rebased = 0
+		}
+		s.timingWheel.currentTick = rebased
+	} else {
+		s.timingWheel.currentTick = 0
+	}
 
 	return nil
 }
@@ -719,4 +745,10 @@ type SchedulerCheckpoint struct {
 	NextTickMs       int64 `json:"next_tick_ms"`
 	WheelSize        int64 `json:"wheel_size"`
 	LastCheckpointTS int64 `json:"last_checkpoint_ts"`
+	// StartTimeMs is the wall-clock epoch the timing wheel's tick 0 corresponds to.
+	// Persisting it lets recovery keep the wheel's absolute-time origin stable
+	// across restarts; without it, startTimeMs was re-sampled at boot while
+	// currentTick was restored, so the wheel's "now" jumped ~uptime into the
+	// future and every timer with delay < uptime fired immediately on restart.
+	StartTimeMs int64 `json:"start_time_ms"`
 }
