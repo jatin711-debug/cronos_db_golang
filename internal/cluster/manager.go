@@ -281,6 +281,7 @@ func (m *Manager) reconcileLocalLeadership() {
 	pa := m.partitionAccessor
 	rt := m.router
 	mem := m.membership
+	raft := m.raft
 	nodeID := m.config.NodeID
 	m.mu.RUnlock()
 	if pa == nil || rt == nil || mem == nil {
@@ -293,9 +294,30 @@ func (m *Manager) reconcileLocalLeadership() {
 		nodeAddr[n.ID] = n.Address
 	}
 
+	// Raft-committed partition assignments are the authoritative source of
+	// leadership. The router's view is derived from the gossip ring and can
+	// transiently disagree, so we cross-check against the committed state: if Raft
+	// has committed a DIFFERENT node as leader for a partition, we must not
+	// self-promote from the gossip view (that is the split-brain vector). When Raft
+	// has no committed assignment yet (bootstrap) we fall back to the router view.
+	var committed map[int32]*PartitionInfo
+	if raft != nil {
+		if state := raft.GetState(); state != nil {
+			committed = state.Partitions
+		}
+	}
+
 	for partitionID, info := range rt.GetAllPartitions() {
 		if info == nil || info.LeaderID != nodeID {
 			continue // not led locally
+		}
+		// Defer to Raft-committed leadership when it names someone else.
+		if committed != nil {
+			if c, ok := committed[partitionID]; ok && c != nil && c.LeaderID != "" && c.LeaderID != nodeID {
+				log.Printf("[CLUSTER] reconcile: skip promote of partition %d; Raft-committed leader is %s (router said %s)",
+					partitionID, c.LeaderID, nodeID)
+				continue
+			}
 		}
 		// Idempotent: PromoteToLeader is a no-op (epoch refresh) once the local
 		// replication leader exists.
