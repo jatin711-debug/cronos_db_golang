@@ -96,6 +96,14 @@ func (g *InternalGRPCServer) RegisterRaftServer(srv types.RaftServiceServer) {
 	types.RegisterRaftServiceServer(g.server, srv)
 }
 
+// RegisterCrossRegionServer registers the cross-region replication service on
+// the internal listener. Cross-region replication writes arbitrary events into
+// any partition and reads any partition, so it must not be exposed on the public
+// client port — it belongs on the internal (peer-authenticated, mTLS) listener.
+func (g *InternalGRPCServer) RegisterCrossRegionServer(srv types.CrossRegionServiceServer) {
+	types.RegisterCrossRegionServiceServer(g.server, srv)
+}
+
 // Start starts the internal gRPC server.
 func (g *InternalGRPCServer) Start() error {
 	lis, err := net.Listen("tcp", g.config.Address)
