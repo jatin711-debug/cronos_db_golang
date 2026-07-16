@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main, developement]
+  pull_request:
+    branches: [main, developement]
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: build & unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          cache: true
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            internal/dedup/rust/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('internal/dedup/rust/Cargo.lock', 'internal/dedup/rust/Cargo.toml') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      # Builds and stages the cgo dedup shared library (libcronos_dedup.so on Linux).
+      - name: Build Rust dedup library
+        run: make rust-dedup
+
+      - name: go vet + gofmt
+        run: make lint
+
+      # Unit suite excludes tests/integration and tests/chaos (which need a running
+      # cluster/docker). It DOES include the regression tests added for the
+      # correctness remediation — restart/rotation/truncation (internal/storage),
+      # follower-ahead reconcile + admin authz (internal/api), FSM offsets + ring
+      # reconcile (internal/cluster), dedup recovery (internal/partition), etc.
+      - name: Unit tests
+        run: make test-unit

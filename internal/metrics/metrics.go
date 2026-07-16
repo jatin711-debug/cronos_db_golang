@@ -85,20 +85,12 @@ var (
 		[]string{"partition"},
 	)
 
-	replicationLagSeconds = promauto.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "cronos_replication_lag_seconds",
-			Help: "Replication lag in seconds between leader and followers per partition",
-		},
-		[]string{"partition", "follower"},
-	)
-	partitionLeaderLeaseStatus = promauto.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "cronos_partition_leader_lease_status",
-			Help: "Leader lease status (1=valid, 0=expired) per partition",
-		},
-		[]string{"partition"},
-	)
+	// NOTE: the canonical, populated replication-lag metric is
+	// `cronos_replication_lag` (in events), registered and updated by the
+	// replication leader (internal/replication/leader.go). A former
+	// `cronos_replication_lag_seconds` gauge + SetReplicationMetrics() existed here
+	// with zero callers (dead) and were removed to avoid advertising a metric that
+	// was never emitted.
 
 	consumerGroupLag = promauto.NewGaugeVec(
 		prometheus.GaugeOpts{
@@ -269,16 +261,6 @@ func SanitizeMetricLabel(method string) string {
 func SetTimingWheelMetrics(partitionID string, activeTimers int64, overflowLevel int64) {
 	timingWheelActiveTimers.WithLabelValues(partitionID).Set(float64(activeTimers))
 	timingWheelOverflowLevel.WithLabelValues(partitionID).Set(float64(overflowLevel))
-}
-
-// SetReplicationMetrics sets replication metrics for a partition.
-func SetReplicationMetrics(partitionID, followerID string, lagSeconds float64, leaseValid bool) {
-	replicationLagSeconds.WithLabelValues(partitionID, followerID).Set(lagSeconds)
-	leaseStatus := 0.0
-	if leaseValid {
-		leaseStatus = 1.0
-	}
-	partitionLeaderLeaseStatus.WithLabelValues(partitionID).Set(leaseStatus)
 }
 
 // SetConsumerGroupMetrics sets consumer group metrics.
