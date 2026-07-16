@@ -8,6 +8,108 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 )
 
+// TestWAL_TruncateToOffset exercises follower-log truncation: appending events,
+// truncating the divergent tail back to an offset, and asserting the WAL rewinds
+// (next offset, reads, and that new appends land contiguously at the truncation
+// point). Covers both a single-segment truncation and one spanning rotation.
+func TestWAL_TruncateToOffset(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		segSize    int64
+		total      int
+		truncateTo int64
+	}{
+		{"single_segment", 64 * 1024 * 1024, 30, 20},
+		{"across_segments", 400, 60, 15}, // tiny segments → truncation spans rotations
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir, err := os.MkdirTemp("", "wal_truncate_test")
+			if err != nil {
+				t.Fatalf("temp dir: %v", err)
+			}
+			defer os.RemoveAll(tmpDir)
+
+			config := &WALConfig{
+				SegmentSizeBytes: tc.segSize,
+				IndexInterval:    2,
+				FsyncMode:        "batch",
+				FlushIntervalMS:  50,
+			}
+			wal, err := NewWAL(tmpDir, 0, config, nil)
+			if err != nil {
+				t.Fatalf("create WAL: %v", err)
+			}
+			defer wal.Close()
+
+			for i := 0; i < tc.total; i++ {
+				ev := &types.Event{
+					MessageId:  fmt.Sprintf("t-%d", i),
+					ScheduleTs: int64(1000 + i),
+					Payload:    []byte(fmt.Sprintf("p-%d", i)),
+					Topic:      "test",
+				}
+				if err := wal.AppendEvent(ev); err != nil {
+					t.Fatalf("append %d: %v", i, err)
+				}
+			}
+			if err := wal.Flush(); err != nil {
+				t.Fatalf("flush: %v", err)
+			}
+
+			removed, err := wal.TruncateToOffset(tc.truncateTo)
+			if err != nil {
+				t.Fatalf("TruncateToOffset: %v", err)
+			}
+			if want := int64(tc.total) - tc.truncateTo; int64(removed) != want {
+				t.Fatalf("removed %d events, want %d", removed, want)
+			}
+
+			if got := wal.GetNextOffset(); got != tc.truncateTo {
+				t.Fatalf("next offset after truncate = %d, want %d", got, tc.truncateTo)
+			}
+
+			// Surviving events must be readable and contiguous.
+			survivors, err := wal.ReadEvents(0, tc.truncateTo-1)
+			if err != nil {
+				t.Fatalf("read survivors: %v", err)
+			}
+			if int64(len(survivors)) != tc.truncateTo {
+				t.Fatalf("expected %d surviving events, got %d", tc.truncateTo, len(survivors))
+			}
+			for i, ev := range survivors {
+				if ev.Offset != int64(i) {
+					t.Fatalf("survivor %d has offset %d", i, ev.Offset)
+				}
+			}
+
+			// Reading past the truncation point returns nothing.
+			after, err := wal.ReadEvents(tc.truncateTo, int64(tc.total))
+			if err != nil {
+				t.Fatalf("read after truncate: %v", err)
+			}
+			if len(after) != 0 {
+				t.Fatalf("expected no events past truncation, got %d", len(after))
+			}
+
+			// New appends must land contiguously at the truncation point.
+			newEv := &types.Event{MessageId: "post-trunc", ScheduleTs: 9999, Payload: []byte("x"), Topic: "test"}
+			if err := wal.AppendEvent(newEv); err != nil {
+				t.Fatalf("append after truncate: %v", err)
+			}
+			if err := wal.Flush(); err != nil {
+				t.Fatalf("flush after truncate: %v", err)
+			}
+			got, err := wal.ReadEvent(tc.truncateTo)
+			if err != nil {
+				t.Fatalf("read new event: %v", err)
+			}
+			if got.GetMessageId() != "post-trunc" {
+				t.Fatalf("new event at offset %d = %q, want post-trunc", tc.truncateTo, got.GetMessageId())
+			}
+		})
+	}
+}
+
 // TestWAL_ReadAfterRotation is a regression test for the rotated-segment read
 // bug: rotation used to Close() the old active segment's file handle while
 // keeping it in w.segments, so any read of a rotated segment failed with

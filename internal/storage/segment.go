@@ -1156,6 +1156,108 @@ func (s *Segment) ReadEventsByOffsetRange(startOffset, endOffset int64) ([]*type
 	return result, nil
 }
 
+// TruncateAfterOffset removes all records with offset > keepThroughOffset from
+// this segment, so its new last offset becomes keepThroughOffset. It is used by
+// follower log truncation when a higher-term leader's log diverges from (starts
+// before) the follower's tail. Records are located by scanning from the header;
+// the byte position of the first record to drop becomes the new segment size.
+//
+// Returns the number of records removed. If keepThroughOffset is at or past the
+// segment's last offset, it is a no-op.
+func (s *Segment) TruncateAfterOffset(keepThroughOffset int64) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closed {
+		return 0, fmt.Errorf("truncate on closed segment")
+	}
+	if keepThroughOffset >= s.lastOffset {
+		return 0, nil // nothing to drop
+	}
+
+	// Flush buffered/mmap writes so the on-disk view is complete before scanning.
+	if s.mmapData != nil {
+		if err := syncMmap(s.mmapData[:s.mmapWritePos]); err != nil {
+			return 0, fmt.Errorf("sync mmap before truncate: %w", err)
+		}
+	} else if err := s.writer.Flush(); err != nil {
+		return 0, fmt.Errorf("flush writer before truncate: %w", err)
+	}
+
+	// Scan from the header to find the byte position of the first record whose
+	// offset exceeds keepThroughOffset, and the new last-good offset.
+	var cutPos int64 = -1
+	var newLastOffset int64 = s.firstOffset - 1
+	var newLastTS int64
+	lengthBytes := make([]byte, 4)
+	recordBuf := make([]byte, 0, 4096)
+	currentPos := int64(64) // after header
+
+	for currentPos < s.sizeBytes {
+		recordStart := currentPos
+		if _, err := s.segmentFile.ReadAt(lengthBytes, currentPos); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return 0, fmt.Errorf("read length: %w", err)
+		}
+		length := int64(binary.BigEndian.Uint32(lengthBytes))
+		if length <= 4 || length > 10*1024*1024 {
+			break
+		}
+		recordLen := int(length - 4)
+		if cap(recordBuf) < recordLen {
+			recordBuf = make([]byte, recordLen)
+		}
+		record := recordBuf[:recordLen]
+		if _, err := s.segmentFile.ReadAt(record, currentPos+4); err != nil {
+			return 0, fmt.Errorf("read record: %w", err)
+		}
+		decrypted, err := s.decryptRecord(record, currentPos+4)
+		if err != nil {
+			return 0, fmt.Errorf("decrypt during truncate: %w", err)
+		}
+		event, err := parseEventRecordWithoutLength(decrypted)
+		if err != nil {
+			return 0, fmt.Errorf("parse during truncate: %w", err)
+		}
+
+		if event.Offset > keepThroughOffset {
+			cutPos = recordStart
+			break
+		}
+		newLastOffset = event.Offset
+		newLastTS = event.GetScheduleTs()
+		currentPos += 4 + int64(recordLen)
+	}
+
+	if cutPos < 0 {
+		return 0, nil // did not find any record to drop
+	}
+
+	// Physically truncate the file to cutPos. truncateToPosition handles the
+	// munmap/remap dance and updates sizeBytes + mmapWritePos. Lock order is
+	// s.mu (held) -> flushMu (taken inside), consistent with Close/closeLocked.
+	if err := s.truncateToPosition(cutPos); err != nil {
+		return 0, fmt.Errorf("truncate segment file to %d: %w", cutPos, err)
+	}
+
+	s.lastOffset = newLastOffset
+	s.lastTS = newLastTS
+	s.nextOffset = newLastOffset + 1
+
+	// Reconcile the sparse index so it holds no entries past the new last offset.
+	if s.index != nil {
+		if err := s.index.Truncate(newLastOffset); err != nil {
+			return 0, fmt.Errorf("truncate index to %d: %w", newLastOffset, err)
+		}
+	}
+
+	// Return value is advisory; the WAL computes the authoritative removed count
+	// from its offset counters. Report 1 to signal that a truncation occurred.
+	return 1, nil
+}
+
 // scan scans segment to recover metadata and handles tail corruption
 // by truncating any half-written or corrupt frames at the end of the file.
 func (s *Segment) scan() error {

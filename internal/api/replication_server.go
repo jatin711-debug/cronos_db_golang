@@ -72,6 +72,27 @@ func (h *ReplicationServiceHandler) Append(ctx context.Context, req *types.Repli
 	}
 
 	if len(req.GetEvents()) > 0 {
+		// Follower-ahead reconciliation: if this (valid-term) leader's batch starts
+		// BEFORE our next offset, our tail diverged from the leader's log (e.g. we
+		// were a former leader that accepted un-replicated writes). Discard the
+		// divergent tail back to the leader's start offset, then accept the batch.
+		// This is epoch-fenced: we only reach here after the term check above, so a
+		// stale leader can never force truncation.
+		leaderStart := req.GetEvents()[0].GetOffset()
+		if leaderStart < p.Wal.GetNextOffset() {
+			removed, truncErr := p.Wal.TruncateToOffset(leaderStart)
+			if truncErr != nil {
+				return &types.ReplicationAppendResponse{
+					Success:    false,
+					Error:      fmt.Sprintf("truncate divergent tail to %d: %v", leaderStart, truncErr),
+					LastOffset: p.Wal.GetLastOffset(),
+					NextOffset: p.Wal.GetNextOffset(),
+					Term:       p.Epoch,
+				}, nil
+			}
+			_ = removed // the WAL logs the truncation detail
+		}
+
 		if err := p.Wal.AppendReplicatedBatch(req.GetEvents()); err != nil {
 			return &types.ReplicationAppendResponse{
 				Success:    false,
