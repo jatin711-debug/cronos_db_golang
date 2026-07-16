@@ -141,6 +141,14 @@ func TestCircuitBreakerRecordsRetryableErrors(t *testing.T) {
 			TTL: 5 * time.Minute,
 		},
 		Security: SecurityConfig{Insecure: true},
+		// The per-address breaker is created from the CLIENT config, so the
+		// threshold must be set here. (A non-positive threshold disables the
+		// breaker rather than opening on the first failure.)
+		CircuitBreaker: circuitbreaker.Config{
+			FailureThreshold: 2,
+			SuccessThreshold: 1,
+			Timeout:          time.Minute,
+		},
 	})
 	if err != nil {
 		t.Fatalf("dial: %v", err)

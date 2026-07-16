@@ -100,6 +100,14 @@ func (cb *CircuitBreaker) RecordSuccess() {
 
 // RecordFailure marks a failed call.
 func (cb *CircuitBreaker) RecordFailure() {
+	// A non-positive FailureThreshold disables the breaker. Previously the trip
+	// condition `failures >= FailureThreshold` was satisfied on the very first
+	// failure when the threshold was 0 (the documented "disabled" default), so the
+	// breaker opened immediately — the inverse of the intended behavior.
+	if cb.cfg.FailureThreshold <= 0 {
+		return
+	}
+
 	cb.lastFailAt.Store(time.Now().UnixNano())
 
 	switch State(cb.state.Load()) {

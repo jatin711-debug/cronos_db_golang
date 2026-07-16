@@ -131,6 +131,11 @@ type Producer struct {
 	closed      atomic.Bool
 	queuedBytes atomic.Int64
 	wg          sync.WaitGroup
+	// closeMu guards the queue-channel lifecycle: enqueue paths take RLock, Close
+	// takes the write lock before close(queue). This makes a send on the closed
+	// channel impossible (the closed.Load() check alone left a TOCTOU window where
+	// Close could close the channel between the check and the send → panic).
+	closeMu sync.RWMutex
 }
 
 // NewProducer creates a producer bound to a client.
@@ -523,6 +528,16 @@ func (p *Producer) SendAsyncContext(ctx context.Context, msg Message, callback D
 		sizeHint: sizeHint,
 	}
 
+	// Hold the read lock across the enqueue so Close (which takes the write lock
+	// before close(queue)) cannot close the channel out from under us. Re-check
+	// closed under the lock to cover a Close that completed before we acquired it.
+	p.closeMu.RLock()
+	defer p.closeMu.RUnlock()
+	if p.closed.Load() {
+		p.releaseQueuedBytes(sizeHint)
+		return nil, p.wrapErr("producer.send_async", ErrorKindValidation, fmt.Errorf("producer is closed"))
+	}
+
 	if p.cfg.BlockOnQueueFull {
 		select {
 		case <-ctx.Done():
@@ -557,7 +572,11 @@ func (p *Producer) CloseWithContext(ctx context.Context) error {
 	if !p.closed.CompareAndSwap(false, true) {
 		return nil
 	}
+	// Take the write lock so no enqueue is mid-flight (they hold the read lock and
+	// re-check closed) before closing the channel — prevents a send-on-closed panic.
+	p.closeMu.Lock()
 	close(p.queue)
+	p.closeMu.Unlock()
 
 	done := make(chan struct{})
 	utils.GoSafe("producer-close-wait", func() {
