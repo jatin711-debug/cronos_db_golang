@@ -239,6 +239,17 @@ func OpenSegment(dataDir string, filename string, cipher *SegmentCipher) (*Segme
 	// Set nextOffset based on lastOffset found during scan
 	segment.nextOffset = segment.lastOffset + 1
 
+	// Reconcile the mmap write cursor with the real data end discovered by scan.
+	// The constructor set mmapWritePos to the on-disk size, which for a segment
+	// with a preallocated tail is far past the last real record. If scan trimmed
+	// the tail, truncateToPosition already reset this; set it explicitly to cover
+	// the no-truncation path and any future scan changes. Without this, the first
+	// append after reopen writes at the preallocated EOF, leaving a zero gap that
+	// silently truncates all subsequent range reads (data-loss on every restart).
+	if segment.mmapData != nil {
+		segment.mmapWritePos = segment.sizeBytes
+	}
+
 	// Position the file handle at the end of the data so the buffered writer
 	// (used for encrypted records) appends instead of overwriting.
 	if _, err := file.Seek(segment.sizeBytes, io.SeekStart); err != nil {
@@ -1227,29 +1238,43 @@ func (s *Segment) scan() error {
 		s.lastOffset = event.Offset
 		s.lastTS = event.GetScheduleTs()
 		lastGoodPos = recordStartPos + 4 + int64(len(recordData)) // After length + recordData
-
-		// Update segment size to reflect truncated state
-		s.sizeBytes = lastGoodPos
 	}
 
-	// If we found corrupt data at the tail, truncate the file. Compare against
-	// the original on-disk size (origSizeBytes), not s.sizeBytes which the loop
-	// above already advanced to lastGoodPos.
-	if lastGoodPos < origSizeBytes {
-		if err := s.truncateToPosition(lastGoodPos); err != nil {
-			return fmt.Errorf("truncate corrupt tail at %d: %w", lastGoodPos, err)
-		}
-		log.Printf("[SEGMENT] Truncated %d bytes of corrupt tail", origSizeBytes-lastGoodPos)
+	// Position the logical size and (below, in OpenSegment) the mmap write cursor
+	// at the real data end FIRST. This is the actual correctness fix: appends land
+	// immediately after the last valid record and reads stop at lastOffset, so a
+	// preallocated or corrupt tail past lastGoodPos is never written into or read.
+	// Previously the scan loop advanced s.sizeBytes to lastGoodPos, which made the
+	// truncateToPosition guard (`pos >= s.sizeBytes`) a silent no-op AND left
+	// mmapWritePos at the preallocated EOF — so the first append after reopen wrote
+	// ~prealloc-size bytes past the data, corrupting range reads on every restart.
+	realDataEnd := lastGoodPos
+	s.sizeBytes = origSizeBytes // let truncateToPosition see the true on-disk size
 
-		// Reconcile the sparse index with the truncated segment. Without this,
-		// the index may still contain entries whose FilePosition points past
-		// the new (shorter) segment EOF, causing later reads to dereference
-		// uninitialized bytes. s.lastOffset is the last valid event offset.
+	// If there is a corrupt or preallocated tail past the last valid record, trim
+	// it to reclaim disk. This is best-effort: on failure (e.g. Windows won't
+	// truncate a file another handle has mmap'd) we log and continue, because the
+	// cursor is already positioned correctly and correctness does not depend on the
+	// physical trim.
+	if realDataEnd < origSizeBytes {
+		if err := s.truncateToPosition(realDataEnd); err != nil {
+			log.Printf("[SEGMENT] Best-effort tail trim to %d failed (continuing): %v", realDataEnd, err)
+			s.sizeBytes = realDataEnd // truncateToPosition did not set it on failure
+		} else {
+			log.Printf("[SEGMENT] Trimmed %d bytes of corrupt/preallocated tail", origSizeBytes-realDataEnd)
+		}
+
+		// Reconcile the sparse index with the real data end regardless of whether
+		// the physical trim succeeded. Without this, the index may still contain
+		// entries whose FilePosition points past lastGoodPos, causing later reads
+		// to dereference uninitialized bytes. s.lastOffset is the last valid offset.
 		if s.index != nil {
 			if err := s.index.Truncate(s.lastOffset); err != nil {
 				return fmt.Errorf("truncate index to offset %d: %w", s.lastOffset, err)
 			}
 		}
+	} else {
+		s.sizeBytes = realDataEnd
 	}
 
 	// If we couldn't find any events, start from firstOffset
@@ -1285,8 +1310,18 @@ func (s *Segment) truncateToPosition(pos int64) error {
 		s.mmapData = nil
 	}
 
-	// Truncate the file
+	// Truncate the file. If this fails (e.g. Windows refuses to truncate a file
+	// that another handle still has memory-mapped), remap at the ORIGINAL size so
+	// the segment remains fully usable, and surface the error to the caller. The
+	// caller in scan() treats trim failure as non-fatal because sizeBytes and
+	// mmapWritePos are already positioned at the real data end — physical
+	// truncation only reclaims the unused preallocated/corrupt tail on disk.
 	if err := s.segmentFile.Truncate(pos); err != nil {
+		if hadMmap {
+			if remapData, remapErr := mmapFile(s.segmentFile, s.mmapSize); remapErr == nil {
+				s.mmapData = remapData
+			}
+		}
 		return fmt.Errorf("truncate to %d: %w", pos, err)
 	}
 
@@ -1395,6 +1430,53 @@ func (s *Segment) Close() error {
 	defer s.flushMu.Unlock()
 
 	return s.closeLocked()
+}
+
+// Deactivate releases the write-side resources of a rotated (now inactive)
+// segment — it flushes and syncs pending writes and unmaps the mmap — while
+// KEEPING the read file handle and sparse index open so historical reads
+// (Replay, follower catch-up, cross-region fetch) continue to work.
+//
+// Previously rotation called Close(), which shut the file handle; every read of
+// a rotated segment then failed with os.ErrClosed. Reads use segmentFile.ReadAt
+// (never the mmap), so dropping the mmap is safe. The segment remains fully
+// readable until retention deletes it via Delete()/Close().
+func (s *Segment) Deactivate() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
+
+	if s.closed {
+		return nil
+	}
+
+	var errs []error
+
+	// Flush any buffered (e.g. encrypted) records still in the writer.
+	if err := s.writer.Flush(); err != nil {
+		errs = append(errs, fmt.Errorf("flush writer: %w", err))
+	}
+
+	// Sync and unmap the mmap; reads do not depend on it.
+	if s.mmapData != nil {
+		if err := syncMmap(s.mmapData[:s.mmapWritePos]); err != nil {
+			errs = append(errs, fmt.Errorf("sync mmap: %w", err))
+		}
+		if err := munmapFile(s.mmapData); err != nil {
+			errs = append(errs, fmt.Errorf("unmap: %w", err))
+		}
+		s.mmapData = nil
+	}
+
+	// Persist the file so a reader opening it fresh sees all data.
+	if err := s.segmentFile.Sync(); err != nil {
+		errs = append(errs, fmt.Errorf("sync file: %w", err))
+	}
+
+	s.isActive = false
+	// NOTE: segmentFile and index intentionally stay open for reads.
+	return errors.Join(errs...)
 }
 
 // closeLocked performs the actual close logic. Caller must hold s.mu.
