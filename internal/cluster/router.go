@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"time"
 )
 
 // PartitionAccessor interface for triggering partition sync operations
@@ -114,14 +115,70 @@ func (r *Router) initializePartitions() {
 	log.Printf("[ROUTER] Initialized %d partitions across %d nodes", r.numPartitions, r.hashRing.Size())
 }
 
-// watchMembershipEvents watches for membership changes and rebalances
+// watchMembershipEvents watches for membership changes and rebalances. It also
+// runs a periodic full reconcile of the hash ring against the authoritative
+// alive-node set: membership events are delivered over a bounded channel that
+// drops on overflow, so an event-only ring could diverge permanently (stale ring
+// → wrong partition owners → split-brain). The reconcile makes any dropped event
+// self-healing.
 func (r *Router) watchMembershipEvents() {
-	for event := range r.membership.Events() {
-		switch event.Type {
-		case EventTypeJoin:
-			r.onNodeJoin(event.Node)
-		case EventTypeLeave, EventTypeFailed:
-			r.onNodeLeave(event.Node)
+	ticker := time.NewTicker(ringReconcileInterval)
+	defer ticker.Stop()
+
+	events := r.membership.Events()
+	for {
+		select {
+		case event, ok := <-events:
+			if !ok {
+				return
+			}
+			switch event.Type {
+			case EventTypeJoin:
+				r.onNodeJoin(event.Node)
+			case EventTypeLeave, EventTypeFailed:
+				r.onNodeLeave(event.Node)
+			}
+		case <-ticker.C:
+			r.reconcileRing()
+		}
+	}
+}
+
+// ringReconcileInterval is how often the router re-syncs its hash ring with the
+// authoritative membership view to recover from any dropped membership events.
+const ringReconcileInterval = 10 * time.Second
+
+// reconcileRing brings the hash ring into agreement with the current alive-node
+// set, adding nodes that are alive but missing from the ring and removing nodes
+// in the ring that are no longer alive. It is idempotent and only rebalances
+// when there is an actual delta, so steady-state ticks are cheap.
+func (r *Router) reconcileRing() {
+	alive := r.membership.GetAliveNodes()
+	aliveSet := make(map[string]*Node, len(alive))
+	for _, n := range alive {
+		aliveSet[n.ID] = n
+	}
+
+	r.mu.RLock()
+	ringNodes := r.hashRing.Nodes()
+	r.mu.RUnlock()
+	ringSet := make(map[string]bool, len(ringNodes))
+	for _, id := range ringNodes {
+		ringSet[id] = true
+	}
+
+	// Alive but not in the ring → treat as a (missed) join.
+	for id, n := range aliveSet {
+		if !ringSet[id] {
+			log.Printf("[ROUTER] Reconcile: adding missing node %s to ring", id)
+			r.onNodeJoin(n)
+		}
+	}
+	// In the ring but no longer alive → treat as a (missed) leave.
+	for _, id := range ringNodes {
+		if _, ok := aliveSet[id]; !ok {
+			log.Printf("[ROUTER] Reconcile: removing dead node %s from ring", id)
+			r.onNodeLeave(&Node{ID: id})
 		}
 	}
 }

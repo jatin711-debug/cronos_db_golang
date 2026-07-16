@@ -279,7 +279,14 @@ func main() {
 				})
 			}
 			if crossRegionReplicator != nil && cfg.NodeRegion != "" {
-				crossRegionReplicator.ReplicateAsync(event)
+				// Do not re-replicate events that arrived FROM another region.
+				// CrossRegionServer.ReplicateEvents tags received events with
+				// source_region; without this guard, appending a received event
+				// fires this hook and ships it straight back out, creating an
+				// infinite cross-region echo loop.
+				if event.GetMeta()["source_region"] == "" {
+					crossRegionReplicator.ReplicateAsync(event)
+				}
 			}
 		})
 	}
