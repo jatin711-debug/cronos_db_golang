@@ -127,7 +127,19 @@ touches the hot path, it must be gated so RF=1 / no-encryption / no-cluster stay
   `PartitionParticipant` is built with PM in `BeginTransaction`.
 - **Verify:** test: begin→prepare→commit via handler → WAL contains tx markers.
 
-### [ ] 2.5 — Backpressure drops events with no requeue / no resume-from-committed
+### [~] 2.5 — Backpressure drops events with no requeue / no resume-from-committed
+- **DONE:** resume-from-committed is already implemented (subscribe seeds NextOffset
+  from the committed offset, handlers.go:859); backpressure skips (no-credit and
+  in-flight-cap, both single and batch paths) now increment
+  `cronos_dispatcher_backpressure_skips_total{partition,reason}` instead of being
+  silent. The "acks commit on nack" claim was disproven (no change needed).
+- **DEFERRED (follow-up):** true requeue / worker-level flow-control so a
+  credit-exhausted event is re-driven from the WAL rather than relying on consumer
+  reconnect. This is an architectural change to the push-based delivery model and
+  is intentionally out of scope for this pass to avoid destabilizing the hot path.
+
+<!-- original item retained below for detail -->
+#### 2.5 detail
 - **Symptom:** Zero credits / in-flight cap → event skipped after dequeue, no requeue, no metric.
   Disconnect abandons in-flight; `NextOffset` written but never re-read to resume.
 - **Root cause:** `continue` on no-credit ([dispatcher.go:647-649](internal/delivery/dispatcher.go:647));

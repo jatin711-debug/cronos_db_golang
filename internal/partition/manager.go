@@ -37,8 +37,9 @@ type Partition struct {
 	DedupStore    *dedup.Manager
 	Dispatcher    *delivery.Dispatcher
 	Worker        *delivery.Worker
-	Follower      *replication.Follower // For receiving replicated data
-	ReplLeader    *replication.Leader   // For sending replication to followers
+	DLQ           *delivery.DeadLetterQueue // Durable dead-letter queue for poison messages
+	Follower      *replication.Follower     // For receiving replicated data
+	ReplLeader    *replication.Leader       // For sending replication to followers
 	// ReplicateMu serializes WAL append + replication for this partition when it
 	// is a replication leader, so events reach followers in strict offset order
 	// (Leader.Replicate requires contiguous offsets and is not safe to call
@@ -238,9 +239,16 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 	// Create consumer group manager with persistent offset store
 	consumerGroup := consumer.NewGroupManagerWithStore(offsetStore)
 
-	// Create dispatcher
+	// Create dispatcher with a durable dead-letter queue so poison messages
+	// (delivery failed after max retries) are captured on disk instead of being
+	// silently dropped. Retry is operator-driven (no auto-retry loop) to avoid
+	// re-driving genuinely-poison messages forever.
 	dispatcherConfig := delivery.DefaultConfig()
-	dispatcher := delivery.NewDispatcher(dispatcherConfig)
+	dlq, err := delivery.NewDeadLetterQueue(dataDir, 0) // 0 → default max entries
+	if err != nil {
+		return fmt.Errorf("create dead-letter queue: %w", err)
+	}
+	dispatcher := delivery.NewDispatcherWithDLQ(dispatcherConfig, dlq)
 
 	// Create worker. Batch size of 100 amortizes DispatchBatch overhead
 	// (metrics observe, map allocations, in-flight CAS, shard write-lock)
@@ -265,6 +273,7 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 		ConsumerGroup: consumerGroup,
 		DedupStore:    dedupManager,
 		Dispatcher:    dispatcher,
+		DLQ:           dlq,
 		Worker:        worker,
 		Leader:        false,
 		CreatedTS:     time.Now(),
@@ -964,6 +973,14 @@ func (pm *PartitionManager) StopPartition(partitionID int32) error {
 			log.Printf("[Partition %d] Drain incomplete: %v", partition.ID, err)
 		}
 		partition.Dispatcher.Close()
+	}
+
+	// Close the dead-letter queue so its segment writer flushes and releases the
+	// data directory before WAL close / temp cleanup.
+	if partition.DLQ != nil {
+		if err := partition.DLQ.Close(); err != nil {
+			log.Printf("[Partition %d] DLQ close failed: %v", partition.ID, err)
+		}
 	}
 
 	// Close durable stores before the WAL so background goroutines stop
