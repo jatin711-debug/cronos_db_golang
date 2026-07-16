@@ -123,24 +123,43 @@ func (c *SegmentCipher) Decrypt(ciphertext []byte) ([]byte, error) {
 	return c.aead.Open(nil, nonce, ct, nil)
 }
 
-// EncryptRecord encrypts a WAL record payload with a deterministic counter nonce. The
-// returned format is [version 1B][ciphertext]. The nonce is derived from the partition ID
-// and the ciphertext's byte position (ciphertextPos) inside the segment file.
+// Record cipher-format versions.
+//
+// v1 (legacy, decrypt-only): [1][ciphertext], nonce = partitionID || position.
+//   The position-derived counter nonce reused the same (key, nonce) pair across
+//   segments (positions restart per segment), which is catastrophic for AES-GCM.
+//   We still DECRYPT v1 so previously-written data remains readable.
+// v2 (current): [2][nonce 12B][ciphertext], nonce = 12 random bytes per record.
+//   A fresh random nonce per record removes the counter-collision class entirely.
+const (
+	recordCipherV1 = byte(1)
+	recordCipherV2 = byte(2)
+)
+
+// EncryptRecord encrypts a WAL record payload with a fresh random 12-byte GCM
+// nonce (format v2). The returned layout is [version=2][nonce 12B][ciphertext].
+// ciphertextPos is accepted for API compatibility but is no longer used to derive
+// the nonce — deriving nonces from position was the source of GCM nonce reuse.
 func (c *SegmentCipher) EncryptRecord(plaintext []byte, ciphertextPos int64) ([]byte, error) {
 	if c.aead == nil {
 		return nil, fmt.Errorf("cipher not initialized")
 	}
-	nonce := c.nonceForRecord(ciphertextPos)
-	ct := c.aead.Seal(nil, nonce[:], plaintext, nil)
-	out := make([]byte, 1+len(ct))
-	out[0] = 1 // cipher-format version
-	copy(out[1:], ct)
-	return out, nil
+	_ = ciphertextPos // retained for signature compatibility; v2 uses a random nonce
+	ns := c.aead.NonceSize()
+	out := make([]byte, 1+ns)
+	out[0] = recordCipherV2
+	if _, err := io.ReadFull(rand.Reader, out[1:1+ns]); err != nil {
+		return nil, fmt.Errorf("generate record nonce: %w", err)
+	}
+	// Seal appends the ciphertext after the version+nonce header we already wrote.
+	return c.aead.Seal(out, out[1:1+ns], plaintext, nil), nil
 }
 
-// DecryptRecord decrypts a WAL record ciphertext produced by EncryptRecord. ciphertextPos
-// must be the byte offset of the ciphertext (after the 4-byte length prefix) inside the
-// segment file.
+// DecryptRecord decrypts a WAL record ciphertext produced by EncryptRecord.
+// It handles both v2 (random nonce embedded in the record) and legacy v1
+// (position-derived nonce). ciphertextPos must be the byte offset of the
+// ciphertext (after the 4-byte length prefix) inside the segment file; it is
+// only used to reconstruct the v1 nonce.
 func (c *SegmentCipher) DecryptRecord(ciphertext []byte, ciphertextPos int64) ([]byte, error) {
 	if c.aead == nil {
 		return nil, fmt.Errorf("cipher not initialized")
@@ -149,12 +168,20 @@ func (c *SegmentCipher) DecryptRecord(ciphertext []byte, ciphertextPos int64) ([
 		return nil, fmt.Errorf("empty record ciphertext")
 	}
 	version := ciphertext[0]
-	if version != 1 {
+	switch version {
+	case recordCipherV1:
+		nonce := c.nonceForRecord(ciphertextPos)
+		return c.aead.Open(nil, nonce[:], ciphertext[1:], nil)
+	case recordCipherV2:
+		ns := c.aead.NonceSize()
+		if len(ciphertext) < 1+ns {
+			return nil, fmt.Errorf("record too short for v2 nonce")
+		}
+		nonce := ciphertext[1 : 1+ns]
+		return c.aead.Open(nil, nonce, ciphertext[1+ns:], nil)
+	default:
 		return nil, fmt.Errorf("unsupported record cipher version: %d", version)
 	}
-	ct := ciphertext[1:]
-	nonce := c.nonceForRecord(ciphertextPos)
-	return c.aead.Open(nil, nonce[:], ct, nil)
 }
 
 // EncryptedFile wraps a file with transparent encryption/decryption.

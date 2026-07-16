@@ -203,6 +203,82 @@ func TestLoadMasterKey(t *testing.T) {
 	})
 }
 
+// TestSegmentCipher_RecordNonceUniqueness is a regression test for the AES-GCM
+// nonce-reuse bug: record nonces were derived from the ciphertext byte position,
+// which restarts per segment, so the same (key, nonce) pair recurred across
+// segments. v2 uses a fresh random nonce per record. This asserts that encrypting
+// the same plaintext at the same position twice yields different ciphertext
+// (different nonce) and that both round-trip.
+func TestSegmentCipher_RecordNonceUniqueness(t *testing.T) {
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i * 7)
+	}
+	cipher, err := NewSegmentCipher(key, 3)
+	if err != nil {
+		t.Fatalf("NewSegmentCipher: %v", err)
+	}
+
+	plaintext := []byte(`{"user":"bob","id":99}`)
+	const pos = int64(64) // same position for both — the v1 collision scenario
+
+	ct1, err := cipher.EncryptRecord(plaintext, pos)
+	if err != nil {
+		t.Fatalf("EncryptRecord 1: %v", err)
+	}
+	ct2, err := cipher.EncryptRecord(plaintext, pos)
+	if err != nil {
+		t.Fatalf("EncryptRecord 2: %v", err)
+	}
+
+	if ct1[0] != recordCipherV2 {
+		t.Fatalf("expected v2 record format, got version %d", ct1[0])
+	}
+	if bytes.Equal(ct1, ct2) {
+		t.Fatal("same plaintext at same position produced identical ciphertext (nonce reuse)")
+	}
+
+	for i, ct := range [][]byte{ct1, ct2} {
+		got, err := cipher.DecryptRecord(ct, pos)
+		if err != nil {
+			t.Fatalf("DecryptRecord %d: %v", i, err)
+		}
+		if !bytes.Equal(got, plaintext) {
+			t.Fatalf("round-trip %d mismatch: got %q", i, got)
+		}
+	}
+}
+
+// TestSegmentCipher_RecordV1BackwardCompat proves legacy v1 records (deterministic
+// position nonce) still decrypt after the switch to v2 random nonces, so data
+// written by older builds remains readable.
+func TestSegmentCipher_RecordV1BackwardCompat(t *testing.T) {
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	cipher, err := NewSegmentCipher(key, 1)
+	if err != nil {
+		t.Fatalf("NewSegmentCipher: %v", err)
+	}
+
+	plaintext := []byte("legacy-v1-record")
+	const pos = int64(128)
+
+	// Hand-build a v1 record: [1][ciphertext] with the deterministic nonce.
+	nonce := cipher.nonceForRecord(pos)
+	ct := cipher.aead.Seal(nil, nonce[:], plaintext, nil)
+	v1 := append([]byte{recordCipherV1}, ct...)
+
+	got, err := cipher.DecryptRecord(v1, pos)
+	if err != nil {
+		t.Fatalf("DecryptRecord v1: %v", err)
+	}
+	if !bytes.Equal(got, plaintext) {
+		t.Fatalf("v1 round-trip mismatch: got %q", got)
+	}
+}
+
 func TestEncryptedFile(t *testing.T) {
 	key := make([]byte, 32)
 	for i := range key {

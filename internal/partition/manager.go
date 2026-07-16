@@ -564,6 +564,11 @@ func (pm *PartitionManager) startPartitionInternal(partition *Partition) error {
 		pm.replayWALTimers(partition)
 	}
 
+	// Re-seed the dedup store from the WAL tail. The dedup Pebble store runs with
+	// DisableWAL + NoSync for throughput, so claims made just before a crash may be
+	// missing; the WAL is the durable record of what was actually accepted.
+	pm.recoverDedupFromWAL(partition)
+
 	// Start scheduler
 	partition.Scheduler.Start()
 
@@ -633,6 +638,70 @@ func (pm *PartitionManager) startPartitionInternal(partition *Partition) error {
 	})
 
 	return nil
+}
+
+// maxDedupRecoveryEvents bounds how many trailing WAL events are re-driven into
+// the dedup store on boot. The dedup store uses PebbleDB with DisableWAL + NoSync
+// for throughput, so recent claims can be lost on a crash; on restart we re-Put
+// the message IDs of the WAL tail (the durable source of truth) so duplicates are
+// still detected. The bound caps boot time on very large WALs — anything older is
+// almost certainly already flushed to the dedup Pebble store or past the TTL.
+const maxDedupRecoveryEvents = 500000
+
+// recoverDedupFromWAL re-populates the dedup store from the tail of the WAL so
+// message IDs accepted just before a crash (and lost from the NoSync dedup
+// Pebble memtable) are still recognized as duplicates after restart. It is
+// bounded by maxDedupRecoveryEvents and skips events already older than the
+// dedup TTL, since those would be pruned from the dedup store anyway.
+func (pm *PartitionManager) recoverDedupFromWAL(partition *Partition) {
+	if partition.DedupStore == nil || partition.Wal == nil {
+		return
+	}
+	lastOffset := partition.Wal.GetLastOffset()
+	if lastOffset < 0 {
+		return
+	}
+
+	startOffset := int64(0)
+	if lastOffset-maxDedupRecoveryEvents+1 > 0 {
+		startOffset = lastOffset - maxDedupRecoveryEvents + 1
+	}
+
+	ttlMs := int64(pm.config.DedupTTLHours) * 60 * 60 * 1000
+	minCreatedTS := int64(0)
+	if ttlMs > 0 {
+		minCreatedTS = time.Now().UnixMilli() - ttlMs
+	}
+
+	recovered := 0
+	const batch int64 = 10000
+	for from := startOffset; from <= lastOffset; from += batch {
+		to := min(from+batch-1, lastOffset)
+		events, err := partition.Wal.ReadEvents(from, to)
+		if err != nil {
+			log.Printf("[Partition %d] Dedup recovery read failed at offsets %d-%d: %v", partition.ID, from, to, err)
+			return
+		}
+		for _, ev := range events {
+			mid := ev.GetMessageId()
+			if mid == "" {
+				continue
+			}
+			// Skip entries already past the dedup TTL — they carry no dedup value.
+			if minCreatedTS > 0 && ev.GetCreatedTs() > 0 && ev.GetCreatedTs() < minCreatedTS {
+				continue
+			}
+			if err := partition.DedupStore.Put(mid, ev.Offset, ev.GetCreatedTs()); err != nil {
+				log.Printf("[Partition %d] Dedup recovery Put failed for %q: %v", partition.ID, mid, err)
+				continue
+			}
+			recovered++
+		}
+	}
+	if recovered > 0 {
+		log.Printf("[Partition %d] Dedup recovery: re-seeded %d message IDs from WAL tail (offsets %d-%d)",
+			partition.ID, recovered, startOffset, lastOffset)
+	}
 }
 
 // replayWALTimers reads all events from the WAL and re-schedules any whose
