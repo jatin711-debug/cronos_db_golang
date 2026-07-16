@@ -750,25 +750,33 @@ func (s *Segment) writeRecord(record []byte) (int64, error) {
 
 // writeRecordMmap writes directly to memory-mapped file (zero-copy, zero-syscall).
 func (s *Segment) writeRecordMmap(record []byte) (int64, error) {
-	recordLen := len(record)
+	recordLen := int64(len(record))
 	if recordLen == 0 {
 		return 0, nil
 	}
 
-	// Check if we have space in mmap
-	if s.mmapWritePos+int64(recordLen) > s.mmapSize {
-		// Remap with larger size
-		if err := s.remapMmap(s.mmapSize * 2); err != nil {
+	// Grow the mapping if the record would not fit. Use len(s.mmapData) — the
+	// actual mapped length — as the authoritative bound rather than s.mmapSize,
+	// so a stale/oversized mmapSize can never let the copy below run past the end
+	// of the real buffer. Ensure the new size is large enough for THIS record even
+	// when a single record exceeds the current size (doubling alone can fall short).
+	if s.mmapWritePos+recordLen > int64(len(s.mmapData)) {
+		needed := s.mmapWritePos + recordLen
+		newSize := s.mmapSize * 2
+		if newSize < needed {
+			newSize = needed
+		}
+		if err := s.remapMmap(newSize); err != nil {
 			return 0, fmt.Errorf("remap mmap: %w", err)
 		}
 	}
 
 	// Copy directly to mmap (single memcpy, no syscall)
 	copy(s.mmapData[s.mmapWritePos:], record)
-	s.mmapWritePos += int64(recordLen)
+	s.mmapWritePos += recordLen
 	s.sizeBytes = s.mmapWritePos
 
-	return int64(recordLen), nil
+	return recordLen, nil
 }
 
 // writeRecordBuffered writes using bufio.Writer (for encryption or fallback).
@@ -828,7 +836,10 @@ func (s *Segment) remapMmap(newSize int64) error {
 	}
 
 	s.mmapData = mmapData
-	s.mmapSize = newSize
+	// Track the ACTUAL mapped length, not the requested newSize. They are equal
+	// here, but sourcing mmapSize from len(mmapData) guarantees the two never
+	// diverge — the write path relies on that invariant to bound its copies.
+	s.mmapSize = int64(len(mmapData))
 	return nil
 }
 
@@ -1342,41 +1353,33 @@ func (s *Segment) scan() error {
 		lastGoodPos = recordStartPos + 4 + int64(len(recordData)) // After length + recordData
 	}
 
-	// Position the logical size and (below, in OpenSegment) the mmap write cursor
-	// at the real data end FIRST. This is the actual correctness fix: appends land
-	// immediately after the last valid record and reads stop at lastOffset, so a
-	// preallocated or corrupt tail past lastGoodPos is never written into or read.
-	// Previously the scan loop advanced s.sizeBytes to lastGoodPos, which made the
-	// truncateToPosition guard (`pos >= s.sizeBytes`) a silent no-op AND left
-	// mmapWritePos at the preallocated EOF — so the first append after reopen wrote
-	// ~prealloc-size bytes past the data, corrupting range reads on every restart.
+	// Position the logical size at the real data end. OpenSegment then sets the
+	// mmap write cursor (mmapWritePos) to this value. This is the actual corruption
+	// fix: appends land immediately after the last valid record and reads stop at
+	// lastOffset, so a preallocated or corrupt tail past lastGoodPos is never
+	// written into or read. Previously the scan loop advanced s.sizeBytes to
+	// lastGoodPos, which left mmapWritePos at the preallocated EOF — so the first
+	// append after reopen wrote ~prealloc-size bytes past the data, corrupting
+	// range reads on every restart.
 	realDataEnd := lastGoodPos
-	s.sizeBytes = origSizeBytes // let truncateToPosition see the true on-disk size
+	s.sizeBytes = realDataEnd
 
-	// If there is a corrupt or preallocated tail past the last valid record, trim
-	// it to reclaim disk. This is best-effort: on failure (e.g. Windows won't
-	// truncate a file another handle has mmap'd) we log and continue, because the
-	// cursor is already positioned correctly and correctness does not depend on the
-	// physical trim.
-	if realDataEnd < origSizeBytes {
-		if err := s.truncateToPosition(realDataEnd); err != nil {
-			log.Printf("[SEGMENT] Best-effort tail trim to %d failed (continuing): %v", realDataEnd, err)
-			s.sizeBytes = realDataEnd // truncateToPosition did not set it on failure
-		} else {
-			log.Printf("[SEGMENT] Trimmed %d bytes of corrupt/preallocated tail", origSizeBytes-realDataEnd)
+	// Do NOT physically truncate the file/mmap here. Retaining the preallocated
+	// tail keeps the segment's mmap at its full size so continued appends have
+	// write headroom and never trigger a remap-on-grow. Trimming on reopen shrank
+	// the mmap and forced that remap path, which on Windows could desynchronize the
+	// mmap size bookkeeping from the actual mapped length and panic on the next
+	// write (mmapWritePos past len(mmapData)). Correctness does not need the trim —
+	// the write cursor is already at the real data end and reads are bounded by
+	// lastOffset. Deliberate truncation (follower realign, retention) still goes
+	// through WAL.TruncateToOffset / truncateToPosition.
+	if realDataEnd < origSizeBytes && s.index != nil {
+		// Reconcile the sparse index so it holds no entries past the real data end
+		// (a genuine corrupt tail could otherwise leave index entries pointing past
+		// lastOffset). s.lastOffset is the last valid event offset.
+		if err := s.index.Truncate(s.lastOffset); err != nil {
+			return fmt.Errorf("truncate index to offset %d: %w", s.lastOffset, err)
 		}
-
-		// Reconcile the sparse index with the real data end regardless of whether
-		// the physical trim succeeded. Without this, the index may still contain
-		// entries whose FilePosition points past lastGoodPos, causing later reads
-		// to dereference uninitialized bytes. s.lastOffset is the last valid offset.
-		if s.index != nil {
-			if err := s.index.Truncate(s.lastOffset); err != nil {
-				return fmt.Errorf("truncate index to offset %d: %w", s.lastOffset, err)
-			}
-		}
-	} else {
-		s.sizeBytes = realDataEnd
 	}
 
 	// If we couldn't find any events, start from firstOffset
