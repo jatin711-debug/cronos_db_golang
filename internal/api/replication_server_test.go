@@ -99,6 +99,74 @@ func TestReplicationServiceHandler_AppendAndSync(t *testing.T) {
 	}
 }
 
+// TestReplicationServiceHandler_FollowerAheadTruncates verifies that when a
+// valid-term leader's batch starts before the follower's next offset (the
+// follower's tail diverged), the follower discards the divergent tail and accepts
+// the leader's entries — instead of rejecting forever with "batch gap".
+func TestReplicationServiceHandler_FollowerAheadTruncates(t *testing.T) {
+	cfg := &types.Config{
+		DataDir:          t.TempDir(),
+		PartitionCount:   1,
+		TickMS:           10,
+		WheelSize:        100,
+		SegmentSizeBytes: 1024,
+		IndexInterval:    1,
+		FsyncMode:        "periodic",
+		FlushIntervalMS:  100,
+		DedupTTLHours:    24,
+		BloomCapacity:    1000,
+	}
+	pm := partition.NewPartitionManager("node-1", cfg)
+	defer pm.StopAllPartitions()
+	if err := pm.CreatePartition(0, "topic-test"); err != nil {
+		t.Fatalf("CreatePartition: %v", err)
+	}
+
+	h := NewReplicationServiceHandler(pm)
+	ctx := context.Background()
+	now := time.Now().UnixMilli()
+
+	// Follower accepts 5 events at term 1 (as a former leader).
+	first := make([]*types.Event, 5)
+	for i := 0; i < 5; i++ {
+		first[i] = &types.Event{MessageId: "old-" + string(rune('a'+i)), Topic: "topic-test", Offset: int64(i), ScheduleTs: now, Payload: []byte("old")}
+	}
+	if resp, err := h.Append(ctx, &types.ReplicationAppendRequest{PartitionId: 0, Term: 1, Events: first}); err != nil || !resp.GetSuccess() {
+		t.Fatalf("initial append failed: err=%v resp=%v", err, resp)
+	}
+
+	// A new leader at term 2 sends a batch starting at offset 3 — the follower is
+	// ahead (next offset 5) and must truncate its tail [3,4] before accepting.
+	repl := []*types.Event{
+		{MessageId: "new-3", Topic: "topic-test", Offset: 3, ScheduleTs: now, Payload: []byte("new")},
+		{MessageId: "new-4", Topic: "topic-test", Offset: 4, ScheduleTs: now, Payload: []byte("new")},
+		{MessageId: "new-5", Topic: "topic-test", Offset: 5, ScheduleTs: now, Payload: []byte("new")},
+	}
+	resp, err := h.Append(ctx, &types.ReplicationAppendRequest{PartitionId: 0, Term: 2, Events: repl})
+	if err != nil {
+		t.Fatalf("reconciling append gRPC error: %v", err)
+	}
+	if !resp.GetSuccess() {
+		t.Fatalf("follower-ahead append rejected: %s", resp.GetError())
+	}
+	if resp.GetNextOffset() != 6 {
+		t.Fatalf("expected next offset 6 after reconcile, got %d", resp.GetNextOffset())
+	}
+
+	// Offset 3 must now hold the leader's value, not the follower's old one.
+	p, err := pm.GetInternalPartition(0)
+	if err != nil {
+		t.Fatalf("GetInternalPartition: %v", err)
+	}
+	ev, err := p.Wal.ReadEvent(3)
+	if err != nil {
+		t.Fatalf("ReadEvent(3): %v", err)
+	}
+	if ev.GetMessageId() != "new-3" {
+		t.Fatalf("offset 3 = %q, want new-3 (tail not reconciled)", ev.GetMessageId())
+	}
+}
+
 func TestReplicationServiceHandler_AppendOffsetMismatch(t *testing.T) {
 	cfg := &types.Config{
 		DataDir:          t.TempDir(),

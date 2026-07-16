@@ -1320,6 +1320,94 @@ func (w *WAL) CompactByOffset(upToOffset int64) (int, error) {
 	return deletedCount, nil
 }
 
+// TruncateToOffset removes all events at or after `offset`, rewinding the WAL so
+// the next appended event lands at `offset`. It is used for follower log
+// truncation: when a higher-term leader's replicated log starts before the
+// follower's next offset, the follower must discard its divergent tail before it
+// can accept the leader's entries.
+//
+// Segments entirely at/after `offset` are deleted; the segment containing
+// `offset` is truncated in place. The active segment is preserved (truncated, not
+// deleted). This must only be invoked by an epoch-fenced caller — the replication
+// Append handler verifies the leader's term before calling it.
+func (w *WAL) TruncateToOffset(offset int64) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if offset < 0 {
+		offset = 0
+	}
+	oldNext := w.nextOffset.Load()
+	if offset >= oldNext {
+		return 0, nil // nothing at/after offset
+	}
+	// The number of events removed is exactly oldNext - offset (offsets are dense).
+	removed := int(oldNext - offset)
+
+	// Reconcile segments. Segments entirely at/after `offset` are deleted (including
+	// the current active segment). The segment straddling `offset` is truncated to
+	// keep [.., offset-1] and stays as a read-only (rotated) segment. A brand-new
+	// active segment starting at `offset` is then created so subsequent appends
+	// land contiguously — this avoids the complexity of re-activating a rotated
+	// segment's torn-down write path.
+	kept := make([]*Segment, 0, len(w.segments))
+	for _, segment := range w.segments {
+		first := segment.GetFirstOffset()
+		last := segment.GetLastOffset()
+
+		switch {
+		case first >= offset:
+			// Entire segment is at/after offset — delete it (even if it is active).
+			if err := segment.Delete(); err != nil {
+				return removed, fmt.Errorf("delete segment %s during truncate: %w", segment.GetFilename(), err)
+			}
+		case last >= offset:
+			// Straddles offset — truncate to keep through offset-1, keep read-only.
+			if _, err := segment.TruncateAfterOffset(offset - 1); err != nil {
+				return removed, fmt.Errorf("truncate segment %s to offset %d: %w", segment.GetFilename(), offset, err)
+			}
+			// Ensure it is not treated as active (its write path may still be live if
+			// it was the active segment before truncation).
+			if segment == w.activeSegment {
+				if err := segment.Deactivate(); err != nil {
+					log.Printf("[WAL-%d] deactivate straddling segment failed: %v", w.partitionID, err)
+				}
+			}
+			kept = append(kept, segment)
+		default:
+			// Entirely before offset — keep as-is.
+			kept = append(kept, segment)
+		}
+	}
+
+	// Create a fresh active segment beginning at `offset`.
+	newActive, err := NewSegmentWithSize(w.dataDir, offset, true, w.cipher, w.config.SegmentSizeBytes)
+	if err != nil {
+		return removed, fmt.Errorf("create new active segment at offset %d: %w", offset, err)
+	}
+	kept = append(kept, newActive)
+	w.segments = kept
+	w.activeSegment = newActive
+
+	// Discard any pre-created next segment; its firstOffset is now stale.
+	w.nextSegMu.Lock()
+	if w.nextSegment != nil {
+		_ = w.nextSegment.Close()
+		w.nextSegment = nil
+	}
+	w.nextSegMu.Unlock()
+	w.preCreateTriggered.Store(false)
+
+	// Rewind offset counters so the next append lands exactly at `offset`.
+	w.nextOffset.Store(offset)
+	w.appendSeq.Store(offset)
+	w.highWatermark = offset - 1
+	w.dirty.Store(true)
+
+	log.Printf("[WAL-%d] Truncated to offset %d, removed %d events", w.partitionID, offset, removed)
+	return removed, nil
+}
+
 // CompactByTimestamp removes all segments whose last timestamp is less than upToTS.
 // Returns the number of segments deleted.
 func (w *WAL) CompactByTimestamp(upToTS int64) (int, error) {
