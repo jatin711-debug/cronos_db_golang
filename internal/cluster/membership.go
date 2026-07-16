@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -45,6 +46,9 @@ type Membership struct {
 	onJoin   func(node *Node)
 	onLeave  func(node *Node)
 	onUpdate func(node *Node)
+
+	// droppedEvents counts membership events dropped due to a full event channel.
+	droppedEvents atomic.Uint64
 }
 
 // MemberEvent represents a membership change event
@@ -559,7 +563,11 @@ func (m *Membership) OnUpdate(fn func(node *Node)) {
 	m.onUpdate = fn
 }
 
-// emitEvent emits a membership event
+// emitEvent emits a membership event. The channel is bounded; on overflow the
+// event is dropped rather than blocking gossip processing. Dropped events are
+// counted and logged so the divergence is visible — the Router's periodic
+// reconcileRing re-syncs its ring from the authoritative alive-node set, making
+// dropped events self-healing rather than permanently divergent.
 func (m *Membership) emitEvent(eventType EventType, node *Node) {
 	select {
 	case m.eventCh <- MemberEvent{
@@ -568,7 +576,9 @@ func (m *Membership) emitEvent(eventType EventType, node *Node) {
 		Time: time.Now(),
 	}:
 	default:
-		// Channel full, skip event
+		dropped := m.droppedEvents.Add(1)
+		log.Printf("[MEMBERSHIP] event channel full, dropped %s event for %s (total dropped=%d; ring self-heals on reconcile)",
+			eventType, node.ID, dropped)
 	}
 }
 

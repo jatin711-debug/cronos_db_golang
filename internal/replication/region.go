@@ -21,6 +21,10 @@ type RegionID string
 const (
 	crossRegionBatchSize     = 100
 	crossRegionFlushInterval = 100 * time.Millisecond
+	// crossRegionMaxBufferedEvents caps the per-region retry buffer so a
+	// persistently-unreachable remote cannot grow memory without bound. When the
+	// cap is exceeded the oldest events are dropped (best-effort async replication).
+	crossRegionMaxBufferedEvents = 100000
 )
 
 // CrossRegionReplicator handles async replication between regions.
@@ -166,7 +170,24 @@ func (crr *CrossRegionReplicator) flushRegion(regionID RegionID) {
 	defer cancel()
 
 	if err := crr.replicateToRegion(ctx, regionID, endpoint, events); err != nil {
-		slog.Warn("Cross-region replication batch failed", "region", regionID, "count", len(events), "error", err)
+		slog.Warn("Cross-region replication batch failed; re-queuing for retry", "region", regionID, "count", len(events), "error", err)
+		// The buffer was cleared before the send, so on failure the events would be
+		// lost permanently. Re-queue them (bounded) so the next flush retries them.
+		// Events are prepended to preserve ordering relative to newly-appended ones.
+		batch.mu.Lock()
+		if len(batch.events)+len(events) <= crossRegionMaxBufferedEvents {
+			batch.events = append(events, batch.events...)
+		} else {
+			// Buffer is saturated (remote persistently unreachable). Keep the most
+			// recent events up to the cap and drop the oldest to bound memory.
+			combined := append(events, batch.events...)
+			if len(combined) > crossRegionMaxBufferedEvents {
+				combined = combined[len(combined)-crossRegionMaxBufferedEvents:]
+			}
+			batch.events = combined
+			slog.Warn("Cross-region retry buffer full; dropped oldest events", "region", regionID, "cap", crossRegionMaxBufferedEvents)
+		}
+		batch.mu.Unlock()
 	} else {
 		slog.Debug("Cross-region replication batch success", "region", regionID, "count", len(events))
 	}
