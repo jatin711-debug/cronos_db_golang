@@ -8,6 +8,65 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 )
 
+// TestSegment_WriteGrowsMmapSufficiently is a regression test for a crash on the
+// append path: writeRecordMmap grew the mapping by only mmapSize*2, which is
+// insufficient when a single record exceeds the current mapped size, and it
+// bounded the copy by mmapSize (bookkeeping) instead of len(mmapData) (the real
+// buffer). A segment reopened with a small mmap that then took large writes could
+// advance mmapWritePos past len(mmapData) and panic
+// ("slice bounds out of range"). This writes records larger than the initial
+// preallocation to force the grow path, then reads them back.
+func TestSegment_WriteGrowsMmapSufficiently(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "seg_grow_test")
+	if err != nil {
+		t.Fatalf("temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Tiny preallocation so the very first append must grow the mmap, and each
+	// record (large payload) exceeds the current mapped size — the insufficient
+	// doubling scenario.
+	seg, err := NewSegmentWithSize(tmpDir, 0, true, nil, 256)
+	if err != nil {
+		t.Fatalf("NewSegmentWithSize: %v", err)
+	}
+	defer seg.Close()
+
+	const n = 20
+	bigPayload := make([]byte, 8192) // each record far larger than the 256B prealloc
+	for i := range bigPayload {
+		bigPayload[i] = byte(i)
+	}
+	for i := 0; i < n; i++ {
+		ev := &types.Event{
+			MessageId:  fmt.Sprintf("big-%d", i),
+			ScheduleTs: int64(1000 + i),
+			Payload:    bigPayload,
+			Topic:      "test",
+			Offset:     int64(i), // Segment.AppendEvent uses pre-assigned offsets
+		}
+		if err := seg.AppendEvent(ev, 4); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+	if err := seg.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
+	events, err := seg.ReadEventsByOffsetRange(0, n-1)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if len(events) != n {
+		t.Fatalf("expected %d events after mmap growth, got %d", n, len(events))
+	}
+	for i, ev := range events {
+		if ev.Offset != int64(i) || len(ev.Payload) != len(bigPayload) {
+			t.Fatalf("event %d corrupted: offset=%d payloadLen=%d", i, ev.Offset, len(ev.Payload))
+		}
+	}
+}
+
 // TestWAL_TruncateToOffset exercises follower-log truncation: appending events,
 // truncating the divergent tail back to an offset, and asserting the WAL rewinds
 // (next offset, reads, and that new appends land contiguously at the truncation
