@@ -462,11 +462,11 @@ func (l *Leader) GetEpoch() int64 {
 }
 
 // SetEpoch sets the epoch (used during leader election) and propagates the term
-// to the WAL so new records carry it.
+// to the WAL so new records carry it. epoch is stored atomically to match the
+// atomic reads in appendToFollower/GetTerm (mixing a mutex write with atomic
+// reads is a data race).
 func (l *Leader) SetEpoch(epoch int64) {
-	l.mu.Lock()
-	l.epoch = epoch
-	l.mu.Unlock()
+	atomic.StoreInt64(&l.epoch, epoch)
 	if l.wal != nil {
 		l.wal.SetCurrentTerm(epoch)
 	}

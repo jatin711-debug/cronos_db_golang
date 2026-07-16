@@ -1168,10 +1168,17 @@ func (pm *PartitionManager) PromoteToLeader(partitionID int32, epoch int64) erro
 	if partition.ReplLeader != nil {
 		partition.Leader = true
 		partition.Epoch = epoch
+		// Propagate the epoch into the replication leader so its outgoing Append
+		// RPCs carry the true term. Without this the leader keeps the epoch it was
+		// created with (1) forever, so a genuinely-stale leader and a new leader
+		// both advertise term 1 and the follower's stale-term fence can't tell them
+		// apart — the split-brain guard is defeated.
+		partition.ReplLeader.SetEpoch(epoch)
 		return nil // Already leader, just update epoch
 	}
 
 	leader := replication.NewLeader(partitionID, int32(pm.config.ReplicationBatchSize), pm.config.ReplicationTimeout, partition.Wal, pm.config.MinInSyncReplicas, pm.nodeID, pm.replicationTLSConfig())
+	leader.SetEpoch(epoch) // advertise the real cluster epoch on the wire, not the default 1
 	leader.Start()
 	partition.ReplLeader = leader
 	partition.Leader = true

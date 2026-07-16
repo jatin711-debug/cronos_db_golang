@@ -420,6 +420,14 @@ func (f *ClusterFSM) applyUpdatePartition(payload json.RawMessage) interface{} {
 		existing.ISR = info.ISR
 		existing.State = info.State
 		existing.Epoch++
+		// Preserve replica offsets across the update. Dropping them here left the
+		// map nil, so failover election (electNewLeader) saw offset 0 for every
+		// candidate and picked the alphabetically-first replica — an unclean
+		// election that can lose acknowledged writes. Prefer the incoming offsets
+		// when provided, otherwise keep the existing ones.
+		if info.ReplicaOffsets != nil {
+			existing.ReplicaOffsets = info.ReplicaOffsets
+		}
 	} else {
 		f.state.Partitions[info.ID] = &info
 	}
