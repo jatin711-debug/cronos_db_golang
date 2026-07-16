@@ -729,7 +729,7 @@ func (pm *PartitionManager) replayWALTimers(partition *Partition) {
 
 	now := time.Now().UnixMilli()
 	scheduledCount := 0
-	expiredCount := 0
+	maturedCount := 0
 	lastScheduled := startOffset - 1
 
 	const replayBatchSize int64 = 10000
@@ -745,15 +745,19 @@ func (pm *PartitionManager) replayWALTimers(partition *Partition) {
 		}
 
 		for _, event := range events {
+			// Schedule every replayed event. Scheduler.Schedule routes future
+			// events into the timing wheel and events whose schedule_ts has already
+			// passed (matured while the node was down) straight to the ready queue
+			// for immediate delivery. Previously matured events were only counted
+			// and dropped, so any timer that came due during downtime was lost.
+			if err := partition.Scheduler.Schedule(event); err != nil {
+				log2.Warn("WAL replay scheduler error", "partition", partition.ID, "offset", event.Offset, "error", err)
+				continue
+			}
 			if event.GetScheduleTs() > now {
-				// Future event — re-schedule it
-				if err := partition.Scheduler.Schedule(event); err != nil {
-					log2.Warn("WAL replay scheduler error", "partition", partition.ID, "offset", event.Offset, "error", err)
-					continue
-				}
 				scheduledCount++
 			} else {
-				expiredCount++
+				maturedCount++
 			}
 			lastScheduled = event.Offset
 		}
@@ -762,8 +766,8 @@ func (pm *PartitionManager) replayWALTimers(partition *Partition) {
 	// Update checkpoint incrementally
 	pm.writeTimerCheckpoint(partition, lastScheduled)
 
-	log.Printf("[Partition %d] WAL replay complete: %d future events re-scheduled, %d already expired (offsets %d-%d)",
-		partition.ID, scheduledCount, expiredCount, startOffset, lastScheduled)
+	log.Printf("[Partition %d] WAL replay complete: %d future events re-scheduled, %d matured-during-downtime enqueued (offsets %d-%d)",
+		partition.ID, scheduledCount, maturedCount, startOffset, lastScheduled)
 }
 
 // replayWALTimersFromOffset replays WAL events starting from a specific offset
@@ -781,7 +785,7 @@ func (pm *PartitionManager) replayWALTimersFromOffset(partition *Partition, star
 
 	now := time.Now().UnixMilli()
 	scheduledCount := 0
-	expiredCount := 0
+	maturedCount := 0
 	lastScheduled := startOffset - 1
 
 	const replayBatchSize int64 = 10000
@@ -797,15 +801,16 @@ func (pm *PartitionManager) replayWALTimersFromOffset(partition *Partition, star
 		}
 
 		for _, event := range events {
+			// See replayWALTimers: schedule every event so matured-during-downtime
+			// timers are enqueued for immediate delivery rather than dropped.
+			if err := partition.Scheduler.Schedule(event); err != nil {
+				log2.Warn("WAL replay scheduler error", "partition", partition.ID, "offset", event.Offset, "error", err)
+				continue
+			}
 			if event.GetScheduleTs() > now {
-				// Future event — re-schedule it
-				if err := partition.Scheduler.Schedule(event); err != nil {
-					log2.Warn("WAL replay scheduler error", "partition", partition.ID, "offset", event.Offset, "error", err)
-					continue
-				}
 				scheduledCount++
 			} else {
-				expiredCount++
+				maturedCount++
 			}
 			lastScheduled = event.Offset
 		}
@@ -814,8 +819,8 @@ func (pm *PartitionManager) replayWALTimersFromOffset(partition *Partition, star
 	// Update checkpoint incrementally
 	pm.writeTimerCheckpoint(partition, lastScheduled)
 
-	log.Printf("[Partition %d] WAL replay from offset %d complete: %d future events re-scheduled, %d already expired (offsets %d-%d)",
-		partition.ID, startOffset, scheduledCount, expiredCount, startOffset, lastScheduled)
+	log.Printf("[Partition %d] WAL replay from offset %d complete: %d future events re-scheduled, %d matured-during-downtime enqueued (offsets %d-%d)",
+		partition.ID, startOffset, scheduledCount, maturedCount, startOffset, lastScheduled)
 }
 
 // TimerCheckpoint stores the incremental replay progress
