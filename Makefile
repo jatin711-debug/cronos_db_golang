@@ -203,6 +203,7 @@ help:
 	@echo   make lint           - Run go vet + gofmt checks
 	@echo   make ci             - Run rust-dedup, build, test, lint in sequence
 	@echo   make build          - Build API and cluster load test binaries
+	@echo   make build-api      - Build only the cronos-api server binary
 	@echo   make rust-dedup     - Build and stage Rust dedup shared library
 	@echo   make test           - Build Rust dedup library and run go tests
 	@echo   make proto          - Regenerate protobuf code
@@ -216,6 +217,7 @@ help:
 	@echo '  (set TRACING_ENABLED=true to export traces with low sample ratio)'
 	@echo   make cluster        - Print cluster startup order
 	@echo   make health         - Check node health endpoints
+	@echo   make demo           - Run the publish/subscribe demo (start a node first)
 	@echo.
 	@echo Load Test
 	@echo   make loadtest       - Run batch mode cluster load test (LOADTEST_BATCH=false for single-event mode)
@@ -310,6 +312,10 @@ build: dashboard rust-dedup ensure-build-dir
 	@$(STAGE_DASHBOARD_DIST_CMD)
 	$(GO_RUNTIME_PREFIX) go build -o $(BUILD_DIR)/$(BINARY)$(EXE_EXT) ./cmd/api/main.go
 	$(GO_RUNTIME_PREFIX) go build -tags clustertest -o $(BUILD_DIR)/cluster_loadtest$(EXE_EXT) cluster_loadtest.go
+
+# Build only the cronos-api server binary (no dashboard, no loadtest).
+build-api: rust-dedup ensure-build-dir
+	$(GO_RUNTIME_PREFIX) go build -o $(BUILD_DIR)/$(BINARY)$(EXE_EXT) ./cmd/api/main.go
 
 # Run all tests. Rust shared library is built/staged first.
 test: rust-dedup test-unit
@@ -519,6 +525,11 @@ else
 	@curl -fsS http://127.0.0.1:8081/health >/dev/null && echo " - Node 2 OK" || echo " - Node 2 FAIL"
 	@curl -fsS http://127.0.0.1:8082/health >/dev/null && echo " - Node 3 OK" || echo " - Node 3 FAIL"
 endif
+
+# Run the publish/subscribe demo against a running local server.
+# Start one first, e.g. `make node1` or `./bin/cronos-api --dev --node-id=node1 --data-dir=./data`.
+demo:
+	$(GO_RUNTIME_PREFIX) go run ./examples/pubsub_demo
 
 docker: docker-build
 
