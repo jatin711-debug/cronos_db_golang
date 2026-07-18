@@ -16,20 +16,21 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
-// ClusterService handles cluster-related gRPC calls
+// ClusterService hosts the cluster-internal gRPC server used for inter-node
+// coordination (join, publish forward, WAL replication stubs).
 type ClusterService struct {
 	manager *Manager
 	server  *grpc.Server
 }
 
-// NewClusterService creates a new cluster service
+// NewClusterService creates a ClusterService bound to the given cluster Manager.
 func NewClusterService(manager *Manager) *ClusterService {
 	return &ClusterService{
 		manager: manager,
 	}
 }
 
-// Start starts the gRPC server for cluster communication
+// Start starts the cluster gRPC server listening on addr.
 func (s *ClusterService) Start(addr string) error {
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -49,14 +50,14 @@ func (s *ClusterService) Start(addr string) error {
 	return nil
 }
 
-// Stop stops the gRPC server
+// Stop gracefully stops the cluster gRPC server.
 func (s *ClusterService) Stop() {
 	if s.server != nil {
 		s.server.GracefulStop()
 	}
 }
 
-// ClusterClient is a client for cluster communication
+// ClusterClient is a pooled gRPC client used for inter-node cluster RPCs.
 type ClusterClient struct {
 	mu        sync.RWMutex
 	conns     map[string]*grpc.ClientConn
@@ -74,7 +75,8 @@ func NewClusterClient(timeout time.Duration, tlsConfig *tls.Config) *ClusterClie
 	}
 }
 
-// GetConnection gets or creates a connection to a node
+// GetConnection returns a cached gRPC connection to addr, dialing if needed.
+// Dial is non-blocking; connectivity is established lazily on first RPC use.
 func (c *ClusterClient) GetConnection(addr string) (*grpc.ClientConn, error) {
 	c.mu.RLock()
 	conn, exists := c.conns[addr]
@@ -114,7 +116,7 @@ func (c *ClusterClient) GetConnection(addr string) (*grpc.ClientConn, error) {
 	return conn, nil
 }
 
-// Close closes all connections
+// Close closes and forgets all cached gRPC connections.
 func (c *ClusterClient) Close() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -127,7 +129,7 @@ func (c *ClusterClient) Close() {
 	}
 }
 
-// RequestJoin sends a join request to the leader
+// RequestJoin sends a cluster join request for node to the leader at leaderAddr.
 func (c *ClusterClient) RequestJoin(_ context.Context, leaderAddr string, node *Node) error {
 	conn, err := c.GetConnection(leaderAddr)
 	if err != nil {
@@ -141,7 +143,7 @@ func (c *ClusterClient) RequestJoin(_ context.Context, leaderAddr string, node *
 	return nil
 }
 
-// ForwardPublish forwards a publish request to the partition leader
+// ForwardPublish forwards a publish request payload to the partition leader at leaderAddr.
 func (c *ClusterClient) ForwardPublish(_ context.Context, leaderAddr string, data []byte) ([]byte, error) {
 	conn, err := c.GetConnection(leaderAddr)
 	if err != nil {
@@ -154,7 +156,7 @@ func (c *ClusterClient) ForwardPublish(_ context.Context, leaderAddr string, dat
 	return nil, fmt.Errorf("not implemented")
 }
 
-// ReplicateWAL replicates WAL entries to a follower
+// ReplicateWAL sends WAL entry bytes to a follower at followerAddr for replication.
 func (c *ClusterClient) ReplicateWAL(_ context.Context, followerAddr string, entries []byte) error {
 	conn, err := c.GetConnection(followerAddr)
 	if err != nil {

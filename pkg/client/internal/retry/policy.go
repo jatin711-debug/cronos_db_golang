@@ -6,12 +6,16 @@ import (
 	"time"
 )
 
-// Policy controls client-side retry backoff.
+// Policy controls client-side retry attempts and exponential backoff with jitter.
 type Policy struct {
+	// MaxAttempts is the maximum number of tries including the first attempt.
 	MaxAttempts int
-	MinBackoff  time.Duration
-	MaxBackoff  time.Duration
-	Jitter      float64
+	// MinBackoff is the base delay used for attempt 0 / lower bound after jitter.
+	MinBackoff time.Duration
+	// MaxBackoff caps exponential growth of the delay.
+	MaxBackoff time.Duration
+	// Jitter is the fractional randomization applied to backoff (e.g. 0.2 = ±20%).
+	Jitter float64
 }
 
 // DefaultPolicy returns conservative retry defaults.

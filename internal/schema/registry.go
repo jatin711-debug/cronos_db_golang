@@ -1,3 +1,9 @@
+// Package schema implements a durable topic schema registry with versioning,
+// compatibility checks, and payload validation for JSON, Avro, and Protobuf.
+//
+// Schemas are persisted under <dataDir>/schemas as one JSON file per version.
+// Validate enforces the latest registered schema when present; topics with no
+// schema allow all payloads.
 package schema
 
 import (
@@ -15,32 +21,45 @@ import (
 type Type string
 
 const (
-	TypeJSON     Type = "json"
-	TypeAvro     Type = "avro"
+	// TypeJSON is a JSON Schema definition.
+	TypeJSON Type = "json"
+	// TypeAvro is an Apache Avro schema.
+	TypeAvro Type = "avro"
+	// TypeProtobuf is a Protocol Buffers message type (optionally with descriptor).
 	TypeProtobuf Type = "protobuf"
 )
 
 // Schema represents a versioned schema for a topic.
 type Schema struct {
-	Topic      string `json:"topic"`
-	Version    int    `json:"version"`
-	Type       Type   `json:"type"`
+	// Topic is the topic this schema applies to.
+	Topic string `json:"topic"`
+	// Version is the monotonic schema version for the topic (starts at 1).
+	Version int `json:"version"`
+	// Type is the schema format (json, avro, or protobuf).
+	Type Type `json:"type"`
+	// Definition is the schema body (JSON Schema text, Avro JSON, or message name).
 	Definition string `json:"definition"`
-	Hash       uint64 `json:"hash"`
-	Descriptor []byte `json:"descriptor,omitempty"` // FileDescriptorProto bytes for protobuf
+	// Hash is an FNV-64a content hash of Definition and optional Descriptor.
+	Hash uint64 `json:"hash"`
+	// Descriptor holds FileDescriptorProto bytes for protobuf dynamic validation.
+	Descriptor []byte `json:"descriptor,omitempty"`
 }
 
-// CompatibilityMode defines schema evolution policy.
+// CompatibilityMode defines schema evolution policy when registering a new version.
 type CompatibilityMode string
 
 const (
-	CompatNone     CompatibilityMode = "NONE"
+	// CompatNone skips compatibility checks on registration.
+	CompatNone CompatibilityMode = "NONE"
+	// CompatBackward requires new schemas to be readable by consumers of the old schema.
 	CompatBackward CompatibilityMode = "BACKWARD"
-	CompatForward  CompatibilityMode = "FORWARD"
-	CompatFull     CompatibilityMode = "FULL"
+	// CompatForward requires old data to be readable under the new schema.
+	CompatForward CompatibilityMode = "FORWARD"
+	// CompatFull requires both backward and forward compatibility.
+	CompatFull CompatibilityMode = "FULL"
 )
 
-// Registry manages topic schemas with versioning.
+// Registry manages topic schemas with versioning and on-disk persistence.
 type Registry struct {
 	mu          sync.RWMutex
 	schemas     map[string][]Schema          // topic -> sorted by version ascending
@@ -179,8 +198,11 @@ func (r *Registry) Validate(topic string, payload []byte) error {
 // SchemaSummary is a lightweight summary of a registered topic suitable for
 // admin/listing APIs.
 type SchemaSummary struct {
-	Topic             string
-	LatestVersion     int
+	// Topic is the registered topic name.
+	Topic string
+	// LatestVersion is the highest schema version for the topic.
+	LatestVersion int
+	// CompatibilityMode is the evolution policy (defaults to BACKWARD if unset).
 	CompatibilityMode CompatibilityMode
 }
 
@@ -216,6 +238,9 @@ func (r *Registry) List() []SchemaSummary {
 	}
 	return summaries
 }
+
+// Load reads all schema JSON files from the registry directory into memory.
+// Invalid files are skipped; versions for each topic are sorted ascending.
 func (r *Registry) Load() error {
 	entries, err := os.ReadDir(r.dir)
 	if err != nil {

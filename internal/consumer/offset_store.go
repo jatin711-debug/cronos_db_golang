@@ -106,7 +106,8 @@ func (s *OffsetStore) GetGroup(groupID string) (*types.ConsumerGroup, bool) {
 	return g, ok
 }
 
-// OffsetStore stores consumer group offsets, exactly-once commit IDs, and group metadata.
+// OffsetStore stores consumer group offsets, exactly-once commit IDs, and group
+// metadata in Pebble with batched flushes for durability.
 type OffsetStore struct {
 	db          *pebble.DB
 	dataDir     string
@@ -133,7 +134,8 @@ type OffsetStore struct {
 	pendingGroupDels map[string]struct{}
 }
 
-// NewOffsetStore creates a new offset store
+// NewOffsetStore opens (or creates) a Pebble-backed offset store under dataDir
+// for the given partitionID. cache may be nil.
 func NewOffsetStore(dataDir string, partitionID int32, cache *pebble.Cache) (*OffsetStore, error) {
 	// Create data directory
 	dir := filepath.Join(dataDir, "consumer_offsets")
@@ -447,7 +449,7 @@ func (s *OffsetStore) GetOffset(groupID string, partitionID int32) (int64, error
 	return s.parseValue(value)
 }
 
-// DeleteOffset deletes committed offset for a consumer group
+// DeleteOffset removes the committed offset for groupID on partitionID.
 func (s *OffsetStore) DeleteOffset(groupID string, partitionID int32) error {
 	s.pendingMu.Lock()
 	s.pending[offsetKey{groupID: groupID, partitionID: partitionID}] = -2
@@ -501,7 +503,7 @@ func (s *OffsetStore) parseValue(value []byte) (int64, error) {
 	return offset, nil
 }
 
-// Close closes the offset store
+// Close flushes pending state and closes the underlying Pebble database.
 func (s *OffsetStore) Close() error {
 	close(s.quit)
 	s.wg.Wait()

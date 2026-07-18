@@ -49,8 +49,8 @@ func (pq *expiryPQ) Pop() any {
 //
 // It is not internally synchronized; callers hold the owning shard's lock.
 type deliveryExpiry struct {
-	pq     expiryPQ
-	lookup map[string]*expiryItem
+	pq     expiryPQ               // min-heap by deadline
+	lookup map[string]*expiryItem // delivery id -> heap item for O(log n) remove
 }
 
 func newDeliveryExpiry() *deliveryExpiry {

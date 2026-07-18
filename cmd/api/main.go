@@ -1,3 +1,8 @@
+// Command cronos-api (package main) is the CronosDB node entrypoint.
+//
+// It loads configuration, wires partitions, cluster membership, public and
+// internal gRPC servers, HTTP health/metrics/dashboard, CDC sinks, retention,
+// backups, tracing, and SLO recording, then runs until SIGINT/SIGTERM.
 package main
 
 import (

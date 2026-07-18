@@ -15,7 +15,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
-// RegionID identifies a geographic region.
+// RegionID identifies a geographic region for cross-region replication.
 type RegionID string
 
 const (
@@ -27,7 +27,8 @@ const (
 	crossRegionMaxBufferedEvents = 100000
 )
 
-// CrossRegionReplicator handles async replication between regions.
+// CrossRegionReplicator handles best-effort async replication of events to
+// remote regions with per-region batching and bounded retry buffers.
 type CrossRegionReplicator struct {
 	mu          sync.RWMutex
 	regions     map[RegionID]string // regionID -> endpoint
@@ -49,11 +50,14 @@ type regionBatch struct {
 	mu       sync.Mutex
 }
 
-// RegionConnection represents a connection to a remote region.
+// RegionConnection describes a remote region endpoint for registration.
 type RegionConnection struct {
+	// RegionID is the remote region's identifier.
 	RegionID RegionID
+	// Endpoint is the remote region's gRPC address for CrossRegionService.
 	Endpoint string
-	Latency  time.Duration
+	// Latency is an optional measured RTT hint (informational).
+	Latency time.Duration
 }
 
 // NewCrossRegionReplicator creates a cross-region replicator.

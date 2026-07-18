@@ -12,16 +12,22 @@ import (
 	"github.com/shirou/gopsutil/v3/net"
 )
 
-// AutoScalerMetrics provides resource metrics for scaling decisions.
+// AutoScalerMetrics provides resource metrics for cluster scaling decisions.
 type AutoScalerMetrics interface {
-	CPUUsage() float64    // 0.0-1.0
-	MemoryUsage() float64 // 0.0-1.0
-	DiskUsage() float64   // 0.0-1.0
-	RequestRate() float64 // requests/sec
+	// CPUUsage returns host CPU utilization in the range [0.0, 1.0].
+	CPUUsage() float64
+	// MemoryUsage returns host memory utilization in the range [0.0, 1.0].
+	MemoryUsage() float64
+	// DiskUsage returns data-directory disk utilization in the range [0.0, 1.0].
+	DiskUsage() float64
+	// RequestRate returns approximate requests per second handled by this node.
+	RequestRate() float64
+	// PartitionLag returns per-partition consumer/replication lag in events.
 	PartitionLag() map[int32]int64
 }
 
-// AutoScaler decides when to scale the cluster.
+// AutoScaler periodically evaluates resource metrics and logs scale-up signals
+// when thresholds are exceeded (advisory; does not mutate cluster membership).
 type AutoScaler struct {
 	metrics       AutoScalerMetrics
 	cpuThreshold  float64
@@ -31,7 +37,7 @@ type AutoScaler struct {
 	quit          chan struct{}
 }
 
-// NewAutoScaler creates an auto-scaler.
+// NewAutoScaler creates an AutoScaler with default thresholds (CPU 70%, mem/disk 80%).
 func NewAutoScaler(metrics AutoScalerMetrics) *AutoScaler {
 	return &AutoScaler{
 		metrics:       metrics,
@@ -90,16 +96,17 @@ func (a *AutoScaler) evaluate() {
 	}
 }
 
-// SystemMetrics collects real OS-level metrics using gopsutil.
+// SystemMetrics collects real OS-level metrics using gopsutil for AutoScaler.
 type SystemMetrics struct {
 	dataDir string
 }
 
-// NewSystemMetrics creates a real system metrics collector.
+// NewSystemMetrics creates a SystemMetrics collector rooted at dataDir for disk usage.
 func NewSystemMetrics(dataDir string) *SystemMetrics {
 	return &SystemMetrics{dataDir: dataDir}
 }
 
+// CPUUsage returns host CPU utilization in the range [0.0, 1.0].
 func (SystemMetrics) CPUUsage() float64 {
 	percent, err := cpu.Percent(100*time.Millisecond, false)
 	if err != nil || len(percent) == 0 {
@@ -108,6 +115,7 @@ func (SystemMetrics) CPUUsage() float64 {
 	return percent[0] / 100.0
 }
 
+// MemoryUsage returns host virtual-memory utilization in the range [0.0, 1.0].
 func (SystemMetrics) MemoryUsage() float64 {
 	v, err := mem.VirtualMemory()
 	if err != nil {
@@ -116,6 +124,7 @@ func (SystemMetrics) MemoryUsage() float64 {
 	return v.UsedPercent / 100.0
 }
 
+// DiskUsage returns used-percent of the filesystem containing dataDir in [0.0, 1.0].
 func (s SystemMetrics) DiskUsage() float64 {
 	usage, err := disk.Usage(s.dataDir)
 	if err != nil {
@@ -124,33 +133,45 @@ func (s SystemMetrics) DiskUsage() float64 {
 	return usage.UsedPercent / 100.0
 }
 
+// RequestRate currently returns 0; intended for metrics-pipeline integration.
 func (SystemMetrics) RequestRate() float64 {
 	// Would integrate with metrics pipeline
 	return 0
 }
 
+// PartitionLag currently returns nil; intended for consumer-offset integration.
 func (SystemMetrics) PartitionLag() map[int32]int64 {
 	// Would integrate with consumer offset store
 	return nil
 }
 
-// SimpleMetrics is a basic metrics implementation using runtime stats (deprecated, use SystemMetrics).
+// SimpleMetrics is a basic metrics implementation using runtime stats.
+// Deprecated: use SystemMetrics for real host metrics.
 type SimpleMetrics struct{}
 
+// CPUUsage always returns 0 for SimpleMetrics.
 func (SimpleMetrics) CPUUsage() float64 { return 0 }
+
+// MemoryUsage returns process Sys memory in gibibytes (not a 0–1 ratio).
 func (SimpleMetrics) MemoryUsage() float64 {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
 	return float64(m.Sys) / float64(1<<30)
 }
-func (SimpleMetrics) DiskUsage() float64            { return 0 }
-func (SimpleMetrics) RequestRate() float64          { return 0 }
+
+// DiskUsage always returns 0 for SimpleMetrics.
+func (SimpleMetrics) DiskUsage() float64 { return 0 }
+
+// RequestRate always returns 0 for SimpleMetrics.
+func (SimpleMetrics) RequestRate() float64 { return 0 }
+
+// PartitionLag always returns nil for SimpleMetrics.
 func (SimpleMetrics) PartitionLag() map[int32]int64 { return nil }
 
-// NetworkStats provides network I/O statistics.
+// NetworkStats provides host network I/O statistics via gopsutil.
 type NetworkStats struct{}
 
-// IOStats returns bytes sent/received since last call.
+// IOStats returns aggregate bytes sent and received on host network interfaces.
 func (NetworkStats) IOStats() (sent uint64, recv uint64, err error) {
 	ioCounters, err := net.IOCounters(false)
 	if err != nil || len(ioCounters) == 0 {

@@ -1,3 +1,8 @@
+// Package slo records request latency and error rates against configurable
+// service-level objectives using a lock-free histogram.
+//
+// Recorder estimates percentiles from fixed microsecond buckets and can expose
+// gauges via PrometheusCollector for dashboards and alerting.
 package slo
 
 import (
@@ -8,12 +13,16 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-// Window defines an SLO observation window.
+// Window defines an SLO observation window and its targets.
 type Window struct {
-	Duration     time.Duration
-	TargetP99    time.Duration
-	TargetP95    time.Duration
-	MaxErrorRate float64 // 0.0-1.0
+	// Duration is the reset period for rolling observations; 0 disables auto-reset.
+	Duration time.Duration
+	// TargetP99 is the maximum allowed estimated p99 latency; 0 skips the p99 check.
+	TargetP99 time.Duration
+	// TargetP95 is the maximum allowed estimated p95 latency (reserved for extensions).
+	TargetP95 time.Duration
+	// MaxErrorRate is the maximum allowed error ratio in [0.0, 1.0].
+	MaxErrorRate float64
 }
 
 // latencyHistogramBounds are the upper bounds of each latency bucket in

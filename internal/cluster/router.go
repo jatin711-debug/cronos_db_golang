@@ -7,17 +7,18 @@ import (
 	"time"
 )
 
-// PartitionAccessor interface for triggering partition sync operations
+// PartitionAccessor is the bridge between the cluster router/manager and local
+// partition lifecycle operations (sync, promote/demote, ISR/offset queries).
 type PartitionAccessor interface {
-	// SyncPartitionFromLeader syncs a partition from its leader
+	// SyncPartitionFromLeader syncs a local partition's data from its leader.
 	SyncPartitionFromLeader(partitionID int32, leaderAddr string) error
-	// GetOrCreatePartition gets or creates a local partition
+	// GetOrCreatePartition gets or creates a local partition instance.
 	GetOrCreatePartition(partitionID int32) error
-	// PromoteToLeader promotes a local partition to leader and starts replication
+	// PromoteToLeader promotes a local partition to leader and starts replication.
 	PromoteToLeader(partitionID int32, epoch int64) error
-	// AddFollower adds a follower to a local leader partition
+	// AddFollower adds a follower to a local leader partition.
 	AddFollower(partitionID int32, followerID string, followerAddr string) error
-	// DemoteFromLeader demotes a local partition from leader
+	// DemoteFromLeader demotes a local partition from leader.
 	DemoteFromLeader(partitionID int32) error
 	// GetPartitionReplicaOffsets returns the latest replica offsets for a local partition.
 	GetPartitionReplicaOffsets(partitionID int32) map[string]int64
@@ -26,7 +27,8 @@ type PartitionAccessor interface {
 	GetPartitionInSyncReplicas(partitionID int32) []string
 }
 
-// Router handles routing requests to the correct node/partition
+// Router maps topics/keys to partitions and partitions to owning nodes using a
+// consistent hash ring kept in sync with membership events.
 type Router struct {
 	mu                sync.RWMutex
 	hashRing          *HashRing
@@ -548,11 +550,16 @@ func (r *Router) RouteRequest(topic string) (*RouteInfo, error) {
 	}, nil
 }
 
-// RouteInfo contains routing information for a request
+// RouteInfo contains routing information for a publish or related request.
 type RouteInfo struct {
+	// PartitionID is the target partition for the request.
 	PartitionID int32
-	LeaderID    string
-	LeaderAddr  string
-	IsLocal     bool
-	Replicas    []string
+	// LeaderID is the node ID of the partition leader.
+	LeaderID string
+	// LeaderAddr is the gRPC address of the partition leader.
+	LeaderAddr string
+	// IsLocal is true when this node is the partition leader.
+	IsLocal bool
+	// Replicas is the full replica set for the partition (node IDs).
+	Replicas []string
 }

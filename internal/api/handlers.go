@@ -1,3 +1,6 @@
+// Package api implements CronosDB's public and internal gRPC services, HTTP
+// health/admin dashboard endpoints, TLS helpers, rate limiting, and interceptors
+// for auth, audit, metrics, versioning, and SLO tracking.
 package api
 
 import (
@@ -38,7 +41,8 @@ func durableAckEnabled(e *types.Event) bool {
 	return e.Meta["cronos.durable_ack"] == "true"
 }
 
-// EventServiceHandler implements the EventService handler
+// EventServiceHandler implements the client-facing EventService gRPC API
+// (publish, subscribe, ack, replay, and related operations).
 type EventServiceHandler struct {
 	types.UnimplementedEventServiceServer
 
@@ -53,37 +57,46 @@ type EventServiceHandler struct {
 	authEnabled      bool // true when JWT authentication is active
 }
 
-// DedupManager interface
+// DedupManager is the interface EventService uses for message-ID deduplication.
 type DedupManager interface {
+	// IsDuplicate reports whether messageID was already accepted at offset.
 	IsDuplicate(messageID string, offset int64) (bool, error)
+	// IsDuplicateBatch checks a batch of message IDs for duplicates.
 	IsDuplicateBatch(messageIDs []string, offsets []int64) ([]bool, error)
 	// RollbackBatch undoes dedup claims when the durable write that followed the
 	// claim failed, so a client retry is not dropped as a spurious duplicate.
 	RollbackBatch(messageIDs []string) error
 }
 
-// ConsumerManager interface
+// ConsumerManager is the interface EventService uses for subscribe/ack and offset reads.
 type ConsumerManager interface {
+	// Subscribe creates a subscription for the given request.
 	Subscribe(request *types.SubscribeRequest) (*consumer.Subscription, error)
+	// Ack acknowledges a delivery and advances the committed offset.
 	Ack(request *types.AckRequest) error
+	// GetCommittedOffset returns the group's committed offset for a partition.
 	GetCommittedOffset(groupID string, partitionID int32) (int64, error)
+	// LeaveGroup removes a member from a consumer group.
 	LeaveGroup(groupID, memberID string) error
 }
 
-// ClusterRouter provides cluster-aware partition routing.
-// When non-nil, the handler checks partition locality before processing.
+// ClusterRouter provides cluster-aware partition routing for EventService.
+// When non-nil, the handler checks partition locality and leadership before processing.
 type ClusterRouter interface {
+	// IsLocalPartition reports whether partitionID is hosted on this node.
 	IsLocalPartition(partitionID int32) bool
+	// IsPartitionLeader reports whether this node is the leader for partitionID.
 	IsPartitionLeader(partitionID int32) bool
+	// GetPartitionEpoch returns the cluster leadership epoch for partitionID.
 	GetPartitionEpoch(partitionID int32) int64
 }
 
-// GRPCStream wraps gRPC stream to implement delivery.Stream interface
+// GRPCStream adapts a gRPC bidi Subscribe stream to the delivery.Stream interface.
 type GRPCStream struct {
 	stream grpc.BidiStreamingServer[types.SubscribeRequest, types.Delivery]
 }
 
-// Send sends a delivery message
+// Send sends a delivery message to the subscriber over the gRPC stream.
 func (s *GRPCStream) Send(delivery *delivery.DeliveryMessage) error {
 	// Convert delivery.DeliveryMessage to types.Delivery
 	return s.stream.Send(&types.Delivery{
@@ -102,12 +115,12 @@ func (s *GRPCStream) Recv() (*delivery.Control, error) {
 	return nil, fmt.Errorf("control message streaming not implemented: use the Ack endpoint for credits and flow control")
 }
 
-// Context returns the stream context
+// Context returns the underlying gRPC stream context.
 func (s *GRPCStream) Context() context.Context {
 	return s.stream.Context()
 }
 
-// NewEventServiceHandler creates a new event service handler
+// NewEventServiceHandler creates an EventService handler with the given dependencies.
 func NewEventServiceHandler(
 	pm *partition.PartitionManager,
 	dm DedupManager,
@@ -205,7 +218,8 @@ func (h *EventServiceHandler) ensureClusterPartitionWritable(partitionID int32) 
 	return nil
 }
 
-// Publish handles publish requests
+// Publish handles a single-event publish request: validate, authorize, dedup,
+// append to the partition WAL, and optionally wait for durable ack.
 func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishRequest) (*types.PublishResponse, error) {
 	ctx, span := tracing.StartSpan(ctx, "Publish")
 	if span != nil {

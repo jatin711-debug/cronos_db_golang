@@ -11,30 +11,42 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 )
 
-// ReplayRequest describes replay query options.
+// ReplayRequest describes historical replay query options for Client.Replay.
 type ReplayRequest struct {
-	Topic       string
+	// Topic is the topic to replay (required).
+	Topic string
+	// PartitionID is the partition to replay (required; must be >= 0).
 	PartitionID int32
 
+	// StartOffset is the first offset to include when replaying by offset (server-defined if 0).
 	StartOffset int64
-	EndOffset   int64
-	Count       int64
+	// EndOffset is the last offset bound when replaying by offset (0 may mean unbounded).
+	EndOffset int64
+	// Count limits how many events to return (0 means server default / unbounded).
+	Count int64
 
+	// StartTime selects events at or after this wall time when using time-based replay.
 	StartTime time.Time
-	EndTime   time.Time
+	// EndTime selects events at or before this wall time when using time-based replay.
+	EndTime time.Time
 
-	ConsumerGroup  string
+	// ConsumerGroup is an optional group ID associated with the replay session.
+	ConsumerGroup string
+	// SubscriptionID is an optional client-visible subscription label for the stream.
 	SubscriptionID string
-	Speed          float64
+	// Speed controls replay pacing: 0 = as-fast-as-possible, 1 = real-time (server semantics).
+	Speed float64
 }
 
-// ReplayEvent wraps replay stream events.
+// ReplayEvent is one event emitted on a Replay stream.
 type ReplayEvent struct {
-	Event        *types.Event
+	// Event is the historical event payload and metadata.
+	Event *types.Event
+	// ReplayOffset is the server's replay cursor offset for this event.
 	ReplayOffset int64
 }
 
-// ReplayHandler handles replayed events.
+// ReplayHandler is invoked for each replayed event. Return ErrStopReplay to stop cleanly.
 type ReplayHandler func(context.Context, ReplayEvent) error
 
 // ErrStopReplay can be returned by ReplayHandler to stop replay without error.

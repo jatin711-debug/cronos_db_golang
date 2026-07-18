@@ -24,11 +24,11 @@ type PebbleStore struct {
 	db          *pebble.DB
 	dataDir     string
 	partitionID int32
-	ttlHours    int32
+	ttlHours    int32 // entry TTL applied at flush time
 
 	pendingMu sync.RWMutex
-	pending   map[string]int64 // messageID -> offset
-	claimMu   sync.Mutex       // serializes check-and-buffer for direct users
+	pending   map[string]int64 // messageID -> offset (not yet durable)
+	claimMu   sync.Mutex       // serializes check-and-buffer and flush
 
 	quit      chan struct{}
 	wg        sync.WaitGroup
@@ -36,7 +36,9 @@ type PebbleStore struct {
 	closeErr  error
 }
 
-// NewPebbleStore creates a new PebbleStore
+// NewPebbleStore opens (or creates) a per-partition Pebble dedup database under
+// dataDir/dedup_<partitionID>. cache may be shared across partitions; pass nil
+// to use Pebble's default caching.
 func NewPebbleStore(dataDir string, partitionID int32, ttlHours int32, cache *pebble.Cache) (*PebbleStore, error) {
 	// Create data directory
 	dir := filepath.Join(dataDir, fmt.Sprintf("dedup_%d", partitionID))
@@ -219,7 +221,7 @@ func (p *PebbleStore) RollbackClaim(messageIDs []string) error {
 	return nil
 }
 
-// GetOffset returns stored offset for message ID
+// GetOffset returns the stored WAL offset for messageID, checking pending first.
 func (p *PebbleStore) GetOffset(messageID string) (int64, bool, error) {
 	p.pendingMu.RLock()
 	if offset, ok := p.pending[messageID]; ok {
@@ -242,7 +244,7 @@ func (p *PebbleStore) GetOffset(messageID string) (int64, bool, error) {
 	return offset, true, err
 }
 
-// Exists checks if message ID exists
+// Exists reports whether messageID is in the pending buffer or PebbleDB.
 func (p *PebbleStore) Exists(messageID string) (bool, error) {
 	p.pendingMu.RLock()
 	if _, ok := p.pending[messageID]; ok {
@@ -329,7 +331,7 @@ func (p *PebbleStore) flushPendingMap(pending map[string]int64) error {
 	return nil
 }
 
-// PruneExpired removes expired entries
+// PruneExpired flushes pending writes then deletes TTL-expired Pebble keys.
 func (p *PebbleStore) PruneExpired() (int, error) {
 	if err := p.flushPending(); err != nil {
 		return 0, fmt.Errorf("flush pending before prune: %w", err)
@@ -362,7 +364,8 @@ func (p *PebbleStore) PruneExpired() (int, error) {
 	return pruned, nil
 }
 
-// GetTimestamp returns stored timestamp for message ID
+// GetTimestamp returns the creation time for messageID.
+// Pending (not yet flushed) entries report time.Now() as an approximation.
 func (p *PebbleStore) GetTimestamp(messageID string) (time.Time, bool, error) {
 	p.pendingMu.RLock()
 	if _, ok := p.pending[messageID]; ok {
@@ -434,7 +437,8 @@ func (p *PebbleStore) GetStats() (*DedupStats, error) {
 	}, nil
 }
 
-// Close closes the store
+// Close stops the flush loop, flushes pending writes, and closes PebbleDB.
+// Safe to call multiple times; subsequent calls return the first close error.
 func (p *PebbleStore) Close() error {
 	p.closeOnce.Do(func() {
 		close(p.quit)
@@ -467,7 +471,7 @@ func (p *PebbleStore) Checkpoint(destDir string) error {
 	return nil
 }
 
-// buildValue builds storage value
+// buildValue encodes offset, expiration (ms), and created (ns) as 24 big-endian bytes.
 func (p *PebbleStore) buildValue(offset int64, expirationTS int64, createdTS int64) []byte {
 	value := make([]byte, 24)
 	// Offset (8 bytes)
@@ -479,7 +483,8 @@ func (p *PebbleStore) buildValue(offset int64, expirationTS int64, createdTS int
 	return value
 }
 
-// parseValue parses storage value
+// parseValue decodes a stored value into offset, expirationTS, and createdTS.
+// Legacy 16-byte values without createdTS return createdTS=0.
 func (p *PebbleStore) parseValue(value []byte) (int64, int64, int64, error) {
 	if len(value) < 24 {
 		if len(value) >= 16 {

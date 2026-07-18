@@ -10,12 +10,14 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 )
 
-// Worker processes ready events from scheduler
+// Worker drains ready events from the scheduler and dispatches them in batches.
+// The ready queue is protected by mu; dispatch stats are atomic so GetStats
+// does not contend with the hot path.
 type Worker struct {
-	mu         sync.Mutex // Only protects readyQueue and processing flag
+	mu         sync.Mutex // protects readyQueue and processing flag
 	dispatcher *Dispatcher
 	readyQueue []*types.Event
-	notify     chan struct{}
+	notify     chan struct{} // buffered wake-up for the loop
 	batchSize  int32
 	processing bool
 	quit       chan struct{}
@@ -26,7 +28,7 @@ type Worker struct {
 	statsLastDispTS atomic.Int64
 }
 
-// NewWorker creates a new delivery worker
+// NewWorker creates a delivery worker that batches up to batchSize events per dispatch.
 func NewWorker(dispatcher *Dispatcher, batchSize int32) *Worker {
 	return &Worker{
 		dispatcher: dispatcher,
@@ -44,7 +46,7 @@ func (w *Worker) signal() {
 	}
 }
 
-// AddReadyEvent adds a ready event to the queue
+// AddReadyEvent appends a single ready event and wakes the worker loop.
 func (w *Worker) AddReadyEvent(event *types.Event) {
 	w.mu.Lock()
 	w.readyQueue = append(w.readyQueue, event)
@@ -61,7 +63,7 @@ func (w *Worker) AddReadyEvents(events []*types.Event) {
 	w.signal()
 }
 
-// Start starts the worker
+// Start launches the background processing loop if not already running.
 func (w *Worker) Start() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -122,7 +124,7 @@ func (w *Worker) processBatch() bool {
 	return true
 }
 
-// Stop stops the worker
+// Stop signals the processing loop to exit. It is a no-op if not running.
 func (w *Worker) Stop() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -135,7 +137,7 @@ func (w *Worker) Stop() {
 	w.processing = false
 }
 
-// GetStats returns worker statistics
+// GetStats returns a snapshot of dispatch counters and queue depth.
 func (w *Worker) GetStats() *WorkerStats {
 	w.mu.Lock()
 	queueLen := int64(len(w.readyQueue))
@@ -151,11 +153,16 @@ func (w *Worker) GetStats() *WorkerStats {
 	}
 }
 
-// WorkerStats represents worker statistics
+// WorkerStats is a point-in-time snapshot of delivery worker activity.
 type WorkerStats struct {
+	// EventsDispatched is the cumulative count of events sent via DispatchBatch.
 	EventsDispatched int64
-	EventsFailed     int64
-	QueueLength      int64
-	LastDispatchTS   int64
-	Processing       bool
+	// EventsFailed is the cumulative count of events in batches that returned an error.
+	EventsFailed int64
+	// QueueLength is the current ready-queue depth.
+	QueueLength int64
+	// LastDispatchTS is the last successful or failed batch dispatch time (Unix ms).
+	LastDispatchTS int64
+	// Processing is true while the background loop is running.
+	Processing bool
 }

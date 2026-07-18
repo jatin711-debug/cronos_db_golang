@@ -7,13 +7,18 @@ import (
 	"os"
 )
 
-// TLSConfig holds TLS configuration for the gRPC server.
+// TLSConfig holds TLS configuration for the public gRPC server.
 type TLSConfig struct {
-	Enabled    bool
-	CAFile     string
-	CertFile   string
-	KeyFile    string
-	ClientAuth bool // require client certs (mTLS)
+	// Enabled turns on TLS for the public listener.
+	Enabled bool
+	// CAFile is the CA certificate path used to verify client certs when ClientAuth is set.
+	CAFile string
+	// CertFile is the server certificate path.
+	CertFile string
+	// KeyFile is the server private key path.
+	KeyFile string
+	// ClientAuth requires and verifies client certificates (mTLS) when true.
+	ClientAuth bool
 }
 
 // BuildServerTLSConfig builds a tls.Config for the gRPC server.

@@ -5,15 +5,15 @@ import (
 	"time"
 )
 
-// RetryEntry represents a delivery that needs to be retried at a specific time.
+// RetryEntry is a delivery scheduled for a future retry attempt.
 type RetryEntry struct {
-	active  *ActiveDelivery
-	retryAt int64 // Unix ms
-	index   int   // For heap.Interface
+	active  *ActiveDelivery // delivery state to re-send
+	retryAt int64           // earliest retry time (Unix ms)
+	index   int             // heap index maintained by container/heap
 }
 
-// RetryHeap is a min-heap of retry entries ordered by retryAt time.
-// It provides O(log N) push/pop and O(1) peek operations.
+// RetryHeap is a min-heap of RetryEntry ordered by retryAt.
+// It provides O(log N) push/pop and O(1) peek for the dispatcher timeout loop.
 type RetryHeap struct {
 	entries []*RetryEntry
 }

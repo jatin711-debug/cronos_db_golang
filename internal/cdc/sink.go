@@ -1,3 +1,8 @@
+// Package cdc implements change data capture: fan-out of WAL append events to
+// pluggable sinks (Kafka, webhooks) via bounded worker pools.
+//
+// Manager.Emit is called from the WAL append hook. When no sinks are registered,
+// HasSinks is false and callers should skip ChangeEvent allocation entirely.
 package cdc
 
 import (
@@ -12,27 +17,36 @@ import (
 
 // Sink is a destination for change data capture events.
 type Sink interface {
+	// Name returns a stable identifier for logging and metrics.
 	Name() string
+	// Write delivers a single change event; ctx bounds the operation.
 	Write(ctx context.Context, event *ChangeEvent) error
+	// Close releases resources held by the sink.
 	Close() error
 }
 
-// ChangeEvent represents a WAL change event.
+// ChangeEvent represents a WAL change event exported to sinks.
 type ChangeEvent struct {
-	Timestamp   time.Time    `json:"timestamp"`
-	Op          string       `json:"op"` // "append", "commit", "compact"
-	PartitionID int32        `json:"partition_id"`
-	Topic       string       `json:"topic"`
-	Offset      int64        `json:"offset"`
-	Event       *types.Event `json:"event,omitempty"`
+	// Timestamp is when the change was observed.
+	Timestamp time.Time `json:"timestamp"`
+	// Op is the change kind: "append", "commit", or "compact".
+	Op string `json:"op"`
+	// PartitionID is the partition that produced the change.
+	PartitionID int32 `json:"partition_id"`
+	// Topic is the event topic.
+	Topic string `json:"topic"`
+	// Offset is the WAL offset of the event.
+	Offset int64 `json:"offset"`
+	// Event is the full event payload when available.
+	Event *types.Event `json:"event,omitempty"`
 }
 
 const (
-	// DefaultCDCWorkers is the number of goroutines per sink.
+	// DefaultCDCWorkers is the number of goroutines per sink pipeline.
 	DefaultCDCWorkers = 4
 	// DefaultCDCQueueSize is the per-sink buffered queue size.
 	DefaultCDCQueueSize = 10000
-	// DefaultCDCWriteTimeout is the per-write timeout.
+	// DefaultCDCWriteTimeout is the per-write and enqueue wait timeout.
 	DefaultCDCWriteTimeout = 5 * time.Second
 )
 

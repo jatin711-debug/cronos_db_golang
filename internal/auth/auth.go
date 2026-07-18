@@ -1,3 +1,9 @@
+// Package auth provides JWT authentication and RBAC authorization for CronosDB
+// gRPC and HTTP APIs.
+//
+// When enabled, Interceptor and StreamInterceptor require a Bearer token,
+// attach Claims to the request context, and handlers call CheckTopicPermission
+// or CheckAdminPermission against a JSON policy file.
 package auth
 
 import (
@@ -20,21 +26,28 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// Config holds auth configuration.
+// Config holds authentication and authorization settings for the server.
 type Config struct {
-	Enabled      bool
-	JWTSecret    []byte
-	JWTPublicKey interface{} // ed25519.PublicKey, *rsa.PublicKey, or *ecdsa.PublicKey
-	Policy       *Policy
+	// Enabled turns on JWT verification in gRPC/HTTP interceptors.
+	Enabled bool
+	// JWTSecret is the HMAC key for HS256/384/512 verification.
+	JWTSecret []byte
+	// JWTPublicKey is an ed25519.PublicKey, *rsa.PublicKey, or *ecdsa.PublicKey
+	// used for asymmetric JWT verification.
+	JWTPublicKey interface{}
+	// Policy is the in-memory RBAC policy; nil means policy is not configured.
+	Policy *Policy
 }
 
-// Policy is a simple in-memory RBAC policy.
+// Policy is a simple in-memory RBAC policy keyed by JWT subject.
 type Policy struct {
+	// Subjects maps principal names (JWT sub) to their permissions.
 	Subjects map[string]*Subject `json:"subjects"`
 }
 
 // Subject holds permissions for a principal.
 type Subject struct {
+	// Topics maps topic names to publish/subscribe/admin permissions.
 	Topics map[string]TopicPerms `json:"topics"`
 
 	// Admin grants the principal access to the AdminService RPCs
@@ -47,14 +60,18 @@ type Subject struct {
 
 // TopicPerms holds allowed operations on a topic.
 type TopicPerms struct {
-	Publish   bool `json:"publish"`
+	// Publish allows producing events to the topic.
+	Publish bool `json:"publish"`
+	// Subscribe allows consuming or replaying events from the topic.
 	Subscribe bool `json:"subscribe"`
-	Admin     bool `json:"admin"`
+	// Admin allows topic-scoped administrative operations.
+	Admin bool `json:"admin"`
 }
 
 // Claims extends jwt.RegisteredClaims with CronosDB-specific fields.
 type Claims struct {
 	jwt.RegisteredClaims
+	// SubjectID is a CronosDB-specific subject identifier (JSON "sub_id").
 	SubjectID string `json:"sub_id"`
 }
 
@@ -107,7 +124,9 @@ func LoadPublicKey(path string) (any, error) {
 	}
 }
 
-// Interceptor returns a gRPC unary interceptor that enforces JWT.
+// Interceptor returns a gRPC unary interceptor that enforces JWT authentication.
+// When cfg is nil or disabled, it is a pass-through. On success, claims are
+// stored on the context via WithClaims.
 func Interceptor(cfg *Config) grpc.UnaryServerInterceptor {
 	if cfg == nil || !cfg.Enabled {
 		return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
@@ -136,7 +155,8 @@ func Interceptor(cfg *Config) grpc.UnaryServerInterceptor {
 	}
 }
 
-// StreamInterceptor returns a gRPC stream interceptor for auth.
+// StreamInterceptor returns a gRPC stream interceptor that enforces JWT auth
+// and attaches claims to the stream context. Pass-through when auth is disabled.
 func StreamInterceptor(cfg *Config) grpc.StreamServerInterceptor {
 	if cfg == nil || !cfg.Enabled {
 		return func(srv interface{}, stream grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {

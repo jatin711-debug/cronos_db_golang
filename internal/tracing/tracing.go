@@ -1,3 +1,8 @@
+// Package tracing configures OpenTelemetry tracing for CronosDB and provides
+// helpers for spans, attributes, and gRPC interceptors.
+//
+// InitTracing installs a global Tracer and TracerProvider when enabled.
+// When disabled or when the exporter is "none", span helpers are no-ops.
 package tracing
 
 import (
@@ -19,23 +24,32 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// Config holds tracing configuration
+// Config holds OpenTelemetry tracing configuration.
 type Config struct {
-	ServiceName  string
-	Enabled      bool
-	ExporterType string // "stdout", "otlp", "none"
+	// ServiceName is the OTel service.name resource attribute (default "cronos-api").
+	ServiceName string
+	// Enabled turns tracing on; when false, InitTracing installs no provider.
+	Enabled bool
+	// ExporterType selects the span exporter: "stdout", "otlp", or "none".
+	ExporterType string
+	// OTLPEndpoint is the OTLP gRPC collector host:port when using "otlp".
 	OTLPEndpoint string
-	SampleRatio  float64
+	// SampleRatio is the parent-based trace ID ratio sampler in [0.0, 1.0].
+	SampleRatio float64
+	// OTLPInsecure uses an insecure (non-TLS) OTLP connection when true.
 	OTLPInsecure bool
 }
 
-// Tracer is the global tracer instance
+// Tracer is the global tracer instance used by StartSpan and gRPC interceptors.
+// It is nil when tracing is disabled.
 var Tracer trace.Tracer
 
-// TracerProvider is the global tracer provider
+// TracerProvider is the global SDK tracer provider; nil when tracing is disabled.
 var TracerProvider *sdktrace.TracerProvider
 
-// InitTracing initializes OpenTelemetry tracing
+// InitTracing initializes OpenTelemetry tracing from cfg.
+// On success it sets the global otel TracerProvider and text-map propagator.
+// OTLP init failures fall back to a no-op exporter rather than failing the process.
 func InitTracing(cfg *Config) error {
 	if cfg == nil || !cfg.Enabled {
 		log.Printf("[TRACING] Tracing disabled")
@@ -144,7 +158,7 @@ func newOTLPExporter(cfg *Config) (sdktrace.SpanExporter, error) {
 	return otlptrace.New(context.Background(), client)
 }
 
-// Shutdown gracefully shuts down the tracer provider
+// Shutdown flushes and shuts down the global tracer provider, if any.
 func Shutdown(ctx context.Context) error {
 	if TracerProvider != nil {
 		return TracerProvider.Shutdown(ctx)
@@ -152,7 +166,8 @@ func Shutdown(ctx context.Context) error {
 	return nil
 }
 
-// StartSpan starts a new span with the given name and attributes
+// StartSpan starts a new child span with the given name and attributes.
+// When tracing is disabled it returns the original context and a nil span.
 func StartSpan(ctx context.Context, name string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
 	if Tracer == nil {
 		return ctx, nil
@@ -160,7 +175,7 @@ func StartSpan(ctx context.Context, name string, attrs ...attribute.KeyValue) (c
 	return Tracer.Start(ctx, name, trace.WithAttributes(attrs...))
 }
 
-// AddEvent adds an event to the current span
+// AddEvent adds a named event to the current span in ctx, if any.
 func AddEvent(ctx context.Context, name string, attrs ...attribute.KeyValue) {
 	span := trace.SpanFromContext(ctx)
 	if span != nil {
@@ -168,7 +183,7 @@ func AddEvent(ctx context.Context, name string, attrs ...attribute.KeyValue) {
 	}
 }
 
-// SetAttributes sets attributes on the current span
+// SetAttributes sets attributes on the current span in ctx, if any.
 func SetAttributes(ctx context.Context, attrs ...attribute.KeyValue) {
 	span := trace.SpanFromContext(ctx)
 	if span != nil {
@@ -176,7 +191,7 @@ func SetAttributes(ctx context.Context, attrs ...attribute.KeyValue) {
 	}
 }
 
-// RecordError records an error on the current span
+// RecordError records an error on the current span in ctx, if any.
 func RecordError(ctx context.Context, err error, attrs ...attribute.KeyValue) {
 	span := trace.SpanFromContext(ctx)
 	if span != nil {
@@ -184,12 +199,12 @@ func RecordError(ctx context.Context, err error, attrs ...attribute.KeyValue) {
 	}
 }
 
-// SpanFromContext returns the span from the context
+// SpanFromContext returns the span stored in ctx (may be a non-recording span).
 func SpanFromContext(ctx context.Context) trace.Span {
 	return trace.SpanFromContext(ctx)
 }
 
-// TraceIDFromContext returns the trace ID from the context
+// TraceIDFromContext returns the hex trace ID from ctx, or "" if absent.
 func TraceIDFromContext(ctx context.Context) string {
 	span := trace.SpanFromContext(ctx)
 	if span != nil && span.SpanContext().HasTraceID() {
@@ -198,7 +213,7 @@ func TraceIDFromContext(ctx context.Context) string {
 	return ""
 }
 
-// SpanIDFromContext returns the span ID from the context
+// SpanIDFromContext returns the hex span ID from ctx, or "" if absent.
 func SpanIDFromContext(ctx context.Context) string {
 	span := trace.SpanFromContext(ctx)
 	if span != nil && span.SpanContext().HasSpanID() {

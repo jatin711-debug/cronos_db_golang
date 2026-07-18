@@ -7,21 +7,22 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 )
 
-// ConsumerGroupServiceHandler implements the ConsumerGroupService handler
+// ConsumerGroupServiceHandler implements the ConsumerGroupService gRPC API for
+// creating, listing, inspecting, and rebalancing consumer groups.
 type ConsumerGroupServiceHandler struct {
 	types.UnimplementedConsumerGroupServiceServer
 
 	consumerManager *consumer.GroupManager
 }
 
-// NewConsumerGroupServiceHandler creates a new consumer group service handler
+// NewConsumerGroupServiceHandler creates a ConsumerGroupService handler.
 func NewConsumerGroupServiceHandler(cm *consumer.GroupManager) *ConsumerGroupServiceHandler {
 	return &ConsumerGroupServiceHandler{
 		consumerManager: cm,
 	}
 }
 
-// CreateConsumerGroup creates a new consumer group
+// CreateConsumerGroup creates a new consumer group for the requested topic/partitions.
 func (h *ConsumerGroupServiceHandler) CreateConsumerGroup(
 	ctx context.Context,
 	req *types.CreateConsumerGroupRequest,
@@ -42,7 +43,7 @@ func (h *ConsumerGroupServiceHandler) CreateConsumerGroup(
 	}, nil
 }
 
-// GetConsumerGroup gets consumer group metadata
+// GetConsumerGroup returns metadata for a single consumer group.
 func (h *ConsumerGroupServiceHandler) GetConsumerGroup(
 	ctx context.Context,
 	req *types.GetConsumerGroupRequest,
@@ -63,7 +64,7 @@ func (h *ConsumerGroupServiceHandler) GetConsumerGroup(
 	}, nil
 }
 
-// ListConsumerGroups lists all consumer groups
+// ListConsumerGroups lists all consumer groups known to this node.
 func (h *ConsumerGroupServiceHandler) ListConsumerGroups(
 	ctx context.Context,
 	req *types.ListConsumerGroupsRequest,
@@ -88,7 +89,7 @@ func (h *ConsumerGroupServiceHandler) ListConsumerGroups(
 	}, nil
 }
 
-// RebalanceConsumerGroup rebalances a consumer group
+// RebalanceConsumerGroup triggers a rebalance and returns member assignments.
 func (h *ConsumerGroupServiceHandler) RebalanceConsumerGroup(
 	ctx context.Context,
 	req *types.RebalanceConsumerGroupRequest,

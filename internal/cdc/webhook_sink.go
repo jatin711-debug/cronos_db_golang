@@ -9,13 +9,13 @@ import (
 	"time"
 )
 
-// WebhookSink sends CDC events to an HTTP endpoint.
+// WebhookSink sends CDC events as JSON POSTs to an HTTP endpoint.
 type WebhookSink struct {
 	url        string
 	httpClient *http.Client
 }
 
-// NewWebhookSink creates a webhook CDC sink.
+// NewWebhookSink creates a webhook CDC sink with a 10s HTTP client timeout.
 func NewWebhookSink(url string) *WebhookSink {
 	return &WebhookSink{
 		url: url,
@@ -25,8 +25,11 @@ func NewWebhookSink(url string) *WebhookSink {
 	}
 }
 
+// Name implements Sink.
 func (w *WebhookSink) Name() string { return "webhook" }
 
+// Write POSTs the change event as application/json to the configured URL.
+// Non-2xx responses are returned as errors.
 func (w *WebhookSink) Write(ctx context.Context, event *ChangeEvent) error {
 	data, err := json.Marshal(event)
 	if err != nil {
@@ -50,4 +53,5 @@ func (w *WebhookSink) Write(ctx context.Context, event *ChangeEvent) error {
 	return nil
 }
 
+// Close implements Sink; webhook sinks hold no long-lived resources.
 func (w *WebhookSink) Close() error { return nil }

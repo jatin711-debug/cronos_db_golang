@@ -11,14 +11,14 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// Handler implements the TransactionService gRPC handler.
+// Handler implements the TransactionService gRPC API on top of a 2PC Coordinator.
 type Handler struct {
 	types.UnimplementedTransactionServiceServer
 	coordinator *Coordinator
 	pm          *partition.PartitionManager
 }
 
-// NewHandler creates a transaction handler.
+// NewHandler creates a TransactionService handler bound to the given partition manager.
 func NewHandler(pm *partition.PartitionManager) *Handler {
 	c := NewCoordinator(30*time.Second, pm.GetDataDir())
 	c.SetPartitionManager(pm)
