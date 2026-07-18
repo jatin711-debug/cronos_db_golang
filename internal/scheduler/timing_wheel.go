@@ -16,44 +16,55 @@ var expiredSlicePool = sync.Pool{
 	},
 }
 
-// TimingWheel implements a hierarchical timing wheel for efficient timer management
+// TimingWheel implements a hierarchical timing wheel for efficient timer management.
+// Each level covers tickMs * wheelSize of time; timers that do not fit cascade into
+// an overflow wheel with a coarser tick. Tick advances expire the current slot and
+// publish batches on the expired channel without blocking publishers when saturated.
 type TimingWheel struct {
 	mu            sync.RWMutex
 	currentTick   int64
-	startTimeMs   int64        // Absolute start time of the root wheel (Unix ms)
-	wheel         []*Timer     // Array of time slots (linked list heads)
-	overflowWheel *TimingWheel // Higher level wheel
-	timers        map[int64]*Timer
-	expired       chan []*Timer
+	startTimeMs   int64            // Absolute start time of this wheel level (Unix ms)
+	wheel         []*Timer         // Array of time slots (linked list heads)
+	overflowWheel *TimingWheel     // Higher level wheel (nil until first far-future timer)
+	timers        map[int64]*Timer // EventID -> timer for O(1) cancel/lookup
+	expired       chan []*Timer    // non-blocking fan-out of expired batches
 	quit          chan struct{}
 	quitOnce      sync.Once
 	timerPool     *sync.Pool
 	expiredBuf    []*Timer   // Reusable scratch buffer for tick processing
 	cascadeBuf    [][]*Timer // Reusable bucket buffer for cascade operations
-	overflowRetry []*Timer   // Timers deferred for re-insertion when the expired channel is full; drained outside the wheel lock to avoid blocking publishers.
-	tickMs        int32
-	wheelSize     int32
+	// overflowRetry holds timers deferred for re-insertion when the expired
+	// channel is full; drained outside the wheel lock to avoid blocking publishers.
+	overflowRetry []*Timer
+	tickMs        int32 // duration of one tick at this level
+	wheelSize     int32 // number of slots in this level
 	maxLevels     int32 // Maximum number of overflow wheel levels
 	currentLevel  int32 // Current level in the hierarchy (0 = root)
 }
 
-// Timer represents a scheduled event.
+// Timer represents a scheduled event in a TimingWheel slot list.
 // Fields are ordered for optimal cache alignment:
 //   - Pointers together (8B each) to minimize GC scan overhead
 //   - Hot int64 fields together (accessed every tick)
 //   - Cold int32 field last
 type Timer struct {
-	next         *Timer
-	prev         *Timer
-	Event        *types.Event
-	ExpirationMs int64 // Absolute expiration time in milliseconds (Unix timestamp)
-	EventID      int64 // Offset-based ID (was string, now int64 — zero alloc)
-	CreatedTS    int64
-	SlotIndex    int32
+	next *Timer // intrusive list forward link
+	prev *Timer // intrusive list backward link
+	// Event is the scheduled payload delivered when the timer expires.
+	Event *types.Event
+	// ExpirationMs is the absolute expiration time in Unix milliseconds.
+	ExpirationMs int64
+	// EventID is the offset-based identity used for map lookup and cancel.
+	EventID int64
+	// CreatedTS is when the timer was created (Unix ms, or a pre-sampled batch time).
+	CreatedTS int64
+	// SlotIndex is the wheel slot currently holding this timer (-1 when unassigned).
+	SlotIndex int32
 }
 
-// NewTimingWheel creates a new timing wheel
-// startTimeMs is the absolute start time (only used by root wheel, pass 0 for overflow wheels)
+// NewTimingWheel creates a hierarchical timing wheel.
+// startTimeMs is the absolute wall-clock origin for tick 0 (root wheel only;
+// pass 0 for overflow wheels, which inherit origin from their parent).
 func NewTimingWheel(tickMs int32, wheelSize int32, maxLevels int32, currentLevel int32, startTimeMs int64) *TimingWheel {
 	tw := &TimingWheel{
 		tickMs:       tickMs,
@@ -82,7 +93,7 @@ func (tw *TimingWheel) initialize() {
 	// No-op for intrusive list slice
 }
 
-// AddTimer adds a timer to the wheel
+// AddTimer adds a timer to the wheel, cascading to overflow levels if needed.
 func (tw *TimingWheel) AddTimer(timer *Timer) error {
 	tw.mu.Lock()
 	defer tw.mu.Unlock()
@@ -180,7 +191,8 @@ func (tw *TimingWheel) removeTimerFromList(timer *Timer) {
 	timer.prev = nil
 }
 
-// RemoveTimer removes a timer
+// RemoveTimer cancels a timer by EventID, searching overflow wheels if needed.
+// The timer is returned to the pool.
 func (tw *TimingWheel) RemoveTimer(eventID int64) error {
 	tw.mu.Lock()
 	defer tw.mu.Unlock()
@@ -206,7 +218,9 @@ func (tw *TimingWheel) RemoveTimer(eventID int64) error {
 	return nil
 }
 
-// Tick advances the timing wheel by one tick
+// Tick advances the timing wheel by one tick, publishing expired timers and
+// cascading from the overflow wheel on full rotations. Deferred overflow-retry
+// re-insertions run outside the wheel lock.
 func (tw *TimingWheel) Tick() {
 	tw.mu.Lock()
 	tw.tickLocked()
@@ -398,7 +412,8 @@ func (tw *TimingWheel) cascadeFromOverflow() {
 	}
 }
 
-// AdvanceTo advances the wheel to a specific tick
+// AdvanceTo advances the wheel tick-by-tick until targetTick, sleeping one
+// tickMs between advances. Returns an error if targetTick is in the past.
 func (tw *TimingWheel) AdvanceTo(targetTick int64) error {
 	if targetTick < tw.currentTick {
 		return fmt.Errorf("cannot advance backwards")
@@ -413,12 +428,13 @@ func (tw *TimingWheel) AdvanceTo(targetTick int64) error {
 	return nil
 }
 
-// GetExpiredChannel returns the channel for expired timers
+// GetExpiredChannel returns the receive-only channel for expired timer batches.
+// Consumers must return slices to expiredSlicePool after processing.
 func (tw *TimingWheel) GetExpiredChannel() <-chan []*Timer {
 	return tw.expired
 }
 
-// GetStats returns timing wheel statistics
+// GetStats returns a snapshot of active timer counts and wheel configuration.
 func (tw *TimingWheel) GetStats() *SchedulerStats {
 	tw.mu.RLock()
 	defer tw.mu.RUnlock()
@@ -459,17 +475,23 @@ func (tw *TimingWheel) Close() {
 	}
 }
 
-// SchedulerStats represents scheduler statistics
+// SchedulerStats holds timing-wheel and ready-queue statistics.
 type SchedulerStats struct {
-	ActiveTimers  int64
-	CurrentTick   int64
-	TickMs        int32
-	WheelSize     int32
+	// ActiveTimers is the number of timers currently in the wheel hierarchy.
+	ActiveTimers int64
+	// CurrentTick is the root wheel's current tick counter.
+	CurrentTick int64
+	// TickMs is the root wheel tick interval in milliseconds.
+	TickMs int32
+	// WheelSize is the number of slots in the root wheel.
+	WheelSize int32
+	// OverflowLevel is the depth of overflow wheels currently allocated.
 	OverflowLevel int32
-	ReadyEvents   int64
+	// ReadyEvents is the number of events waiting in the scheduler ready queue.
+	ReadyEvents int64
 }
 
-// NewTimer creates a new timer (deprecated, use GetTimer)
+// NewTimer creates a new heap-allocated timer (prefer TimingWheel.GetTimer).
 func NewTimer(eventID int64, event *types.Event) *Timer {
 	return &Timer{
 		EventID:      eventID,
@@ -479,7 +501,7 @@ func NewTimer(eventID int64, event *types.Event) *Timer {
 	}
 }
 
-// GetTimer gets a timer from the pool or creates a new one
+// GetTimer obtains a timer from the pool (or allocates one) and initializes it.
 func (tw *TimingWheel) GetTimer(eventID int64, event *types.Event) *Timer {
 	timer := tw.timerPool.Get().(*Timer)
 	timer.EventID = eventID
@@ -506,7 +528,7 @@ func (tw *TimingWheel) GetTimerFast(offset int64, event *types.Event, nowMs int6
 	return timer
 }
 
-// AddTimers adds multiple timers to the wheel with a single lock acquisition
+// AddTimers adds multiple timers to the wheel with a single lock acquisition.
 func (tw *TimingWheel) AddTimers(timers []*Timer) error {
 	tw.mu.Lock()
 	defer tw.mu.Unlock()
@@ -519,14 +541,14 @@ func (tw *TimingWheel) AddTimers(timers []*Timer) error {
 	return nil
 }
 
-// GetCurrentTick returns the current tick in a thread-safe manner
+// GetCurrentTick returns the current tick in a thread-safe manner.
 func (tw *TimingWheel) GetCurrentTick() int64 {
 	tw.mu.RLock()
 	defer tw.mu.RUnlock()
 	return tw.currentTick
 }
 
-// PutTimer returns a timer to the pool
+// PutTimer clears references and returns a timer to the pool for reuse.
 func (tw *TimingWheel) PutTimer(timer *Timer) {
 	timer.Event = nil
 	timer.EventID = 0

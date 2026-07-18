@@ -18,11 +18,13 @@ type fakeReplServer struct {
 	mu       sync.Mutex
 	received []*types.Event
 	nextOff  int64
+	lastTerm int64
 }
 
 func (s *fakeReplServer) Append(_ context.Context, req *types.ReplicationAppendRequest) (*types.ReplicationAppendResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.lastTerm = req.GetTerm()
 	if req.GetExpectedNextOffset() != s.nextOff {
 		return &types.ReplicationAppendResponse{
 			Success:    false,
@@ -40,6 +42,12 @@ func (s *fakeReplServer) Append(_ context.Context, req *types.ReplicationAppendR
 		LastOffset: s.nextOff - 1,
 		NextOffset: s.nextOff,
 	}, nil
+}
+
+func (s *fakeReplServer) term() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastTerm
 }
 
 func (s *fakeReplServer) count() int {
@@ -89,6 +97,31 @@ func TestLeader_GRPCReplicate_EndToEnd(t *testing.T) {
 	// The follower must now be in-sync so leadership stats reflect quorum.
 	if isr := l.GetInSyncReplicas(); len(isr) != 1 {
 		t.Fatalf("expected 1 in-sync replica, got %d", len(isr))
+	}
+}
+
+// TestLeader_SetEpochPropagatesToWire verifies that SetEpoch changes the Term
+// carried by outgoing Append RPCs. Before the fix, PromoteToLeader updated the
+// partition epoch but not the Leader object, so the wire term stayed at the
+// default 1 and the follower's stale-term fence could not distinguish leaders.
+func TestLeader_SetEpochPropagatesToWire(t *testing.T) {
+	fake, addr, stop := startFakeReplServer(t)
+	defer stop()
+
+	l := NewLeader(0, 500, 100*time.Millisecond, nil, 2, "leader", nil)
+	if err := l.AddFollower("f1", addr); err != nil {
+		t.Fatalf("AddFollower: %v", err)
+	}
+	defer l.Stop()
+
+	l.SetEpoch(7)
+
+	events := []*types.Event{{MessageId: "m0", Offset: 0, Payload: []byte("a"), Topic: "t"}}
+	if err := l.Replicate(events); err != nil {
+		t.Fatalf("Replicate: %v", err)
+	}
+	if got := fake.term(); got != 7 {
+		t.Fatalf("follower received term %d, want 7 (epoch not propagated to wire)", got)
 	}
 }
 

@@ -8,11 +8,14 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 )
 
-// Policy controls request hedging behavior.
+// Policy controls request hedging behavior (parallel speculative retries).
 type Policy struct {
-	Enabled   bool
-	Delay     time.Duration // How long to wait before sending hedge request
-	MaxHedges int           // Max additional requests (1 = one hedge)
+	// Enabled turns hedging on; when false Do just runs fn once.
+	Enabled bool
+	// Delay is how long to wait before launching each hedge request.
+	Delay time.Duration
+	// MaxHedges is the max additional requests beyond the primary (1 = one hedge).
+	MaxHedges int
 }
 
 // DefaultPolicy returns safe defaults (disabled).
@@ -79,24 +82,47 @@ func Do[T any](ctx context.Context, policy Policy, fn func(context.Context) (T, 
 		launch(policy.Delay)
 	}
 
-	// Wait for first result
-	res := <-results
+	// Close results once every attempt has finished so the range below terminates
+	// even if some hedges returned early (e.g. their delay was cut short by ctx
+	// cancellation) and never sent a value. The buffer capacity equals the number
+	// of attempts, so sends never block.
+	utils.GoSafe("hedge-wait-group", func() {
+		wg.Wait()
+		close(results)
+	})
 
-	// Cancel in-flight requests
+	// Return the first SUCCESSFUL result. Previously this took the first result off
+	// the channel regardless of error, so a fast failure would beat a slow success
+	// — defeating the purpose of hedging. We now consume until one succeeds; if
+	// none do, res holds the last error seen.
+	var res result
+	var got bool
+	for r := range results {
+		res = r
+		got = true
+		if r.err == nil {
+			break // first success wins
+		}
+	}
+	if !got {
+		// No attempt produced a result (all cancelled before sending). Run the
+		// primary inline as a fallback so we never return a zero value with nil err.
+		val, err := fn(ctx)
+		res = result{val: val, err: err}
+	}
+
+	// Cancel in-flight requests.
 	mu.Lock()
 	for _, cancel := range cancelFns {
 		cancel()
 	}
 	mu.Unlock()
 
-	// Drain remaining to avoid goroutine leaks
+	// Drain any results still buffered (the range may have broken early on success)
+	// so producing goroutines are not leaked.
 	utils.GoSafe("hedge-drain-results", func() {
 		for range results {
 		}
-	})
-	utils.GoSafe("hedge-wait-group", func() {
-		wg.Wait()
-		close(results)
 	})
 
 	return res.val, res.err

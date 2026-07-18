@@ -6,6 +6,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/jatin711-debug/cronos_db_golang/internal/auth"
 	"github.com/jatin711-debug/cronos_db_golang/internal/cluster"
 	"github.com/jatin711-debug/cronos_db_golang/internal/partition"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
@@ -125,6 +126,26 @@ type PartitionServiceHandler struct {
 	clusterManager   *cluster.Manager // nil in standalone mode
 	localNodeID      string
 	splitManager     *partition.SplitManager
+
+	authPolicy  *auth.Policy
+	authEnabled bool // true when JWT authentication is active
+}
+
+// SetAuthPolicy enables admin authorization for destructive partition RPCs
+// (Compact, RunRetention, SplitPartition). Call this only when auth is enabled;
+// when auth is disabled the handler leaves authEnabled false and skips checks.
+func (h *PartitionServiceHandler) SetAuthPolicy(p *auth.Policy) {
+	h.authPolicy = p
+	h.authEnabled = true
+}
+
+// requireAdmin enforces global admin privileges on destructive operations. It is
+// a no-op when auth is disabled (dev / no --auth-enabled).
+func (h *PartitionServiceHandler) requireAdmin(ctx context.Context) error {
+	if !h.authEnabled {
+		return nil
+	}
+	return auth.CheckAdminPermission(ctx, h.authPolicy)
 }
 
 // NewPartitionServiceHandler creates a new partition service handler.
@@ -366,8 +387,12 @@ func (h *PartitionServiceHandler) GetSchedulerStatus(ctx context.Context, req *t
 	}, nil
 }
 
+// Compact runs WAL compaction for a partition (admin-only when auth is enabled).
+// BeforeTs, Force, or min-consumed-offset policies select what can be deleted.
 func (h *PartitionServiceHandler) Compact(ctx context.Context, req *types.CompactRequest) (*types.CompactResponse, error) {
-	_ = ctx
+	if err := h.requireAdmin(ctx); err != nil {
+		return nil, err
+	}
 
 	if req == nil || req.GetPartitionId() < 0 {
 		return nil, status.Error(codes.InvalidArgument, "valid partition_id is required")
@@ -413,8 +438,11 @@ func (h *PartitionServiceHandler) Compact(ctx context.Context, req *types.Compac
 	}, nil
 }
 
+// RunRetention applies age/size retention policy to a partition's WAL segments (admin-only when auth is enabled).
 func (h *PartitionServiceHandler) RunRetention(ctx context.Context, req *types.RetentionRequest) (*types.RetentionResponse, error) {
-	_ = ctx
+	if err := h.requireAdmin(ctx); err != nil {
+		return nil, err
+	}
 
 	if req == nil || req.GetPartitionId() < 0 {
 		return nil, status.Error(codes.InvalidArgument, "valid partition_id is required")
@@ -465,7 +493,9 @@ func (h *PartitionServiceHandler) RunRetention(ctx context.Context, req *types.R
 
 // SplitPartition splits a partition into two at a given offset.
 func (h *PartitionServiceHandler) SplitPartition(ctx context.Context, req *types.SplitPartitionRequest) (*types.SplitPartitionResponse, error) {
-	_ = ctx
+	if err := h.requireAdmin(ctx); err != nil {
+		return nil, err
+	}
 
 	if req == nil {
 		return nil, status.Error(codes.InvalidArgument, "request is required")

@@ -16,32 +16,34 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 )
 
-// Segment represents a WAL segment file
+// Segment is a single WAL segment file holding a contiguous offset range.
+// Active segments accept appends via mmap (plaintext) or a buffered writer
+// (encrypted); rotated segments remain readable until retention deletes them.
 type Segment struct {
 	mu              sync.RWMutex
 	flushMu         sync.Mutex // serializes flush/sync with mmap remapping
 	segmentFile     *os.File
-	writer          *bufio.Writer
+	writer          *bufio.Writer // buffered path for encrypted or non-mmap writes
 	reader          io.ReaderAt
-	mmapData        []byte // Memory mapped data
-	mmapWritePos    int64  // Current write position in mmap
-	mmapSize        int64  // Total mmap size
-	firstOffset     int64
-	lastOffset      int64
-	firstTS         int64
-	lastTS          int64
-	nextOffset      int64
-	indexEntries    int64
-	nextIndexOffset int64
-	sizeBytes       int64
-	createdTS       int64
-	isActive        bool
-	closed          bool // Set to true after Close()
+	mmapData        []byte // memory-mapped file view; nil when encrypted or unmapped
+	mmapWritePos    int64  // current write cursor within mmapData (bytes)
+	mmapSize        int64  // mapped length in bytes (tracks len(mmapData))
+	firstOffset     int64  // first event offset stored in this segment
+	lastOffset      int64  // last event offset; -1 when empty
+	firstTS         int64  // schedule timestamp of first event (ms); 0 if unknown
+	lastTS          int64  // schedule timestamp of last event (ms)
+	nextOffset      int64  // next offset expected to be appended in this segment
+	indexEntries    int64  // number of sparse index entries written
+	nextIndexOffset int64  // relative event count threshold for next index entry
+	sizeBytes       int64  // logical data end in bytes (header + records)
+	createdTS       int64  // segment creation time (Unix ms)
+	isActive        bool   // true while this segment accepts appends
+	closed          bool   // true after Close(); reads/writes are rejected
 	dataDir         string
-	filename        string
-	indexFilename   string
-	index           *Index // sparse index for fast seeking
-	recordBuf       []byte // Reusable buffer for serialization
+	filename        string // e.g. "00000000000000000012.log"
+	indexFilename   string // e.g. "00000000000000000012.index"
+	index           *Index // sparse index for fast seeking by offset/timestamp
+	recordBuf       []byte // reusable buffer for serialization
 	cipher          *SegmentCipher
 }
 
@@ -160,7 +162,8 @@ func NewSegmentWithSize(dataDir string, firstOffset int64, isActive bool, cipher
 	return segment, nil
 }
 
-// OpenSegment opens an existing segment
+// OpenSegment opens an existing segment file, validates its header, scans
+// records for metadata, and recovers from a corrupt tail if needed.
 func OpenSegment(dataDir string, filename string, cipher *SegmentCipher) (*Segment, error) {
 	filePath := filepath.Join(dataDir, "segments", filename)
 
@@ -239,6 +242,17 @@ func OpenSegment(dataDir string, filename string, cipher *SegmentCipher) (*Segme
 	// Set nextOffset based on lastOffset found during scan
 	segment.nextOffset = segment.lastOffset + 1
 
+	// Reconcile the mmap write cursor with the real data end discovered by scan.
+	// The constructor set mmapWritePos to the on-disk size, which for a segment
+	// with a preallocated tail is far past the last real record. If scan trimmed
+	// the tail, truncateToPosition already reset this; set it explicitly to cover
+	// the no-truncation path and any future scan changes. Without this, the first
+	// append after reopen writes at the preallocated EOF, leaving a zero gap that
+	// silently truncates all subsequent range reads (data-loss on every restart).
+	if segment.mmapData != nil {
+		segment.mmapWritePos = segment.sizeBytes
+	}
+
 	// Position the file handle at the end of the data so the buffered writer
 	// (used for encrypted records) appends instead of overwriting.
 	if _, err := file.Seek(segment.sizeBytes, io.SeekStart); err != nil {
@@ -303,7 +317,8 @@ func buildSegmentHeader(firstOffset, createdTS int64) []byte {
 	return header
 }
 
-// AppendEvent appends an event to the segment
+// AppendEvent appends a single event to the active segment. indexInterval
+// controls sparse index density (one entry every N events).
 func (s *Segment) AppendEvent(event *types.Event, indexInterval int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -314,7 +329,7 @@ func (s *Segment) AppendEvent(event *types.Event, indexInterval int64) error {
 	return fmt.Errorf("cannot append to closed segment")
 }
 
-// AppendBatch appends a batch of events (thread-safe)
+// AppendBatch appends a batch of events to the segment (thread-safe; acquires s.mu).
 func (s *Segment) AppendBatch(events []*types.Event, indexInterval int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -397,7 +412,8 @@ func (s *Segment) AppendPreparedBatchUnsafe(prepared []*PreparedRecord, indexInt
 	return s.AppendPreparedBatchLocked(prepared, indexInterval)
 }
 
-// appendBatchInternal is the shared batch append implementation
+// appendBatchInternal is the shared batch append implementation.
+// Caller must already hold s.mu (or equivalent exclusive access).
 func (s *Segment) appendBatchInternal(events []*types.Event, indexInterval int64) error {
 	if !s.isActive {
 		return fmt.Errorf("cannot append to closed segment")
@@ -739,25 +755,33 @@ func (s *Segment) writeRecord(record []byte) (int64, error) {
 
 // writeRecordMmap writes directly to memory-mapped file (zero-copy, zero-syscall).
 func (s *Segment) writeRecordMmap(record []byte) (int64, error) {
-	recordLen := len(record)
+	recordLen := int64(len(record))
 	if recordLen == 0 {
 		return 0, nil
 	}
 
-	// Check if we have space in mmap
-	if s.mmapWritePos+int64(recordLen) > s.mmapSize {
-		// Remap with larger size
-		if err := s.remapMmap(s.mmapSize * 2); err != nil {
+	// Grow the mapping if the record would not fit. Use len(s.mmapData) — the
+	// actual mapped length — as the authoritative bound rather than s.mmapSize,
+	// so a stale/oversized mmapSize can never let the copy below run past the end
+	// of the real buffer. Ensure the new size is large enough for THIS record even
+	// when a single record exceeds the current size (doubling alone can fall short).
+	if s.mmapWritePos+recordLen > int64(len(s.mmapData)) {
+		needed := s.mmapWritePos + recordLen
+		newSize := s.mmapSize * 2
+		if newSize < needed {
+			newSize = needed
+		}
+		if err := s.remapMmap(newSize); err != nil {
 			return 0, fmt.Errorf("remap mmap: %w", err)
 		}
 	}
 
 	// Copy directly to mmap (single memcpy, no syscall)
 	copy(s.mmapData[s.mmapWritePos:], record)
-	s.mmapWritePos += int64(recordLen)
+	s.mmapWritePos += recordLen
 	s.sizeBytes = s.mmapWritePos
 
-	return int64(recordLen), nil
+	return recordLen, nil
 }
 
 // writeRecordBuffered writes using bufio.Writer (for encryption or fallback).
@@ -817,7 +841,10 @@ func (s *Segment) remapMmap(newSize int64) error {
 	}
 
 	s.mmapData = mmapData
-	s.mmapSize = newSize
+	// Track the ACTUAL mapped length, not the requested newSize. They are equal
+	// here, but sourcing mmapSize from len(mmapData) guarantees the two never
+	// diverge — the write path relies on that invariant to bound its copies.
+	s.mmapSize = int64(len(mmapData))
 	return nil
 }
 
@@ -830,7 +857,7 @@ func (s *Segment) decryptRecord(ciphertext []byte, ciphertextPos int64) ([]byte,
 	return s.cipher.DecryptRecord(ciphertext, ciphertextPos)
 }
 
-// ReadEvent reads event at offset using index for fast seeking
+// ReadEvent reads the event at targetOffset, using the sparse index for seeking.
 func (s *Segment) ReadEvent(targetOffset int64) (*types.Event, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -980,7 +1007,8 @@ func (s *Segment) readEventFile(targetOffset int64, startPos int64) (*types.Even
 	return nil, fmt.Errorf("event not found at offset %d", targetOffset)
 }
 
-// ReadEventsByTime reads events in the given timestamp range [startTS, endTS]
+// ReadEventsByTime reads events whose schedule timestamp is in [startTS, endTS]
+// (inclusive, Unix milliseconds).
 func (s *Segment) ReadEventsByTime(startTS, endTS int64) ([]*types.Event, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -1060,7 +1088,8 @@ func (s *Segment) ReadEventsByTime(startTS, endTS int64) ([]*types.Event, error)
 	return result, nil
 }
 
-// ReadEventsByOffsetRange reads events in the given offset range [startOffset, endOffset]
+// ReadEventsByOffsetRange reads events in the inclusive offset range
+// [startOffset, endOffset].
 func (s *Segment) ReadEventsByOffsetRange(startOffset, endOffset int64) ([]*types.Event, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -1145,6 +1174,108 @@ func (s *Segment) ReadEventsByOffsetRange(startOffset, endOffset int64) ([]*type
 	return result, nil
 }
 
+// TruncateAfterOffset removes all records with offset > keepThroughOffset from
+// this segment, so its new last offset becomes keepThroughOffset. It is used by
+// follower log truncation when a higher-term leader's log diverges from (starts
+// before) the follower's tail. Records are located by scanning from the header;
+// the byte position of the first record to drop becomes the new segment size.
+//
+// Returns the number of records removed. If keepThroughOffset is at or past the
+// segment's last offset, it is a no-op.
+func (s *Segment) TruncateAfterOffset(keepThroughOffset int64) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closed {
+		return 0, fmt.Errorf("truncate on closed segment")
+	}
+	if keepThroughOffset >= s.lastOffset {
+		return 0, nil // nothing to drop
+	}
+
+	// Flush buffered/mmap writes so the on-disk view is complete before scanning.
+	if s.mmapData != nil {
+		if err := syncMmap(s.mmapData[:s.mmapWritePos]); err != nil {
+			return 0, fmt.Errorf("sync mmap before truncate: %w", err)
+		}
+	} else if err := s.writer.Flush(); err != nil {
+		return 0, fmt.Errorf("flush writer before truncate: %w", err)
+	}
+
+	// Scan from the header to find the byte position of the first record whose
+	// offset exceeds keepThroughOffset, and the new last-good offset.
+	var cutPos int64 = -1
+	var newLastOffset int64 = s.firstOffset - 1
+	var newLastTS int64
+	lengthBytes := make([]byte, 4)
+	recordBuf := make([]byte, 0, 4096)
+	currentPos := int64(64) // after header
+
+	for currentPos < s.sizeBytes {
+		recordStart := currentPos
+		if _, err := s.segmentFile.ReadAt(lengthBytes, currentPos); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return 0, fmt.Errorf("read length: %w", err)
+		}
+		length := int64(binary.BigEndian.Uint32(lengthBytes))
+		if length <= 4 || length > 10*1024*1024 {
+			break
+		}
+		recordLen := int(length - 4)
+		if cap(recordBuf) < recordLen {
+			recordBuf = make([]byte, recordLen)
+		}
+		record := recordBuf[:recordLen]
+		if _, err := s.segmentFile.ReadAt(record, currentPos+4); err != nil {
+			return 0, fmt.Errorf("read record: %w", err)
+		}
+		decrypted, err := s.decryptRecord(record, currentPos+4)
+		if err != nil {
+			return 0, fmt.Errorf("decrypt during truncate: %w", err)
+		}
+		event, err := parseEventRecordWithoutLength(decrypted)
+		if err != nil {
+			return 0, fmt.Errorf("parse during truncate: %w", err)
+		}
+
+		if event.Offset > keepThroughOffset {
+			cutPos = recordStart
+			break
+		}
+		newLastOffset = event.Offset
+		newLastTS = event.GetScheduleTs()
+		currentPos += 4 + int64(recordLen)
+	}
+
+	if cutPos < 0 {
+		return 0, nil // did not find any record to drop
+	}
+
+	// Physically truncate the file to cutPos. truncateToPosition handles the
+	// munmap/remap dance and updates sizeBytes + mmapWritePos. Lock order is
+	// s.mu (held) -> flushMu (taken inside), consistent with Close/closeLocked.
+	if err := s.truncateToPosition(cutPos); err != nil {
+		return 0, fmt.Errorf("truncate segment file to %d: %w", cutPos, err)
+	}
+
+	s.lastOffset = newLastOffset
+	s.lastTS = newLastTS
+	s.nextOffset = newLastOffset + 1
+
+	// Reconcile the sparse index so it holds no entries past the new last offset.
+	if s.index != nil {
+		if err := s.index.Truncate(newLastOffset); err != nil {
+			return 0, fmt.Errorf("truncate index to %d: %w", newLastOffset, err)
+		}
+	}
+
+	// Return value is advisory; the WAL computes the authoritative removed count
+	// from its offset counters. Report 1 to signal that a truncation occurred.
+	return 1, nil
+}
+
 // scan scans segment to recover metadata and handles tail corruption
 // by truncating any half-written or corrupt frames at the end of the file.
 func (s *Segment) scan() error {
@@ -1227,28 +1358,34 @@ func (s *Segment) scan() error {
 		s.lastOffset = event.Offset
 		s.lastTS = event.GetScheduleTs()
 		lastGoodPos = recordStartPos + 4 + int64(len(recordData)) // After length + recordData
-
-		// Update segment size to reflect truncated state
-		s.sizeBytes = lastGoodPos
 	}
 
-	// If we found corrupt data at the tail, truncate the file. Compare against
-	// the original on-disk size (origSizeBytes), not s.sizeBytes which the loop
-	// above already advanced to lastGoodPos.
-	if lastGoodPos < origSizeBytes {
-		if err := s.truncateToPosition(lastGoodPos); err != nil {
-			return fmt.Errorf("truncate corrupt tail at %d: %w", lastGoodPos, err)
-		}
-		log.Printf("[SEGMENT] Truncated %d bytes of corrupt tail", origSizeBytes-lastGoodPos)
+	// Position the logical size at the real data end. OpenSegment then sets the
+	// mmap write cursor (mmapWritePos) to this value. This is the actual corruption
+	// fix: appends land immediately after the last valid record and reads stop at
+	// lastOffset, so a preallocated or corrupt tail past lastGoodPos is never
+	// written into or read. Previously the scan loop advanced s.sizeBytes to
+	// lastGoodPos, which left mmapWritePos at the preallocated EOF — so the first
+	// append after reopen wrote ~prealloc-size bytes past the data, corrupting
+	// range reads on every restart.
+	realDataEnd := lastGoodPos
+	s.sizeBytes = realDataEnd
 
-		// Reconcile the sparse index with the truncated segment. Without this,
-		// the index may still contain entries whose FilePosition points past
-		// the new (shorter) segment EOF, causing later reads to dereference
-		// uninitialized bytes. s.lastOffset is the last valid event offset.
-		if s.index != nil {
-			if err := s.index.Truncate(s.lastOffset); err != nil {
-				return fmt.Errorf("truncate index to offset %d: %w", s.lastOffset, err)
-			}
+	// Do NOT physically truncate the file/mmap here. Retaining the preallocated
+	// tail keeps the segment's mmap at its full size so continued appends have
+	// write headroom and never trigger a remap-on-grow. Trimming on reopen shrank
+	// the mmap and forced that remap path, which on Windows could desynchronize the
+	// mmap size bookkeeping from the actual mapped length and panic on the next
+	// write (mmapWritePos past len(mmapData)). Correctness does not need the trim —
+	// the write cursor is already at the real data end and reads are bounded by
+	// lastOffset. Deliberate truncation (follower realign, retention) still goes
+	// through WAL.TruncateToOffset / truncateToPosition.
+	if realDataEnd < origSizeBytes && s.index != nil {
+		// Reconcile the sparse index so it holds no entries past the real data end
+		// (a genuine corrupt tail could otherwise leave index entries pointing past
+		// lastOffset). s.lastOffset is the last valid event offset.
+		if err := s.index.Truncate(s.lastOffset); err != nil {
+			return fmt.Errorf("truncate index to offset %d: %w", s.lastOffset, err)
 		}
 	}
 
@@ -1285,8 +1422,18 @@ func (s *Segment) truncateToPosition(pos int64) error {
 		s.mmapData = nil
 	}
 
-	// Truncate the file
+	// Truncate the file. If this fails (e.g. Windows refuses to truncate a file
+	// that another handle still has memory-mapped), remap at the ORIGINAL size so
+	// the segment remains fully usable, and surface the error to the caller. The
+	// caller in scan() treats trim failure as non-fatal because sizeBytes and
+	// mmapWritePos are already positioned at the real data end — physical
+	// truncation only reclaims the unused preallocated/corrupt tail on disk.
 	if err := s.segmentFile.Truncate(pos); err != nil {
+		if hadMmap {
+			if remapData, remapErr := mmapFile(s.segmentFile, s.mmapSize); remapErr == nil {
+				s.mmapData = remapData
+			}
+		}
 		return fmt.Errorf("truncate to %d: %w", pos, err)
 	}
 
@@ -1397,6 +1544,53 @@ func (s *Segment) Close() error {
 	return s.closeLocked()
 }
 
+// Deactivate releases the write-side resources of a rotated (now inactive)
+// segment — it flushes and syncs pending writes and unmaps the mmap — while
+// KEEPING the read file handle and sparse index open so historical reads
+// (Replay, follower catch-up, cross-region fetch) continue to work.
+//
+// Previously rotation called Close(), which shut the file handle; every read of
+// a rotated segment then failed with os.ErrClosed. Reads use segmentFile.ReadAt
+// (never the mmap), so dropping the mmap is safe. The segment remains fully
+// readable until retention deletes it via Delete()/Close().
+func (s *Segment) Deactivate() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
+
+	if s.closed {
+		return nil
+	}
+
+	var errs []error
+
+	// Flush any buffered (e.g. encrypted) records still in the writer.
+	if err := s.writer.Flush(); err != nil {
+		errs = append(errs, fmt.Errorf("flush writer: %w", err))
+	}
+
+	// Sync and unmap the mmap; reads do not depend on it.
+	if s.mmapData != nil {
+		if err := syncMmap(s.mmapData[:s.mmapWritePos]); err != nil {
+			errs = append(errs, fmt.Errorf("sync mmap: %w", err))
+		}
+		if err := munmapFile(s.mmapData); err != nil {
+			errs = append(errs, fmt.Errorf("unmap: %w", err))
+		}
+		s.mmapData = nil
+	}
+
+	// Persist the file so a reader opening it fresh sees all data.
+	if err := s.segmentFile.Sync(); err != nil {
+		errs = append(errs, fmt.Errorf("sync file: %w", err))
+	}
+
+	s.isActive = false
+	// NOTE: segmentFile and index intentionally stay open for reads.
+	return errors.Join(errs...)
+}
+
 // closeLocked performs the actual close logic. Caller must hold s.mu.
 func (s *Segment) closeLocked() error {
 	if s.closed {
@@ -1439,7 +1633,8 @@ func (s *Segment) closeLocked() error {
 	return errors.Join(errs...)
 }
 
-// Delete permanently removes the segment and its index files from disk
+// Delete permanently removes the segment and its index files from disk after
+// closing open handles.
 func (s *Segment) Delete() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1468,46 +1663,46 @@ func (s *Segment) Delete() error {
 	return errors.Join(errs...)
 }
 
-// IsFull checks if segment is full
+// IsFull reports whether the segment's logical size is at or above maxSize bytes.
 func (s *Segment) IsFull(maxSize int64) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.sizeBytes >= maxSize
 }
 
-// GetSize returns segment size in bytes
+// GetSize returns the logical segment size in bytes (header plus records).
 func (s *Segment) GetSize() int64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.sizeBytes
 }
 
-// GetFilename returns filename
+// GetFilename returns the segment file name (e.g. "00000000000000000012.log").
 func (s *Segment) GetFilename() string {
 	return s.filename
 }
 
-// GetFirstOffset returns first offset
+// GetFirstOffset returns the first event offset stored in this segment.
 func (s *Segment) GetFirstOffset() int64 {
 	return s.firstOffset
 }
 
-// GetLastOffset returns last offset
+// GetLastOffset returns the last event offset in this segment, or -1 if empty.
 func (s *Segment) GetLastOffset() int64 {
 	return s.lastOffset
 }
 
-// GetFirstTS returns first timestamp
+// GetFirstTS returns the schedule timestamp of the first event (Unix ms), or 0.
 func (s *Segment) GetFirstTS() int64 {
 	return s.firstTS
 }
 
-// GetLastTS returns last timestamp
+// GetLastTS returns the schedule timestamp of the last event (Unix ms).
 func (s *Segment) GetLastTS() int64 {
 	return s.lastTS
 }
 
-// IsActive returns active status
+// IsActive reports whether this segment still accepts appends.
 func (s *Segment) IsActive() bool {
 	return s.isActive
 }

@@ -1,3 +1,6 @@
+// Package replication implements leader-to-follower WAL streaming, bulk snapshot
+// install for catch-up, optional mTLS between nodes, and async cross-region
+// event fan-out for CronosDB.
 package replication
 
 import (
@@ -49,19 +52,27 @@ type Leader struct {
 	tlsConfig         *MTLSConfig // optional mTLS for replication connections
 }
 
-// FollowerInfo represents a follower replica and its gRPC replication client.
+// FollowerInfo tracks a follower replica and its gRPC replication client state.
 type FollowerInfo struct {
-	mu            sync.Mutex
-	ID            string
-	Address       string // follower's cluster gRPC address (serves ReplicationService)
-	NextOffset    int64
-	LastAckTS     int64
+	mu sync.Mutex
+	// ID is the follower's node identifier.
+	ID string
+	// Address is the follower's cluster gRPC address (serves ReplicationService).
+	Address string
+	// NextOffset is the next WAL offset the leader will send to this follower.
+	NextOffset int64
+	// LastAckTS is the unix timestamp of the last successful ack from the follower.
+	LastAckTS int64
+	// HighWatermark is the highest offset the follower has acknowledged.
 	HighWatermark int64
-	Connected     bool
-	LastError     error
-	InSync        bool // whether the follower has acked the leader's latest sends
-	conn          *grpc.ClientConn
-	client        types.ReplicationServiceClient
+	// Connected is true when a gRPC client is currently configured for the follower.
+	Connected bool
+	// LastError is the most recent replication error for this follower, if any.
+	LastError error
+	// InSync is true when the follower has acknowledged the leader's latest sends.
+	InSync bool
+	conn   *grpc.ClientConn
+	client types.ReplicationServiceClient
 }
 
 // NewLeader creates a new leader. minInSyncReplicas is the minimum ISR size
@@ -462,11 +473,11 @@ func (l *Leader) GetEpoch() int64 {
 }
 
 // SetEpoch sets the epoch (used during leader election) and propagates the term
-// to the WAL so new records carry it.
+// to the WAL so new records carry it. epoch is stored atomically to match the
+// atomic reads in appendToFollower/GetTerm (mixing a mutex write with atomic
+// reads is a data race).
 func (l *Leader) SetEpoch(epoch int64) {
-	l.mu.Lock()
-	l.epoch = epoch
-	l.mu.Unlock()
+	atomic.StoreInt64(&l.epoch, epoch)
 	if l.wal != nil {
 		l.wal.SetCurrentTerm(epoch)
 	}
@@ -599,10 +610,16 @@ func computeBatchChecksum(events []*types.Event) uint32 {
 	return h.Sum32()
 }
 
+// LeaderStats is a snapshot of replication leader health for a partition.
 type LeaderStats struct {
-	Followers          int64
+	// Followers is the number of registered followers.
+	Followers int64
+	// ConnectedFollowers is how many followers currently have a live client connection.
 	ConnectedFollowers int64
-	InSyncFollowers    int64
-	HighWatermark      int64
-	Epoch              int64
+	// InSyncFollowers is how many followers are in the in-sync replica set.
+	InSyncFollowers int64
+	// HighWatermark is the quorum-committed high-watermark offset.
+	HighWatermark int64
+	// Epoch is the current leadership epoch for the partition.
+	Epoch int64
 }

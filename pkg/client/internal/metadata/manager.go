@@ -14,30 +14,36 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 )
 
-// Config controls metadata refresh behavior.
+// Config controls metadata cache TTL, refresh cadence, and address resolution.
 type Config struct {
-	TTL                  time.Duration
-	RefreshInterval      time.Duration
-	RequestTimeout       time.Duration
-	NodeIDToAddress      map[string]string
+	// TTL is how long cached metadata is considered fresh.
+	TTL time.Duration
+	// RefreshInterval is the background refresh period (should be <= TTL).
+	RefreshInterval time.Duration
+	// RequestTimeout bounds each ListPartitions metadata RPC.
+	RequestTimeout time.Duration
+	// NodeIDToAddress maps cluster node IDs to gRPC addresses when metadata omits them.
+	NodeIDToAddress map[string]string
+	// StaticPartitionCount is a fallback partition count when metadata is empty (0 = none).
 	StaticPartitionCount int
-	OnRefresh            func(duration time.Duration, err error)
+	// OnRefresh is an optional callback after each refresh attempt.
+	OnRefresh func(duration time.Duration, err error)
 }
 
-// Manager caches partition metadata and refreshes it periodically.
+// Manager caches partition/leader metadata and refreshes it periodically.
 type Manager struct {
-	pool *connpool.Pool
-	cfg  Config
+	pool *connpool.Pool // connection pool used to fetch metadata
+	cfg  Config         // TTL, refresh, and mapping settings
 
-	mu             sync.RWMutex
-	partitions     map[int32]*types.PartitionInfo
-	leaderAddrByID map[string]string
-	lastUpdated    time.Time
-	stale          atomic.Bool
+	mu             sync.RWMutex                   // guards partitions, leaderAddrByID, lastUpdated
+	partitions     map[int32]*types.PartitionInfo // partition ID → last known info
+	leaderAddrByID map[string]string              // node ID → dial address
+	lastUpdated    time.Time                      // wall time of last successful refresh
+	stale          atomic.Bool                    // forces refresh on EnsureFresh when true
 
-	stopOnce sync.Once
-	stopCh   chan struct{}
-	wg       sync.WaitGroup
+	stopOnce sync.Once      // ensures Close is idempotent
+	stopCh   chan struct{}  // closed to stop the refresh loop
+	wg       sync.WaitGroup // waits for background refresh goroutine
 }
 
 // NewManager creates a metadata manager.

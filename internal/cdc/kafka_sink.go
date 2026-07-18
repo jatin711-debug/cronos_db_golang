@@ -11,6 +11,7 @@ import (
 )
 
 // KafkaSink is a CDC sink that writes to Kafka using segmentio/kafka-go.
+// The writer is created lazily on first Write.
 type KafkaSink struct {
 	brokers []string
 	topic   string
@@ -18,7 +19,7 @@ type KafkaSink struct {
 	mu      sync.Mutex
 }
 
-// NewKafkaSink creates a Kafka CDC sink.
+// NewKafkaSink creates a Kafka CDC sink targeting the given brokers and topic.
 func NewKafkaSink(brokers []string, topic string) *KafkaSink {
 	return &KafkaSink{
 		brokers: brokers,
@@ -26,8 +27,11 @@ func NewKafkaSink(brokers []string, topic string) *KafkaSink {
 	}
 }
 
+// Name implements Sink.
 func (k *KafkaSink) Name() string { return "kafka" }
 
+// Write marshals the change event as JSON and produces it to Kafka.
+// Message keys are "topic/partitionID" for partitioning.
 func (k *KafkaSink) Write(ctx context.Context, event *ChangeEvent) error {
 	// Lazy-init writer on first use
 	if err := k.ensureWriter(); err != nil {
@@ -49,6 +53,7 @@ func (k *KafkaSink) Write(ctx context.Context, event *ChangeEvent) error {
 	return k.writer.WriteMessages(ctx, msg)
 }
 
+// Close shuts down the Kafka writer if it was opened.
 func (k *KafkaSink) Close() error {
 	k.mu.Lock()
 	defer k.mu.Unlock()

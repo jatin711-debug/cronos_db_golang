@@ -74,6 +74,9 @@ func TestIsLeaderRelated(t *testing.T) {
 		"connection refused",
 		"timeout",
 		"random error",
+		"partition not found",
+		"partition 7 out of bounds",
+		"unknown topic",
 	}
 
 	for _, msg := range nonLeader {

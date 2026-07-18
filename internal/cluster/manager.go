@@ -9,7 +9,8 @@ import (
 	"time"
 )
 
-// Manager is the main cluster manager that coordinates all distributed components
+// Manager is the main cluster coordinator: membership, partition routing, Raft
+// metadata consensus, leadership reconciliation, and failover.
 type Manager struct {
 	mu                sync.RWMutex
 	config            *ClusterConfig
@@ -24,7 +25,8 @@ type Manager struct {
 	cancel  context.CancelFunc
 }
 
-// NewManager creates a new cluster manager from simplified config
+// NewManager creates a cluster Manager from the simplified startup Config.
+// Membership, router, and Raft are initialized later in Start.
 func NewManager(cfg *Config) *Manager {
 	// Convert simple config to internal config
 	config := &ClusterConfig{
@@ -80,7 +82,8 @@ func NewManager(cfg *Config) *Manager {
 	}
 }
 
-// Start starts the cluster manager
+// Start initializes Raft (optional), membership, and the partition router, then
+// begins background leader tasks. It is not safe to call more than once.
 func (m *Manager) Start() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -192,7 +195,7 @@ func (m *Manager) Start() error {
 	return nil
 }
 
-// Stop stops the cluster manager
+// Stop shuts down Raft, membership, and background tasks. Safe if already stopped.
 func (m *Manager) Stop() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -281,6 +284,7 @@ func (m *Manager) reconcileLocalLeadership() {
 	pa := m.partitionAccessor
 	rt := m.router
 	mem := m.membership
+	raft := m.raft
 	nodeID := m.config.NodeID
 	m.mu.RUnlock()
 	if pa == nil || rt == nil || mem == nil {
@@ -293,9 +297,30 @@ func (m *Manager) reconcileLocalLeadership() {
 		nodeAddr[n.ID] = n.Address
 	}
 
+	// Raft-committed partition assignments are the authoritative source of
+	// leadership. The router's view is derived from the gossip ring and can
+	// transiently disagree, so we cross-check against the committed state: if Raft
+	// has committed a DIFFERENT node as leader for a partition, we must not
+	// self-promote from the gossip view (that is the split-brain vector). When Raft
+	// has no committed assignment yet (bootstrap) we fall back to the router view.
+	var committed map[int32]*PartitionInfo
+	if raft != nil {
+		if state := raft.GetState(); state != nil {
+			committed = state.Partitions
+		}
+	}
+
 	for partitionID, info := range rt.GetAllPartitions() {
 		if info == nil || info.LeaderID != nodeID {
 			continue // not led locally
+		}
+		// Defer to Raft-committed leadership when it names someone else.
+		if committed != nil {
+			if c, ok := committed[partitionID]; ok && c != nil && c.LeaderID != "" && c.LeaderID != nodeID {
+				log.Printf("[CLUSTER] reconcile: skip promote of partition %d; Raft-committed leader is %s (router said %s)",
+					partitionID, c.LeaderID, nodeID)
+				continue
+			}
 		}
 		// Idempotent: PromoteToLeader is a no-op (epoch refresh) once the local
 		// replication leader exists.
@@ -830,19 +855,27 @@ func (m *Manager) GetStats() *ClusterStats {
 	}
 }
 
-// ClusterStats represents cluster statistics
+// ClusterStats is a summary of this node's view of cluster health and ownership.
 type ClusterStats struct {
-	NodeID           string `json:"node_id"`
-	ClusterID        string `json:"cluster_id"`
-	IsLeader         bool   `json:"is_leader"`
-	TotalNodes       int    `json:"total_nodes"`
-	AliveNodes       int    `json:"alive_nodes"`
-	NumPartitions    int    `json:"num_partitions"`
-	LocalPartitions  int    `json:"local_partitions"`
-	LeaderPartitions int    `json:"leader_partitions"`
+	// NodeID is this node's identifier.
+	NodeID string `json:"node_id"`
+	// ClusterID is the logical cluster identifier.
+	ClusterID string `json:"cluster_id"`
+	// IsLeader is true when this node is the Raft/cluster metadata leader.
+	IsLeader bool `json:"is_leader"`
+	// TotalNodes is the number of known nodes in the membership view.
+	TotalNodes int `json:"total_nodes"`
+	// AliveNodes is the number of nodes currently considered alive.
+	AliveNodes int `json:"alive_nodes"`
+	// NumPartitions is the configured partition count.
+	NumPartitions int `json:"num_partitions"`
+	// LocalPartitions is how many partitions this node hosts as a replica.
+	LocalPartitions int `json:"local_partitions"`
+	// LeaderPartitions is how many partitions this node currently leads.
+	LeaderPartitions int `json:"leader_partitions"`
 }
 
-// AssignPartition proposes a partition assignment to the Raft cluster
+// AssignPartition proposes a new partition assignment to the Raft cluster.
 func (m *Manager) AssignPartition(info *PartitionInfo) error {
 	m.mu.RLock()
 	raftNode := m.raft
@@ -865,7 +898,7 @@ func (m *Manager) AssignPartition(info *PartitionInfo) error {
 	return raftNode.Apply(cmd)
 }
 
-// UpdatePartition proposes a partition metadata update to the Raft cluster
+// UpdatePartition proposes a partition metadata update to the Raft cluster.
 func (m *Manager) UpdatePartition(info *PartitionInfo) error {
 	m.mu.RLock()
 	raftNode := m.raft

@@ -19,17 +19,18 @@ const (
 	dlqWriteBufSize = 4 * 1024 * 1024  // 4MB write buffer
 )
 
-// DLQSegmentWriter writes DLQ entries to an append-only segment file.
+// DLQSegmentWriter writes DLQ entries to append-only rotating segment files.
+// Records are length-prefixed with CRC32; segments rotate at ~64MB.
 type DLQSegmentWriter struct {
 	mu         sync.Mutex
 	dataDir    string
 	activeFile *os.File
 	writer     *bufio.Writer
-	size       int64
-	seqNum     int64
+	size       int64 // current active segment size in bytes
+	seqNum     int64 // active segment sequence number
 }
 
-// NewDLQSegmentWriter creates a new DLQ segment writer.
+// NewDLQSegmentWriter creates a writer under dataDir and opens the next segment.
 func NewDLQSegmentWriter(dataDir string) (*DLQSegmentWriter, error) {
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		return nil, fmt.Errorf("create dlq dir: %w", err)

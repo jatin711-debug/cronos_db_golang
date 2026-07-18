@@ -46,9 +46,17 @@ The old implementation treated `batch` and `periodic` identically: both relied o
 * `batch` and `periodic` are no longer comparable; `periodic` remains the highest-throughput mode with a small loss window, while `batch` is the recommended durable-high-throughput mode and is now the default.
 * Use `every_event` for maximum durability; use `periodic` for maximum throughput.
 
-### 2. Encrypted writes are allocation-leaner
+### 2. Encrypted writes use record cipher v2 (random nonce)
 
-AES-256-GCM AEAD is cached and WAL records use a deterministic counter nonce (partition ID + ciphertext byte position), eliminating per-record `crypto/rand` reads and two allocations. The `fsync` still dominates single-threaded throughput, so the win is most visible in high-concurrency scenarios as lower GC pressure and fewer allocs/op.
+AES-256-GCM AEAD is cached per partition. **WAL record encryption v2** embeds a
+**fresh random 12-byte GCM nonce** per record (`[version=2][nonce][ciphertext]`).
+This removes the historical v1 counter-nonce collision class (same key reused at
+the same position across rotated segments). Legacy v1 records remain decryptable
+with the partition+position-derived nonce for backward read compatibility.
+
+Random nonces cost a small amount of entropy and header bytes per record; fsync
+still dominates single-threaded throughput. The win of caching AEAD is most
+visible under concurrent writers (lower allocs/op and GC pressure).
 
 ### 3. Index fsync is out of the write hot path
 

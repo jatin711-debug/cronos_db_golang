@@ -21,13 +21,17 @@ The scheduler controls when events become deliverable, using a hot timing wheel 
 ## Production Decisions
 
 - Hierarchical wheel gives near O(1) scheduling behavior.
-- Adaptive hydrator interval manages scan pressure under changing load.
+- Defaults: **`-tick-ms=10`**, **`-wheel-size=600`** (6s root span); hot window default 60 minutes.
+- Adaptive hydrator interval (5s–5min) manages cold-store scan pressure.
 - Hot and cold separation keeps memory bounded for distant schedules.
+- **Crash recovery:** restore `timer_state.json` when present, **rebase `currentTick` from wall clock**, replay WAL timers from checkpoint; events matured during downtime are **enqueued for immediate delivery** (not dropped).
+- Ready-queue and wheel size admission limits reject publish under overload (`ResourceExhausted`).
 
 ## Debug Pointers
 
 - Delayed or early trigger issues: [internal/scheduler/timing_wheel.go](../../../internal/scheduler/timing_wheel.go)
-- Hydration lag: [internal/scheduler/scheduler.go](../../../internal/scheduler/scheduler.go)
+- Hydration lag / recovery: [internal/scheduler/scheduler.go](../../../internal/scheduler/scheduler.go)
+- Partition WAL timer replay: [internal/partition/manager.go](../../../internal/partition/manager.go)
 
 ## Related Diagrams
 

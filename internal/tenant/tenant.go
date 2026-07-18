@@ -1,3 +1,9 @@
+// Package tenant implements multi-tenant resource accounting and admission
+// control for CronosDB publishes.
+//
+// Accountant tracks per-tenant rate limits (token bucket), in-flight event
+// counts, and storage bytes so the API can reject over-quota producers without
+// contending on the hot path when no limits are configured.
 package tenant
 
 import (
@@ -12,9 +18,12 @@ type ID string
 
 // Limits defines resource caps for a tenant.
 type Limits struct {
+	// MaxEventsPerSecond is the publish rate limit (token bucket rate); 0 disables.
 	MaxEventsPerSecond float64
-	MaxInFlight        int64
-	MaxStorageBytes    int64
+	// MaxInFlight is the maximum admitted-but-not-yet-delivered events; 0 disables.
+	MaxInFlight int64
+	// MaxStorageBytes is the maximum accounted storage for the tenant; 0 disables.
+	MaxStorageBytes int64
 }
 
 // tokenBucket implements a classic token bucket for rate limiting.
@@ -74,9 +83,11 @@ type Accountant struct {
 	configured atomic.Bool
 }
 
-// Usage tracks current consumption.
+// Usage tracks current consumption for a tenant.
 type Usage struct {
-	InFlight     atomic.Int64
+	// InFlight is the number of admitted events not yet delivered/completed.
+	InFlight atomic.Int64
+	// StorageBytes is the accounted payload/storage usage in bytes.
 	StorageBytes atomic.Int64
 }
 

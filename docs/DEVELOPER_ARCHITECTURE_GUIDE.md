@@ -127,50 +127,21 @@ flowchart TB
 
 The runtime is composed in `cmd/api/main.go` in this order:
 
-1. Load config and install hot-reload listener (`internal/config`).
+1. Load config (includes production validation unless `--dev`) and install hot-reload listener.
 2. Initialize guardrails (`audit`, `schema`, `tenant`, `cdc`, `slo`, `tracing`).
 3. Initialize partition manager with shared Pebble cache.
 4. Start operational loops (`disk_pressure`, `backup_scheduler`, retention enforcer).
-5. If cluster mode: start cluster manager (`raft` + membership + router).
-6. Create initial partitions and wire WAL append hooks.
-7. Build and start gRPC server, register all services.
-8. Start health/metrics server (fail fast on startup/bind errors) and periodic stats loop.
-9. On signal, execute graceful shutdown in ordered phases.
+5. If cluster mode: start cluster manager (`raft` + membership + router), join seeds.
+6. Create initial partitions (standalone: all; cluster: partition 0 then lazy-create) and wire WAL append hooks (CDC + cross-region with `source_region` echo guard).
+7. Build **public** gRPC (`:9000`): Event, ConsumerGroup, Partition, Admin + Transaction handler (PM-injected).
+8. Build **internal** gRPC (`:7947`): Replication, Raft, CrossRegion (optional replication mTLS).
+9. Start HTTP (`:8080`): health, metrics, embedded dashboard `/ui/`, `/api/admin/*`.
+10. Start serve monitors, stats loop, optional autoscaler.
+11. On signal: graceful stop public/internal gRPC and HTTP, stop partitions, stop cluster.
 
 ### 4.2 Startup and Shutdown Sequence
 
-```mermaid
-sequenceDiagram
-    participant Main as cmd/api/main.go
-    participant Config as internal/config
-    participant PM as internal/partition
-    participant Cluster as internal/cluster
-    participant API as internal/api
-    participant BG as Background Loops
-
-    Main->>Config: LoadConfig()
-    Main->>Main: Init logger, tracing, slo, audit
-    Main->>PM: NewPartitionManagerWithCache(...)
-    Main->>BG: Start disk monitor and backup scheduler
-    alt cluster enabled
-        Main->>Cluster: NewManager(config)
-        Main->>Cluster: SetPartitionAccessor(pm)
-        Main->>Cluster: Start()
-        Main->>Cluster: JoinCluster(seed)
-    end
-    Main->>PM: Create and start initial partitions
-    Main->>PM: Wire WAL append hooks for CDC and cross region
-    Main->>API: NewGRPCServer(config)
-    Main->>API: Register Event, Consumer, Partition, Tx
-    Main->>API: Register Replication, Raft, CrossRegion
-    Main->>API: Start()
-    Main->>API: Monitor ServeError()
-    Main->>BG: Start stats loop and retention loop
-    Note over Main,BG: Wait for SIGINT or SIGTERM
-    Main->>API: GracefulStopWithTimeout(ctx)
-    Main->>PM: StopAllPartitions()
-    Main->>Cluster: Stop()
-```
+See the canonical Mermaid source: [docs/mermaid/startup_sequence.mmd](mermaid/startup_sequence.mmd).
 
 ## 5. End-to-End Runtime Flows
 
@@ -457,7 +428,7 @@ flowchart LR
   - **Atomic swap** during snapshot install — WAL closed before rename, matching `StopPartition`'s ordering; avoids Windows file-lock contention.
   - **mTLS optional** — `--replication-tls-enabled` plus `--replication-tls-{ca,cert,key}-file`. Server enforces `tls.RequireAndVerifyClientCert`; both sides pin against the cluster CA. `Follower.dialCredentials` falls back to insecure credentials when the flag is off (intentional for `--dev`, refused by `config.ValidateConfig` in production).
   - **Cross-region** is intentionally separate from intra-cluster — no ISR, last-write-wins conflict handling, fire-and-forget.
-  - **Trigger caveat** — `--snapshot-catchup-threshold` is defined and exposed (default `10000`) but **not yet consumed** by any automatic lag-driven code path. Documented as forward-compatible configuration; a far-behind follower mid-flight still does incremental `Sync`/`Append` catch-up.
+  - **Trigger caveat** — `--snapshot-catchup-threshold` (default `10000`) is used on join / `SyncPartitionFromLeader`. Automatic mid-flight lag-driven InstallSnapshot is **not** wired; a far-behind connected follower still uses incremental `Sync`/`Append` catch-up.
 
 ### 6.12 Cross-Region Topology
 
@@ -501,10 +472,11 @@ flowchart TB
   - `internal/tx/coordinator.go`
   - `internal/tx/transaction_handler.go`
 - Main flow:
-  - `PrepareTransaction` now executes prepare-only path.
+  - `tx.NewHandler(pm)` injects PartitionManager so participants write durable markers.
+  - `PrepareTransaction` executes prepare-only path.
   - Commit path proceeds from prepared state with idempotent behavior.
 - Reliability decisions:
-  - Durable coordinator log for recovery replay.
+  - Durable coordinator log (`tx_log.json`) for recovery replay.
   - Explicit state transitions reduce phase conflation bugs.
 
 ### 6.15 Transaction State Model
@@ -654,11 +626,16 @@ flowchart TB
 - Correctness:
   - Dedup, schema validation, epoch checks, transaction state machine.
 - Backpressure:
-  - Credits, admission control, rate limiters, tenant accounting.
+  - Credits, admission control, rate limiters, tenant accounting, `cronos_dispatcher_backpressure_skips_total`.
+  - **Gap (documented):** no deep worker redrive queue for every credit-skipped ready event; rely on credits/reconnect/WAL durability ([delivery.md](architecture/features/delivery.md), [ARCHITECTURE known limitations](../ARCHITECTURE.md#known-limitations)).
 - Fault isolation:
   - Circuit breaker, retry queue, DLQ, service-level error boundaries.
 - Operability:
-  - Health endpoints, metrics, tracing, audit logs, periodic stats.
+  - Health endpoints, metrics, tracing, audit logs, periodic stats, admin dashboard.
+  - **Gap (documented):** `TriggerRebalance` admin RPC is a soft stub; membership-driven rebalance works ([cluster.md](architecture/features/cluster.md)).
+- Replication catch-up:
+  - Join bulk snapshot + incremental follower catch-up.
+  - **Gap (documented):** no mid-flight auto InstallSnapshot when lag exceeds threshold ([replication.md](architecture/features/replication.md)).
 
 ## 8. Debugging and Navigation Playbook
 

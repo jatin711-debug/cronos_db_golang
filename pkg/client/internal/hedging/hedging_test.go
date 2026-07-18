@@ -21,6 +21,35 @@ func TestDefaultPolicy(t *testing.T) {
 	}
 }
 
+// TestDo_FirstSuccessWinsOverFastFailure verifies that hedging returns the first
+// SUCCESSFUL result, not merely the first-completed one: a fast failure must not
+// beat a slower success.
+func TestDo_FirstSuccessWinsOverFastFailure(t *testing.T) {
+	policy := Policy{Enabled: true, Delay: 5 * time.Millisecond, MaxHedges: 1}
+	var calls atomic.Int32
+
+	val, err := Do(context.Background(), policy, func(ctx context.Context) (string, error) {
+		n := calls.Add(1)
+		if n == 1 {
+			// First attempt fails fast.
+			return "", errors.New("fast failure")
+		}
+		// Hedge attempt succeeds after a short delay.
+		select {
+		case <-time.After(20 * time.Millisecond):
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+		return "slow-success", nil
+	})
+	if err != nil {
+		t.Fatalf("expected success from hedge, got error: %v", err)
+	}
+	if val != "slow-success" {
+		t.Fatalf("expected slow-success, got %q", val)
+	}
+}
+
 func TestDo_Disabled(t *testing.T) {
 	ctx := context.Background()
 	policy := Policy{Enabled: false}

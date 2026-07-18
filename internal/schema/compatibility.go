@@ -102,9 +102,13 @@ func contains(slice []string, item string) bool {
 	return false
 }
 
+// jsonSchema is a minimal subset of JSON Schema used for compatibility checks.
 type jsonSchema struct {
-	Type       string                 `json:"type"`
-	Required   []string               `json:"required"`
+	// Type is the JSON Schema type keyword (e.g. "object", "string").
+	Type string `json:"type"`
+	// Required lists property names that must be present on objects.
+	Required []string `json:"required"`
+	// Properties maps property names to nested schemas for object types.
 	Properties map[string]*jsonSchema `json:"properties"`
 }
 

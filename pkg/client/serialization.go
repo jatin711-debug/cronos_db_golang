@@ -6,30 +6,37 @@ import (
 )
 
 const (
-	// MetaCodecNameKey stores codec name in event metadata.
+	// MetaCodecNameKey stores the codec name in event metadata when encoding Values.
 	MetaCodecNameKey = "client.codec"
 )
 
-// Codec allows pluggable payload serialization.
+// Codec is a pluggable payload serialization strategy used by Producer/Consumer helpers.
 type Codec interface {
+	// Name returns a stable codec identifier stored in event metadata.
 	Name() string
+	// Encode serializes v into payload bytes.
 	Encode(v any) ([]byte, error)
+	// Decode deserializes data into out (out must be a non-nil pointer).
 	Decode(data []byte, out any) error
 }
 
-// JSONCodec encodes values as JSON.
+// JSONCodec encodes and decodes values as JSON.
 type JSONCodec struct{}
 
+// Name implements Codec.
 func (JSONCodec) Name() string { return "json" }
 
+// Encode implements Codec.
 func (JSONCodec) Encode(v any) ([]byte, error) {
 	return json.Marshal(v)
 }
 
+// Decode implements Codec.
 func (JSONCodec) Decode(data []byte, out any) error {
 	return json.Unmarshal(data, out)
 }
 
+// encodeWithCodec encodes v and returns payload bytes plus the codec name.
 func encodeWithCodec(codec Codec, v any) ([]byte, string, error) {
 	if codec == nil {
 		return nil, "", fmt.Errorf("codec is required for value encoding")
@@ -41,7 +48,7 @@ func encodeWithCodec(codec Codec, v any) ([]byte, string, error) {
 	return payload, codec.Name(), nil
 }
 
-// DecodePayload decodes a payload into out with the provided codec.
+// DecodePayload decodes data into out using the provided codec.
 func DecodePayload(codec Codec, data []byte, out any) error {
 	if codec == nil {
 		return fmt.Errorf("codec is required")

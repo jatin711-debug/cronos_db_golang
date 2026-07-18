@@ -13,10 +13,14 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 )
 
-// BackupCheckpoint tracks the last successfully backed-up offset.
+// BackupCheckpoint tracks the last successfully backed-up segment starting offset
+// so subsequent BackupWAL calls can skip already-copied closed segments.
 type BackupCheckpoint struct {
-	LastOffset int64     `json:"last_offset"`
-	Timestamp  time.Time `json:"timestamp"`
+	// LastOffset is the highest segment starting offset that has been backed up.
+	// Segments with starting offset <= LastOffset are skipped on the next run.
+	LastOffset int64 `json:"last_offset"`
+	// Timestamp is when this checkpoint was written (UTC).
+	Timestamp time.Time `json:"timestamp"`
 }
 
 // BackupWAL creates an incremental backup of WAL segments and their sparse

@@ -82,10 +82,10 @@ VERIFY_GO_CMD = powershell -NoProfile -Command "if (-not (Get-Command go -ErrorA
 VERIFY_CARGO_CMD = powershell -NoProfile -Command "if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) { Write-Error '[verify-env] Missing required tool: cargo'; exit 1 }"
 VERIFY_PROTOC_CMD = powershell -NoProfile -Command "if (-not (Get-Command protoc -ErrorAction SilentlyContinue)) { Write-Error '[verify-env] Missing required tool: protoc'; exit 1 }"
 VERIFY_DOCKER_CMD = powershell -NoProfile -Command "if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { Write-Error '[verify-env] Missing required tool: docker'; exit 1 }"
-VERIFY_DOCKER_COMPOSE_CMD = powershell -NoProfile -Command 'docker compose version *> $$null; if ($$LASTEXITCODE -ne 0) { Write-Error "[verify-env] Missing required tool: docker compose"; exit 1 }'
+VERIFY_DOCKER_COMPOSE_CMD = powershell -NoProfile -Command 'docker compose version *> $$null; if ($$LASTEXITCODE -ne 0) { Write-Error '[verify-env] Missing required tool: docker compose'; exit 1 }'
 VERIFY_GIT_CMD = powershell -NoProfile -Command "if (-not (Get-Command git -ErrorAction SilentlyContinue)) { Write-Error '[verify-tag-env] Missing required tool: git'; exit 1 }"
 VERIFY_GH_CMD = powershell -NoProfile -Command "if (-not (Get-Command gh -ErrorAction SilentlyContinue)) { Write-Error '[verify-release-env] Missing required tool: gh'; exit 1 }"
-VERIFY_GH_AUTH_CMD = powershell -NoProfile -Command 'gh auth status *> $$null; if ($$LASTEXITCODE -ne 0) { Write-Error "[verify-release-env] Not authenticated. Run: gh auth login"; exit 1 }"
+VERIFY_GH_AUTH_CMD = powershell -NoProfile -Command 'gh auth status *> $$null; if ($$LASTEXITCODE -ne 0) { Write-Error '[verify-release-env] Not authenticated. Run: gh auth login'; exit 1 }'
 
 # Windows resolves `npm` via `npm.cmd`. .cmd shims are not directly executable
 # from MSYS make, so we use the .cmd form. The invocation body itself is
@@ -213,7 +213,7 @@ help:
 	@echo   make node1          - Start node 1 (bootstrap)
 	@echo   make node2          - Start node 2 (joins node1)
 	@echo   make node3          - Start node 3 (joins node1)
-	@echo   (set TRACING_ENABLED=true to export traces with low sample ratio)
+	@echo '  (set TRACING_ENABLED=true to export traces with low sample ratio)'
 	@echo   make cluster        - Print cluster startup order
 	@echo   make health         - Check node health endpoints
 	@echo.
@@ -241,7 +241,7 @@ help:
 	@echo   make tag VERSION=v0.2.1      - Create local annotated tag (requires clean git state)
 	@echo   make tag-push VERSION=v0.2.1 - Push an existing local tag to REMOTE (default: origin)
 	@echo   make release VERSION=v0.2.1  - Create GitHub Release from pushed tag using gh CLI
-	@echo   make publish VERSION=v0.2.1  - Run ci (includes rust-dedup), tag, push, and release
+	@echo '  make publish VERSION=v0.2.1  - Run ci (includes rust-dedup), tag, push, and release'
 	@echo   Optional overrides: REMOTE=origin RELEASE_NOTES_FILE=notes.md RELEASE_DRAFT=true RELEASE_PRERELEASE=true
 
 verify-env:
@@ -378,7 +378,7 @@ release: release-preflight
 	@echo Created GitHub release for $(VERSION)
 
 publish: tag-preflight
-	@echo [publish] Step 1/4: ci (includes rust dedup build for $(PLATFORM))
+	@echo '[publish] Step 1/4: ci (includes rust dedup build for $(PLATFORM))'
 	@$(MAKE) ci
 	@echo [publish] Step 2/4: tag
 	@$(MAKE) tag VERSION=$(VERSION) REMOTE=$(REMOTE)

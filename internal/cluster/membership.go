@@ -8,26 +8,41 @@ import (
 	"log"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
-// MembershipService defines the interface for cluster membership implementations.
+// MembershipService defines the interface for cluster membership implementations
+// (custom TCP gossip or HashiCorp Memberlist).
 type MembershipService interface {
+	// Start begins membership listeners and join/heartbeat loops.
 	Start(ctx context.Context) error
+	// Stop shuts down membership and releases network resources.
 	Stop()
+	// Join adds or updates a node in the membership view.
 	Join(node *Node) error
+	// Leave removes a node from the membership view.
 	Leave(nodeID string) error
+	// GetNode returns a node by ID.
 	GetNode(nodeID string) (*Node, error)
+	// GetNodes returns all known nodes.
 	GetNodes() []*Node
+	// GetAliveNodes returns nodes currently considered alive.
 	GetAliveNodes() []*Node
+	// GetLocalNode returns this process's local node descriptor.
 	GetLocalNode() *Node
+	// GetClusterState returns a snapshot of cluster membership state.
 	GetClusterState() *ClusterState
+	// Events returns a channel of membership change events.
 	Events() <-chan MemberEvent
+	// OnJoin registers a callback invoked when a node joins.
 	OnJoin(cb func(node *Node))
+	// OnLeave registers a callback invoked when a node leaves.
 	OnLeave(cb func(node *Node))
 }
 
-// Membership manages cluster membership and node discovery
+// Membership manages cluster membership and node discovery via a custom TCP
+// gossip protocol with heartbeats and failure detection.
 type Membership struct {
 	mu          sync.RWMutex
 	config      *ClusterConfig
@@ -45,25 +60,36 @@ type Membership struct {
 	onJoin   func(node *Node)
 	onLeave  func(node *Node)
 	onUpdate func(node *Node)
+
+	// droppedEvents counts membership events dropped due to a full event channel.
+	droppedEvents atomic.Uint64
 }
 
-// MemberEvent represents a membership change event
+// MemberEvent represents a membership change event delivered on Events().
 type MemberEvent struct {
+	// Type is the kind of membership change.
 	Type EventType
+	// Node is the node affected by the event.
 	Node *Node
+	// Time is when the event was observed locally.
 	Time time.Time
 }
 
-// EventType represents the type of membership event
+// EventType represents the type of membership event.
 type EventType int
 
 const (
+	// EventTypeJoin indicates a node joined the cluster view.
 	EventTypeJoin EventType = iota
+	// EventTypeLeave indicates a node left the cluster gracefully.
 	EventTypeLeave
+	// EventTypeUpdate indicates an existing node's metadata was updated.
 	EventTypeUpdate
+	// EventTypeFailed indicates a node failed or became suspect.
 	EventTypeFailed
 )
 
+// String returns a human-readable name for the event type.
 func (e EventType) String() string {
 	switch e {
 	case EventTypeJoin:
@@ -231,14 +257,21 @@ func (m *Membership) handleConnection(conn net.Conn) {
 	}
 }
 
-// GossipMessage is the message format for gossip protocol
+// GossipMessage is the wire format for the custom TCP gossip protocol
+// (join, heartbeat, state, node_joined).
 type GossipMessage struct {
-	Type       string `json:"type"`
-	NodeID     string `json:"node_id"`
-	Address    string `json:"address"`     // gRPC address
-	GossipAddr string `json:"gossip_addr"` // Gossip address for heartbeats
-	RaftAddr   string `json:"raft_addr"`
-	Timestamp  int64  `json:"timestamp"`
+	// Type is the message kind: "join", "heartbeat", "state", or "node_joined".
+	Type string `json:"type"`
+	// NodeID is the sender (or subject) node identifier.
+	NodeID string `json:"node_id"`
+	// Address is the node's public gRPC address.
+	Address string `json:"address"`
+	// GossipAddr is the node's gossip/membership address for heartbeats.
+	GossipAddr string `json:"gossip_addr"`
+	// RaftAddr is the node's Raft transport address.
+	RaftAddr string `json:"raft_addr"`
+	// Timestamp is a wall-clock timestamp used for skew detection on heartbeats.
+	Timestamp int64 `json:"timestamp"`
 }
 
 // handleJoinRequest handles a node join request
@@ -559,7 +592,11 @@ func (m *Membership) OnUpdate(fn func(node *Node)) {
 	m.onUpdate = fn
 }
 
-// emitEvent emits a membership event
+// emitEvent emits a membership event. The channel is bounded; on overflow the
+// event is dropped rather than blocking gossip processing. Dropped events are
+// counted and logged so the divergence is visible — the Router's periodic
+// reconcileRing re-syncs its ring from the authoritative alive-node set, making
+// dropped events self-healing rather than permanently divergent.
 func (m *Membership) emitEvent(eventType EventType, node *Node) {
 	select {
 	case m.eventCh <- MemberEvent{
@@ -568,7 +605,9 @@ func (m *Membership) emitEvent(eventType EventType, node *Node) {
 		Time: time.Now(),
 	}:
 	default:
-		// Channel full, skip event
+		dropped := m.droppedEvents.Add(1)
+		log.Printf("[MEMBERSHIP] event channel full, dropped %s event for %s (total dropped=%d; ring self-heals on reconcile)",
+			eventType, node.ID, dropped)
 	}
 }
 
@@ -792,25 +831,36 @@ func getString(m map[string]interface{}, key string) string {
 	return ""
 }
 
-// Heartbeat represents a heartbeat message
+// Heartbeat represents a heartbeat message exchanged between nodes.
 type Heartbeat struct {
-	NodeID    string    `json:"node_id"`
-	Address   string    `json:"address"`
-	Timestamp int64     `json:"timestamp"`
-	State     NodeState `json:"state"`
+	// NodeID is the sending node's identifier.
+	NodeID string `json:"node_id"`
+	// Address is the sending node's gRPC address.
+	Address string `json:"address"`
+	// Timestamp is the sender wall-clock time (unix millis or nanos depending on path).
+	Timestamp int64 `json:"timestamp"`
+	// State is the sender's self-reported membership state.
+	State NodeState `json:"state"`
 }
 
-// JoinRequest represents a join request
+// JoinRequest represents a request from a node to join the cluster.
 type JoinRequest struct {
-	NodeID   string `json:"node_id"`
-	Address  string `json:"address"`
+	// NodeID is the joining node's identifier.
+	NodeID string `json:"node_id"`
+	// Address is the joining node's gRPC address.
+	Address string `json:"address"`
+	// HTTPAddr is the joining node's HTTP address.
 	HTTPAddr string `json:"http_addr"`
+	// RaftAddr is the joining node's Raft address.
 	RaftAddr string `json:"raft_addr"`
 }
 
-// JoinResponse represents a join response
+// JoinResponse represents the result of a join attempt.
 type JoinResponse struct {
-	Success      bool          `json:"success"`
-	Error        string        `json:"error,omitempty"`
+	// Success is true when the join was accepted.
+	Success bool `json:"success"`
+	// Error describes why the join was rejected, if any.
+	Error string `json:"error,omitempty"`
+	// ClusterState is the cluster snapshot returned to the joiner on success.
 	ClusterState *ClusterState `json:"cluster_state,omitempty"`
 }

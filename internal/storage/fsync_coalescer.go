@@ -15,9 +15,9 @@ import (
 // WALs that are no longer registered.
 type FsyncCoalescer struct {
 	mu        sync.Mutex
-	walSet    map[*WAL]struct{}
-	interval  time.Duration
-	quit      chan struct{}
+	walSet    map[*WAL]struct{} // registered WALs flushed each sweep
+	interval  time.Duration     // sweep period; should match WAL flush interval
+	quit      chan struct{}     // closed by Close to stop the loop
 	wg        sync.WaitGroup
 	closeOnce sync.Once
 }

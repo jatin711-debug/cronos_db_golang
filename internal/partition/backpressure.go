@@ -8,16 +8,17 @@ import (
 	"github.com/shirou/gopsutil/v3/mem"
 )
 
-// TokenBucket implements a simple token bucket rate limiter.
+// TokenBucket implements a simple token bucket rate limiter for ingest admission.
 type TokenBucket struct {
-	tokens     atomic.Int64
-	maxTokens  int64
-	refillRate int64        // tokens per second
-	lastRefill atomic.Int64 // Unix nano timestamp
+	tokens     atomic.Int64 // currently available tokens
+	maxTokens  int64        // burst capacity (max tokens held)
+	refillRate int64        // tokens added per second
+	lastRefill atomic.Int64 // Unix nano of last refill
 	mu         sync.Mutex
 }
 
-// NewTokenBucket creates a new token bucket.
+// NewTokenBucket creates a token bucket with the given burst capacity (maxTokens)
+// and steady refill rate (tokens per second). Starts full.
 func NewTokenBucket(maxTokens, refillRate int64) *TokenBucket {
 	tb := &TokenBucket{
 		maxTokens:  maxTokens,
@@ -59,15 +60,18 @@ func (tb *TokenBucket) TryConsume(n int64) bool {
 	return true
 }
 
-// MemoryMonitor tracks memory usage and provides backpressure signals.
+// MemoryMonitor tracks OS-level memory usage and provides backpressure signals
+// when usage exceeds a configured percentage threshold.
 type MemoryMonitor struct {
-	maxPercent    float64
-	checkInterval time.Duration
-	lastCheck     atomic.Int64
-	overLimit     atomic.Bool
+	maxPercent    float64       // trip threshold as UsedPercent (0–100)
+	checkInterval time.Duration // minimum time between syscalls
+	lastCheck     atomic.Int64  // Unix ms of last VirtualMemory sample
+	overLimit     atomic.Bool   // cached result of last check
 }
 
-// NewMemoryMonitor creates a memory monitor.
+// NewMemoryMonitor creates a memory monitor. maxPercent is the OS memory
+// UsedPercent threshold (e.g. 85). checkIntervalMs is the cache TTL in
+// milliseconds. Returns nil (disabled) when maxPercent <= 0.
 func NewMemoryMonitor(maxPercent float64, checkIntervalMs int64) *MemoryMonitor {
 	if maxPercent <= 0 {
 		return nil // Disabled
@@ -106,14 +110,17 @@ func (m *MemoryMonitor) IsOverLimit() bool {
 	return over
 }
 
-// BackpressureManager combines rate limiting and memory monitoring for admission control.
+// BackpressureManager combines global memory monitoring and per-partition
+// token-bucket rate limiting for publish admission control.
 type BackpressureManager struct {
-	memoryMonitor *MemoryMonitor
-	rateLimiters  map[int32]*TokenBucket
+	memoryMonitor *MemoryMonitor         // nil when memory backpressure is disabled
+	rateLimiters  map[int32]*TokenBucket // partitionID -> limiter
 	mu            sync.RWMutex
 }
 
-// NewBackpressureManager creates a backpressure manager.
+// NewBackpressureManager creates a manager. maxMemoryPercent and
+// memoryCheckIntervalMs configure the optional MemoryMonitor (disabled when
+// maxMemoryPercent <= 0). Per-partition rate limiters are added via SetRateLimiter.
 func NewBackpressureManager(maxMemoryPercent float64, memoryCheckIntervalMs int64) *BackpressureManager {
 	return &BackpressureManager{
 		memoryMonitor: NewMemoryMonitor(maxMemoryPercent, memoryCheckIntervalMs),

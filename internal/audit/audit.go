@@ -1,3 +1,9 @@
+// Package audit provides append-only, buffered NDJSON audit logging for
+// security-relevant API actions.
+//
+// Logger never blocks the gRPC hot path on disk I/O: events are enqueued to a
+// channel and written by a background worker with batched flush/fsync. When
+// the buffer is full, events are dropped and counted rather than stalling RPCs.
 package audit
 
 import (
@@ -16,6 +22,7 @@ import (
 )
 
 const (
+	// DefaultBufferSize is the default capacity of the in-memory audit event channel.
 	DefaultBufferSize = 4096
 
 	// auditSyncEvery is the number of encoded events after which the audit log
@@ -53,16 +60,24 @@ func WithBufferSize(n int) Option {
 	}
 }
 
-// Event represents a single audit log entry.
+// Event represents a single audit log entry written as one NDJSON line.
 type Event struct {
+	// Timestamp is when the event was accepted by Log (UTC).
 	Timestamp time.Time `json:"timestamp"`
-	Action    string    `json:"action"`
-	Subject   string    `json:"subject"`
-	Resource  string    `json:"resource"`
-	Outcome   string    `json:"outcome"`
-	Detail    string    `json:"detail,omitempty"`
-	SourceIP  string    `json:"source_ip,omitempty"`
-	RequestID string    `json:"request_id,omitempty"`
+	// Action is the operation name (e.g. RPC method or admin action).
+	Action string `json:"action"`
+	// Subject is the authenticated principal, or "anonymous".
+	Subject string `json:"subject"`
+	// Resource identifies the target (topic, partition, tenant, etc.).
+	Resource string `json:"resource"`
+	// Outcome is typically "success" or "failure".
+	Outcome string `json:"outcome"`
+	// Detail holds optional free-form context about the action.
+	Detail string `json:"detail,omitempty"`
+	// SourceIP is the client address when available.
+	SourceIP string `json:"source_ip,omitempty"`
+	// RequestID correlates the audit entry with a request/trace when available.
+	RequestID string `json:"request_id,omitempty"`
 }
 
 // Logger writes audit events to an append-only log file.
@@ -145,7 +160,8 @@ func (l *Logger) Log(evt Event) {
 	}
 }
 
-// LogGRPC creates an audit event from a gRPC context.
+// LogGRPC creates an audit event from a gRPC context, resolving the subject
+// from auth claims when present (otherwise "anonymous").
 func (l *Logger) LogGRPC(ctx context.Context, action, resource, outcome, detail string) {
 	subject := "anonymous"
 	if claims, ok := auth.ClaimsFromContext(ctx); ok {

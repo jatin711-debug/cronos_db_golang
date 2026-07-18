@@ -1,3 +1,9 @@
+// Package delivery implements sharded event dispatch to gRPC subscribers.
+//
+// The Dispatcher fans out ready events with per-subscription flow-control
+// credits, ack timeouts, exponential retries via a min-heap, optional circuit
+// breakers, and a durable dead-letter queue for exhausted deliveries. A Worker
+// bridges the scheduler ready queue into DispatchBatch for high throughput.
 package delivery
 
 import (
@@ -79,7 +85,9 @@ func releaseStringSlice(s []string) {
 }
 
 // Dispatcher manages event delivery to subscribers.
-// It is optimized with sharding for reduced lock contention.
+// Subscriptions are sharded by ID to reduce lock contention; partition-to-
+// subscriber indexes enable O(1) fan-out. Credits, in-flight caps, retries,
+// and circuit breakers protect slow or failing consumers.
 type Dispatcher struct {
 	shards     []*DispatcherShard
 	shardCount int
@@ -113,7 +121,7 @@ type Dispatcher struct {
 	OnDeliveryComplete func(tenantID string)
 }
 
-// DispatcherShard represents a shard of the dispatcher.
+// DispatcherShard holds a subset of subscriptions and their in-flight deliveries.
 type DispatcherShard struct {
 	mu               sync.RWMutex
 	subscriptions    map[string]*Subscription
@@ -125,81 +133,119 @@ type DispatcherShard struct {
 	dlq    *DeadLetterQueue
 }
 
-// Subscription represents a subscriber.
+// Subscription represents a single consumer connection for a partition.
 type Subscription struct {
-	ID            string
+	// ID uniquely identifies this subscription across the dispatcher.
+	ID string
+	// ConsumerGroup is the logical group used for round-robin fan-out.
 	ConsumerGroup string
-	Partition     *types.Partition
-	NextOffset    int64
-	Credits       int32
-	MaxCredits    int32
-	Stream        Stream
-	CreatedTS     int64
+	// Partition is the partition this subscriber consumes from.
+	Partition *types.Partition
+	// NextOffset is the next expected offset after the last successful ack.
+	NextOffset int64
+	// Credits is the current flow-control credit balance (atomically updated).
+	Credits int32
+	// MaxCredits is the credit ceiling for this subscription.
+	MaxCredits int32
+	// Stream is the transport used to send deliveries and receive control messages.
+	Stream Stream
+	// CreatedTS is the subscription creation time in Unix milliseconds.
+	CreatedTS int64
 
-	// Circuit breaker protects against repeatedly sending to failed consumers.
+	// circuitBreaker protects against repeatedly sending to failed consumers.
 	circuitBreaker *CircuitBreaker
 }
 
-// Stream represents gRPC stream.
+// Stream is the bidirectional transport used to deliver events and receive acks/credits.
 type Stream interface {
+	// Send delivers a message (or batch) to the subscriber.
 	Send(delivery *DeliveryMessage) error
+	// Recv receives the next control message (ack or credit top-up).
 	Recv() (*Control, error)
+	// Context returns the stream's cancellation context.
 	Context() context.Context
 }
 
-// DeliveryMessage represents a delivery to subscriber.
+// DeliveryMessage is a unit of work sent to a subscriber.
 type DeliveryMessage struct {
-	Event      *types.Event
+	// Event is the single-event payload; set for non-batch deliveries (and often
+	// for singleton batches for convenience).
+	Event *types.Event
+	// DeliveryID uniquely identifies this delivery for ack correlation.
 	DeliveryID string
-	Attempt    int32
+	// Attempt is the 1-based delivery attempt number.
+	Attempt int32
+	// AckTimeout is the ack deadline in milliseconds from send time.
 	AckTimeout int32
-	Batch      []*types.Event // For batched delivery
+	// Batch holds multiple events for batched delivery; nil for single-event sends.
+	Batch []*types.Event
 }
 
-// DeliveryControl represents control message from subscriber.
+// Control is a control-plane message from a subscriber (ack and/or credit).
 type Control struct {
-	Ack    *AckMessage
+	// Ack is a delivery acknowledgment, if present.
+	Ack *AckMessage
+	// Credit is a flow-control credit top-up, if present.
 	Credit *CreditMessage
 }
 
-// AckMessage represents acknowledgment.
+// AckMessage acknowledges (or nacks) a prior delivery.
 type AckMessage struct {
+	// DeliveryID is the delivery being acknowledged.
 	DeliveryID string
-	Success    bool
-	Error      string
+	// Success is true when the subscriber processed the delivery successfully.
+	Success bool
+	// Error is an optional error description when Success is false.
+	Error string
+	// NextOffset is the subscriber's next expected offset after this ack.
 	NextOffset int64
 }
 
-// CreditMessage represents flow control credit.
+// CreditMessage tops up flow-control credits for a subscription.
 type CreditMessage struct {
+	// Credits is the number of credits to add.
 	Credits int32
 }
 
-// ActiveDelivery represents an active delivery.
+// ActiveDelivery tracks an in-flight delivery awaiting ack or timeout.
 type ActiveDelivery struct {
-	Delivery        *DeliveryMessage
-	Subscription    *Subscription
-	Attempt         int32
-	CreatedTS       int64
-	AckDeadline     time.Time
+	// Delivery is the message that was sent to the subscriber.
+	Delivery *DeliveryMessage
+	// Subscription is the recipient of the delivery.
+	Subscription *Subscription
+	// Attempt is the current attempt number (mirrors Delivery.Attempt).
+	Attempt int32
+	// CreatedTS is when this attempt was tracked (Unix ms).
+	CreatedTS int64
+	// AckDeadline is when the delivery times out if not acked.
+	AckDeadline time.Time
+	// CreditsConsumed is how many credits were taken for this delivery (batch size or 1).
 	CreditsConsumed int32
 }
 
-// Config represents dispatcher configuration.
+// Config holds dispatcher tuning parameters.
 type Config struct {
-	MaxRetries         int32
-	DefaultAckTimeout  time.Duration
+	// MaxRetries is the maximum delivery attempts before DLQ.
+	MaxRetries int32
+	// DefaultAckTimeout is how long to wait for an ack before retrying.
+	DefaultAckTimeout time.Duration
+	// MaxDeliveryCredits is the default credit ceiling for new subscriptions.
 	MaxDeliveryCredits int32
-	RetryBackoff       time.Duration
-	MaxInFlightEvents  int64 // Global cap on in-flight deliveries across all subscriptions
+	// RetryBackoff is the base delay multiplied by attempt number between retries.
+	RetryBackoff time.Duration
+	// MaxInFlightEvents is the global cap on in-flight deliveries (0 = unlimited).
+	MaxInFlightEvents int64
 
-	// Circuit breaker configuration
-	CircuitBreakerFailureThreshold float64 // 0.0-1.0, 1.0 = disabled
-	CircuitBreakerOpenDurationMs   int64
-	CircuitBreakerMinAttempts      int64
+	// CircuitBreakerFailureThreshold is the failure rate (0.0–1.0) that trips the breaker.
+	// A value of 1.0 effectively disables tripping under normal ratios.
+	CircuitBreakerFailureThreshold float64
+	// CircuitBreakerOpenDurationMs is how long the breaker stays open before half-open.
+	CircuitBreakerOpenDurationMs int64
+	// CircuitBreakerMinAttempts is the minimum samples before the failure rate is evaluated.
+	CircuitBreakerMinAttempts int64
 }
 
-// DefaultConfig returns default config.
+// DefaultConfig returns a Config with production-oriented defaults.
 func DefaultConfig() *Config {
 	return &Config{
 		MaxRetries:                     5,
@@ -215,7 +261,7 @@ func DefaultConfig() *Config {
 
 const defaultShardCount = 32
 
-// NewDispatcher creates a new dispatcher with sharding.
+// NewDispatcher creates a sharded dispatcher and starts the timeout/retry loop.
 func NewDispatcher(config *Config) *Dispatcher {
 	if config == nil {
 		config = DefaultConfig()
@@ -308,7 +354,8 @@ func (d *Dispatcher) releaseCredit(sub *Subscription) {
 	d.releaseCredits(sub, 1)
 }
 
-// Subscribe adds a subscription.
+// Subscribe registers a subscription, initializes credits and circuit breaker,
+// and indexes it under its partition for O(1) dispatch lookups.
 func (d *Dispatcher) Subscribe(sub *Subscription) error {
 	shard := d.getShard(sub.ID)
 	shard.mu.Lock()
@@ -337,7 +384,7 @@ func (d *Dispatcher) Subscribe(sub *Subscription) error {
 	return nil
 }
 
-// Unsubscribe removes a subscription.
+// Unsubscribe removes a subscription and abandons its in-flight deliveries.
 func (d *Dispatcher) Unsubscribe(subscriptionID string) error {
 	shard := d.getShard(subscriptionID)
 	shard.mu.Lock()
@@ -465,7 +512,8 @@ func (d *Dispatcher) pickSubscriber(groupSubs []*Subscription, startIdx int) *Su
 	return nil
 }
 
-// Dispatch dispatches an event to subscribers.
+// Dispatch fans out a single event to one subscriber per consumer group on the
+// event's partition, subject to credits, circuit breakers, and in-flight limits.
 func (d *Dispatcher) Dispatch(event *types.Event) error {
 	start := time.Now()
 	defer func() {
@@ -507,6 +555,7 @@ func (d *Dispatcher) Dispatch(event *types.Event) error {
 		if !d.tryReserveInFlight(1) {
 			deliveryMessagePool.Put(delivery)
 			d.releaseCredit(selectedSub)
+			metrics.IncDispatcherBackpressureSkip(strconv.FormatInt(int64(event.GetPartitionId()), 10), "in_flight_cap", 1)
 			return fmt.Errorf("in-flight limit exceeded")
 		}
 
@@ -575,7 +624,8 @@ func (d *Dispatcher) dispatchToSub(sub *Subscription, event *types.Event) error 
 	return nil
 }
 
-// DispatchBatch dispatches a batch of events.
+// DispatchBatch fans out a batch of events, grouping by partition and building
+// per-subscriber batches for efficient stream sends.
 func (d *Dispatcher) DispatchBatch(events []*types.Event) error {
 	if len(events) == 0 {
 		return nil
@@ -645,6 +695,11 @@ func (d *Dispatcher) dispatchPartitionBatch(partitionID int32, events []*types.E
 
 			selectedSub := d.pickSubscriber(groupSubs, start)
 			if selectedSub == nil {
+				// No subscriber in this group currently has credits. The event is
+				// not delivered on this pass; surface it as backpressure rather than
+				// dropping silently. It remains durable in the WAL and is re-driven
+				// when the consumer reconnects from its committed offset.
+				metrics.IncDispatcherBackpressureSkip(strconv.FormatInt(int64(partitionID), 10), "no_credits", 1)
 				continue
 			}
 
@@ -678,6 +733,7 @@ func (d *Dispatcher) dispatchPartitionBatch(partitionID int32, events []*types.E
 			deliveryMessagePool.Put(delivery)
 			// Credits were consumed per event while assigning.
 			d.releaseCredits(sub, int32(len(batchEvents)))
+			metrics.IncDispatcherBackpressureSkip(strconv.FormatInt(int64(partitionID), 10), "in_flight_cap", len(batchEvents))
 			return fmt.Errorf("in-flight limit exceeded")
 		}
 
@@ -978,7 +1034,8 @@ func parseSubIDFromDeliveryID(deliveryID string) (string, error) {
 	return deliveryID[:idx], nil
 }
 
-// HandleAck handles acknowledgment from subscriber.
+// HandleAck processes a subscriber acknowledgment. Success releases credits and
+// updates NextOffset; failure schedules a retry or sends the delivery to the DLQ.
 func (d *Dispatcher) HandleAck(deliveryID string, success bool, nextOffset int64) error {
 	subID, err := parseSubIDFromDeliveryID(deliveryID)
 	if err != nil {
@@ -1137,14 +1194,21 @@ func (d *Dispatcher) GetStats() *DispatcherStats {
 	return stats
 }
 
-// DispatcherStats represents dispatcher statistics.
+// DispatcherStats is a point-in-time snapshot of dispatcher load.
 type DispatcherStats struct {
+	// ActiveSubscriptions is the number of registered subscriptions.
 	ActiveSubscriptions int64
-	ActiveDeliveries    int64
-	CreditsInUse        int64
-	CreditsAvailable    int64
-	RetryQueueDepth     int64
-	DLQSize             int64
+	// ActiveDeliveries is the number of in-flight deliveries awaiting ack.
+	ActiveDeliveries int64
+	// CreditsInUse is MaxCredits minus currently available credits, summed across subs.
+	CreditsInUse int64
+	// CreditsAvailable is the sum of remaining credits across all subscriptions.
+	CreditsAvailable int64
+	// RetryQueueDepth is the number of entries waiting in the retry heap.
+	RetryQueueDepth int64
+	// DLQSize is the number of entries in the dead-letter queue (0 if unset).
+	DLQSize int64
+	// OpenCircuitBreakers counts subscriptions whose breaker is open or half-open (CanTry false).
 	OpenCircuitBreakers int64
 }
 
