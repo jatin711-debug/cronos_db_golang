@@ -15,6 +15,7 @@ services:
     command:
       - --dev
       - --data-dir=/data
+      - --raft-dir=/data/raft
       - --fsync-mode=periodic
       - --flush-interval=50
       - --index-interval=4096
@@ -58,9 +59,11 @@ services:
     command:
       - --dev
       - --data-dir=/data
+      - --raft-dir=/data/raft
       - --node-id=node1
       - --cluster
       - --cluster-seeds=
+      - --cluster-raft-addr=cronos-node1:7948
       - --fsync-mode=periodic
       - --flush-interval=50
       - --index-interval=4096
@@ -108,9 +111,11 @@ services:
     command:
       - --dev
       - --data-dir=/data
+      - --raft-dir=/data/raft
       - --node-id=node2
       - --cluster
       - --cluster-seeds=cronos-node1:7946
+      - --cluster-raft-addr=cronos-node2:7948
       - --fsync-mode=periodic
       - --flush-interval=50
       - --index-interval=4096
@@ -160,9 +165,11 @@ services:
     command:
       - --dev
       - --data-dir=/data
+      - --raft-dir=/data/raft
       - --node-id=node3
       - --cluster
       - --cluster-seeds=cronos-node1:7946
+      - --cluster-raft-addr=cronos-node3:7948
       - --fsync-mode=periodic
       - --flush-interval=50
       - --index-interval=4096
