@@ -15,30 +15,36 @@
 .PARAMETER DataDir
     Data directory (default: ./data/node1).
 
-.PARAMETER GRPCPort
-    Public client gRPC port (default: 9000).
+.PARAMETER GRPCAddr
+    Public client gRPC address (default: localhost:9000).
 
-.PARAMETER HTTPPort
-    Metrics/health HTTP port (default: 8080).
+.PARAMETER HTTPAddr
+    Metrics/health HTTP address (default: localhost:8080).
 
-.PARAMETER ClusterGRPCPort
-    Internal cluster/replication gRPC port (default: 10000).
+.PARAMETER ClusterGRPCAddr
+    Internal cluster/replication gRPC address (default: localhost:10000).
+
+.PARAMETER ClusterRaftAddr
+    Cluster Raft address (default: localhost:12000).
+
+.PARAMETER ClusterGossipAddr
+    Cluster gossip address (default: localhost:14000).
+
+.PARAMETER ClusterSeeds
+    Comma-separated seed node addresses for joining an existing cluster.
 
 .PARAMETER Cluster
     Enable clustering mode (default: true).
 
-.PARAMETER Bootstrap
-    Bootstrap a new cluster on this node (default: true for node1).
+.EXAMPLE
+    .\scripts\run-node-windows.ps1 -NodeID node1 -GRPCAddr localhost:9000
 
 .EXAMPLE
-    .\scripts\run-node-windows.ps1 -NodeID node1 -GRPCPort 9000
-
-.EXAMPLE
-    # Terminal 1: bootstrap
-    .\scripts\run-node-windows.ps1 -NodeID node1 -Bootstrap
+    # Terminal 1: bootstrap leader
+    .\scripts\run-node-windows.ps1 -NodeID node1 -GRPCAddr localhost:9000
 
     # Terminal 2: joiner
-    .\scripts\run-node-windows.ps1 -NodeID node2 -GRPCPort 9001 -ClusterGRPCPort 10001 -Bootstrap:$false
+    .\scripts\run-node-windows.ps1 -NodeID node2 -GRPCAddr localhost:9001 -ClusterGRPCPort localhost:10001 -ClusterSeeds localhost:14000
 #>
 
 [CmdletBinding()]
@@ -50,8 +56,8 @@ param(
     [string]$ClusterGRPCAddr = "localhost:10000",
     [string]$ClusterRaftAddr = "localhost:12000",
     [string]$ClusterGossipAddr = "localhost:14000",
-    [switch]$Cluster = $true,
-    [switch]$Bootstrap = $true
+    [string]$ClusterSeeds = "",
+    [switch]$Cluster = $true
 )
 
 $ErrorActionPreference = "Stop"
@@ -60,7 +66,7 @@ $binary = Join-Path $repoRoot "bin" "cronos-api.exe"
 
 if (-not (Test-Path $binary)) {
     Write-Host "Binary not found at $binary. Building..." -ForegroundColor Yellow
-    & make -C $repoRoot build
+    & make -C $repoRoot build-api
     if ($LASTEXITCODE -ne 0) {
         Write-Error "Build failed"
     }
@@ -85,8 +91,8 @@ $args = @(
 if ($Cluster) {
     $args += "--cluster"
 }
-if ($Bootstrap) {
-    $args += "--bootstrap"
+if ($ClusterSeeds -ne "") {
+    $args += "--cluster-seeds=$ClusterSeeds"
 }
 
 Write-Host "Starting CronosDB node $NodeID on gRPC $GRPCAddr / cluster $ClusterGRPCAddr ..." -ForegroundColor Cyan
