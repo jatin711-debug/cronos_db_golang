@@ -109,4 +109,4 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
 
 # Entry point
 ENTRYPOINT ["/app/cronos-api"]
-CMD ["--data-dir=/data"]
+CMD ["--data-dir=/data", "--raft-dir=/data/raft"]
