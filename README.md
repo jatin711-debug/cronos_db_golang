@@ -136,13 +136,17 @@ graph TB
 ### Build
 
 ```bash
-# Build Rust bloom filter + Go binaries
+# Build Rust bloom filter + Go binaries (includes admin dashboard SPA, requires npm)
 make build
+
+# Or build only the server binary (no dashboard, no npm needed)
+make build-api
 
 # Or step by step:
 make rust-dedup          # Build Rust shared library
 make ensure-build-dir    # Create bin/ directory
-go build -o bin/cronos-api ./cmd/api/main.go
+go build -o bin/cronos-api ./cmd/api/main.go      # Linux / macOS
+go build -o bin/cronos-api.exe ./cmd/api/main.go  # Windows
 ```
 
 ### Run Single Node
@@ -443,11 +447,15 @@ if err != nil {
 ### End-to-end demo
 
 ```bash
+# Start a local dev node first
+./bin/cronos-api --dev --node-id=node1 --data-dir=./data
+
+# In another terminal
 go run ./examples/pubsub_demo
 ```
 
-This demo publishes one JSON event with a 10-second schedule window and prints the received delivery metadata/payload.
-By default it bootstraps local cluster ports `9000,9001,9002`; use `-addr` to force a single node.
+This demo connects to `localhost:9000`, publishes one JSON event scheduled 10 seconds in the future, and prints the received delivery metadata/payload.
+Use `-addr` to target a different node. Run `make demo` if a node is already up.
 
 ---
 
@@ -793,7 +801,7 @@ See [proto/events.proto](proto/events.proto) for the complete specification.
 - [x] Non-root container user
 - [x] Health checks in Docker
 - [x] Cross-platform Makefile (Windows/Linux/macOS)
-- [x] CI pipeline target (`make ci`)
+- [x] CI pipeline target (`make ci`; GitHub Actions workflow not currently present)
 - [x] Two-tier scheduler with adaptive hydrator (cold store + hot timing wheel)
 - [x] Non-blocking retry heap (min-heap by retry deadline)
 - [x] Admission control (readyQueue / timingWheel / in-flight limits)
