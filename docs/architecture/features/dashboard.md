@@ -2,145 +2,98 @@
 
 ## Purpose
 
-The admin dashboard is the operator-facing web UI for the CronosDB
-AdminService. It surfaces cluster topology, partition health,
-replication lag, consumer-group lag, retention, compaction,
-schema, tenant, and rebalance information through a React 19 single-page
-application served by the same Go binary that runs the public gRPC
-API. The dashboard reads exclusively from the AdminService — it is a
-thin client, and the JSON wire format mirrors the gRPC protobuf so
-backend and frontend evolve together.
+The admin dashboard is the operator-facing web UI for CronosDB AdminService. It
+surfaces cluster topology, partition health, replication lag, consumer-group
+lag, retention, compaction, schemas, tenants, and rebalance actions through a
+React 19 SPA served by the same Go binary that runs the public gRPC API.
+
+The dashboard talks to the process over HTTP JSON (`/api/admin/*`), which is a
+thin proxy over the same `AdminServiceHandler` used by gRPC — no separate
+business logic path.
 
 ## Key Files
 
 - [web/dashboard/src/main.tsx](../../../web/dashboard/src/main.tsx),
-  [App.tsx](../../../web/dashboard/src/App.tsx) — React 19 entry point
-  and top-level nav.
-- [web/dashboard/src/views/](../../../web/dashboard/src/views/) — one
-  component per AdminService RPC group.
-- [web/dashboard/src/lib/api-mock.ts](../../../web/dashboard/src/lib/api-mock.ts) —
-  typed `useAdmin()` hook returning mock data; swap to `fetch()`
-  against the JSON proxy in a future step.
-- [web/dashboard/src/components/ui/](../../../web/dashboard/src/components/ui/) —
-  shadcn/ui primitives (Button, Card, Badge).
+  [App.tsx](../../../web/dashboard/src/App.tsx) — React 19 entry and nav shell
+  (basename `/ui`).
+- [web/dashboard/src/views/](../../../web/dashboard/src/views/) — views for
+  home, cluster, partitions, replication, consumers, schemas, tenants,
+  operations, login.
+- [web/dashboard/src/lib/api.ts](../../../web/dashboard/src/lib/api.ts) —
+  live `fetch()` client + React hooks; JWT stored in `localStorage`.
+- [web/dashboard/src/components/](../../../web/dashboard/src/components/) —
+  theme, toasts, mobile nav, error boundary, shadcn-style UI primitives.
 - [web/dashboard/vite.config.ts](../../../web/dashboard/vite.config.ts) —
-  Vite 7 build config; emits `web/dashboard/dist/` with
-  content-hashed assets.
+  Vite 7 build; emits `web/dashboard/dist/` with content-hashed assets.
 - [internal/api/web_handler.go](../../../internal/api/web_handler.go) —
-  Go HTTP handler that:
-    - Embeds the SPA via `//go:embed web/dist/*`.
-    - Exposes the JSON proxy at `/api/admin/*` (one path per
-      AdminService RPC).
-    - Wraps every JSON path in an auth middleware that reuses
-      `auth.ParseToken` + `auth.CheckAdminPermission`.
+  embeds SPA via `//go:embed web/dist/*`; serves `/ui/` with SPA fallback to
+  `index.html`; exposes JWT-gated `/api/admin/*` JSON proxy.
 - [internal/api/web/dist/README.txt](../../../internal/api/web/dist/README.txt) —
-  placeholder so the `//go:embed` directive compiles before the SPA
-  has been built. Replaced in place by the Makefile's
-  `STAGE_DASHBOARD_DIST_CMD` when `make build` runs.
-- [cmd/api/main.go](../../../cmd/api/main.go) — wires `WebHandler`
-  into the existing `*http.ServeMux` (one block, alongside the
-  health checker and `/metrics`).
-- [pkg/types/admin.pb.go](../../../pkg/types/admin.pb.go) — the
-  gRPC-generated types whose `json:"snake_case,omitempty"` tags
-  define the dashboard's wire format.
-- [internal/auth/auth.go](../../../internal/auth/auth.go) — exports
-  `auth.ParseToken` (added in step 5) which the HTTP middleware
-  uses to verify Bearer tokens; same secret/keys as the gRPC
-  interceptor.
+  embed placeholder until `make dashboard` / `make build` stages real assets.
+- [cmd/api/main.go](../../../cmd/api/main.go) — mounts `WebHandler` on the
+  HTTP mux next to health and metrics.
+- [pkg/types/admin.pb.go](../../../pkg/types/admin.pb.go) — protobuf JSON tags
+  define the wire field names.
+- [internal/auth/auth.go](../../../internal/auth/auth.go) — `ParseToken` +
+  `CheckAdminPermission` shared with gRPC admin paths.
 
 ## Main Flow
 
 ```
 Browser (SPA)
-   │  GET /ui/                 (assets + index.html)
-   │  GET /api/admin/topology  (Authorization: Bearer <jwt>)
+   │  GET /ui/…                 (assets + SPA routes → index.html fallback)
+   │  GET /api/admin/topology   (Authorization: Bearer <jwt> when auth on)
    ▼
-Go binary (cronos-api)
-   │  /ui/     → embedded dist (FileServer, strip /ui/)
-   │  /api/admin/* → WebHandler.authMiddleware →
-   │                 WebHandler.apiMux → AdminServiceHandler.<RPC> →
-   │                 json.Marshal(proto response) → 200 application/json
+Go binary (cronos-api)  HTTP :8080
+   │  /ui/     → embedded dist (spaFileServer)
+   │  /api/admin/* → authMiddleware → AdminServiceHandler.<RPC>
+   │                 → json.Marshal(proto response)
    ▼
-AdminService gRPC handler (re-used, no business-logic change)
+Same handler code as gRPC AdminService
 ```
 
-The JSON wire format is the gRPC protobuf's JSON form. Snake-case
-field names match `web/dashboard/src/lib/api-mock.ts` exactly, so
-swapping the mock hook for `fetch('/api/admin/topology')` is a
-one-line change with no view edits.
+## Endpoints
+
+| HTTP path | Admin RPC / action |
+|-----------|--------------------|
+| `/api/admin/topology` | GetClusterTopology |
+| `/api/admin/partition-health` | GetPartitionHealth |
+| `/api/admin/replication-lag` | GetReplicationLag |
+| `/api/admin/consumer-groups` | ListConsumerGroups |
+| `/api/admin/consumer-group-lag` | GetConsumerGroupLag |
+| `/api/admin/schemas` | ListSchemas |
+| `/api/admin/schema` | GetSchema |
+| `/api/admin/tenant-usage` | GetTenantUsage |
+| `/api/admin/retention/run` | RunRetention |
+| `/api/admin/compaction/run` | RunCompaction |
+| `/api/admin/cluster/rebalance` | **TriggerRebalance soft-stub** — RPC exists, RBAC applies; returns success + message that rebalance is membership-driven (`PartitionsMoved=0`). See [cluster.md](cluster.md) and [ARCHITECTURE known limitations](../../../ARCHITECTURE.md#known-limitations). |
 
 ## Production Decisions
 
-- **Single binary, single listener.** The SPA is served from the
-  same `:8080` HTTP listener that already serves `/health` and
-  `/metrics`. No new port, no new process. The `*http.ServeMux` is
-  shared.
-- **`//go:embed` keeps the binary self-contained.** The
-  `STAGE_DASHBOARD_DIST_CMD` Makefile rule copies the SPA's
-  `dist/` into `internal/api/web/dist/` before `go build`, so the
-  embed directive `web/dist/*` resolves at compile time. The
-  binary contains the SPA; distribution is one file.
-- **No SPA fallback for client-side routes (yet).** Requests to
-  `/ui/some/path` that don't match an asset return 404. Adding
-  SPA fallback (return `index.html` for any unmatched `/ui/*`
-  path) is a known gap; deferred to a follow-up step.
-- **Auth mirrors the gRPC service.** Bearer token in
-  `Authorization: Bearer <jwt>`, parsed by `auth.ParseToken`,
-  claims stashed in `r.Context()`, and gated by
-  `auth.CheckAdminPermission(Subject.Admin=true)`. Same policy
-  file, same secret/keys, same AllowAll semantics in dev mode.
-- **gRPC status codes map to HTTP.** The proxy uses a
-  `grpcCodeToHTTP` table (NotFound→404, PermissionDenied→403,
-  FailedPrecondition→412, etc.) so the dashboard and the CLI see
-  consistent error semantics.
-- **All 11 AdminService RPCs are exposed**, including the ones
-  whose handler returns a documented "not yet wired" response
-  (ListSchemas, GetSchema, GetTenantUsage, TriggerRebalance).
-  This keeps the wire surface stable so step 5+ can add the real
-  implementations without changing the dashboard.
-- **`make build` depends on `make dashboard`.** The `build:`
-  target chains `dashboard rust-dedup ensure-build-dir`, so a
-  `go build` of the project always produces a binary with the
-  current SPA. Go-only builds via `make test-unit` are unaffected.
-- **Defer the SPA mock-data swap.** The dashboard renders mock
-  data via `useAdmin()`. A future step will replace the hook
-  body with a `fetch('/api/admin/topology')` call. The TS types
-  already match the wire format, so no view changes are required.
+- **Single binary, single HTTP listener.** SPA and JSON proxy share `:8080`
+  with `/health` and `/metrics`.
+- **`//go:embed` keeps the binary self-contained.** `make build` stages
+  `web/dashboard/dist` → `internal/api/web/dist` before compile.
+- **SPA client-route fallback.** Unmatched `/ui/*` paths return `index.html`
+  so React Router deep links work.
+- **Auth mirrors gRPC.** Bearer JWT, same secret/keys/policy; admin requires
+  `Subject.Admin=true`. In `--dev` (auth off) middleware is a pass-through.
+- **gRPC status → HTTP.** NotFound→404, PermissionDenied→403, etc.
+- **Schemas and tenant usage are live** when schema registry / tenant
+  accountant are initialized at process start (they are in `cmd/api/main.go`).
+- **`make build` depends on dashboard stage** so release binaries include UI.
 
 ## Debug Pointers
 
-- **Dashboard doesn't load in the browser.** Open
-  `http://localhost:8080/ui/` directly; if it 404s, the embed
-  is empty — run `make dashboard && make build`. Check the
-  binary's logs for the "dashboard dist not embedded" warning
-  emitted at startup.
-- **JSON proxy returns 401 unexpectedly.** Confirm
-  `Authorization: Bearer <jwt>` is set, the JWT is signed with
-  the same secret/key as the gRPC service, and the subject has
-  `admin: true` in the policy file. The error body is the
-  gRPC `PermissionDenied` message verbatim, which is helpful for
-  debugging but does leak some auth detail; acceptable for an
-  admin-only endpoint.
-- **JSON proxy returns 500 with an error body.** Check
-  `cmd/api/main.go` startup logs for handler initialization
-  errors (e.g. nil AdminServiceHandler, missing cluster manager).
-  The proxy does not retry; the underlying gRPC handler is the
-  source of truth.
-- **CORS errors in the browser console.** The dashboard is
-  served from the same origin as the JSON proxy (`:8080`), so
-  no CORS preflight is required. If the dashboard is opened
-  via a different origin (e.g. `vite dev` on `:5173` while the
-  API runs on `:8080`), the browser will block the fetch. For
-  local development, set the dashboard's `base: '/'` (or use
-  the production build).
-- **Stale SPA after rebuild.** `make build` clears and re-stages
-  `internal/api/web/dist/` from `web/dashboard/dist/`; restart
-  the binary to pick up the new embed. The Go build cache
-  (`~/.cache/go-build`) does not affect embed content.
+- **404 on `/ui/`:** embed empty — run `make dashboard && make build` and restart.
+- **401 on JSON:** missing/invalid JWT or subject lacks `admin: true`.
+- **CORS in vite dev:** SPA and API must be same origin for production embed;
+  proxy or point fetch base URL when developing SPA against a remote node.
+- **Stale UI after rebuild:** re-stage dist and restart the binary (embed is
+  compile-time).
 
-## Related Diagrams
+## Related
 
-- The dashboard flows are not currently captured in Mermaid. The
-  high-level architecture diagram in [ARCHITECTURE.md](../../../../ARCHITECTURE.md)
-  shows the AdminService as a separate node; a future
-  diagram can show the JSON proxy + SPA wiring.
+- [api.md](api.md) — public vs internal listeners and AdminService
+- [auth.md](auth.md) — JWT and RBAC
+- [ARCHITECTURE.md](../../../ARCHITECTURE.md)

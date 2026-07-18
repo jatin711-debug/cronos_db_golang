@@ -21,11 +21,13 @@ The partition module is the core execution unit that groups WAL, scheduler, dedu
 
 ## Production Decisions
 
-- Partition-level encapsulation limits blast radius.
-- Partition storage consumes WAL v2 records (Raft term + trailing checksum) and uses the production fsync default of `batch`.
-- Epoch handling supports leader fencing.
-- Admission control prevents overload per partition.
-- Disk monitor can trigger emergency compaction under pressure.
+- Partition-level encapsulation limits blast radius: each partition owns WAL, scheduler, dedup, dispatcher, worker, consumer groups, **DLQ**, and optional leader/follower replication roles.
+- **Standalone** mode creates all partitions at startup; **cluster** mode creates partition 0 for shared state and **lazy-creates** others on first use.
+- Create path wires **`NewDeadLetterQueue` + `NewDispatcherWithDLQ`** so delivery failures are durable.
+- Start path runs **dedup WAL recovery** and **scheduler/WAL timer replay** (matured timers deliver immediately).
+- Partition storage uses WAL v2 and default fsync mode `batch`.
+- Epoch handling fences stale leaders; `ReplicateMu` preserves offset order on the RF>1 write path only.
+- Admission control and disk monitor prevent overload and trigger emergency compaction.
 
 ## Debug Pointers
 

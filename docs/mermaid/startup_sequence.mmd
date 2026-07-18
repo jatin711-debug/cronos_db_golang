@@ -1,35 +1,39 @@
 sequenceDiagram
     participant Main as cmd/api/main.go
     participant Config as internal/config
+    participant Guard as audit schema tenant cdc slo tracing
     participant PM as internal/partition
     participant Cluster as internal/cluster
-    participant API as internal/api
-    participant BG as Background Loops
+    participant Pub as Public gRPC :9000
+    participant Int as Internal gRPC :7947
+    participant HTTP as HTTP :8080
+    participant BG as Background loops
 
-    Main->>Config: LoadConfig()
-    Main->>Config: ValidateConfig()
-    Main->>Main: Dev-mode check (--dev bypass)
-    Main->>Main: Init logger, tracing, slo, audit
-    Main->>PM: NewPartitionManagerWithCache(...)
-    Main->>BG: Start disk monitor and backup scheduler
+    Main->>Config: LoadConfig + ValidateConfig
+    Main->>Main: --dev relaxes production security gates
+    Main->>Guard: Init audit, schema, tenant, CDC sinks, tracing, SLO
+    Main->>PM: NewPartitionManagerWithCache(shared Pebble cache)
+    Main->>BG: Disk monitor, backup scheduler, retention ticker
     alt cluster enabled
-        Main->>Cluster: NewManager(config)
-        Main->>Cluster: SetPartitionAccessor(pm)
-        Main->>Cluster: Start()
-        Main->>Cluster: JoinCluster(seed)
+        Main->>Cluster: NewManager + SetPartitionAccessor
+        Main->>Cluster: Start Raft then membership/router
+        Main->>Cluster: JoinCluster seeds when provided
     end
-    Main->>PM: Create and start initial partitions
-    Main->>PM: Wire WAL append hooks for CDC and cross region
-    Main->>API: NewGRPCServer(config)
-    Main->>API: Register Event, Consumer, Partition, Tx
-    Main->>API: Register Replication, Raft, CrossRegion
-    Main->>API: Register health server
-    Main->>API: Start()
-    Main->>API: Monitor ServeError()
-    Main->>BG: Start stats loop and retention loop
-    Note over Main,BG: Wait for SIGINT or SIGTERM
-    Main->>API: GracefulStopWithTimeout(ctx)
-    Main->>API: Forced Stop fallback
-    Main->>API: Stop health server
-    Main->>PM: StopAllPartitions()
-    Main->>Cluster: Stop()
+    Main->>PM: Create/start partitions<br/>(standalone: all; cluster: partition 0 then lazy)
+    Main->>PM: Wire WAL appendHook CDC + cross-region echo guard
+    Main->>Pub: NewGRPCServer + interceptors
+    Main->>Pub: Register Event, ConsumerGroup, Partition, Admin
+    Main->>Pub: SetTransactionHandler (PM-injected 2PC)
+    Main->>Int: NewInternalGRPCServer
+    Main->>Int: Register Replication, Raft, CrossRegion
+    Main->>HTTP: Health + metrics + WebHandler /ui + /api/admin
+    Main->>Pub: Start + ServeError monitor
+    Main->>Int: Start + ServeError monitor
+    Main->>HTTP: ListenAndServe with timeouts
+    Main->>BG: Stats loop; optional autoscaler
+    Note over Main,BG: SIGINT / SIGTERM
+    Main->>Pub: GracefulStopWithTimeout then Stop
+    Main->>Int: Graceful stop
+    Main->>HTTP: Shutdown
+    Main->>PM: StopAllPartitions
+    Main->>Cluster: Stop when enabled
