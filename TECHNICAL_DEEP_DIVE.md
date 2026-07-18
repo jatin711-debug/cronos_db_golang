@@ -213,10 +213,10 @@ Wheel with 60 slots, 1-second tick:
 **Solution**: Multiple wheels, like how a clock has hours, minutes, seconds.
 
 ```
-Level 0 (Root): 100ms tick, 60 slots = 6 second window
-Level 1:        6s tick,    60 slots = 360 second (6 min) window
-Level 2:        360s tick,  60 slots = 6 hour window
-Level 3:        6hr tick,   60 slots = 15 day window
+Defaults (see internal/config/defaults.go):
+Level 0 (Root): 10ms tick, 600 slots = 6 second window
+Overflow levels cascade with span = tickMs × wheelSize per level
+(Historical illustrations sometimes used 100ms × 60; the product is still a 6s root span.)
 ```
 
 **How it works**:
@@ -236,7 +236,7 @@ Level 0 rotation complete → Take Level 1 slot 0 → Recalculate positions in L
 - All operations: O(1)!
 
 **In CronosDB**: `internal/scheduler/timing_wheel.go`
-- 100ms tick (configurable)
+- 10ms tick default (configurable via `-tick-ms`)
 - 60 slots per wheel
 - Up to 10 levels
 - Handles millions of events with bounded memory
@@ -508,7 +508,8 @@ Hash Ring (0 to 2^64):
   Partition 7 hashes to position 7000 → belongs to Node B
 ```
 
-**Virtual Nodes**: Each physical node gets 150 virtual positions on the ring.
+**Virtual Nodes**: Each physical node gets many virtual positions on the ring
+(process default **2048** via `-virtual-nodes`; the hashring helper falls back to 150 only if a caller passes weight ≤ 0).
 
 ```
 Node A: positions 100, 1100, 2100, ..., 14900 (150 vnodes)

@@ -33,13 +33,28 @@ The cluster module provides node membership, partition routing, leader assignmen
 - Rebalance path uses partition accessor hooks to avoid ownership without data.
 - Explicit epoch usage supports leader fencing behavior.
 - New-node join path: `Manager.JoinCluster` iterates `router.GetLocalPartitions()` and calls `PartitionManager.SyncPartitionFromLeader(partitionID, leader.Address)`, which triggers `Follower.InstallSnapshot` (bulk `ReplicationService.Snapshot` install) for each partition the joining node owns.
-- After formation, `reconcileLocalLeadership` runs every 5s on every node and idempotently wires up `PromoteToLeader` + `AddFollower` for every locally-led partition — this is what enables streaming `ReplicationService.Append` on a healthy cluster.
+- After formation, `reconcileLocalLeadership` runs every 5s and uses **Raft-committed assignments** (not gossip alone) to idempotently `PromoteToLeader` / demote / `AddFollower` for local partitions — enabling streaming `ReplicationService.Append` on a healthy cluster.
+- Partition ID routing for keys uses **FNV-1a**; node placement on the ring uses **SHA-256 virtual nodes** (default 2048).
+
+## Known Limitation: Admin `TriggerRebalance` soft stub
+
+| | |
+|--|--|
+| **Automatic rebalance (works)** | Membership join/leave → router assignment → Raft apply → `reconcileLocalLeadership` (~5s) promotes/demotes and may `SyncPartitionFromLeader`. |
+| **On-demand RPC (stub)** | `AdminService.TriggerRebalance` / dashboard `POST /api/admin/cluster/rebalance` is **implemented as a soft stub**: RBAC still required; response is `Success=true` with an explanatory `Error` string and `PartitionsMoved=0`. It does **not** force a full ring reshuffle. |
+| **Why** | Prevents unsafe operator thrash until a controlled drain/move API exists. |
+| **Code** | [internal/api/admin_handler.go](../../../internal/api/admin_handler.go) (`TriggerRebalance`) |
+| **See also** | [ARCHITECTURE.md § Known Limitations](../../../ARCHITECTURE.md#known-limitations), [dashboard.md](dashboard.md) |
+
+**Operator guidance:** To change placement, change membership (add/remove nodes) or wait for
+failure detection; do not rely on the Rebalance button as a manual “reshuffle now” tool.
 
 ## Debug Pointers
 
 - Ownership/routing confusion: [internal/cluster/router.go](../../../internal/cluster/router.go)
 - Metadata drift: [internal/cluster/manager.go](../../../internal/cluster/manager.go)
 - Raft status and peers: [internal/cluster/raft.go](../../../internal/cluster/raft.go)
+- Why UI rebalance did nothing: [internal/api/admin_handler.go](../../../internal/api/admin_handler.go)
 
 ## Related Diagrams
 

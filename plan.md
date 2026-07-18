@@ -2,9 +2,15 @@
 
 Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` won't-fix/deferred
 
+> **Authority note:** Trust the **Progress summary** below over individual item
+> checkboxes later in this file. Historical body items may still show `[ ]` even
+> after the fix landed; they are retained as audit notes, not a live backlog.
+> Architecture docs (`ARCHITECTURE.md`, `docs/architecture/*`) describe **current**
+> runtime behavior after Phases 1–5.
+
 ## Progress summary (this pass)
 - **Phase 1 (storage data-loss): DONE** — 1.1 restart prealloc corruption, 1.2 rotated-segment
-  reads, 1.3 GCM nonce reuse, 1.4 dedup WAL recovery. (Also fixed the Windows mmap-truncate
+  reads, 1.3 GCM nonce reuse (cipher v2 random nonce), 1.4 dedup WAL recovery. (Also fixed the Windows mmap-truncate
   P0.5 item as part of 1.1.)
 - **Phase 2 (delivery loss): DONE** — 2.1 scheduler clock skew, 2.2 matured-timer loss,
   2.3 DLQ wiring, 2.4 2PC PM injection, 2.5 backpressure observability (deep requeue deferred).
@@ -15,11 +21,11 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` won't-fix/
   4.2 cross-region off public port, 4.3 require policy file in prod, 4.4 HTTP timeouts.
 - **Phase 5 (client SDK): DONE** — 5.1 CB threshold-0 disabled, 5.2 hedging first-success,
   5.3 capability probes round-trip, 5.4 async send/close race hardened (RWMutex).
-- **Phase 6 (observability/CI): in progress.**
+- **Phase 6 (observability/CI): largely done** — CI restored on `main`/`developement`;
+  remaining optional: flaky client test stabilization, lag-driven snapshot auto-trigger.
 
-Known pre-existing flaky test (NOT introduced this pass): `pkg/client` →
-`TestSendAsyncContextCancellation` fails intermittently in the full-suite run (~5/8) at
-baseline as well. Stabilize when CI lands (P6.2).
+Known pre-existing flaky test: `pkg/client` →
+`TestSendAsyncContextCancellation` fails intermittently in some full-suite runs.
 
 
 This plan enumerates every **verified** defect found during the deep audit (cross-checked

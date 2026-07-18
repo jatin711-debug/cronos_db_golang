@@ -20,8 +20,9 @@ Transaction module coordinates prepare and commit phases for multi-step consiste
 ## Production Decisions
 
 - Prepare and commit are explicitly separated to avoid phase conflation.
-- State transitions are persisted for restart safety.
-- Idempotent recovery reduces duplicate-side effects after partial failures.
+- State transitions are persisted (`tx_log.json`) for restart safety.
+- `tx.NewHandler(pm)` injects the **PartitionManager** into the coordinator so gRPC Begin/Prepare/Commit write real partition participants (not PM-nil no-ops).
+- Idempotent recovery rehydrates prepared/committing transactions after crash.
 
 ## Debug Pointers
 

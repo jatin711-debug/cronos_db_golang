@@ -1,26 +1,52 @@
 # CronosDB Architecture By Feature
 
-This folder contains the architecture split by feature so developers can read subsystem docs independently.
+This folder contains the architecture split by feature so developers can read
+subsystem docs independently.
 
-## Production-Hardening Highlights
+## Production-Hardening Highlights (current code)
 
-Recent changes reflected across these docs:
+- **WAL v2 record format** with Raft term and trailing checksum; upgrading from
+  older layouts requires a clean data directory.
+- **Encryption at rest v2** uses a **random 12-byte GCM nonce per record**;
+  legacy v1 counter nonces remain decrypt-only.
+- **Persistent consumer group metadata** and optional exactly-once commit IDs
+  in `OffsetStore`.
+- **DLQ wired per partition** at create time (`NewDispatcherWithDLQ`).
+- **Dedup crash recovery** reseeds claims from the WAL tail on partition start.
+- **Scheduler recovery** rebases ticks from wall clock; timers matured during
+  downtime are delivered immediately (not dropped).
+- **2PC handler injects PartitionManager** so prepare/commit write durable markers.
+- **Bounded CDC worker pool** (`DefaultCDCWorkers=4`, queue 10000) with
+  non-blocking `Emit` and graceful `Close`.
+- **Retention enforcer** protects active segments/system dirs and deletes aged
+  or size-eligible segments plus matching `.index` files.
+- **Listener split:**
+  - Public gRPC `:9000` — Event, Partition, ConsumerGroup, Transaction, **Admin**
+  - Internal gRPC `:7947` — **Replication, Raft, CrossRegion** (optional mTLS)
+  - HTTP `:8080` — health, metrics, `/ui/` dashboard, `/api/admin/*`
+- **Bulk snapshot install** (`ReplicationService.Snapshot`) for join/wipe recovery.
+- **Raft-authoritative leadership** for local promote/demote reconcile (not
+  gossip-only).
+- **Production security gate** (unless `--dev`): TLS, JWT auth **and** policy
+  file, encryption at rest, replication mTLS, RF≥3, minISR≥2.
 
-- **WAL v2 record format** with Raft term and trailing checksum; upgrading requires a clean data dir.
-- **Persistent consumer group metadata** (assignments, group state) and exactly-once commit IDs in `OffsetStore`.
-- **Bounded CDC worker pool** (`DefaultCDCWorkers=4`, `DefaultCDCQueueSize=10000`) with non-blocking `Emit` and graceful `Close`.
-- **Rewritten retention enforcer** that parses segment headers, protects active segments/system dirs, and removes aged/size-eligible segments plus their `.index` files.
-- **Dedicated internal cluster listener** (`InternalGRPCServer`, default `:7947`) carries `ReplicationService` and `RaftService` only — replication traffic is fully isolated from the public API on `:9000`.
-- **Replication mTLS** via `replication.MTLSConfig` + `BuildClientTLSConfig` / `BuildServerTLSConfig`; CA-pinned, `tls.RequireAndVerifyClientCert` on the server.
-- **Bulk snapshot install** (`ReplicationService.Snapshot` streaming RPC) — segment + sparse-index files with per-file IEEE CRC32, atomic dir swap, `WAL.ReloadSegments()`. Used for new-node bootstrap and follower-wipe recovery.
-- **`--snapshot-catchup-threshold`** is defined and exposed (default `10000`); currently invoked only by `PartitionManager.SyncPartitionFromLeader` on node join — automatic lag-driven trigger is not yet wired.
-- **Production security requirements**: TLS, auth, encryption at rest, replication mTLS; disabled by the `--dev` flag.
+## Known Limitations (documented gaps)
+
+These are **intentional deferred features**, fully called out so docs match reality.
+Details and mermaid: [ARCHITECTURE.md § Known Limitations](../../ARCHITECTURE.md#known-limitations).
+
+| Gap | What works | What does not (yet) | Primary doc |
+|-----|------------|---------------------|-------------|
+| **Lag-driven snapshot** | Bulk `InstallSnapshot` on join / `SyncPartitionFromLeader`; `--snapshot-catchup-threshold` (default 10000) | Mid-flight auto-snapshot when a connected follower’s lag exceeds threshold | [replication.md](features/replication.md) |
+| **Admin TriggerRebalance** | Automatic rebalance on membership + Raft reconcile (~5s) | On-demand `TriggerRebalance` RPC/UI is a soft stub (descriptive response) | [cluster.md](features/cluster.md), [dashboard.md](features/dashboard.md) |
+| **Deep delivery requeue** | Credits, CB, DLQ, backpressure **metrics**, resume-from-committed offset | Worker-level redrive queue that re-WAL-drives every credit-skipped ready event | [delivery.md](features/delivery.md) |
 
 ## Start Here
 
-- Composition root and runtime lifecycle: [cmd/api/main.go](../../cmd/api/main.go)
-- Full narrative guide: [docs/DEVELOPER_ARCHITECTURE_GUIDE.md](../DEVELOPER_ARCHITECTURE_GUIDE.md)
-- Mermaid source diagrams: [docs/mermaid](../mermaid)
+- Composition root: [cmd/api/main.go](../../cmd/api/main.go)
+- Narrative guide: [docs/DEVELOPER_ARCHITECTURE_GUIDE.md](../DEVELOPER_ARCHITECTURE_GUIDE.md)
+- Full architecture: [ARCHITECTURE.md](../../ARCHITECTURE.md)
+- Mermaid sources: [docs/mermaid](../mermaid)
 
 ## Feature Documents
 

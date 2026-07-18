@@ -9,6 +9,7 @@ Quick navigation:
 - Feature-by-feature architecture docs: [docs/architecture/README.md](docs/architecture/README.md)
 - Standalone Mermaid source files: [docs/mermaid](docs/mermaid)
 - Comprehensive developer walkthrough: [docs/DEVELOPER_ARCHITECTURE_GUIDE.md](docs/DEVELOPER_ARCHITECTURE_GUIDE.md)
+- **Known limitations (intentionally deferred):** [Known Limitations](#known-limitations)
 
 ---
 
@@ -31,6 +32,7 @@ Quick navigation:
 - [Performance Characteristics](#performance-characteristics)
 - [Configuration Reference](#configuration-reference)
 - [Technology Stack](#technology-stack)
+- [Known Limitations](#known-limitations)
 
 ---
 
@@ -81,7 +83,7 @@ graph TB
     subgraph "Cluster Layer"
         RAFT[Raft Consensus<br/>HashiCorp Raft]
         GOSSIP[Gossip Protocol<br/>TCP Heartbeats or Memberlist/SWIM]
-        REPL[Replication<br/>Binary Protocol]
+        REPL[Replication<br/>gRPC Internal :7947]
     end
 
     C1 -->|Publish/PublishBatch| GW
@@ -269,7 +271,7 @@ sequenceDiagram
     gRPC->>DSP: Register subscription
     Note over DSP: Set credits to MaxCredits
 
-    loop Timing Wheel Tick every 100ms
+    loop Timing Wheel Tick every tick-ms default 10ms
         SCH->>SCH: Tick and check current slot
         SCH-->>WRK: ReadySignal with expired timers
         WRK->>DSP: DispatchBatch(events)
@@ -470,7 +472,7 @@ graph TB
 ```
 
 **Wheel Parameters:**
-- Level 0: 100ms tick, 60 slots = 6 second window
+- Level 0 (default): 10ms tick, 600 slots = 6 second window
 - Level 1: 6s tick, 60 slots = 360 second window
 - Level 2: 360s tick, 60 slots = 6 hour window
 - Max levels: 10 (configurable)
@@ -525,19 +527,29 @@ flowchart LR
 
 ### Scheduler Recovery on Crash
 
+On restart the scheduler:
+
+1. Restores wheel origin from `timer_state.json` when present.
+2. **Rebases `currentTick` from wall clock** so absolute fire times stay aligned after downtime (no compounding future skew).
+3. Replays WAL timers from `timer_replay_checkpoint.json` (or offset 0).
+4. Events with `schedule_ts > now` re-enter the hot timing wheel (or cold store).
+5. Events that **matured during downtime** are enqueued for **immediate delivery** (not discarded).
+
 ```mermaid
 flowchart TD
-    A[Node Starts] --> B[Read timer_replay_checkpoint.json]
-    B --> C{Checkpoint exists?}
-    C -->|Yes| D[startOffset = lastScheduledOffset + 1]
-    C -->|No| D2[startOffset = 0]
-    D --> E[Scan WAL in batches of 10000]
-    D2 --> E
-    E --> F{event.schedule_ts > now?}
-    F -->|Yes| G[Re-schedule in timing wheel]
-    F -->|No| H[Skip - already expired]
-    G --> I[Write new checkpoint]
-    H --> I
+    A[Node Starts] --> B[Restore timer_state.json if present]
+    B --> C[Rebase currentTick from wall clock]
+    C --> D[Read timer_replay_checkpoint.json]
+    D --> E{Checkpoint exists?}
+    E -->|Yes| F[startOffset = lastScheduledOffset + 1]
+    E -->|No| F2[startOffset = 0]
+    F --> G[Scan WAL in batches of 10000]
+    F2 --> G
+    G --> H{event.schedule_ts > now?}
+    H -->|Yes| I[Re-schedule in timing wheel or cold store]
+    H -->|No| J[Enqueue for immediate delivery]
+    I --> K[Write new checkpoint]
+    J --> K
 ```
 
 ---
@@ -711,7 +723,7 @@ flowchart TD
     B -->|Yes| C[Push to RetryHeap with retryAt = now + backoff]
     B -->|No| D[Continue]
 
-    E[processRetries every 100ms] --> F{Peek retryAt <= now?}
+    E[processRetries on retry loop] --> F{Peek retryAt <= now?}
     F -->|Yes| G[Pop and redispatch]
     F -->|No| H[No-op]
     G --> E
@@ -1067,26 +1079,33 @@ traffic never reaches the replication listener.
 ```mermaid
 graph LR
     subgraph "Public API listener"
-      PUB[gRPC :9000<br/>EventService, PartitionService,<br/>ConsumerGroupService, TransactionService]
+      PUB[gRPC :9000<br/>EventService, PartitionService,<br/>ConsumerGroupService, TransactionService,<br/>AdminService]
     end
     subgraph "Internal cluster listener"
-      INT[InternalGRPCServer :7947<br/>ReplicationService, RaftService]
+      INT[InternalGRPCServer :7947<br/>ReplicationService, RaftService,<br/>CrossRegionService]
+    end
+    subgraph "HTTP operator plane"
+      HTTP[HTTP :8080<br/>health metrics /ui /api/admin]
     end
     subgraph "Public client traffic"
       C[Client SDK] --> PUB
+      O[Ops UI / CLI] --> HTTP
+      O --> PUB
     end
     subgraph "Intra-cluster traffic"
-      L[Leader partition] -->|Append / Sync / Snapshot| INT
+      L[Leader partition] -->|Append / Sync / Snapshot gRPC| INT
       F[Follower partition] -->|mTLS optional| INT
+      R[Remote region] -->|CrossRegionService| INT
     end
 ```
 
 The internal listener is `InternalGRPCServer`
 (`internal/api/internal_grpc_server.go`, default `:7947`, configurable
-via `--cluster-grpc-addr`). It registers `ReplicationServiceServer` and
-`RaftServiceServer` only — no public API surface is exposed on this
-socket. Cross-region replication uses a third, separate gRPC service
-(`CrossRegionService`); see [Cross-Region Replication](#cross-region-replication).
+via `--cluster-grpc-addr`). It registers **ReplicationService**, **RaftService**,
+and **CrossRegionService** — no public client EventService surface is exposed
+on this socket. Cross-region traffic is intentionally peer-plane only so
+arbitrary event inject/fetch stays off `:9000`. See
+[Cross-Region Replication](#cross-region-replication).
 
 ### `ReplicationService` RPCs
 
@@ -1171,7 +1190,7 @@ Trigger policy:
 |------|---------|------|
 | `InstallSnapshot` | New node joins and owns partitions it does not yet have data for | `Manager.JoinCluster` → `PartitionManager.SyncPartitionFromLeader` (10-minute context) |
 | `catchUpFollower` / `Sync` | Connected follower reports lag during normal `Replicate` | `Leader.catchUpFollower` |
-| Automatic lag-driven `InstallSnapshot` | **Not implemented.** `--snapshot-catchup-threshold` is plumbed but not consumed. | (gap) |
+| Automatic lag-driven `InstallSnapshot` | **Not implemented.** Flag is used on join/`SyncPartitionFromLeader`; no mid-flight lag monitor calls InstallSnapshot. | See [Known Limitations](#known-limitations) |
 
 ### Replication mTLS
 
@@ -1197,9 +1216,10 @@ intentional for `--dev`, refused in production by the validation in
   `min-insync-replicas` followers have appended. Default is 1 (leader-only);
   production target is RF=3 / minISR=2 (see [Durability & Fault
   Tolerance](#durability--fault-tolerance)).
-- **Trigger gap**: `--snapshot-catchup-threshold` is exposed but not yet
-  read by any automatic lag-driven code path. Documented as a future-work
-  knob so configuration is forward-compatible.
+- **Trigger gap**: `--snapshot-catchup-threshold` is applied on **join /
+  `SyncPartitionFromLeader`**. There is still **no mid-flight** lag watcher that
+  automatically switches a connected follower from incremental catch-up to
+  `InstallSnapshot`. See [Known Limitations](#known-limitations).
 
 ### Raft FSM - Metadata State Machine
 
@@ -1316,7 +1336,7 @@ flowchart TD
     end
 
     subgraph 2 SCHEDULE
-        S1[Timing wheel ticks every 100ms]
+        S1[Timing wheel ticks every tick-ms default 10ms]
         S2[Event expires from slot]
         S3[Push to ready queue]
         S4[Signal ReadySignal channel]
@@ -1459,8 +1479,8 @@ flowchart TD
 | WAL | `-index-interval` | `1000` | Sparse index interval |
 | WAL | `-fsync-mode` | `batch` | `every_event`, `batch` (default), or `periodic` |
 | WAL | `-flush-interval` | `1000` | Background flush interval ms (used by `periodic`) |
-| Scheduler | `-tick-ms` | `100` | Timing wheel tick duration |
-| Scheduler | `-wheel-size` | `60` | Slots per timing wheel level |
+| Scheduler | `-tick-ms` | `10` | Timing wheel tick duration (ms); 10ms × 600 slots = 6s root span |
+| Scheduler | `-wheel-size` | `600` | Slots per timing wheel level |
 | Scheduler | `-hot-window-minutes` | `60` | Events beyond this go to cold store (0 = disabled) |
 | Scheduler | `-hydrator-min-interval` | `5000` | Minimum adaptive hydrator scan interval in ms |
 | Scheduler | `-hydrator-max-interval` | `300000` | Maximum adaptive hydrator scan interval in ms |
@@ -1475,23 +1495,26 @@ flowchart TD
 | Admission | `-max-in-flight` | `500000` | Max in-flight deliveries per partition |
 | Dedup | `-dedup-ttl` | `168` | Dedup TTL in hours (7 days) |
 | Dedup | `-bloom-capacity` | `100000000` | Bloom filter capacity |
-| Retention | `--retention-max-age-hours` | `0` | Max segment age before deletion (0 = disabled) |
+| Retention | `--retention-max-age-hours` | `168` | Max segment age before deletion (0 = disabled) |
 | Retention | `--retention-max-size-gb` | `0` | Max total segment size before deletion (0 = disabled) |
 | Security | `--tls-cert-file` | `` | Server TLS certificate |
 | Security | `--tls-key-file` | `` | Server TLS key |
 | Security | `--tls-ca-file` | `` | TLS CA for client cert verification |
-| Security | `--auth-enabled` | `false` | Enable authentication |
-| Security | `--auth-token` | `` | Static auth token (when auth enabled) |
+| Security | `--auth-enabled` | `false` | Enable JWT authentication |
+| Security | `--auth-jwt-secret` | `` | HMAC secret for JWT verification |
+| Security | `--auth-jwt-public-key` | `` | Path to Ed25519/RSA public key for JWT verification |
+| Security | `--auth-policy-file` | `` | RBAC policy JSON (required in production when auth is enabled) |
 | Security | `--encryption-enabled` | `false` | Enable encryption at rest |
 | Security | `--encryption-key-file` | `` | Path to encryption key file |
-| Replication | `--replication-factor` | `1` | Required replica count |
-| Replication | `--min-insync-replicas` | `1` | Minimum in-sync replicas for acked writes |
+| Replication | `--replication-factor` | `1` | Required replica count (production requires ≥3) |
+| Replication | `--min-insync-replicas` | `1` | Minimum in-sync replicas for acked writes (production requires ≥2) |
 | Replication | `--replication-tls-cert-file` | `` | Replication mTLS certificate |
 | Replication | `--replication-tls-key-file` | `` | Replication mTLS key |
 | Replication | `--replication-tls-ca-file` | `` | Replication mTLS CA |
+| Replication | `--snapshot-catchup-threshold` | `10000` | Lag (events) above which join path may request Snapshot; 0 disables (not auto mid-flight) |
 | Cluster | `-cluster` | `false` | Enable cluster mode |
 | Cluster | `-cluster-seeds` | empty | Comma-separated seed nodes |
-| Cluster | `-virtual-nodes` | `150` | Virtual nodes per physical node |
+| Cluster | `-virtual-nodes` | `2048` | Virtual nodes per physical node on the placement ring |
 | Cluster | `-use-memberlist` | `false` | Use HashiCorp Memberlist (SWIM) instead of custom TCP gossip |
 | Cluster | `-heartbeat-interval` | `1s` | Gossip heartbeat interval |
 | Cluster | `-failure-timeout` | `5s` | Node failure detection timeout |
@@ -1516,9 +1539,9 @@ graph TB
     end
 
     subgraph Networking
-        GRPC[gRPC - Client API]
-        TCP[Raw TCP - Replication]
-        HTTP[net/http - Health + Metrics]
+        GRPC[gRPC public API :9000]
+        IGRPC[gRPC internal :7947<br/>Replication Raft CrossRegion]
+        HTTP[net/http :8080<br/>Health Metrics Dashboard]
     end
 
     subgraph Consensus
@@ -1535,7 +1558,7 @@ graph TB
     GO --> BOLT
     GO --> FS
     GO --> GRPC
-    GO --> TCP
+    GO --> IGRPC
     GO --> HTTP
     GO --> HRAFT
     GO --> PROM
@@ -1549,7 +1572,7 @@ graph TB
 | Property | Guarantee | Mechanism |
 |----------|-----------|-----------|
 | **Metadata** | Strong consistency | Raft consensus |
-| **WAL writes** | Eventual consistency | Async leader to follower replication with batch CRC32 and term stamping |
+| **WAL writes** | Configurable durability + quorum | Leader WAL append; sync gRPC replication to followers until minISR; batch CRC32 and term fencing |
 | **Delivery** | At-least-once | Ack-based with retry + DLQ |
 | **Ordering** | Per-partition, per-consumer-group | Offset-based sequential delivery |
 | **Dedup** | Best-effort 7-day window | Bloom + PebbleDB with TTL |
@@ -1565,16 +1588,74 @@ graph TB
 
 | Layer | Mechanism |
 |-------|-----------|
-| **Transport** | gRPC TLS (`--tls-cert-file`, `--tls-key-file`, `--tls-ca-file`) |
-| **Authentication** | Token-based auth (`--auth-enabled`, `--auth-token`) |
-| **Encryption at rest** | AES-GCM encryption (`--encryption-enabled`, `--encryption-key-file`) |
-| **Replication** | mTLS between nodes (`--replication-tls-cert-file`, `--replication-tls-key-file`, `--replication-tls-ca-file`) |
-| **Run mode** | `--dev` disables production security requirements; production requires TLS, auth, encryption, replication mTLS, `--replication-factor>=3`, `--min-insync-replicas>=2` |
-| **Rate Limiting** | Per-IP token bucket (1M req/s default) |
+| **Transport** | Public gRPC TLS (`--tls-cert-file`, `--tls-key-file`, `--tls-ca-file`, optional mTLS client auth) |
+| **Authentication** | JWT auth (`--auth-enabled`, `--auth-jwt-secret` and/or `--auth-jwt-public-key`) plus RBAC policy (`--auth-policy-file`; required in production) |
+| **Authorization** | Topic-level RBAC and `Subject.Admin` for AdminService / destructive partition ops / dashboard JSON |
+| **Encryption at rest** | AES-256-GCM record encryption v2 with **random 12-byte nonce** per record (`--encryption-enabled`, `--encryption-key-file`); legacy v1 counter nonces decrypt-only |
+| **Replication** | Internal gRPC mTLS (`--replication-tls-cert-file`, `--replication-tls-key-file`, `--replication-tls-ca-file`) |
+| **Run mode** | `--dev` disables production security requirements; production requires TLS, auth + policy file, encryption, replication mTLS, `--replication-factor>=3`, `--min-insync-replicas>=2` |
+| **Rate Limiting** | Per-IP token bucket (1M req/s default in non-dev); optional per-topic limits |
 | **gRPC** | Max message size 16MB, max 10K concurrent streams |
 | **Keepalive** | 10s interval, 20s timeout, enforcement policy |
+| **HTTP** | Health, Prometheus metrics, embedded admin SPA (`/ui/`), Admin JSON proxy (`/api/admin/*`) with timeouts |
 | **Container** | Non-root user, minimal Debian slim image |
 | **Data** | CRC32 integrity checks on every WAL record; trailing checksum and Raft term in v2 format; atomic file writes for tx logs and key files |
+
+---
+
+## Known Limitations
+
+These are **documented product/architecture gaps**, not accidental omissions from
+the design docs. Each is implemented enough to operate safely; the deferred
+piece is called out so operators and contributors know what not to rely on yet.
+
+### 1. Automatic mid-flight lag-driven snapshot install
+
+| | |
+|--|--|
+| **What works today** | Bulk `ReplicationService.Snapshot` / `Follower.InstallSnapshot` is fully implemented (CRC, staging, atomic swap, `WAL.ReloadSegments`). Join and ownership transfer call `PartitionManager.SyncPartitionFromLeader`, which can use `--snapshot-catchup-threshold` (default `10000` events; `0` disables). |
+| **What is deferred** | While a follower is already connected, large lag is healed only via incremental `Sync` / `Append` (`Leader.catchUpFollower`). **No background loop** watches lag and auto-triggers InstallSnapshot mid-flight. |
+| **Why deferred** | Hot-path replication stays simple; full snapshot is expensive (IO + atomic swap) and is reserved for bootstrap/wipe/join. |
+| **Operator impact** | A follower that falls far behind after join may take longer to catch up via event-by-event replication. For wipe recovery, re-join or re-run state transfer. |
+| **Code** | `internal/partition/manager.go` (`SyncPartitionFromLeader`), `internal/replication/follower.go` (`InstallSnapshot`), `internal/replication/leader.go` (`catchUpFollower`) |
+| **Feature doc** | [docs/architecture/features/replication.md](docs/architecture/features/replication.md) |
+
+```mermaid
+flowchart LR
+    Join[Node join / ownership move] --> SyncPM[SyncPartitionFromLeader]
+    SyncPM --> Threshold{lag vs snapshot-catchup-threshold}
+    Threshold -->|above or cold start| Snap[InstallSnapshot bulk]
+    Threshold -->|below| IncrJoin[Incremental Sync]
+    Connected[Already connected follower lag] --> CatchUp[catchUpFollower Sync/Append only]
+    CatchUp -.->|not wired| Snap
+```
+
+### 2. Admin `TriggerRebalance` is a soft stub
+
+| | |
+|--|--|
+| **What works today** | Cluster **automatically** rebalances on membership join/leave via router + Raft assignment apply + `reconcileLocalLeadership` (≈5s). Partition promote/demote and `SyncPartitionFromLeader` run from those paths. Dashboard/CLI can call the RPC. |
+| **What is deferred** | `AdminService.TriggerRebalance` does **not** invoke an on-demand rebalance engine. It is RBAC-gated and returns `Success=true` with a **descriptive error string** explaining that reconcile is membership-driven (so clients can detect the gap without `Unimplemented`). |
+| **Why deferred** | Avoid unsafe operator-forced thrash before a controlled “drain + move N partitions” API exists. |
+| **Operator impact** | Do not depend on the UI/CLI “Rebalance” button to reshuffle a healthy cluster. Add/remove nodes (or wait for membership events) to trigger placement changes. |
+| **Code** | `internal/api/admin_handler.go` (`TriggerRebalance`), `internal/cluster/manager.go` / `router.go` |
+| **Feature docs** | [cluster.md](docs/architecture/features/cluster.md), [dashboard.md](docs/architecture/features/dashboard.md), [api.md](docs/architecture/features/api.md) |
+
+### 3. Deep delivery requeue under backpressure (deferred)
+
+| | |
+|--|--|
+| **What works today** | Credits, in-flight caps, circuit breakers, retry heap, and durable DLQ after max retries. Subscribe can **resume from committed offset**. Backpressure skips emit `cronos_dispatcher_backpressure_skips_total{partition,reason}`. Events remain **durable in the WAL**. |
+| **What is deferred** | When a dispatch pass finds **no credits / in-flight capacity**, the event is **not re-enqueued into a worker-level redrive queue** on that pass. Recovery relies on later dispatch attempts, consumer credit replenishment, and/or **reconnect resume from committed offset**—not a dedicated “requeue from WAL until acked” loop for every skipped ready event. |
+| **Why deferred** | Changing the push model to true pull/redrive risks hot-path complexity and double-delivery patterns; deferred after observability was added (`plan.md` item 2.5). |
+| **Operator impact** | Under sustained zero-credit consumers, metrics show skips; ensure consumers ack and grant credits, or reconnect. Do not assume every ready-queue dequeue is immediately redelivered without credit recovery. |
+| **Code** | `internal/delivery/dispatcher.go` (credit / in-flight paths + backpressure metrics), `internal/partition/backpressure.go` (publish admission) |
+| **Feature doc** | [docs/architecture/features/delivery.md](docs/architecture/features/delivery.md) |
+
+### Related open work (smaller)
+
+- Flaky client unit test `TestSendAsyncContextCancellation` (see `plan.md`).
+- Individual historical checkboxes in `plan.md` may lag the progress summary; trust the summary + this section for runtime reality.
 
 ---
 
