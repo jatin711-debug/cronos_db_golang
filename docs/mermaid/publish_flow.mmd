@@ -1,32 +1,42 @@
 sequenceDiagram
     participant Producer
     participant API as EventService.Publish
+    participant Auth as Auth / RBAC / quotas
     participant PM as PartitionManager
     participant Dedup
     participant WAL
+    participant Repl as Replication Leader optional
     participant Scheduler
     participant Worker
     participant Dispatcher
     participant Consumer
     participant Group as ConsumerGroup
 
-    Producer->>API: Publish(event)
-    API->>PM: Resolve partition for topic or key
-    API->>Dedup: IsDuplicate(message_id)
+    Producer->>API: Publish / PublishBatch
+    API->>Auth: JWT topic perms tenant schema optional
+    API->>PM: Resolve partition for key or topic
+    API->>Dedup: Claim message_id batch
     alt duplicate
-      Dedup-->>API: duplicate=true
-      API-->>Producer: duplicate error
-    else new event
-      Dedup-->>API: duplicate=false
-      API->>WAL: Stamp Raft term + trailing checksum
-      WAL-->>API: offset assigned
-      API->>Scheduler: Schedule by schedule_ts
-      API-->>Producer: success with offset
+      Dedup-->>API: duplicate
+      API-->>Producer: duplicate / already exists
+    else new
+      Dedup-->>API: claimed
+      API->>WAL: Append WAL v2 term + checksum
+      alt WAL fails
+        API->>Dedup: RollbackBatch
+        API-->>Producer: error
+      else durable path
+        WAL-->>API: offsets
+        opt minISR greater than 1
+          API->>Repl: Replicate until ISR quorum
+        end
+        API->>Scheduler: Schedule by schedule_ts
+        API-->>Producer: success offsets
+      end
     end
 
-    Scheduler->>Worker: ready notification
-    Worker->>Dispatcher: dispatch batch
-    Dispatcher->>Consumer: delivery stream message
-    Consumer->>API: Ack(delivery_id, next_offset)
-    API->>Group: CommitOffset(group, partition, next_offset)
-    Group-->>API: committed
+    Scheduler->>Worker: ready events
+    Worker->>Dispatcher: dispatch
+    Dispatcher->>Consumer: Subscribe delivery stream
+    Consumer->>API: Ack
+    API->>Group: CommitOffset

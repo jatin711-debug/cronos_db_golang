@@ -15,14 +15,16 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 )
 
-// ReloadableConfig wraps a Config with atomic value access for hot reload.
-// Only specific fields can be updated without restart; critical fields
-// (data-dir, partition-count, cluster seeds) require a restart.
+// ReloadableConfig wraps a Config with RWMutex-protected access for hot reload.
+// Only specific fields can be updated without restart (credits, ack timeout,
+// retries, load shedding, circuit breaker threshold, tracing sample ratio,
+// stats interval). Critical fields (data-dir, partition-count, cluster seeds)
+// require a process restart.
 type ReloadableConfig struct {
 	mu     sync.RWMutex
 	config *types.Config
 
-	// Callbacks invoked when specific fields change
+	// onChange holds callbacks invoked when a successful Reload changes fields.
 	onChange []func(old, new *types.Config)
 }
 

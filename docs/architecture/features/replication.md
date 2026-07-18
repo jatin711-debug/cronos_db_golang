@@ -134,13 +134,23 @@ cluster.
 - **Conflict resolution**: cross-region uses last-write-wins; intra-cluster
   uses Raft-style term fencing (the leader with the higher epoch wins).
 
-## Trigger Policy & Known Gap
+## Trigger Policy & Known Limitation
 
 | Path | Trigger | Code |
 |------|---------|------|
-| Bulk snapshot install (`InstallSnapshot`) | New node joins and owns partitions it does not yet have data for | `Manager.JoinCluster` → `PartitionManager.SyncPartitionFromLeader` |
-| Incremental catch-up (`Sync` / `Append` loop) | A connected follower reports `NextOffset < nextBatchStart` during normal `Replicate` | `Leader.catchUpFollower` |
-| Automatic lag-driven snapshot install | **Not implemented.** `--snapshot-catchup-threshold` is plumbed but no code path inspects replication lag and routes to `InstallSnapshot` based on the threshold. | (gap) |
+| Bulk snapshot install (`InstallSnapshot`) | New node joins and owns partitions it does not yet have data for (wipe/bootstrap) | `Manager.JoinCluster` → `PartitionManager.SyncPartitionFromLeader` (threshold-aware) |
+| Incremental catch-up (`Sync` / `Append` loop) | A **connected** follower reports `NextOffset < nextBatchStart` during normal `Replicate` | `Leader.catchUpFollower` |
+| Automatic lag-driven snapshot install | **Not implemented (documented gap).** No mid-flight loop watches lag and switches to `InstallSnapshot` when lag &gt; `--snapshot-catchup-threshold`. The flag **is** used on the join/`SyncPartitionFromLeader` path; it is not a dead config key. | See [ARCHITECTURE.md § Known Limitations](../../../ARCHITECTURE.md#known-limitations) |
+
+### Why mid-flight auto-snapshot is deferred
+
+- Incremental catch-up preserves the normal leader→follower hot path and term fencing.
+- Full snapshot is heavyweight (segment + index stream, CRC, atomic dir swap, WAL close/reload).
+- Bootstrap/join already covers the common “empty or wiped follower” case.
+
+**Operator guidance:** If a follower is hopelessly behind after network isolation, prefer
+re-provision / re-join so `SyncPartitionFromLeader` can InstallSnapshot, rather than waiting
+for unbounded incremental catch-up alone.
 
 ## Debug Pointers
 

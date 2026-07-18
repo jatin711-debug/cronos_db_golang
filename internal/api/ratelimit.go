@@ -126,7 +126,8 @@ func (rl *rateLimiter) allow(ip string) bool {
 	return v.(*tokenBucket).tryConsume(now, rl.rate, rl.capacity)
 }
 
-// RateLimitInterceptor creates a gRPC unary interceptor for rate limiting
+// RateLimitInterceptor creates a gRPC unary interceptor that rate-limits by client IP
+// using a token bucket of requestsPerSecond with burstCapacity.
 func RateLimitInterceptor(requestsPerSecond float64, burstCapacity float64) grpc.UnaryServerInterceptor {
 	rl := newRateLimiter(requestsPerSecond, burstCapacity)
 	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {

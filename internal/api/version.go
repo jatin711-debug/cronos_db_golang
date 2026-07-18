@@ -66,7 +66,7 @@ func VersionInterceptor(vg *VersionGate) grpc.UnaryServerInterceptor {
 // - Servers ignore unknown fields (protobuf forward compat)
 // - New features gated behind version check
 
-// UpgradePolicy documents zero-downtime rolling upgrade strategy.
+// UpgradePolicy documents and validates zero-downtime rolling upgrade strategy.
 //
 // 1. Deploy new binary to follower nodes first
 // 2. Verify followers catch up and pass health checks
@@ -76,9 +76,10 @@ func VersionInterceptor(vg *VersionGate) grpc.UnaryServerInterceptor {
 //
 // During rolling upgrade, cluster runs in mixed-version mode.
 // New features are disabled until all nodes report compatible version.
-
 type UpgradePolicy struct{}
 
+// ValidateRollingUpgrade returns an error if targetVersion is a downgrade or
+// skips more than one major version ahead of currentVersion.
 func (UpgradePolicy) ValidateRollingUpgrade(currentVersion, targetVersion int) error {
 	if targetVersion < currentVersion {
 		return fmt.Errorf("downgrades not supported: %d -> %d", currentVersion, targetVersion)

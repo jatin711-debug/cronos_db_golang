@@ -21,7 +21,8 @@ import (
 	"google.golang.org/grpc/reflection"
 )
 
-// GRPCServer represents the gRPC server
+// GRPCServer is the public client-facing gRPC server (EventService, admin,
+// consumer groups, partitions, transactions, optional cross-region).
 type GRPCServer struct {
 	server    *grpc.Server
 	listener  net.Listener
@@ -30,30 +31,45 @@ type GRPCServer struct {
 	serveErr  chan error
 }
 
-// Config represents gRPC server configuration
+// Config configures the public gRPC server, interceptors, TLS, and auth.
 type Config struct {
-	Address               string
-	MaxRecvMsgSize        int
-	MaxSendMsgSize        int
-	KeepaliveMinTime      time.Duration
-	KeepaliveTimeout      time.Duration
-	MaxConnectionIdle     time.Duration
-	MaxConnectionAge      time.Duration
+	// Address is the listen address (host:port) for the public gRPC server.
+	Address string
+	// MaxRecvMsgSize is the maximum receive message size in bytes.
+	MaxRecvMsgSize int
+	// MaxSendMsgSize is the maximum send message size in bytes.
+	MaxSendMsgSize int
+	// KeepaliveMinTime is the server keepalive ping interval.
+	KeepaliveMinTime time.Duration
+	// KeepaliveTimeout is how long the server waits for keepalive pings.
+	KeepaliveTimeout time.Duration
+	// MaxConnectionIdle is the max idle time before a connection is closed.
+	MaxConnectionIdle time.Duration
+	// MaxConnectionAge is the max connection lifetime before graceful close.
+	MaxConnectionAge time.Duration
+	// MaxConnectionAgeGrace is the grace period after MaxConnectionAge.
 	MaxConnectionAgeGrace time.Duration
-	TLS                   *TLSConfig
-	Auth                  *auth.Config
-	TopicRateLimiter      *TopicRateLimiter
-	AuditLogger           *audit.Logger
-	VersionGate           *VersionGate
-	SLORecorder           SLORecorder
+	// TLS is optional TLS/mTLS configuration for the public listener.
+	TLS *TLSConfig
+	// Auth is optional JWT/RBAC configuration; nil or disabled enables --dev mode shortcuts.
+	Auth *auth.Config
+	// TopicRateLimiter optionally enforces per-subject/topic publish rate limits.
+	TopicRateLimiter *TopicRateLimiter
+	// AuditLogger optionally records audited RPC outcomes.
+	AuditLogger *audit.Logger
+	// VersionGate optionally enforces client wire-protocol version compatibility.
+	VersionGate *VersionGate
+	// SLORecorder optionally records per-RPC latency and error samples.
+	SLORecorder SLORecorder
 }
 
 // SLORecorder is the minimal interface for SLO latency tracking.
 type SLORecorder interface {
+	// Record records one RPC sample with its latency and whether it failed.
 	Record(latency time.Duration, err bool)
 }
 
-// DefaultConfig returns default gRPC server configuration
+// DefaultConfig returns a production-oriented public gRPC server configuration.
 func DefaultConfig() *Config {
 	return &Config{
 		Address:               ":9000",

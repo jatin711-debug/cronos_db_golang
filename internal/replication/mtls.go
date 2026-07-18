@@ -12,12 +12,16 @@ import (
 // authenticate traffic between cluster nodes (leader -> follower replication,
 // bulk sync, heartbeats).
 type MTLSConfig struct {
-	Enabled    bool
-	CAFile     string
-	CertFile   string
-	KeyFile    string
+	// Enabled turns on mutual TLS for replication connections.
+	Enabled bool
+	// CAFile is the path to the CA certificate used to verify peer certificates.
+	CAFile string
+	// CertFile is the path to this node's certificate presented to peers.
+	CertFile string
+	// KeyFile is the path to this node's private key for CertFile.
+	KeyFile string
+	// ServerName is the expected TLS server name when dialing as a client.
 	ServerName string
-
 	// InsecureSkipVerify is provided for testing only. It must be false in
 	// production so that the replication channel fails closed.
 	InsecureSkipVerify bool

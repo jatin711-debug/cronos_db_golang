@@ -1,3 +1,8 @@
+// Package dedup provides message-ID deduplication stores for CronosDB.
+//
+// Implementations range from an in-memory store for tests to a PebbleDB-backed
+// store and a bloom-filter accelerated variant (BloomPebbleStore). Manager wraps
+// any DedupStore and optionally uses batch/rollback capabilities when present.
 package dedup
 
 import (
@@ -5,48 +10,56 @@ import (
 	"time"
 )
 
-// DedupStore interface for message deduplication
+// DedupStore is the persistence interface for message-ID deduplication.
+// CheckAndStore is the primary hot path: it atomically claims a message ID so
+// concurrent producers cannot both treat the same ID as new.
 type DedupStore interface {
-	// CheckAndStore checks if message ID exists, and stores it if not
-	// Returns (exists, error)
+	// CheckAndStore checks if messageID already exists and stores it if not.
+	// Returns (true, nil) when the ID was already present (duplicate).
 	CheckAndStore(messageID string, offset int64) (bool, error)
 
-	// GetOffset returns stored offset for message ID
+	// GetOffset returns the stored WAL offset for messageID.
+	// The bool is false when the ID is not present.
 	GetOffset(messageID string) (int64, bool, error)
 
-	// Exists checks if message ID exists
+	// Exists reports whether messageID is currently recorded.
 	Exists(messageID string) (bool, error)
 
-	// GetTimestamp returns stored timestamp for message ID
+	// GetTimestamp returns the creation timestamp stored for messageID.
+	// The bool is false when the ID is not present.
 	GetTimestamp(messageID string) (time.Time, bool, error)
 
-	// Put inserts or overwrites an entry directly with a given created timestamp
+	// Put inserts or overwrites an entry with an explicit created timestamp.
 	Put(messageID string, offset int64, createdTS int64) error
 
-	// PruneExpired removes expired entries
+	// PruneExpired removes TTL-expired entries and returns how many were deleted.
 	PruneExpired() (int, error)
 
-	// GetStats returns store statistics
+	// GetStats returns store statistics for observability.
 	GetStats() (*DedupStats, error)
 
-	// Close closes the store
+	// Close releases resources held by the store.
 	Close() error
 }
 
-// MemoryStore is an in-memory dedup store for testing
+// MemoryStore is an in-memory DedupStore intended for tests and lightweight use.
 type MemoryStore struct {
 	mu       sync.RWMutex
 	entries  map[string]Entry
-	ttlHours int32 // TTL in hours for entries
+	ttlHours int32 // TTL in hours applied to newly stored entries
 }
 
+// Entry is a single dedup record: WAL offset plus TTL and creation timestamps.
 type Entry struct {
-	Offset       int64
+	// Offset is the WAL offset associated with the message ID.
+	Offset int64
+	// ExpirationTS is the expiry time in Unix milliseconds (0 means no expiry).
 	ExpirationTS int64
-	CreatedTS    int64
+	// CreatedTS is the creation time in Unix nanoseconds.
+	CreatedTS int64
 }
 
-// NewMemoryStore creates a new in-memory store with optional TTL
+// NewMemoryStore creates an in-memory store with a default 24-hour TTL.
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
 		entries:  make(map[string]Entry),
@@ -54,7 +67,7 @@ func NewMemoryStore() *MemoryStore {
 	}
 }
 
-// NewMemoryStoreWithTTL creates a new in-memory store with specified TTL in hours
+// NewMemoryStoreWithTTL creates an in-memory store with the given TTL in hours.
 func NewMemoryStoreWithTTL(ttlHours int32) *MemoryStore {
 	return &MemoryStore{
 		entries:  make(map[string]Entry),
@@ -62,7 +75,7 @@ func NewMemoryStoreWithTTL(ttlHours int32) *MemoryStore {
 	}
 }
 
-// CheckAndStore checks if message ID exists, and stores it if not
+// CheckAndStore claims messageID if absent. Returns true when it already exists.
 func (m *MemoryStore) CheckAndStore(messageID string, offset int64) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -83,7 +96,7 @@ func (m *MemoryStore) CheckAndStore(messageID string, offset int64) (bool, error
 	return false, nil
 }
 
-// GetTimestamp returns stored timestamp for message ID
+// GetTimestamp returns the creation time for messageID, if present.
 func (m *MemoryStore) GetTimestamp(messageID string) (time.Time, bool, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -95,7 +108,7 @@ func (m *MemoryStore) GetTimestamp(messageID string) (time.Time, bool, error) {
 	return time.Unix(0, entry.CreatedTS), true, nil
 }
 
-// Put inserts or overwrites an entry directly with a given created timestamp
+// Put inserts or overwrites an entry with the given created timestamp.
 func (m *MemoryStore) Put(messageID string, offset int64, createdTS int64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -109,7 +122,7 @@ func (m *MemoryStore) Put(messageID string, offset int64, createdTS int64) error
 	return nil
 }
 
-// GetOffset returns stored offset
+// GetOffset returns the stored WAL offset for messageID, if present.
 func (m *MemoryStore) GetOffset(messageID string) (int64, bool, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -121,7 +134,7 @@ func (m *MemoryStore) GetOffset(messageID string) (int64, bool, error) {
 	return entry.Offset, true, nil
 }
 
-// Exists checks if message ID exists
+// Exists reports whether messageID is recorded in the store.
 func (m *MemoryStore) Exists(messageID string) (bool, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -140,7 +153,7 @@ func (m *MemoryStore) RollbackBatch(messageIDs []string) error {
 	return nil
 }
 
-// PruneExpired removes expired entries
+// PruneExpired removes TTL-expired entries and returns the delete count.
 func (m *MemoryStore) PruneExpired() (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -158,7 +171,7 @@ func (m *MemoryStore) PruneExpired() (int, error) {
 	return deleted, nil
 }
 
-// GetStats returns store statistics
+// GetStats returns approximate entry counts for the in-memory store.
 func (m *MemoryStore) GetStats() (*DedupStats, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -168,49 +181,57 @@ func (m *MemoryStore) GetStats() (*DedupStats, error) {
 	}, nil
 }
 
-// Close closes the store
+// Close is a no-op for the in-memory store.
 func (m *MemoryStore) Close() error {
 	return nil
 }
 
-// DedupStats represents deduplication store statistics
+// DedupStats holds deduplication store observability counters.
 type DedupStats struct {
-	DBSizeBytes      int64
+	// DBSizeBytes is an optional on-disk size estimate (implementation-specific).
+	DBSizeBytes int64
+	// ApproximateCount is the approximate number of stored message IDs.
 	ApproximateCount int64
-	TTLHours         int32
-	LastPruneTS      int64
-	// Bloom filter stats
-	BloomHits           uint64 // Fast path: bloom said "not exists"
-	BloomFalsePositives uint64 // Bloom said "maybe exists" but wasn't
-	PebbleHits          uint64 // Actually found in PebbleDB
-	BloomMemoryBytes    uint64 // Bloom filter memory usage
-	BloomCount          uint64 // Items in bloom filter
+	// TTLHours is the configured entry TTL in hours.
+	TTLHours int32
+	// LastPruneTS is the last prune time in Unix milliseconds (if tracked).
+	LastPruneTS int64
+	// BloomHits counts bloom fast-path negatives ("definitely not present").
+	BloomHits uint64
+	// BloomFalsePositives counts bloom "maybe" results that Pebble did not find.
+	BloomFalsePositives uint64
+	// PebbleHits counts IDs confirmed present in PebbleDB.
+	PebbleHits uint64
+	// BloomMemoryBytes is the bloom filter's approximate memory footprint.
+	BloomMemoryBytes uint64
+	// BloomCount is the approximate number of items added to the bloom filter.
+	BloomCount uint64
 }
 
-// Manager manages the dedup store
+// Manager is a thin façade over a DedupStore with batch and rollback helpers.
 type Manager struct {
 	store DedupStore
 }
 
-// NewManager creates a new dedup manager
+// NewManager creates a Manager backed by the given store.
 func NewManager(store DedupStore) *Manager {
 	return &Manager{
 		store: store,
 	}
 }
 
-// IsDuplicate checks if message is a duplicate
+// IsDuplicate claims messageID via CheckAndStore and reports whether it was a duplicate.
 func (m *Manager) IsDuplicate(messageID string, offset int64) (bool, error) {
 	exists, err := m.store.CheckAndStore(messageID, offset)
 	return exists, err
 }
 
-// GetTimestamp returns stored timestamp for message ID
+// GetTimestamp returns the stored creation timestamp for messageID.
 func (m *Manager) GetTimestamp(messageID string) (time.Time, bool, error) {
 	return m.store.GetTimestamp(messageID)
 }
 
-// Put inserts or overwrites an entry directly with a given created timestamp
+// Put inserts or overwrites an entry with the given created timestamp.
 func (m *Manager) Put(messageID string, offset int64, createdTS int64) error {
 	return m.store.Put(messageID, offset, createdTS)
 }
@@ -235,8 +256,9 @@ func (m *Manager) IsDuplicateBatch(messageIDs []string, offsets []int64) ([]bool
 	return results, nil
 }
 
-// BatchDedupStore is an optional interface for stores that support batch operations
+// BatchDedupStore is an optional interface for stores that support batch claims.
 type BatchDedupStore interface {
+	// CheckAndStoreBatch claims each message ID and returns per-ID duplicate flags.
 	CheckAndStoreBatch(messageIDs []string, offsets []int64) ([]bool, error)
 }
 

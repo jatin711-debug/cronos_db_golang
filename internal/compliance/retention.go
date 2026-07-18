@@ -1,3 +1,8 @@
+// Package compliance enforces data lifecycle policies such as WAL segment
+// retention by age and total size.
+//
+// Enforcer walks the data directory, never deletes the active (highest-offset)
+// segment per partition, and removes matching sparse index files alongside segments.
 package compliance
 
 import (
@@ -14,10 +19,12 @@ import (
 	"time"
 )
 
-// RetentionPolicy defines data lifecycle rules.
+// RetentionPolicy defines data lifecycle rules for WAL segments.
 type RetentionPolicy struct {
-	MaxAge       time.Duration // Delete events older than this
-	MaxSizeBytes int64         // Delete oldest segments when total size exceeds this
+	// MaxAge deletes non-active segments older than this duration; 0 disables age retention.
+	MaxAge time.Duration
+	// MaxSizeBytes deletes oldest non-active segments until total size fits; 0 disables.
+	MaxSizeBytes int64
 }
 
 // segmentInfo holds parsed metadata for a WAL segment file.
@@ -28,13 +35,13 @@ type segmentInfo struct {
 	size        int64
 }
 
-// Enforcer applies retention policies to partition data.
+// Enforcer applies RetentionPolicy to partition WAL data under dataDir.
 type Enforcer struct {
 	dataDir string
 	policy  RetentionPolicy
 }
 
-// NewEnforcer creates a retention enforcer.
+// NewEnforcer creates a retention enforcer for the given data directory and policy.
 func NewEnforcer(dataDir string, policy RetentionPolicy) *Enforcer {
 	return &Enforcer{
 		dataDir: dataDir,
@@ -42,7 +49,9 @@ func NewEnforcer(dataDir string, policy RetentionPolicy) *Enforcer {
 	}
 }
 
-// Run executes retention policy once.
+// Run executes retention policy once: collect segments, preserve the active
+// segment per partition, then delete by MaxAge and/or MaxSizeBytes.
+// It honors ctx cancellation between phases.
 func (e *Enforcer) Run(ctx context.Context) error {
 	segments, err := e.collectSegments()
 	if err != nil {

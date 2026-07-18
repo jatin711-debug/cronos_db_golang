@@ -30,6 +30,7 @@ type InternalGRPCServer struct {
 
 // InternalConfig configures the internal cluster gRPC listener.
 type InternalConfig struct {
+	// Address is the listen address (host:port) for the internal gRPC server.
 	Address string
 	// TLS is the optional replication mTLS configuration. When enabled, the
 	// server requires and verifies client certificates.
@@ -94,6 +95,14 @@ func (g *InternalGRPCServer) RegisterReplicationServer(srv types.ReplicationServ
 // RegisterRaftServer registers the internal raft metadata service.
 func (g *InternalGRPCServer) RegisterRaftServer(srv types.RaftServiceServer) {
 	types.RegisterRaftServiceServer(g.server, srv)
+}
+
+// RegisterCrossRegionServer registers the cross-region replication service on
+// the internal listener. Cross-region replication writes arbitrary events into
+// any partition and reads any partition, so it must not be exposed on the public
+// client port — it belongs on the internal (peer-authenticated, mTLS) listener.
+func (g *InternalGRPCServer) RegisterCrossRegionServer(srv types.CrossRegionServiceServer) {
+	types.RegisterCrossRegionServiceServer(g.server, srv)
 }
 
 // Start starts the internal gRPC server.

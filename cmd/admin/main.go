@@ -1,3 +1,8 @@
+// Command cronos-admin (package main) is the CronosDB administrative CLI.
+//
+// It dials a node over gRPC (optional TLS/mTLS and JWT) and exposes cobra
+// subcommands for partitions, consumer groups, cluster status, debug publish,
+// JWT generation, and AdminService operator RPCs.
 package main
 
 import (
@@ -20,18 +25,30 @@ import (
 	"google.golang.org/grpc/metadata"
 )
 
+// CLI flags and shared gRPC clients used by subcommands after dial.
 var (
-	serverAddr    string
-	tlsEnabled    bool
-	tlsCAFile     string
-	tlsCertFile   string
-	tlsKeyFile    string
+	// serverAddr is the target node gRPC address (--server).
+	serverAddr string
+	// tlsEnabled enables TLS for the client connection (--tls).
+	tlsEnabled bool
+	// tlsCAFile is an optional CA PEM path for server verification.
+	tlsCAFile string
+	// tlsCertFile is an optional client certificate path for mTLS.
+	tlsCertFile string
+	// tlsKeyFile is an optional client private key path for mTLS.
+	tlsKeyFile string
+	// tlsSkipVerify disables server certificate verification (dev only).
 	tlsSkipVerify bool
-	jwtToken      string
-	client        types.EventServiceClient
-	partClient    types.PartitionServiceClient
-	cgClient      types.ConsumerGroupServiceClient
-	adminClient   types.AdminServiceClient
+	// jwtToken is the Bearer token attached to every RPC when set.
+	jwtToken string
+	// client is the EventService client after dial.
+	client types.EventServiceClient
+	// partClient is the PartitionService client after dial.
+	partClient types.PartitionServiceClient
+	// cgClient is the ConsumerGroupService client after dial.
+	cgClient types.ConsumerGroupServiceClient
+	// adminClient is the AdminService client after dial.
+	adminClient types.AdminServiceClient
 )
 
 func main() {
@@ -138,11 +155,14 @@ func bearerStreamInterceptor(token string) grpc.StreamClientInterceptor {
 	}
 }
 
+// closeConn is a no-op placeholder; gRPC clients share a connection that is
+// process-scoped for this simple CLI.
 func closeConn() error {
 	// Connection is shared across clients; no direct close on clients needed in this simple impl
 	return nil
 }
 
+// partitionCmd groups partition list/info/WAL status subcommands.
 func partitionCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "partition",
@@ -211,6 +231,7 @@ func partitionCmd() *cobra.Command {
 	return cmd
 }
 
+// consumerCmd groups consumer-group lag and list subcommands.
 func consumerCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "consumer",
@@ -257,6 +278,7 @@ func consumerCmd() *cobra.Command {
 	return cmd
 }
 
+// clusterCmd groups cluster status helpers.
 func clusterCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "cluster",
@@ -281,6 +303,7 @@ func clusterCmd() *cobra.Command {
 	return cmd
 }
 
+// debugCmd groups ad-hoc debug helpers such as single-event publish.
 func debugCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "debug",
@@ -314,6 +337,7 @@ func debugCmd() *cobra.Command {
 	return cmd
 }
 
+// generateTokenCmd issues an HS256 JWT for testing/CLI auth.
 func generateTokenCmd() *cobra.Command {
 	var secret string
 	var subject string
@@ -348,6 +372,8 @@ func generateTokenCmd() *cobra.Command {
 // is optional.
 // ---------------------------------------------------------------------------
 
+// adminCmd is the operator-facing AdminService subcommand group.
+// Commands require Subject.Admin=true when the server has auth enabled.
 func adminCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "admin",
@@ -370,6 +396,7 @@ func adminCmd() *cobra.Command {
 	return cmd
 }
 
+// adminTopologyCmd prints cluster topology via AdminService.GetClusterTopology.
 func adminTopologyCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "topology",
@@ -399,6 +426,7 @@ func adminTopologyCmd() *cobra.Command {
 	}
 }
 
+// adminPartitionHealthCmd prints per-partition health stats.
 func adminPartitionHealthCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "partition-health [partition-id]",
@@ -428,6 +456,7 @@ func adminPartitionHealthCmd() *cobra.Command {
 	}
 }
 
+// adminReplicationLagCmd shows leader HWM and per-follower replication lag.
 func adminReplicationLagCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "replication-lag [partition-id]",
@@ -458,6 +487,7 @@ func adminReplicationLagCmd() *cobra.Command {
 	}
 }
 
+// adminConsumerGroupsCmd lists consumer groups known to the node.
 func adminConsumerGroupsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "consumer-groups",
@@ -484,6 +514,7 @@ func adminConsumerGroupsCmd() *cobra.Command {
 	return cmd
 }
 
+// adminConsumerGroupLagCmd shows committed offset vs high watermark lag.
 func adminConsumerGroupLagCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "consumer-group-lag [group-id] [partition-id]",
@@ -510,6 +541,7 @@ func adminConsumerGroupLagCmd() *cobra.Command {
 	}
 }
 
+// adminSchemaListCmd lists registered topic schemas.
 func adminSchemaListCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "schema-list",
@@ -534,6 +566,7 @@ func adminSchemaListCmd() *cobra.Command {
 	}
 }
 
+// adminSchemaGetCmd fetches a specific schema version (0 = latest).
 func adminSchemaGetCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "schema-get [topic] [version]",
@@ -559,6 +592,7 @@ func adminSchemaGetCmd() *cobra.Command {
 	}
 }
 
+// adminTenantUsageCmd shows per-tenant in-flight and storage usage.
 func adminTenantUsageCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "tenant-usage [tenant-id]",
@@ -585,6 +619,7 @@ func adminTenantUsageCmd() *cobra.Command {
 	}
 }
 
+// adminRetentionRunCmd triggers a one-shot age/size retention run.
 func adminRetentionRunCmd() *cobra.Command {
 	var partitionID int64
 	var maxAgeHours int64
@@ -619,6 +654,7 @@ func adminRetentionRunCmd() *cobra.Command {
 	return cmd
 }
 
+// adminCompactionRunCmd triggers consumer-offset-bounded WAL compaction once.
 func adminCompactionRunCmd() *cobra.Command {
 	var partitionID int64
 
@@ -647,6 +683,7 @@ func adminCompactionRunCmd() *cobra.Command {
 	return cmd
 }
 
+// adminRebalanceCmd requests a cluster router rebalance via AdminService.
 func adminRebalanceCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "cluster-rebalance",

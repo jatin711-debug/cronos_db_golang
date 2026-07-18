@@ -10,16 +10,18 @@ import (
 	"github.com/shirou/gopsutil/v3/disk"
 )
 
-// DiskMonitor watches disk usage and triggers emergency compaction.
+// DiskMonitor watches disk usage under dataDir and invokes compactFn when
+// usage meets or exceeds thresholdPct (fraction in [0,1], e.g. 0.85 for 85%).
 type DiskMonitor struct {
-	dataDir       string
-	thresholdPct  float64 // e.g. 0.85 for 85%
-	checkInterval time.Duration
-	compactFn     func()
-	quit          chan struct{}
+	dataDir       string        // path whose filesystem usage is sampled
+	thresholdPct  float64       // trip threshold as a fraction of capacity (0–1)
+	checkInterval time.Duration // how often usage is sampled (default 30s)
+	compactFn     func()        // emergency compaction callback; may be nil
+	quit          chan struct{} // closed by Stop to end the loop
 }
 
-// NewDiskMonitor creates a disk pressure monitor.
+// NewDiskMonitor creates a disk pressure monitor for dataDir. compactFn is
+// called when used fraction >= thresholdPct (e.g. 0.85).
 func NewDiskMonitor(dataDir string, thresholdPct float64, compactFn func()) *DiskMonitor {
 	return &DiskMonitor{
 		dataDir:       dataDir,

@@ -12,30 +12,37 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 )
 
-// Snapshot represents a point-in-time snapshot of partition state.
-// This enables fast recovery without replaying the entire WAL.
+// Snapshot is a point-in-time capture of partition recovery state.
+// Loading a snapshot lets startup skip full WAL timer replay up to
+// LastScheduledOffset.
 type Snapshot struct {
-	PartitionID         int32            `json:"partition_id"`
-	HighWatermark       int64            `json:"high_watermark"`
-	LastScheduledOffset int64            `json:"last_scheduled_offset"`
-	ConsumerOffsets     map[string]int64 `json:"consumer_offsets"` // groupID -> offset
-	Timestamp           int64            `json:"timestamp"`
-	Version             int              `json:"version"`
+	// PartitionID identifies the partition this snapshot belongs to.
+	PartitionID int32 `json:"partition_id"`
+	// HighWatermark is the WAL high watermark at snapshot time.
+	HighWatermark int64 `json:"high_watermark"`
+	// LastScheduledOffset is the last WAL offset whose timer was known scheduled.
+	LastScheduledOffset int64 `json:"last_scheduled_offset"`
+	// ConsumerOffsets maps consumer group ID to committed offset for this partition.
+	ConsumerOffsets map[string]int64 `json:"consumer_offsets"`
+	// Timestamp is when the snapshot was taken (Unix milliseconds).
+	Timestamp int64 `json:"timestamp"`
+	// Version is the on-disk snapshot format version (must match snapshotVersion).
+	Version int `json:"version"`
 }
 
 const snapshotVersion = 1
 const snapshotFilename = "snapshot.json"
 
-// SnapshotManager handles creating and loading snapshots for fast recovery.
+// SnapshotManager creates and loads partition recovery snapshots under dataDir.
 type SnapshotManager struct {
 	mu               sync.RWMutex
-	dataDir          string
-	partitionID      int32
-	lastSnapshot     *Snapshot
-	lastSnapshotTime time.Time
+	dataDir          string    // partition data directory
+	partitionID      int32     // owning partition
+	lastSnapshot     *Snapshot // cached last loaded/created snapshot
+	lastSnapshotTime time.Time // wall time of last successful CreateSnapshot
 }
 
-// NewSnapshotManager creates a snapshot manager for a partition.
+// NewSnapshotManager creates a snapshot manager for the given partition dataDir.
 func NewSnapshotManager(dataDir string, partitionID int32) *SnapshotManager {
 	return &SnapshotManager{
 		dataDir:     dataDir,

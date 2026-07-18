@@ -12,27 +12,36 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 )
 
-// DLQEntry represents a dead-letter queue entry
+// DLQEntry is a durable record of a delivery that exhausted retries (or a tombstone).
 type DLQEntry struct {
-	Event       *types.Event `json:"event"`
-	DeliveryID  string       `json:"delivery_id"`
-	Attempts    int32        `json:"attempts"`
-	LastError   string       `json:"last_error"`
-	FailedAt    int64        `json:"failed_at"`
-	Subscriber  string       `json:"subscriber"`
-	PartitionID int32        `json:"partition_id"`
+	// Event is the failed event payload (nil on tombstone records).
+	Event *types.Event `json:"event"`
+	// DeliveryID correlates this entry with the original delivery attempt.
+	DeliveryID string `json:"delivery_id"`
+	// Attempts is how many delivery attempts were made before DLQ.
+	Attempts int32 `json:"attempts"`
+	// LastError describes the final failure reason.
+	LastError string `json:"last_error"`
+	// FailedAt is when the entry (or tombstone) was written (Unix ms).
+	FailedAt int64 `json:"failed_at"`
+	// Subscriber is the subscription ID that failed, if known.
+	Subscriber string `json:"subscriber"`
+	// PartitionID is the event's partition.
+	PartitionID int32 `json:"partition_id"`
 	// Tombstone marks a log entry that deletes/retracts a prior DLQ entry with
 	// the same DeliveryID. It is used by Remove/Retry so the action survives a
 	// restart; load() skips the original entry when a tombstone is present.
 	Tombstone bool `json:"tombstone,omitempty"`
 }
 
-// DeadLetterQueue manages failed deliveries
+// DeadLetterQueue stores failed deliveries in memory and on append-only segments.
+// Remove/Retry append tombstones so actions survive restart; a background
+// retry worker can re-drive entries via a registered callback.
 type DeadLetterQueue struct {
 	mu      sync.RWMutex
 	entries []*DLQEntry
 	dataDir string
-	maxSize int
+	maxSize int // max in-memory entries; oldest are dropped on overflow
 	writer  *DLQSegmentWriter
 
 	// Background retry worker
@@ -40,7 +49,8 @@ type DeadLetterQueue struct {
 	retryFn   func(entry *DLQEntry) // callback to re-queue for delivery
 }
 
-// NewDeadLetterQueue creates a new DLQ
+// NewDeadLetterQueue creates a DLQ under dataDir/dlq, loading existing segments.
+// A non-positive maxSize defaults to 10000 in-memory entries.
 func NewDeadLetterQueue(dataDir string, maxSize int) (*DeadLetterQueue, error) {
 	dlqDir := filepath.Join(dataDir, "dlq")
 	if err := os.MkdirAll(dlqDir, 0755); err != nil {
@@ -72,7 +82,7 @@ func NewDeadLetterQueue(dataDir string, maxSize int) (*DeadLetterQueue, error) {
 	return dlq, nil
 }
 
-// Add adds a failed delivery to the DLQ
+// Add records a failed delivery in memory and appends it to the segment log.
 func (d *DeadLetterQueue) Add(event *types.Event, deliveryID string, attempts int32, lastError string, subscriber string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -102,7 +112,7 @@ func (d *DeadLetterQueue) Add(event *types.Event, deliveryID string, attempts in
 	return d.writer.WriteEntry(data)
 }
 
-// Get returns all DLQ entries
+// Get returns a copy of all in-memory DLQ entries.
 func (d *DeadLetterQueue) Get() []*DLQEntry {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
@@ -112,7 +122,7 @@ func (d *DeadLetterQueue) Get() []*DLQEntry {
 	return entries
 }
 
-// GetByPartition returns DLQ entries for a specific partition
+// GetByPartition returns in-memory DLQ entries for the given partition.
 func (d *DeadLetterQueue) GetByPartition(partitionID int32) []*DLQEntry {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
@@ -174,14 +184,14 @@ func (d *DeadLetterQueue) writeTombstone(deliveryID string) error {
 	return d.writer.WriteEntry(data)
 }
 
-// Count returns the number of entries in the DLQ
+// Count returns the number of in-memory DLQ entries.
 func (d *DeadLetterQueue) Count() int {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	return len(d.entries)
 }
 
-// Clear removes all entries from the DLQ
+// Clear removes all in-memory entries and compacts segment files to empty.
 func (d *DeadLetterQueue) Clear() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -231,10 +241,13 @@ func (d *DeadLetterQueue) load() error {
 	return nil
 }
 
-// DLQStats represents DLQ statistics
+// DLQStats summarizes dead-letter queue occupancy and entry ages.
 type DLQStats struct {
-	TotalEntries   int   `json:"total_entries"`
+	// TotalEntries is the number of in-memory DLQ entries.
+	TotalEntries int `json:"total_entries"`
+	// OldestEntryAge is now minus the oldest entry's FailedAt, in milliseconds.
 	OldestEntryAge int64 `json:"oldest_entry_age_ms"`
+	// NewestEntryAge is now minus the newest entry's FailedAt, in milliseconds.
 	NewestEntryAge int64 `json:"newest_entry_age_ms"`
 }
 
@@ -307,7 +320,7 @@ func (d *DeadLetterQueue) Close() error {
 	return nil
 }
 
-// GetStats returns DLQ statistics
+// GetStats returns occupancy and age statistics for in-memory DLQ entries.
 func (d *DeadLetterQueue) GetStats() *DLQStats {
 	d.mu.RLock()
 	defer d.mu.RUnlock()

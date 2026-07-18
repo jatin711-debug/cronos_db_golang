@@ -1,3 +1,5 @@
+// Package consumer implements consumer-group membership, partition assignment,
+// offset commit, and durable offset/commit-ID storage for CronosDB.
 package consumer
 
 import (
@@ -10,18 +12,24 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 )
 
-// Subscription represents a subscriber
+// Subscription represents an active consumer subscription to a partition.
 type Subscription struct {
-	ID            string
+	// ID is the subscription/member identifier.
+	ID string
+	// ConsumerGroup is the consumer group this subscription belongs to.
 	ConsumerGroup string
-	Partition     *types.Partition
-	StartOffset   int64
-	Delivery      chan<- *types.Delivery
-	Done          <-chan struct{}
-	quit          chan struct{}
+	// Partition is the local partition being consumed, if already bound.
+	Partition *types.Partition
+	// StartOffset is the first offset the subscription should read from.
+	StartOffset int64
+	// Delivery is the channel used to push deliveries to the subscriber.
+	Delivery chan<- *types.Delivery
+	// Done is closed when the subscription should stop.
+	Done <-chan struct{}
+	quit chan struct{}
 }
 
-// GroupManager manages consumer groups
+// GroupManager manages consumer groups, membership, rebalancing, and offset commits.
 type GroupManager struct {
 	mu          sync.RWMutex
 	groups      map[string]*types.ConsumerGroup
@@ -29,7 +37,8 @@ type GroupManager struct {
 	offsetStore *OffsetStore               // persistent offset storage
 }
 
-// NewGroupManager creates a new group manager (in-memory only, use NewGroupManagerWithStore for persistence)
+// NewGroupManager creates an in-memory-only group manager.
+// Use NewGroupManagerWithStore when durable offsets and group metadata are required.
 func NewGroupManager() *GroupManager {
 	return &GroupManager{
 		groups:     make(map[string]*types.ConsumerGroup),
@@ -37,7 +46,8 @@ func NewGroupManager() *GroupManager {
 	}
 }
 
-// NewGroupManagerWithStore creates a new group manager with persistent offset storage
+// NewGroupManagerWithStore creates a group manager backed by a persistent OffsetStore
+// and restores any previously persisted group metadata.
 func NewGroupManagerWithStore(offsetStore *OffsetStore) *GroupManager {
 	gm := &GroupManager{
 		groups:      make(map[string]*types.ConsumerGroup),
@@ -60,7 +70,8 @@ func (g *GroupManager) persistGroup(group *types.ConsumerGroup) {
 	}
 }
 
-// CreateGroup creates a new consumer group
+// CreateGroup creates a new consumer group for topic with the given partition set.
+// Committed offsets are initialized to -1 (beginning of log).
 func (g *GroupManager) CreateGroup(groupID, topic string, partitions []int32) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -92,7 +103,7 @@ func (g *GroupManager) CreateGroup(groupID, topic string, partitions []int32) er
 	return nil
 }
 
-// GetGroup returns a consumer group
+// GetGroup returns the consumer group with groupID, if it exists.
 func (g *GroupManager) GetGroup(groupID string) (*types.ConsumerGroup, bool) {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
@@ -126,7 +137,8 @@ func (g *GroupManager) CheckpointOffsetStore(destDir string) error {
 	return store.Checkpoint(destDir)
 }
 
-// JoinGroup adds a consumer to a group
+// JoinGroup adds or re-joins a consumer member to a group and rebalances assignments.
+// The group is auto-created when it does not yet exist.
 func (g *GroupManager) JoinGroup(groupID, memberID, address, topic string, partitionID int32) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -212,7 +224,7 @@ func (g *GroupManager) JoinGroup(groupID, memberID, address, topic string, parti
 	return nil
 }
 
-// LeaveGroup removes a consumer from a group
+// LeaveGroup removes a consumer member from a group and rebalances remaining members.
 func (g *GroupManager) LeaveGroup(groupID, memberID string) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -247,7 +259,7 @@ func (g *GroupManager) LeaveGroup(groupID, memberID string) error {
 	return nil
 }
 
-// TriggerRebalance manually triggers a rebalance and returns assignments
+// TriggerRebalance manually rebalances groupID and returns active member-to-partition assignments.
 func (g *GroupManager) TriggerRebalance(groupID string) (map[string]int32, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -333,7 +345,9 @@ func (g *GroupManager) CommitOffset(groupID string, partitionID int64, offset in
 	return nil
 }
 
-// GetCommittedOffset gets committed offset for a partition
+// GetCommittedOffset returns the committed offset for groupID on partitionID.
+// It checks in-memory state first, then falls back to the offset store.
+// A return of -1 means the beginning of the partition.
 func (g *GroupManager) GetCommittedOffset(groupID string, partitionID int32) (int64, error) {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
@@ -359,7 +373,7 @@ func (g *GroupManager) GetCommittedOffset(groupID string, partitionID int32) (in
 	return -1, nil // Beginning of partition
 }
 
-// ListGroups lists all consumer groups
+// ListGroups returns all known consumer groups.
 func (g *GroupManager) ListGroups() []*types.ConsumerGroup {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
@@ -372,7 +386,7 @@ func (g *GroupManager) ListGroups() []*types.ConsumerGroup {
 	return groups
 }
 
-// DeleteGroup deletes a consumer group
+// DeleteGroup deletes a consumer group and its persisted metadata, if any.
 func (g *GroupManager) DeleteGroup(groupID string) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -388,7 +402,7 @@ func (g *GroupManager) DeleteGroup(groupID string) error {
 	return nil
 }
 
-// Subscribe creates a subscription
+// Subscribe creates a Subscription from req and joins the corresponding consumer group.
 func (g *GroupManager) Subscribe(req *types.SubscribeRequest) (*Subscription, error) {
 	// Create a subscription (simplified)
 	sub := &Subscription{
@@ -408,7 +422,7 @@ func (g *GroupManager) Subscribe(req *types.SubscribeRequest) (*Subscription, er
 	return sub, nil
 }
 
-// Ack acknowledges event processing
+// Ack acknowledges event processing by committing the next offset encoded in the delivery ID.
 func (g *GroupManager) Ack(req *types.AckRequest) error {
 	if req.DeliveryId == "" {
 		return fmt.Errorf("delivery_id is required")
@@ -433,7 +447,7 @@ func (g *GroupManager) Ack(req *types.AckRequest) error {
 	return g.CommitOffset(groupID, partitionID, req.NextOffset)
 }
 
-// GetStats returns group manager statistics
+// GetStats returns aggregate consumer-group membership statistics.
 func (g *GroupManager) GetStats() *GroupManagerStats {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
@@ -463,10 +477,14 @@ func (g *GroupManager) GetStats() *GroupManagerStats {
 	}
 }
 
-// GroupManagerStats represents group manager statistics
+// GroupManagerStats is an aggregate snapshot of consumer-group membership.
 type GroupManagerStats struct {
-	TotalGroups   int64
-	ActiveGroups  int64
-	TotalMembers  int64
+	// TotalGroups is the number of known consumer groups.
+	TotalGroups int64
+	// ActiveGroups is the number of groups with at least one active member.
+	ActiveGroups int64
+	// TotalMembers is the total member count across all groups.
+	TotalMembers int64
+	// ActiveMembers is the count of members currently considered active.
 	ActiveMembers int64
 }

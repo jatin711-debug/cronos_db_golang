@@ -1,3 +1,10 @@
+// Package config loads, validates, and hot-reloads CronosDB node configuration
+// from command-line flags and environment variables (CRONOS_*).
+//
+// LoadConfig applies defaults, parses flags, then applies env overrides.
+// Production mode enforces TLS, auth, encryption, and replication safety unless
+// --dev is set. ReloadableConfig supports SIGHUP-driven updates of a safe
+// subset of runtime tunables.
 package config
 
 import (
@@ -11,7 +18,9 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 )
 
-// LoadConfig loads configuration from flags and environment
+// LoadConfig loads node configuration from command-line flags and environment
+// variables. Defaults are applied first, then flags, then CRONOS_* env overrides.
+// It returns an error if validation fails (see ValidateConfig).
 func LoadConfig() (*types.Config, error) {
 	var config types.Config
 
@@ -407,7 +416,9 @@ func LoadConfig() (*types.Config, error) {
 	return &config, nil
 }
 
-// ValidateConfig validates the configuration
+// ValidateConfig checks that required fields are set and that production
+// hardening rules hold when DevMode is false (replication factor, min ISR,
+// TLS, auth policy, encryption at rest, and replication mTLS).
 func ValidateConfig(c *types.Config) error {
 	if c.NodeID == "" {
 		return fmt.Errorf("node-id is required")
@@ -457,6 +468,13 @@ func ValidateConfig(c *types.Config) error {
 		}
 		if c.AuthJWTSecret == "" && c.AuthJWTPublicKey == "" {
 			return fmt.Errorf("production mode requires auth-jwt-secret or auth-jwt-public-key")
+		}
+		if c.AuthPolicyFile == "" {
+			// Without a policy file the server falls back to AllowAllPolicy(), which
+			// makes every authenticated subject an admin on every topic — i.e. "auth
+			// enabled" would silently mean "no authorization". Require an explicit
+			// policy in production.
+			return fmt.Errorf("production mode requires auth-policy-file (use --dev to bypass); without it every authenticated subject is admin")
 		}
 		if !c.EncryptionEnabled {
 			return fmt.Errorf("production mode requires encryption at rest to be enabled (use --dev to bypass)")

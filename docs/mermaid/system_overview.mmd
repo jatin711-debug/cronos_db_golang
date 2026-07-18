@@ -2,44 +2,50 @@ flowchart TB
     subgraph Client_Side[Clients]
       Producer[Producer SDK]
       Consumer[Consumer SDK]
-      Admin[Ops and Admin]
+      Admin[Ops CLI and Dashboard]
     end
 
-    subgraph Data_Plane[Data Plane]
-      APIGW[gRPC API Layer]
-      EventH[Event Handlers]
+    subgraph Edge[Process edge]
+      APIGW[Public gRPC :9000]
+      HTTP[HTTP :8080 health metrics UI]
+      IGRPC[Internal gRPC :7947]
+    end
+
+    subgraph Data_Plane[Data plane]
+      EventH[Event / Partition / CG / Tx handlers]
+      AdminH[AdminService handler]
       PM[Partition Manager]
-      Partition[Per Partition Runtime]
-      WAL[WAL and Segments]
-      Sched[Scheduler Timing Wheel]
-      Worker[Delivery Worker]
-      Disp[Dispatcher and Credits]
-      Group[Consumer Groups and Offsets]
-      DLQ[Dead Letter Queue]
+      Partition[Per partition runtime]
+      WAL[WAL segments + index]
+      Sched[Scheduler wheel + cold store]
+      Worker[Delivery worker]
+      Disp[Dispatcher credits CB retry]
+      Group[Consumer groups + offsets]
+      DLQ[Dead letter queue]
+      Dedup[Dedup bloom + Pebble]
     end
 
-    subgraph Control_Plane[Control Plane]
-      ClusterM[Cluster Manager]
-      Router[Hash Ring Router]
-      Membership[Membership Gossip]
-      Raft[Raft Metadata]
-      Replication[Leader Follower Replication]
-      CrossRegion[Cross Region Replicator]
+    subgraph Control_Plane[Control plane]
+      ClusterM[Cluster manager]
+      Router[Hash ring router SHA-256 vnodes]
+      Membership[Gossip or Memberlist]
+      Raft[Raft metadata]
+      Replication[Leader follower ReplicationService]
+      CrossRegion[CrossRegionService]
     end
 
-    subgraph Guardrails[Reliability Guardrails]
-      Dedup[Dedup Bloom and Pebble]
-      Auth[Auth RBAC]
-      Audit[Audit Logger]
-      Schema[Schema Registry]
-      Tenant[Tenant Accountant]
-      SLO[SLO Recorder and Metrics]
-      Compliance[Retention and Backup]
+    subgraph Guardrails[Guardrails]
+      Auth[JWT + RBAC]
+      Audit[Audit logger]
+      Schema[Schema registry]
+      Tenant[Tenant accountant]
+      SLO[SLO + metrics + tracing]
+      Compliance[Retention + backup]
     end
 
-    subgraph Security[Production Security]
-      TLS[TLS for gRPC]
-      EncAtRest[Encryption at rest]
+    subgraph Security[Production security]
+      TLS[Public TLS]
+      EncAtRest[Encryption at rest v2]
       ReplMTLS[Replication mTLS]
       DevMode[--dev bypass]
     end
@@ -47,12 +53,16 @@ flowchart TB
     Producer --> APIGW
     Consumer --> APIGW
     Admin --> APIGW
+    Admin --> HTTP
 
     APIGW --> EventH
+    APIGW --> AdminH
+    HTTP --> AdminH
     EventH --> PM
     PM --> Partition
     Partition --> WAL
     Partition --> Sched
+    Partition --> Dedup
     Sched --> Worker
     Worker --> Disp
     Disp --> Consumer
@@ -60,19 +70,20 @@ flowchart TB
     Disp --> DLQ
 
     APIGW --> TLS
-    EventH --> Dedup
     EventH --> Auth
     EventH --> Schema
     EventH --> Tenant
     APIGW --> Audit
     APIGW --> SLO
+    AdminH --> Auth
 
     PM --> Router
     Router --> ClusterM
     ClusterM --> Membership
     ClusterM --> Raft
     Partition --> Replication
+    Replication --> IGRPC
+    CrossRegion --> IGRPC
     Replication --> ReplMTLS
-    Partition --> CrossRegion
     Compliance --> WAL
     TLS --> EncAtRest

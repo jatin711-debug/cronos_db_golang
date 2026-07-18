@@ -1,17 +1,22 @@
 flowchart TB
     subgraph RegionA
-      ALeader[Leader Partition]
+      ALeader[Leader partition]
       AFollower1[Follower 1]
       AFollower2[Follower 2]
+      AHook[WAL appendHook]
     end
     subgraph RegionB
-      BIngress[CrossRegionService]
-      BLeader[Leader Partition]
-      BFollower[Follower]
+      BInternal[Internal gRPC :7947<br/>CrossRegionService]
+      BLeader[Local partition apply]
+      BFollower[Intra-region followers]
     end
 
-    ALeader -->|Append hook batch| BIngress
-    BIngress -->|PublishBatch| BLeader
-    BLeader -->|Replication Append| BFollower
-    ALeader -->|Replication Append| AFollower1
-    ALeader -->|Replication Append| AFollower2
+    ALeader --> AHook
+    AHook -->|ReplicateAsync if source_region empty| BInternal
+    BInternal -->|tag source_region meta LWW on conflict| BLeader
+    BLeader -->|ReplicationService Append| BFollower
+    ALeader -->|ReplicationService Append| AFollower1
+    ALeader -->|ReplicationService Append| AFollower2
+
+    EchoGuard[Echo guard: skip re-export when source_region meta set]
+    AHook -.-> EchoGuard

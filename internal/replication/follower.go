@@ -20,7 +20,8 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
-// Follower handles replication from leader
+// Follower applies streamed WAL appends and bulk snapshots from the partition
+// leader onto the local WAL for a single partition replica.
 type Follower struct {
 	mu           sync.RWMutex
 	partitionID  int32
@@ -268,28 +269,28 @@ func (f *Follower) dialCredentials() (credentials.TransportCredentials, error) {
 	return insecure.NewCredentials(), nil
 }
 
-// GetNextOffset returns next offset to replicate
+// GetNextOffset returns the next WAL offset this follower expects to receive.
 func (f *Follower) GetNextOffset() int64 {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 	return f.nextOffset
 }
 
-// GetEpoch returns the follower's epoch
+// GetEpoch returns the follower's current leadership epoch.
 func (f *Follower) GetEpoch() int64 {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 	return f.epoch
 }
 
-// SetEpoch sets the epoch (used during leader failover)
+// SetEpoch sets the leadership epoch (used during leader failover).
 func (f *Follower) SetEpoch(epoch int64) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.epoch = epoch
 }
 
-// Stop stops the follower
+// Stop signals the follower to stop background replication work.
 func (f *Follower) Stop() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -304,7 +305,7 @@ func (f *Follower) Stop() {
 	log.Printf("[FOLLOWER] Stopped replication for partition %d", f.partitionID)
 }
 
-// SetWAL sets the WAL for this follower
+// SetWAL attaches or replaces the local WAL and resets NextOffset from it.
 func (f *Follower) SetWAL(wal *storage.WAL) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -312,7 +313,7 @@ func (f *Follower) SetWAL(wal *storage.WAL) {
 	f.nextOffset = wal.GetNextOffset()
 }
 
-// SetLeader updates the leader information
+// SetLeader updates the known leader identity, address, and epoch.
 func (f *Follower) SetLeader(leaderID, leaderAddr string, epoch int64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -325,14 +326,14 @@ func (f *Follower) SetLeader(leaderID, leaderAddr string, epoch int64) error {
 	return nil
 }
 
-// IsCatchingUp returns true if follower is catching up
+// IsCatchingUp reports whether a bulk snapshot install is currently in progress.
 func (f *Follower) IsCatchingUp() bool {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 	return f.catchupMode
 }
 
-// GetStats returns follower statistics
+// GetStats returns a snapshot of follower replication progress.
 func (f *Follower) GetStats() *FollowerStats {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
@@ -347,12 +348,18 @@ func (f *Follower) GetStats() *FollowerStats {
 	}
 }
 
-// FollowerStats represents follower statistics
+// FollowerStats is a snapshot of follower replication progress for a partition.
 type FollowerStats struct {
-	PartitionID  int32
-	LeaderID     string
-	Epoch        int64
-	NextOffset   int64
-	CatchingUp   bool
+	// PartitionID is the partition this follower replicates.
+	PartitionID int32
+	// LeaderID is the current known leader node ID.
+	LeaderID string
+	// Epoch is the current leadership epoch.
+	Epoch int64
+	// NextOffset is the next expected WAL offset from the leader.
+	NextOffset int64
+	// CatchingUp is true while a bulk snapshot install is in progress.
+	CatchingUp bool
+	// LastSyncTime is when the last successful catch-up or sync completed.
 	LastSyncTime time.Time
 }

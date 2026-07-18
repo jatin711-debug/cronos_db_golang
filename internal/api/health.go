@@ -13,12 +13,15 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 )
 
-// HealthChecker performs deep health checks.
+// HealthChecker serves HTTP liveness, readiness, and deep health endpoints.
 type HealthChecker struct {
-	Config       *types.Config
+	// Config is the process configuration used for mode and node identity.
+	Config *types.Config
+	// PartitionMgr is used to verify partitions and WAL readability.
 	PartitionMgr *partition.PartitionManager
-	ClusterMgr   *cluster.Manager
-	startTime    time.Time
+	// ClusterMgr is optional; used when cluster mode is enabled.
+	ClusterMgr *cluster.Manager
+	startTime  time.Time
 	// lastDeepProbe stores the Unix-nano timestamp of the last WAL probe read
 	// inside /health/deep. Probes are rate-limited to 1 Hz to avoid stealing
 	// disk IOPS from the write path.
@@ -27,26 +30,38 @@ type HealthChecker struct {
 
 // DeepHealthResponse is the JSON response for /health/deep.
 type DeepHealthResponse struct {
-	Status    string                 `json:"status"`
-	NodeID    string                 `json:"node_id"`
-	Timestamp int64                  `json:"timestamp"`
-	UptimeMs  int64                  `json:"uptime_ms"`
-	Checks    map[string]HealthCheck `json:"checks"`
-	Healthy   bool                   `json:"healthy"`
+	// Status is a short overall status string (e.g. "ok" or "degraded").
+	Status string `json:"status"`
+	// NodeID is the responding node's identifier.
+	NodeID string `json:"node_id"`
+	// Timestamp is the response wall-clock time in unix milliseconds.
+	Timestamp int64 `json:"timestamp"`
+	// UptimeMs is how long the process has been running in milliseconds.
+	UptimeMs int64 `json:"uptime_ms"`
+	// Checks maps check names to individual results.
+	Checks map[string]HealthCheck `json:"checks"`
+	// Healthy is true when every critical check passed.
+	Healthy bool `json:"healthy"`
 }
 
-// HealthCheck is an individual check result.
+// HealthCheck is an individual deep-health check result.
 type HealthCheck struct {
-	Status  string `json:"status"`
-	Detail  string `json:"detail,omitempty"`
-	Healthy bool   `json:"healthy"`
+	// Status is a short status label for the check (e.g. "up" or "down").
+	Status string `json:"status"`
+	// Detail is optional human-readable detail about the check outcome.
+	Detail string `json:"detail,omitempty"`
+	// Healthy is true when this individual check passed.
+	Healthy bool `json:"healthy"`
 }
 
-// MetricsResponse is a simple Prometheus-compatible metrics output.
+// MetricsResponse is a simple JSON metrics snapshot (not Prometheus exposition).
 type MetricsResponse struct {
-	Timestamp int64                  `json:"timestamp"`
-	NodeID    string                 `json:"node_id"`
-	Metrics   map[string]interface{} `json:"metrics"`
+	// Timestamp is the snapshot wall-clock time in unix milliseconds.
+	Timestamp int64 `json:"timestamp"`
+	// NodeID is the responding node's identifier.
+	NodeID string `json:"node_id"`
+	// Metrics is an arbitrary map of metric names to values.
+	Metrics map[string]interface{} `json:"metrics"`
 }
 
 // NewHealthChecker creates a health checker.

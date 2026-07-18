@@ -8,16 +8,18 @@ import (
 	"time"
 )
 
-// BackupScheduler periodically backs up closed WAL segments.
+// BackupScheduler periodically backs up closed WAL segments into timestamped
+// destination directories and purges backups older than retention.
 type BackupScheduler struct {
-	walDir    string
-	backupDir string
-	interval  time.Duration
-	retention time.Duration
-	quit      chan struct{}
+	walDir    string        // source partition data directory (contains segments/)
+	backupDir string        // root directory for timestamped backup subdirs
+	interval  time.Duration // how often to run BackupWAL
+	retention time.Duration // age after which backup subdirs are deleted
+	quit      chan struct{} // closed by Stop to end the loop
 }
 
-// NewBackupScheduler creates a backup scheduler.
+// NewBackupScheduler creates a scheduler that backs up walDir into backupDir
+// every interval and deletes backups older than retention.
 func NewBackupScheduler(walDir, backupDir string, interval, retention time.Duration) *BackupScheduler {
 	return &BackupScheduler{
 		walDir:    walDir,

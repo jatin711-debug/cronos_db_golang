@@ -25,7 +25,7 @@ All numbers below are from single-machine benchmarks (3 nodes on one host, AMD R
 | **Publish Latency (RF=1, `periodic`, batch)** | **P50 ~150µs · P95 ~400µs · P99 ~540µs** (max observed ~800µs — sub-millisecond tail) |
 | **Publish Latency (RF=3, minISR=2)** | **P50 ~890µs · P99 ~1.3ms** (includes the quorum replication round-trip) |
 | **Success Rate** | **100%** across batch benchmark profiles |
-| **Timer Precision** | 100ms tick (configurable) |
+| **Timer Precision** | 10ms tick default (`-tick-ms`; configurable) |
 | **Dedup False Positive Rate** | <1% (Rust bloom filter) |
 
 > Benchmarked on a **single machine** running all 3 cluster nodes simultaneously (AMD Ryzen 7 6800H). The ~790K figure is the throughput ceiling — RF=1 with `periodic` fsync (least durable). Replicated durability (RF=3 / minISR=2) runs ~200K with batch=4000 (~4× lower) because each write blocks on quorum replication; that is the honest production-durability number. Real networks and higher-latency storage will lower both.
@@ -63,7 +63,7 @@ All numbers below are from single-machine benchmarks (3 nodes on one host, AMD R
 - **Multi-Node Clustering** — 3+ nodes with automatic partition distribution
 - **Raft Consensus** — Metadata consistency (HashiCorp Raft)
 - **Pluggable Gossip** — Choose custom TCP heartbeats or HashiCorp Memberlist (SWIM protocol) via config
-- **Consistent Hashing** — FNV-1a ring with configurable virtual nodes (`-virtual-nodes`, default 150)
+- **Consistent Hashing** — SHA-256 placement ring with virtual nodes (`-virtual-nodes`, default 2048); partition ID routing uses FNV-1a
 - **Leader-follower replication over dedicated internal gRPC** — `InternalGRPCServer` on a separate listener (default `:7947`) with optional cluster-only mTLS. Replication traffic is isolated from the public API on `:9000`.
 - **Bulk snapshot install** — `ReplicationService.Snapshot` streams segment + sparse-index files with per-file IEEE CRC32; follower stages under `<dataDir>/snapshot-staging/{segments,index}`, verifies, and atomically swaps into place via `WAL.ReloadSegments()`. Used for new-node bootstrap and follower-wipe recovery.
 - **Clock Skew Detection** — Cross-node heartbeat timestamp comparison; warns if absolute skew exceeds 5 seconds
@@ -105,21 +105,21 @@ graph TB
     subgraph "Cluster"
         RAFT["Raft<br/>Metadata"]
         GOSSIP["Gossip<br/>TCP Heartbeats or Memberlist/SWIM"]
-        REPL["Replication<br/>Binary Protocol"]
+        REPL["Replication<br/>gRPC Internal :7947"]
     end
 
     C1 -->|"Publish/Batch"| GW
     C2 -->|"Subscribe stream"| GW
     GW --> PM --> DD --> WAL --> SCH
     WAL --> CS
-    CS -->|"Hydrator (60s)"| SCH
+    CS -->|"Hydrator (adaptive 5s–5min)"| SCH
     SCH -->|"Ready events"| DSP -->|"Stream"| C2
     WAL -.-> REPL
     PM -.-> RAFT
     GOSSIP -.-> PM
 ```
 
-> For the full architecture with 30+ Mermaid diagrams, sequence diagrams, and deep-dive explanations, see **[ARCHITECTURE.md](ARCHITECTURE.md)**.
+> For the full architecture with Mermaid diagrams, sequence diagrams, and deep-dive explanations, see **[ARCHITECTURE.md](ARCHITECTURE.md)** (includes a **[Known Limitations](ARCHITECTURE.md#known-limitations)** section for deferred gaps such as mid-flight lag snapshots, admin rebalance soft-stub, and deep delivery requeue).
 >
 > For per-feature architecture docs and standalone Mermaid source files, see **[docs/architecture/README.md](docs/architecture/README.md)** and **[docs/mermaid](docs/mermaid)**.
 

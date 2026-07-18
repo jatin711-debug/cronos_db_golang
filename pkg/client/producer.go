@@ -19,53 +19,77 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 )
 
-// Message represents a producer payload.
+// Message is a single producer payload submitted via Send / SendAsync / SendBatch.
+// Prefer Payload for raw bytes, or Value+Codec for structured encoding.
 type Message struct {
+	// MessageID is the idempotency key. When empty and AutoMessageID is true, the producer generates one.
 	MessageID string
-	Topic     string
-	Payload   []byte
-	Value     any
-	Codec     Codec
+	// Topic is the destination topic name (required).
+	Topic string
+	// Payload is the raw event body. Used when non-empty; otherwise Value is encoded via Codec.
+	Payload []byte
+	// Value is an optional structured value encoded with Codec when Payload is empty.
+	Value any
+	// Codec serializes Value; defaults to ProducerConfig.Codec when nil.
+	Codec Codec
 
-	// Use ScheduleTS directly when already computed. If zero, ScheduleAt is used.
+	// ScheduleTS is the trigger time as Unix milliseconds. When zero, ScheduleAt is used.
 	ScheduleTS int64
+	// ScheduleAt is an alternative to ScheduleTS; converted to Unix ms when ScheduleTS is zero.
 	ScheduleAt time.Time
 
-	Meta         map[string]string
+	// Meta is optional event metadata key/value pairs sent to the server.
+	Meta map[string]string
+	// PartitionKey selects the partition via consistent hashing when PartitionID is nil.
 	PartitionKey string
-	PartitionID  *int32
+	// PartitionID forces a specific partition when non-nil (overrides PartitionKey hashing).
+	PartitionID *int32
 
+	// AllowDuplicate permits republishing an existing message_id (server-side testing / overrides).
 	AllowDuplicate bool
 }
 
-// SendResult contains publish result metadata.
+// SendResult contains publish result metadata for a successfully accepted message.
 type SendResult struct {
-	MessageID   string
+	// MessageID is the message identifier that was published (generated or caller-supplied).
+	MessageID string
+	// PartitionID is the partition that accepted the write.
 	PartitionID int32
-	Offset      int64
-	ScheduleTS  int64
+	// Offset is the durable log offset assigned by the server.
+	Offset int64
+	// ScheduleTS is the effective schedule timestamp (Unix ms) after server processing.
+	ScheduleTS int64
+	// NodeAddress is the gRPC address of the node that handled the publish.
 	NodeAddress string
-	LeaderID    string
+	// LeaderID is the leader node ID when known from routing metadata.
+	LeaderID string
 }
 
-// BatchSendResult contains aggregate send batch results.
+// BatchSendResult aggregates outcomes from a multi-message SendBatch call.
 type BatchSendResult struct {
-	Results        []*SendResult
+	// Results holds per-message results when the server returns them (may be partial on mixed outcomes).
+	Results []*SendResult
+	// PublishedCount is how many events the server accepted as new publishes.
 	PublishedCount int32
+	// DuplicateCount is how many events were detected as duplicates.
 	DuplicateCount int32
-	ErrorCount     int32
+	// ErrorCount is how many events failed validation or write on the server.
+	ErrorCount int32
 }
 
-// DeliveryCallback is invoked for async sends after completion.
+// DeliveryCallback is invoked for async sends after completion (success or error).
 type DeliveryCallback func(*SendResult, error)
 
-// Partitioner provides custom partitioning logic.
+// Partitioner maps a partition key to a partition ID given the current partition count.
 type Partitioner interface {
+	// Partition returns the partition ID for key, or an error if partitionCount is invalid.
 	Partition(key string, partitionCount int) (int32, error)
 }
 
+// defaultPartitioner uses the same FNV-based hash as the server (utils.HashToPartitionID).
 type defaultPartitioner struct{}
 
+// Partition implements Partitioner using the server-compatible FNV partition hash.
 func (defaultPartitioner) Partition(key string, partitionCount int) (int32, error) {
 	if partitionCount <= 0 {
 		return 0, fmt.Errorf("partition count must be > 0")
@@ -73,22 +97,35 @@ func (defaultPartitioner) Partition(key string, partitionCount int) (int32, erro
 	return utils.HashToPartitionID(key, partitionCount), nil
 }
 
-// ProducerConfig controls producer behavior.
+// ProducerConfig controls producer routing, retries, payload limits, and async queue behavior.
 type ProducerConfig struct {
-	Partitioner           Partitioner
+	// Partitioner selects partitions from keys; nil uses the default server-compatible hasher.
+	Partitioner Partitioner
+	// DefaultAllowDuplicate is applied to messages that do not set AllowDuplicate explicitly.
 	DefaultAllowDuplicate bool
-	RetryPolicy           retry.Policy
-	AutoMessageID         bool
-	Codec                 Codec
-	MaxPayloadBytes       int
+	// RetryPolicy governs retries on transient/leader-change errors.
+	RetryPolicy retry.Policy
+	// AutoMessageID generates a MessageID when the message leaves it empty.
+	AutoMessageID bool
+	// Codec is the default encoder for Message.Value when Message.Codec is nil.
+	Codec Codec
+	// MaxPayloadBytes rejects messages whose encoded payload exceeds this size (0 → client MaxSendMsgSize).
+	MaxPayloadBytes int
 
-	AsyncQueueSize   int
-	AsyncWorkers     int
+	// AsyncQueueSize is the buffered channel capacity for SendAsync requests.
+	AsyncQueueSize int
+	// AsyncWorkers is the number of goroutines draining the async queue.
+	AsyncWorkers int
+	// BlockOnQueueFull blocks SendAsync when the queue is full; if false, returns an error.
 	BlockOnQueueFull bool
-	MaxInFlight      int
-	MaxQueuedBytes   int64
-	CircuitBreaker   circuitbreaker.Config
-	Hedging          hedging.Policy
+	// MaxInFlight caps concurrent in-flight sync/async publish operations.
+	MaxInFlight int
+	// MaxQueuedBytes caps total payload bytes waiting in the async queue.
+	MaxQueuedBytes int64
+	// CircuitBreaker gates publishes per target address (FailureThreshold 0 disables).
+	CircuitBreaker circuitbreaker.Config
+	// Hedging optionally issues parallel hedged requests after a delay (see hedging.Policy).
+	Hedging hedging.Policy
 }
 
 // DefaultProducerConfig returns safe producer defaults.
@@ -112,24 +149,31 @@ func DefaultProducerConfig() ProducerConfig {
 	}
 }
 
+// asyncSendRequest is a unit of work queued for async producer workers.
 type asyncSendRequest struct {
-	msg      Message
-	callback DeliveryCallback
-	future   *DeliveryFuture
-	sizeHint int64
+	ctx      context.Context  // request context for cancellation
+	msg      Message          // message to publish
+	callback DeliveryCallback // optional completion callback
+	future   *DeliveryFuture  // optional future completed on finish
+	sizeHint int64            // approximate payload size for MaxQueuedBytes accounting
 }
 
-// Producer implements sync and async publish APIs.
+// Producer implements sync and async publish APIs against a CronosDB Client.
 type Producer struct {
-	client      *Client
-	cfg         ProducerConfig
-	partitioner Partitioner
+	client      *Client        // shared metadata-aware client
+	cfg         ProducerConfig // resolved producer settings
+	partitioner Partitioner    // partition key → partition ID
 
-	queue       chan asyncSendRequest
-	inFlight    chan struct{}
-	closed      atomic.Bool
-	queuedBytes atomic.Int64
-	wg          sync.WaitGroup
+	queue       chan asyncSendRequest // async work queue
+	inFlight    chan struct{}         // semaphore of size MaxInFlight
+	closed      atomic.Bool           // true after Close begins
+	queuedBytes atomic.Int64          // current queued payload bytes
+	wg          sync.WaitGroup        // waits for async workers to exit
+	// closeMu guards the queue-channel lifecycle: enqueue paths take RLock, Close
+	// takes the write lock before close(queue). This makes a send on the closed
+	// channel impossible (the closed.Load() check alone left a TOCTOU window where
+	// Close could close the channel between the check and the send → panic).
+	closeMu sync.RWMutex
 }
 
 // NewProducer creates a producer bound to a client.
@@ -223,14 +267,12 @@ func (p *Producer) Send(ctx context.Context, msg Message) (*SendResult, error) {
 				addr string
 			}
 			var addrIdx atomic.Int32
-			triedAddrs := make([]string, 0, len(route.CandidateAddresses))
 			hedgeRes, hedgeErr := hedging.Do[hedgeResult](ctx, p.cfg.Hedging, func(hctx context.Context) (hedgeResult, error) {
 				idx := int(addrIdx.Add(1) - 1)
 				if idx >= len(route.CandidateAddresses) {
 					return hedgeResult{}, fmt.Errorf("exhausted hedge candidates")
 				}
 				addr := route.CandidateAddresses[idx]
-				triedAddrs = append(triedAddrs, addr)
 				resp, innerErr, _ := p.tryPublishWithBreaker(hctx, addr, event, allowDuplicate)
 				return hedgeResult{resp: resp, addr: addr}, innerErr
 			})
@@ -308,7 +350,7 @@ func (p *Producer) Send(ctx context.Context, msg Message) (*SendResult, error) {
 		}
 
 		if !shouldRetry {
-			continue
+			break
 		}
 	}
 
@@ -346,7 +388,7 @@ func (p *Producer) tryPublishWithBreaker(ctx context.Context, addr string, event
 	}
 	resp, err := p.tryPublish(ctx, addr, event, allowDuplicate)
 	if err != nil {
-		if cb != nil && !errs.IsRetryable(err) {
+		if cb != nil && !errors.Is(err, context.Canceled) {
 			cb.RecordFailure()
 		}
 		return resp, err, false
@@ -366,15 +408,17 @@ func (p *Producer) SendBatch(ctx context.Context, msgs []Message) (*BatchSendRes
 	type batchGroup struct {
 		addr           string
 		allowDuplicate bool
+		partitionID    int32
+		leaderID       string
 		msgs           []Message
 		events         []*types.Event
 	}
 
-	groupKey := func(addr string, allowDuplicate bool) string {
+	groupKey := func(partitionID int32, addr string, allowDuplicate bool) string {
 		if allowDuplicate {
-			return addr + "|dup:1"
+			return fmt.Sprintf("%d|%s|dup:1", partitionID, addr)
 		}
-		return addr + "|dup:0"
+		return fmt.Sprintf("%d|%s|dup:0", partitionID, addr)
 	}
 
 	groups := make(map[string]*batchGroup)
@@ -401,12 +445,14 @@ func (p *Producer) SendBatch(ctx context.Context, msgs []Message) (*BatchSendRes
 
 		addr := route.CandidateAddresses[0]
 		allowDuplicate := p.cfg.DefaultAllowDuplicate || msg.AllowDuplicate
-		key := groupKey(addr, allowDuplicate)
+		key := groupKey(partitionID, addr, allowDuplicate)
 		group, exists := groups[key]
 		if !exists {
 			group = &batchGroup{
 				addr:           addr,
 				allowDuplicate: allowDuplicate,
+				partitionID:    partitionID,
+				leaderID:       route.LeaderID,
 				msgs:           make([]Message, 0, 64),
 				events:         make([]*types.Event, 0, 64),
 			}
@@ -463,12 +509,28 @@ func (p *Producer) SendBatch(ctx context.Context, msgs []Message) (*BatchSendRes
 		result.PublishedCount += resp.GetPublishedCount()
 		result.DuplicateCount += resp.GetDuplicateCount()
 		result.ErrorCount += resp.GetErrorCount()
-		for _, msg := range group.msgs {
-			result.Results = append(result.Results, &SendResult{
+
+		// Offsets are only reliably assigned per message when every message in
+		// the group was accepted (no duplicates or validation errors). In that
+		// case the server returns a contiguous range [FirstOffset, LastOffset]
+		// for the events in request order.
+		allPublished := resp.GetPublishedCount() == int32(len(group.msgs))
+		var baseOffset int64
+		if allPublished {
+			baseOffset = resp.GetFirstOffset()
+		}
+		for i, msg := range group.msgs {
+			sr := &SendResult{
 				MessageID:   msg.MessageID,
+				PartitionID: group.partitionID,
 				NodeAddress: group.addr,
 				ScheduleTS:  resolveScheduleTS(msg),
-			})
+				LeaderID:    group.leaderID,
+			}
+			if allPublished {
+				sr.Offset = baseOffset + int64(i)
+			}
+			result.Results = append(result.Results, sr)
 		}
 	}
 
@@ -497,10 +559,21 @@ func (p *Producer) SendAsyncContext(ctx context.Context, msg Message, callback D
 
 	future := newDeliveryFuture()
 	req := asyncSendRequest{
+		ctx:      ctx,
 		msg:      msg,
 		callback: callback,
 		future:   future,
 		sizeHint: sizeHint,
+	}
+
+	// Hold the read lock across the enqueue so Close (which takes the write lock
+	// before close(queue)) cannot close the channel out from under us. Re-check
+	// closed under the lock to cover a Close that completed before we acquired it.
+	p.closeMu.RLock()
+	defer p.closeMu.RUnlock()
+	if p.closed.Load() {
+		p.releaseQueuedBytes(sizeHint)
+		return nil, p.wrapErr("producer.send_async", ErrorKindValidation, fmt.Errorf("producer is closed"))
 	}
 
 	if p.cfg.BlockOnQueueFull {
@@ -537,7 +610,11 @@ func (p *Producer) CloseWithContext(ctx context.Context) error {
 	if !p.closed.CompareAndSwap(false, true) {
 		return nil
 	}
+	// Take the write lock so no enqueue is mid-flight (they hold the read lock and
+	// re-check closed) before closing the channel — prevents a send-on-closed panic.
+	p.closeMu.Lock()
 	close(p.queue)
+	p.closeMu.Unlock()
 
 	done := make(chan struct{})
 	utils.GoSafe("producer-close-wait", func() {
@@ -559,7 +636,7 @@ func (p *Producer) CloseWithContext(ctx context.Context) error {
 func (p *Producer) worker() {
 	defer p.wg.Done()
 	for req := range p.queue {
-		ctx, cancel := context.WithTimeout(context.Background(), p.client.cfg.RequestTimeout)
+		ctx, cancel := context.WithTimeout(req.ctx, p.client.cfg.RequestTimeout)
 		res, err := p.Send(ctx, req.msg)
 		cancel()
 		p.releaseQueuedBytes(req.sizeHint)
@@ -807,9 +884,11 @@ type deliveryOutcome struct {
 }
 
 // DeliveryFuture is returned by async sends for later awaiting.
+// DeliveryFuture is completed when an async Send finishes (success or error).
+// Wait blocks until completion or context cancellation.
 type DeliveryFuture struct {
-	once sync.Once
-	ch   chan deliveryOutcome
+	once sync.Once            // ensures complete runs at most once
+	ch   chan deliveryOutcome // buffered outcome channel
 }
 
 func newDeliveryFuture() *DeliveryFuture {

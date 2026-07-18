@@ -11,8 +11,8 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// mmapFile memory maps a file for reading/writing on Windows.
-// Uses CreateFileMapping and MapViewOfFile for true memory-mapped I/O.
+// mmapFile memory-maps a file for reading and writing on Windows via
+// CreateFileMapping and MapViewOfFile.
 func mmapFile(file *os.File, size int64) ([]byte, error) {
 	if size <= 0 {
 		return nil, fmt.Errorf("invalid mmap size: %d", size)

@@ -1,3 +1,6 @@
+// Package partition owns local partition lifecycle: WAL, scheduling, delivery,
+// consumer groups, dedup, snapshots, backpressure, disk pressure, and split.
+// PartitionManager is the entry point for create/start/stop and admission control.
 package partition
 
 import (
@@ -26,35 +29,60 @@ import (
 	"github.com/cockroachdb/pebble"
 )
 
-// Partition represents a data partition
+// Partition is a local data partition with its durable log, timer wheel,
+// consumers, and delivery pipeline.
 type Partition struct {
-	ID            int32
-	Topic         string
-	DataDir       string
-	Wal           *storage.WAL
-	Scheduler     *scheduler.Scheduler
+	// ID is the stable partition identifier (hash-derived or cluster-assigned).
+	ID int32
+	// Topic is the logical topic (or key label) associated with this partition.
+	Topic string
+	// DataDir is the on-disk root for this partition's WAL, indexes, and stores.
+	DataDir string
+	// Wal is the segmented write-ahead log for this partition.
+	Wal *storage.WAL
+	// Scheduler holds the timing wheel and ready queue for delayed delivery.
+	Scheduler *scheduler.Scheduler
+	// ConsumerGroup manages consumer groups and committed offsets.
 	ConsumerGroup *consumer.GroupManager
-	DedupStore    *dedup.Manager
-	Dispatcher    *delivery.Dispatcher
-	Worker        *delivery.Worker
-	Follower      *replication.Follower // For receiving replicated data
-	ReplLeader    *replication.Leader   // For sending replication to followers
+	// DedupStore tracks recently accepted message IDs for exactly-once publish.
+	DedupStore *dedup.Manager
+	// Dispatcher delivers events to subscribers and tracks in-flight work.
+	Dispatcher *delivery.Dispatcher
+	// Worker pulls ready events and hands them to the Dispatcher in batches.
+	Worker *delivery.Worker
+	// DLQ is the durable dead-letter queue for poison messages after max retries.
+	DLQ *delivery.DeadLetterQueue
+	// Follower receives replicated Append RPCs when this node is not leader.
+	Follower *replication.Follower
+	// ReplLeader sends replication to followers when this node leads the partition.
+	ReplLeader *replication.Leader
 	// ReplicateMu serializes WAL append + replication for this partition when it
 	// is a replication leader, so events reach followers in strict offset order
 	// (Leader.Replicate requires contiguous offsets and is not safe to call
 	// concurrently out of order). It is only taken on the replicated write path;
 	// RF=1 / non-leader partitions (ReplLeader == nil) never acquire it, keeping
 	// the single-node fast path fully pipelined.
-	ReplicateMu      sync.Mutex
-	Leader           bool
-	Epoch            int64  // Cluster-assigned epoch for split-brain fencing
-	MinKey           string // Minimum key boundary (inclusive)
-	MaxKey           string // Maximum key boundary (exclusive)
-	CreatedTS        time.Time
-	UpdatedTS        time.Time
-	deliveryQuit     chan struct{} // Quit channel for delivery goroutine
+	ReplicateMu sync.Mutex
+	// Leader is true when this node is the current leader for the partition.
+	Leader bool
+	// Epoch is the cluster-assigned epoch for split-brain fencing (Raft term).
+	Epoch int64
+	// MinKey is the inclusive lower key boundary for range-partitioned keys.
+	// Empty means no lower bound.
+	MinKey string
+	// MaxKey is the exclusive upper key boundary for range-partitioned keys.
+	// Empty means no upper bound.
+	MaxKey string
+	// CreatedTS is when this partition instance was first created on this node.
+	CreatedTS time.Time
+	// UpdatedTS is when partition metadata (e.g. bounds) was last updated.
+	UpdatedTS time.Time
+	// deliveryQuit is closed to stop delivery, compaction, and snapshot loops.
+	deliveryQuit chan struct{}
+	// deliveryQuitOnce ensures deliveryQuit is closed at most once.
 	deliveryQuitOnce sync.Once
-	replayErr        atomic.Pointer[error]
+	// replayErr holds the last WAL timer-replay error, if any.
+	replayErr atomic.Pointer[error]
 }
 
 // GetReplayError returns the last WAL replay error for this partition, if any.
@@ -103,17 +131,18 @@ func (p *Partition) IsKeyInBounds(key string) bool {
 	return true
 }
 
-// PartitionManager manages all partitions
+// PartitionManager manages local partitions: create/start/stop, admission
+// control, leadership promotion, and recovery (snapshot + WAL replay).
 type PartitionManager struct {
 	mu               sync.RWMutex
-	partitions       map[int32]*Partition
-	nodeID           string
-	config           *types.Config
-	pebbleCache      *pebble.Cache
-	tenantAccountant tenantAccountant
-	splitting        map[int32]bool // tracks partitions currently undergoing split
-	splittingMu      sync.RWMutex
-	backpressureMgr  *BackpressureManager
+	partitions       map[int32]*Partition // partitionID -> live partition
+	nodeID           string               // local node identity for replication
+	config           *types.Config        // shared server configuration
+	pebbleCache      *pebble.Cache        // optional shared Pebble block cache
+	tenantAccountant tenantAccountant     // optional delivery accounting hook
+	splitting        map[int32]bool       // partitions currently undergoing split
+	splittingMu      sync.RWMutex         // protects splitting map
+	backpressureMgr  *BackpressureManager // memory + per-partition rate limits
 	fsyncCoalescer   *storage.FsyncCoalescer
 }
 
@@ -122,7 +151,8 @@ type tenantAccountant interface {
 	RecordDelivery(tenant tenant.ID)
 }
 
-// NewPartitionManager creates a new partition manager
+// NewPartitionManager creates a partition manager for the given node.
+// When config.FlushIntervalMS > 0, a shared FsyncCoalescer is started.
 func NewPartitionManager(nodeID string, config *types.Config) *PartitionManager {
 	pm := &PartitionManager{
 		partitions:      make(map[int32]*Partition),
@@ -238,9 +268,16 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 	// Create consumer group manager with persistent offset store
 	consumerGroup := consumer.NewGroupManagerWithStore(offsetStore)
 
-	// Create dispatcher
+	// Create dispatcher with a durable dead-letter queue so poison messages
+	// (delivery failed after max retries) are captured on disk instead of being
+	// silently dropped. Retry is operator-driven (no auto-retry loop) to avoid
+	// re-driving genuinely-poison messages forever.
 	dispatcherConfig := delivery.DefaultConfig()
-	dispatcher := delivery.NewDispatcher(dispatcherConfig)
+	dlq, err := delivery.NewDeadLetterQueue(dataDir, 0) // 0 → default max entries
+	if err != nil {
+		return fmt.Errorf("create dead-letter queue: %w", err)
+	}
+	dispatcher := delivery.NewDispatcherWithDLQ(dispatcherConfig, dlq)
 
 	// Create worker. Batch size of 100 amortizes DispatchBatch overhead
 	// (metrics observe, map allocations, in-flight CAS, shard write-lock)
@@ -265,6 +302,7 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 		ConsumerGroup: consumerGroup,
 		DedupStore:    dedupManager,
 		Dispatcher:    dispatcher,
+		DLQ:           dlq,
 		Worker:        worker,
 		Leader:        false,
 		CreatedTS:     time.Now(),
@@ -282,7 +320,8 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 	return nil
 }
 
-// CreatePartition creates a new partition (public method with lock management)
+// CreatePartition creates a new local partition with WAL, scheduler, and
+// delivery components. The partition is not started until StartPartition.
 func (pm *PartitionManager) CreatePartition(partitionID int32, topic string) error {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
@@ -290,7 +329,7 @@ func (pm *PartitionManager) CreatePartition(partitionID int32, topic string) err
 	return pm.createPartitionLocked(partitionID, topic)
 }
 
-// GetPartition gets a partition by ID
+// GetPartition returns the public types.Partition view for partitionID.
 func (pm *PartitionManager) GetPartition(partitionID int32) (*types.Partition, error) {
 	partition, err := pm.GetInternalPartition(partitionID)
 	if err != nil {
@@ -300,7 +339,8 @@ func (pm *PartitionManager) GetPartition(partitionID int32) (*types.Partition, e
 	return pm.toTypesPartition(partition), nil
 }
 
-// GetInternalPartition gets the internal partition object
+// GetInternalPartition returns the internal Partition object for advanced use
+// (WAL access, replication wiring). Returns ErrPartitionNotFound if missing.
 func (pm *PartitionManager) GetInternalPartition(partitionID int32) (*Partition, error) {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
@@ -564,6 +604,11 @@ func (pm *PartitionManager) startPartitionInternal(partition *Partition) error {
 		pm.replayWALTimers(partition)
 	}
 
+	// Re-seed the dedup store from the WAL tail. The dedup Pebble store runs with
+	// DisableWAL + NoSync for throughput, so claims made just before a crash may be
+	// missing; the WAL is the durable record of what was actually accepted.
+	pm.recoverDedupFromWAL(partition)
+
 	// Start scheduler
 	partition.Scheduler.Start()
 
@@ -635,6 +680,70 @@ func (pm *PartitionManager) startPartitionInternal(partition *Partition) error {
 	return nil
 }
 
+// maxDedupRecoveryEvents bounds how many trailing WAL events are re-driven into
+// the dedup store on boot. The dedup store uses PebbleDB with DisableWAL + NoSync
+// for throughput, so recent claims can be lost on a crash; on restart we re-Put
+// the message IDs of the WAL tail (the durable source of truth) so duplicates are
+// still detected. The bound caps boot time on very large WALs — anything older is
+// almost certainly already flushed to the dedup Pebble store or past the TTL.
+const maxDedupRecoveryEvents = 500000
+
+// recoverDedupFromWAL re-populates the dedup store from the tail of the WAL so
+// message IDs accepted just before a crash (and lost from the NoSync dedup
+// Pebble memtable) are still recognized as duplicates after restart. It is
+// bounded by maxDedupRecoveryEvents and skips events already older than the
+// dedup TTL, since those would be pruned from the dedup store anyway.
+func (pm *PartitionManager) recoverDedupFromWAL(partition *Partition) {
+	if partition.DedupStore == nil || partition.Wal == nil {
+		return
+	}
+	lastOffset := partition.Wal.GetLastOffset()
+	if lastOffset < 0 {
+		return
+	}
+
+	startOffset := int64(0)
+	if lastOffset-maxDedupRecoveryEvents+1 > 0 {
+		startOffset = lastOffset - maxDedupRecoveryEvents + 1
+	}
+
+	ttlMs := int64(pm.config.DedupTTLHours) * 60 * 60 * 1000
+	minCreatedTS := int64(0)
+	if ttlMs > 0 {
+		minCreatedTS = time.Now().UnixMilli() - ttlMs
+	}
+
+	recovered := 0
+	const batch int64 = 10000
+	for from := startOffset; from <= lastOffset; from += batch {
+		to := min(from+batch-1, lastOffset)
+		events, err := partition.Wal.ReadEvents(from, to)
+		if err != nil {
+			log.Printf("[Partition %d] Dedup recovery read failed at offsets %d-%d: %v", partition.ID, from, to, err)
+			return
+		}
+		for _, ev := range events {
+			mid := ev.GetMessageId()
+			if mid == "" {
+				continue
+			}
+			// Skip entries already past the dedup TTL — they carry no dedup value.
+			if minCreatedTS > 0 && ev.GetCreatedTs() > 0 && ev.GetCreatedTs() < minCreatedTS {
+				continue
+			}
+			if err := partition.DedupStore.Put(mid, ev.Offset, ev.GetCreatedTs()); err != nil {
+				log.Printf("[Partition %d] Dedup recovery Put failed for %q: %v", partition.ID, mid, err)
+				continue
+			}
+			recovered++
+		}
+	}
+	if recovered > 0 {
+		log.Printf("[Partition %d] Dedup recovery: re-seeded %d message IDs from WAL tail (offsets %d-%d)",
+			partition.ID, recovered, startOffset, lastOffset)
+	}
+}
+
 // replayWALTimers reads all events from the WAL and re-schedules any whose
 // schedule_ts is still in the future. This recovers timers lost during a crash.
 // Uses incremental checkpointing to avoid O(N) replay on each boot.
@@ -660,7 +769,7 @@ func (pm *PartitionManager) replayWALTimers(partition *Partition) {
 
 	now := time.Now().UnixMilli()
 	scheduledCount := 0
-	expiredCount := 0
+	maturedCount := 0
 	lastScheduled := startOffset - 1
 
 	const replayBatchSize int64 = 10000
@@ -676,15 +785,19 @@ func (pm *PartitionManager) replayWALTimers(partition *Partition) {
 		}
 
 		for _, event := range events {
+			// Schedule every replayed event. Scheduler.Schedule routes future
+			// events into the timing wheel and events whose schedule_ts has already
+			// passed (matured while the node was down) straight to the ready queue
+			// for immediate delivery. Previously matured events were only counted
+			// and dropped, so any timer that came due during downtime was lost.
+			if err := partition.Scheduler.Schedule(event); err != nil {
+				log2.Warn("WAL replay scheduler error", "partition", partition.ID, "offset", event.Offset, "error", err)
+				continue
+			}
 			if event.GetScheduleTs() > now {
-				// Future event — re-schedule it
-				if err := partition.Scheduler.Schedule(event); err != nil {
-					log2.Warn("WAL replay scheduler error", "partition", partition.ID, "offset", event.Offset, "error", err)
-					continue
-				}
 				scheduledCount++
 			} else {
-				expiredCount++
+				maturedCount++
 			}
 			lastScheduled = event.Offset
 		}
@@ -693,8 +806,8 @@ func (pm *PartitionManager) replayWALTimers(partition *Partition) {
 	// Update checkpoint incrementally
 	pm.writeTimerCheckpoint(partition, lastScheduled)
 
-	log.Printf("[Partition %d] WAL replay complete: %d future events re-scheduled, %d already expired (offsets %d-%d)",
-		partition.ID, scheduledCount, expiredCount, startOffset, lastScheduled)
+	log.Printf("[Partition %d] WAL replay complete: %d future events re-scheduled, %d matured-during-downtime enqueued (offsets %d-%d)",
+		partition.ID, scheduledCount, maturedCount, startOffset, lastScheduled)
 }
 
 // replayWALTimersFromOffset replays WAL events starting from a specific offset
@@ -712,7 +825,7 @@ func (pm *PartitionManager) replayWALTimersFromOffset(partition *Partition, star
 
 	now := time.Now().UnixMilli()
 	scheduledCount := 0
-	expiredCount := 0
+	maturedCount := 0
 	lastScheduled := startOffset - 1
 
 	const replayBatchSize int64 = 10000
@@ -728,15 +841,16 @@ func (pm *PartitionManager) replayWALTimersFromOffset(partition *Partition, star
 		}
 
 		for _, event := range events {
+			// See replayWALTimers: schedule every event so matured-during-downtime
+			// timers are enqueued for immediate delivery rather than dropped.
+			if err := partition.Scheduler.Schedule(event); err != nil {
+				log2.Warn("WAL replay scheduler error", "partition", partition.ID, "offset", event.Offset, "error", err)
+				continue
+			}
 			if event.GetScheduleTs() > now {
-				// Future event — re-schedule it
-				if err := partition.Scheduler.Schedule(event); err != nil {
-					log2.Warn("WAL replay scheduler error", "partition", partition.ID, "offset", event.Offset, "error", err)
-					continue
-				}
 				scheduledCount++
 			} else {
-				expiredCount++
+				maturedCount++
 			}
 			lastScheduled = event.Offset
 		}
@@ -745,17 +859,20 @@ func (pm *PartitionManager) replayWALTimersFromOffset(partition *Partition, star
 	// Update checkpoint incrementally
 	pm.writeTimerCheckpoint(partition, lastScheduled)
 
-	log.Printf("[Partition %d] WAL replay from offset %d complete: %d future events re-scheduled, %d already expired (offsets %d-%d)",
-		partition.ID, startOffset, scheduledCount, expiredCount, startOffset, lastScheduled)
+	log.Printf("[Partition %d] WAL replay from offset %d complete: %d future events re-scheduled, %d matured-during-downtime enqueued (offsets %d-%d)",
+		partition.ID, startOffset, scheduledCount, maturedCount, startOffset, lastScheduled)
 }
 
-// TimerCheckpoint stores the incremental replay progress
+// TimerCheckpoint stores incremental WAL timer-replay progress so restarts
+// need not re-scan the entire log.
 type TimerCheckpoint struct {
+	// LastScheduledOffset is the highest WAL offset whose timer was re-scheduled.
 	LastScheduledOffset int64 `json:"last_scheduled_offset"`
-	LastCheckpointTime  int64 `json:"last_checkpoint_time"`
+	// LastCheckpointTime is when this checkpoint was written (Unix milliseconds).
+	LastCheckpointTime int64 `json:"last_checkpoint_time"`
 }
 
-// readTimerCheckpoint reads the timer replay checkpoint
+// readTimerCheckpoint reads the timer replay checkpoint from disk, if present.
 func (pm *PartitionManager) readTimerCheckpoint(partition *Partition) *TimerCheckpoint {
 	cpPath := fmt.Sprintf("%s/timer_replay_checkpoint.json", partition.DataDir)
 	data, err := os.ReadFile(cpPath)
@@ -769,7 +886,7 @@ func (pm *PartitionManager) readTimerCheckpoint(partition *Partition) *TimerChec
 	return &cp
 }
 
-// writeTimerCheckpoint writes the timer replay checkpoint
+// writeTimerCheckpoint atomically writes the timer replay checkpoint to disk.
 func (pm *PartitionManager) writeTimerCheckpoint(partition *Partition, lastOffset int64) {
 	cp := TimerCheckpoint{
 		LastScheduledOffset: lastOffset,
@@ -786,13 +903,14 @@ func (pm *PartitionManager) writeTimerCheckpoint(partition *Partition, lastOffse
 	}
 }
 
-// runCompaction calculates the minimum consumed offset across all consumer groups
-// and safely removes obsolete WAL segments.
-// RunCompaction triggers compaction on this partition (exported for external callers).
+// RunCompaction triggers WAL compaction based on the minimum committed consumer
+// offset across groups assigned to this partition (exported for external callers).
 func (p *Partition) RunCompaction() {
 	p.runCompaction()
 }
 
+// runCompaction calculates the minimum consumed offset across all consumer groups
+// and safely removes obsolete WAL segments.
 func (p *Partition) runCompaction() {
 	groups := p.ConsumerGroup.ListGroups()
 
@@ -842,7 +960,7 @@ func (p *Partition) runCompaction() {
 	}
 }
 
-// ListPartitions lists all partitions
+// ListPartitions returns a snapshot of all local partitions.
 func (pm *PartitionManager) ListPartitions() []*Partition {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
@@ -855,7 +973,8 @@ func (pm *PartitionManager) ListPartitions() []*Partition {
 	return partitions
 }
 
-// StartPartition starts a partition
+// StartPartition starts background workers (scheduler, delivery, compaction,
+// snapshot) for an existing partition, replaying WAL timers as needed.
 func (pm *PartitionManager) StartPartition(partitionID int32) error {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
@@ -863,7 +982,8 @@ func (pm *PartitionManager) StartPartition(partitionID int32) error {
 	return pm.startPartitionLocked(partitionID)
 }
 
-// StopPartition stops a partition
+// StopPartition gracefully stops delivery, drains in-flight work, and closes
+// durable stores and the WAL for the given partition.
 func (pm *PartitionManager) StopPartition(partitionID int32) error {
 	partition, err := pm.GetInternalPartition(partitionID)
 	if err != nil {
@@ -892,6 +1012,14 @@ func (pm *PartitionManager) StopPartition(partitionID int32) error {
 		partition.Dispatcher.Close()
 	}
 
+	// Close the dead-letter queue so its segment writer flushes and releases the
+	// data directory before WAL close / temp cleanup.
+	if partition.DLQ != nil {
+		if err := partition.DLQ.Close(); err != nil {
+			log.Printf("[Partition %d] DLQ close failed: %v", partition.ID, err)
+		}
+	}
+
 	// Close durable stores before the WAL so background goroutines stop
 	// touching the data directory. Otherwise snapshot/dedup/offset workers can
 	// still be writing when the test's TempDir cleanup runs and we leak files
@@ -917,7 +1045,7 @@ func (pm *PartitionManager) StopPartition(partitionID int32) error {
 	return nil
 }
 
-// StopAllPartitions stops all active partitions concurrently and gracefully
+// StopAllPartitions stops all active partitions concurrently and gracefully.
 func (pm *PartitionManager) StopAllPartitions() error {
 	partitions := pm.ListPartitions()
 
@@ -966,7 +1094,7 @@ func (pm *PartitionManager) Close() error {
 	return nil
 }
 
-// GetStats returns partition manager statistics
+// GetStats returns aggregate partition manager statistics.
 func (pm *PartitionManager) GetStats() *PartitionManagerStats {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
@@ -989,14 +1117,18 @@ func (pm *PartitionManager) countLeaderPartitions() int64 {
 	return count
 }
 
-// PartitionManagerStats represents partition manager statistics
+// PartitionManagerStats holds aggregate counts for monitoring.
 type PartitionManagerStats struct {
-	TotalPartitions  int64
+	// TotalPartitions is the number of local partitions currently loaded.
+	TotalPartitions int64
+	// LeaderPartitions is how many of those partitions this node leads.
 	LeaderPartitions int64
+	// ActivePartitions is currently equal to TotalPartitions (all loaded are active).
 	ActivePartitions int64
 }
 
-// GetOrCreatePartition gets an existing partition or creates a new one for sync
+// GetOrCreatePartition ensures a local partition exists (creating it if needed)
+// for replication sync. The partition is not automatically started.
 func (pm *PartitionManager) GetOrCreatePartition(partitionID int32) error {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
@@ -1077,10 +1209,17 @@ func (pm *PartitionManager) PromoteToLeader(partitionID int32, epoch int64) erro
 	if partition.ReplLeader != nil {
 		partition.Leader = true
 		partition.Epoch = epoch
+		// Propagate the epoch into the replication leader so its outgoing Append
+		// RPCs carry the true term. Without this the leader keeps the epoch it was
+		// created with (1) forever, so a genuinely-stale leader and a new leader
+		// both advertise term 1 and the follower's stale-term fence can't tell them
+		// apart — the split-brain guard is defeated.
+		partition.ReplLeader.SetEpoch(epoch)
 		return nil // Already leader, just update epoch
 	}
 
 	leader := replication.NewLeader(partitionID, int32(pm.config.ReplicationBatchSize), pm.config.ReplicationTimeout, partition.Wal, pm.config.MinInSyncReplicas, pm.nodeID, pm.replicationTLSConfig())
+	leader.SetEpoch(epoch) // advertise the real cluster epoch on the wire, not the default 1
 	leader.Start()
 	partition.ReplLeader = leader
 	partition.Leader = true
@@ -1187,14 +1326,20 @@ func (pm *PartitionManager) GetPartitionInSyncReplicas(partitionID int32) []stri
 	return isr
 }
 
-// PartitionLoadStatus exposes backpressure signals for a partition.
+// PartitionLoadStatus exposes backpressure and queue-depth signals for a partition.
 type PartitionLoadStatus struct {
-	PartitionID        int32
-	ReadyQueueDepth    int64
-	TimingWheelDepth   int64
+	// PartitionID is the partition these metrics describe.
+	PartitionID int32
+	// ReadyQueueDepth is events waiting in the scheduler ready queue.
+	ReadyQueueDepth int64
+	// TimingWheelDepth is events still waiting in the timing wheel.
+	TimingWheelDepth int64
+	// InFlightDeliveries is active delivery attempts not yet acked/failed.
 	InFlightDeliveries int64
-	DLQSize            int64
-	CanAccept          bool
+	// DLQSize is the number of entries in the dead-letter queue.
+	DLQSize int64
+	// CanAccept is false when admission control would reject a new publish.
+	CanAccept bool
 }
 
 // GetLoadStatus returns backpressure metrics for a partition.
@@ -1223,12 +1368,13 @@ func (pm *PartitionManager) GetLoadStatus(partitionID int32) (*PartitionLoadStat
 	return status, nil
 }
 
-// NewPartitionManagerWithAccessor creates a new partition manager that implements PartitionAccessor
+// NewPartitionManagerWithAccessor creates a partition manager that implements
+// PartitionAccessor (same as NewPartitionManager; kept for API clarity).
 func NewPartitionManagerWithAccessor(nodeID string, config *types.Config) *PartitionManager {
 	return NewPartitionManager(nodeID, config)
 }
 
-// GetDataDir returns the configured data directory
+// GetDataDir returns the configured data directory, or "" if unset.
 func (pm *PartitionManager) GetDataDir() string {
 	if pm.config != nil {
 		return pm.config.DataDir

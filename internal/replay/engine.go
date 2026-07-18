@@ -1,3 +1,5 @@
+// Package replay provides time-range and offset-based event replay over a WAL,
+// including streaming delivery suitable for gRPC replay APIs.
 package replay
 
 import (
@@ -10,20 +12,22 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 )
 
-// ReplayEngine provides event replay functionality
+// ReplayEngine reads historical events from a partition WAL for offline or
+// online replay by time range or offset range.
 type ReplayEngine struct {
 	mu  sync.RWMutex
 	wal *storage.WAL
 }
 
-// NewReplayEngine creates a new replay engine
+// NewReplayEngine creates a ReplayEngine backed by the given WAL.
 func NewReplayEngine(wal *storage.WAL) *ReplayEngine {
 	return &ReplayEngine{
 		wal: wal,
 	}
 }
 
-// ReplayByTimeRange replays events in a time range
+// ReplayByTimeRange returns events whose schedule timestamps fall in [startTS, endTS].
+// It prefers the WAL time index and falls back to a batched offset scan on failure.
 func (r *ReplayEngine) ReplayByTimeRange(ctx context.Context, startTS, endTS int64) ([]*types.Event, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -89,7 +93,8 @@ func (r *ReplayEngine) ReplayByTimeRange(ctx context.Context, startTS, endTS int
 	return filtered, nil
 }
 
-// ReplayByOffset replays events starting from an offset
+// ReplayByOffset returns up to count events starting at startOffset (inclusive),
+// capped at the WAL's last available offset.
 func (r *ReplayEngine) ReplayByOffset(ctx context.Context, startOffset, count int64) ([]*types.Event, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -115,7 +120,8 @@ func (r *ReplayEngine) ReplayByOffset(ctx context.Context, startOffset, count in
 	return events, nil
 }
 
-// ReplayStream streams events for replay (for gRPC streaming)
+// ReplayStream loads events for req and sends them on eventCh, optionally paced
+// by req.Speed. It always closes eventCh when finished.
 func (r *ReplayEngine) ReplayStream(ctx context.Context, req *ReplayRequest, eventCh chan<- *ReplayEvent) error {
 	defer close(eventCh)
 
@@ -192,21 +198,32 @@ func (r *ReplayEngine) ReplayStream(ctx context.Context, req *ReplayRequest, eve
 	return nil
 }
 
-// ReplayRequest represents replay request
+// ReplayRequest describes a time-based or offset-based replay operation.
 type ReplayRequest struct {
-	Topic          string
-	PartitionID    int32
-	StartTS        int64
-	EndTS          int64
-	StartOffset    int64
-	Count          int64
-	ConsumerGroup  string
+	// Topic is the logical topic being replayed (informational for multi-topic setups).
+	Topic string
+	// PartitionID is the partition whose WAL is replayed.
+	PartitionID int32
+	// StartTS is the inclusive lower bound schedule timestamp for time-based replay.
+	StartTS int64
+	// EndTS is the inclusive upper bound schedule timestamp; 0 means "now" for streaming.
+	EndTS int64
+	// StartOffset is the first WAL offset for offset-based replay.
+	StartOffset int64
+	// Count is the maximum number of events for offset-based replay (default 1000 when <= 0).
+	Count int64
+	// ConsumerGroup is an optional consumer group associated with the replay request.
+	ConsumerGroup string
+	// SubscriptionID is an optional subscription identifier for the replay client.
 	SubscriptionID string
-	Speed          float64 // 0=fastest, 1=real-time
+	// Speed controls streaming pace: 0 is fastest, 1 is approximately real-time pacing.
+	Speed float64
 }
 
-// ReplayEvent represents replayed event
+// ReplayEvent is a single event emitted during a streaming replay, with its replay sequence index.
 type ReplayEvent struct {
-	Event        *types.Event
+	// Event is the original stored event being replayed.
+	Event *types.Event
+	// ReplayOffset is the zero-based index of this event within the current replay stream.
 	ReplayOffset int64
 }

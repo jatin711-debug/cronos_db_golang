@@ -4,19 +4,21 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"time"
 )
 
-// PartitionAccessor interface for triggering partition sync operations
+// PartitionAccessor is the bridge between the cluster router/manager and local
+// partition lifecycle operations (sync, promote/demote, ISR/offset queries).
 type PartitionAccessor interface {
-	// SyncPartitionFromLeader syncs a partition from its leader
+	// SyncPartitionFromLeader syncs a local partition's data from its leader.
 	SyncPartitionFromLeader(partitionID int32, leaderAddr string) error
-	// GetOrCreatePartition gets or creates a local partition
+	// GetOrCreatePartition gets or creates a local partition instance.
 	GetOrCreatePartition(partitionID int32) error
-	// PromoteToLeader promotes a local partition to leader and starts replication
+	// PromoteToLeader promotes a local partition to leader and starts replication.
 	PromoteToLeader(partitionID int32, epoch int64) error
-	// AddFollower adds a follower to a local leader partition
+	// AddFollower adds a follower to a local leader partition.
 	AddFollower(partitionID int32, followerID string, followerAddr string) error
-	// DemoteFromLeader demotes a local partition from leader
+	// DemoteFromLeader demotes a local partition from leader.
 	DemoteFromLeader(partitionID int32) error
 	// GetPartitionReplicaOffsets returns the latest replica offsets for a local partition.
 	GetPartitionReplicaOffsets(partitionID int32) map[string]int64
@@ -25,7 +27,8 @@ type PartitionAccessor interface {
 	GetPartitionInSyncReplicas(partitionID int32) []string
 }
 
-// Router handles routing requests to the correct node/partition
+// Router maps topics/keys to partitions and partitions to owning nodes using a
+// consistent hash ring kept in sync with membership events.
 type Router struct {
 	mu                sync.RWMutex
 	hashRing          *HashRing
@@ -114,14 +117,70 @@ func (r *Router) initializePartitions() {
 	log.Printf("[ROUTER] Initialized %d partitions across %d nodes", r.numPartitions, r.hashRing.Size())
 }
 
-// watchMembershipEvents watches for membership changes and rebalances
+// watchMembershipEvents watches for membership changes and rebalances. It also
+// runs a periodic full reconcile of the hash ring against the authoritative
+// alive-node set: membership events are delivered over a bounded channel that
+// drops on overflow, so an event-only ring could diverge permanently (stale ring
+// → wrong partition owners → split-brain). The reconcile makes any dropped event
+// self-healing.
 func (r *Router) watchMembershipEvents() {
-	for event := range r.membership.Events() {
-		switch event.Type {
-		case EventTypeJoin:
-			r.onNodeJoin(event.Node)
-		case EventTypeLeave, EventTypeFailed:
-			r.onNodeLeave(event.Node)
+	ticker := time.NewTicker(ringReconcileInterval)
+	defer ticker.Stop()
+
+	events := r.membership.Events()
+	for {
+		select {
+		case event, ok := <-events:
+			if !ok {
+				return
+			}
+			switch event.Type {
+			case EventTypeJoin:
+				r.onNodeJoin(event.Node)
+			case EventTypeLeave, EventTypeFailed:
+				r.onNodeLeave(event.Node)
+			}
+		case <-ticker.C:
+			r.reconcileRing()
+		}
+	}
+}
+
+// ringReconcileInterval is how often the router re-syncs its hash ring with the
+// authoritative membership view to recover from any dropped membership events.
+const ringReconcileInterval = 10 * time.Second
+
+// reconcileRing brings the hash ring into agreement with the current alive-node
+// set, adding nodes that are alive but missing from the ring and removing nodes
+// in the ring that are no longer alive. It is idempotent and only rebalances
+// when there is an actual delta, so steady-state ticks are cheap.
+func (r *Router) reconcileRing() {
+	alive := r.membership.GetAliveNodes()
+	aliveSet := make(map[string]*Node, len(alive))
+	for _, n := range alive {
+		aliveSet[n.ID] = n
+	}
+
+	r.mu.RLock()
+	ringNodes := r.hashRing.Nodes()
+	r.mu.RUnlock()
+	ringSet := make(map[string]bool, len(ringNodes))
+	for _, id := range ringNodes {
+		ringSet[id] = true
+	}
+
+	// Alive but not in the ring → treat as a (missed) join.
+	for id, n := range aliveSet {
+		if !ringSet[id] {
+			log.Printf("[ROUTER] Reconcile: adding missing node %s to ring", id)
+			r.onNodeJoin(n)
+		}
+	}
+	// In the ring but no longer alive → treat as a (missed) leave.
+	for _, id := range ringNodes {
+		if _, ok := aliveSet[id]; !ok {
+			log.Printf("[ROUTER] Reconcile: removing dead node %s from ring", id)
+			r.onNodeLeave(&Node{ID: id})
 		}
 	}
 }
@@ -491,11 +550,16 @@ func (r *Router) RouteRequest(topic string) (*RouteInfo, error) {
 	}, nil
 }
 
-// RouteInfo contains routing information for a request
+// RouteInfo contains routing information for a publish or related request.
 type RouteInfo struct {
+	// PartitionID is the target partition for the request.
 	PartitionID int32
-	LeaderID    string
-	LeaderAddr  string
-	IsLocal     bool
-	Replicas    []string
+	// LeaderID is the node ID of the partition leader.
+	LeaderID string
+	// LeaderAddr is the gRPC address of the partition leader.
+	LeaderAddr string
+	// IsLocal is true when this node is the partition leader.
+	IsLocal bool
+	// Replicas is the full replica set for the partition (node IDs).
+	Replicas []string
 }

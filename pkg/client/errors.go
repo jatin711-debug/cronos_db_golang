@@ -5,27 +5,39 @@ import (
 	"fmt"
 )
 
-// ErrorKind classifies client errors for policy decisions.
+// ErrorKind classifies client errors for retry and policy decisions.
 type ErrorKind string
 
 const (
-	ErrorKindValidation    ErrorKind = "validation"
-	ErrorKindTimeout       ErrorKind = "timeout"
-	ErrorKindAuth          ErrorKind = "auth"
-	ErrorKindUnavailable   ErrorKind = "unavailable"
-	ErrorKindLeaderChange  ErrorKind = "leader_change"
+	// ErrorKindValidation indicates invalid client configuration or arguments.
+	ErrorKindValidation ErrorKind = "validation"
+	// ErrorKindTimeout indicates a deadline was exceeded.
+	ErrorKindTimeout ErrorKind = "timeout"
+	// ErrorKindAuth indicates authentication or authorization failure.
+	ErrorKindAuth ErrorKind = "auth"
+	// ErrorKindUnavailable indicates the target is temporarily unreachable.
+	ErrorKindUnavailable ErrorKind = "unavailable"
+	// ErrorKindLeaderChange indicates partition leadership moved; refresh metadata and retry.
+	ErrorKindLeaderChange ErrorKind = "leader_change"
+	// ErrorKindMetadataStale indicates cached routing metadata is out of date.
 	ErrorKindMetadataStale ErrorKind = "metadata_stale"
-	ErrorKindTransport     ErrorKind = "transport"
-	ErrorKindInternal      ErrorKind = "internal"
+	// ErrorKindTransport indicates a low-level gRPC/network failure.
+	ErrorKindTransport ErrorKind = "transport"
+	// ErrorKindInternal indicates an unexpected client or server internal error.
+	ErrorKindInternal ErrorKind = "internal"
 )
 
-// Error is a typed client error.
+// Error is a typed client error with operation name and classification.
 type Error struct {
+	// Kind classifies the failure for retry/policy logic.
 	Kind ErrorKind
-	Op   string
-	Err  error
+	// Op is a short operation name (e.g. "producer.send") for diagnostics.
+	Op string
+	// Err is the underlying cause.
+	Err error
 }
 
+// Error implements the error interface.
 func (e *Error) Error() string {
 	if e == nil {
 		return ""
@@ -36,8 +48,10 @@ func (e *Error) Error() string {
 	return fmt.Sprintf("%s (%s): %v", e.Op, e.Kind, e.Err)
 }
 
+// Unwrap returns the underlying cause for errors.Is / errors.As.
 func (e *Error) Unwrap() error { return e.Err }
 
+// wrapError wraps err as a typed Error unless it is already one.
 func wrapError(op string, kind ErrorKind, err error) error {
 	if err == nil {
 		return nil

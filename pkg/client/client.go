@@ -4,9 +4,9 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
@@ -23,14 +23,15 @@ import (
 )
 
 // Client is the CronosDB SDK entry point for metadata-aware routing and transport.
+// Create one with Dial, then derive Producer/Consumer instances or call Replay.
 type Client struct {
-	cfg        Config
-	pool       *connpool.Pool
-	metadata   *metadata.Manager
-	breakerMgr *circuitbreaker.Manager
+	cfg        Config                  // resolved runtime settings
+	pool       *connpool.Pool          // per-node gRPC connection pool
+	metadata   *metadata.Manager       // partition/leader metadata cache
+	breakerMgr *circuitbreaker.Manager // optional per-address circuit breakers
 
-	bgCancel  context.CancelFunc
-	closeOnce sync.Once
+	bgCancel  context.CancelFunc // stops background metadata refresh
+	closeOnce sync.Once          // ensures Close is idempotent
 }
 
 // Dial creates and initializes a client with pooled connections and metadata cache.
@@ -166,14 +167,14 @@ func (c *Client) eventClientForAddress(addr string) (types.EventServiceClient, e
 	if err == nil {
 		return client, nil
 	}
-	if !strings.Contains(err.Error(), "not found in pool") {
+	if !errors.Is(err, connpool.ErrNodeNotFound) {
 		return nil, err
 	}
 
 	bootstrapCtx, cancel := context.WithTimeout(context.Background(), c.cfg.DialTimeout)
 	defer cancel()
 	if addErr := c.pool.AddNode(bootstrapCtx, addr); addErr != nil {
-		return nil, err
+		return nil, addErr
 	}
 	return c.pool.EventClient(addr)
 }
@@ -183,14 +184,14 @@ func (c *Client) partitionClientForAddress(addr string) (types.PartitionServiceC
 	if err == nil {
 		return client, nil
 	}
-	if !strings.Contains(err.Error(), "not found in pool") {
+	if !errors.Is(err, connpool.ErrNodeNotFound) {
 		return nil, err
 	}
 
 	bootstrapCtx, cancel := context.WithTimeout(context.Background(), c.cfg.DialTimeout)
 	defer cancel()
 	if addErr := c.pool.AddNode(bootstrapCtx, addr); addErr != nil {
-		return nil, err
+		return nil, addErr
 	}
 	return c.pool.PartitionClient(addr)
 }
@@ -286,18 +287,21 @@ func buildTransportCredentials(sec SecurityConfig) (credentials.TransportCredent
 	return credentials.NewTLS(tlsCfg), nil
 }
 
+// staticTokenCredentials implements credentials.PerRPCCredentials for a fixed bearer token.
 type staticTokenCredentials struct {
-	scheme     string
-	token      string
-	insecureOK bool
+	scheme     string // authorization scheme (e.g. "Bearer")
+	token      string // raw token value
+	insecureOK bool   // when true, allows the credential on non-TLS transports
 }
 
+// GetRequestMetadata attaches the static Authorization header to each RPC.
 func (c *staticTokenCredentials) GetRequestMetadata(context.Context, ...string) (map[string]string, error) {
 	return map[string]string{
 		"authorization": fmt.Sprintf("%s %s", c.scheme, c.token),
 	}, nil
 }
 
+// RequireTransportSecurity reports whether TLS is required for this credential.
 func (c *staticTokenCredentials) RequireTransportSecurity() bool {
 	return !c.insecureOK
 }

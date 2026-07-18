@@ -10,10 +10,12 @@ import (
 	"google.golang.org/grpc/metadata"
 )
 
-// PropagationHeader is the gRPC metadata header used for trace propagation
+// PropagationHeader is a gRPC metadata key historically used for trace propagation.
+// W3C TraceContext headers are preferred via the OTel text-map propagator.
 const PropagationHeader = "x-trace-id"
 
-// GRPCServerInterceptor returns a gRPC unary server interceptor for tracing
+// GRPCServerInterceptor returns a unary server interceptor that extracts
+// incoming trace context, starts a server span for the RPC method, and records errors.
 func GRPCServerInterceptor() grpc.UnaryServerInterceptor {
 	propagator := otel.GetTextMapPropagator()
 
@@ -61,7 +63,8 @@ func GRPCServerInterceptor() grpc.UnaryServerInterceptor {
 	}
 }
 
-// GRPCStreamServerInterceptor returns a gRPC stream server interceptor for tracing
+// GRPCStreamServerInterceptor returns a stream server interceptor that starts
+// a server span and injects the traced context into the stream.
 func GRPCStreamServerInterceptor() grpc.StreamServerInterceptor {
 	propagator := otel.GetTextMapPropagator()
 
@@ -112,7 +115,8 @@ func (x *grpcServerStreamWithContext) Context() context.Context {
 	return x.ctx
 }
 
-// GRPCClientInterceptor returns a gRPC unary client interceptor for tracing
+// GRPCClientInterceptor returns a unary client interceptor that starts a
+// client span and injects trace context into outgoing metadata.
 func GRPCClientInterceptor() grpc.UnaryClientInterceptor {
 	propagator := otel.GetTextMapPropagator()
 
@@ -154,7 +158,8 @@ func GRPCClientInterceptor() grpc.UnaryClientInterceptor {
 	}
 }
 
-// GRPCClientStreamInterceptor returns a gRPC client stream interceptor for tracing
+// GRPCClientStreamInterceptor returns a stream client interceptor that starts
+// a client span and injects trace context into the stream request.
 func GRPCClientStreamInterceptor() grpc.StreamClientInterceptor {
 	propagator := otel.GetTextMapPropagator()
 

@@ -12,22 +12,30 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// Capability identifies an optional server feature.
+// Capability identifies an optional server feature probed at runtime.
 type Capability string
 
 const (
+	// CapabilityMetadataAPI indicates PartitionService.ListPartitions (or equivalent) is available.
 	CapabilityMetadataAPI Capability = "metadata_api"
-	CapabilityReplayAPI   Capability = "replay_api"
-	CapabilitySubscribe   Capability = "subscribe_api"
-	CapabilityAck         Capability = "ack_api"
+	// CapabilityReplayAPI indicates EventService.Replay is available.
+	CapabilityReplayAPI Capability = "replay_api"
+	// CapabilitySubscribe indicates EventService.Subscribe is available.
+	CapabilitySubscribe Capability = "subscribe_api"
+	// CapabilityAck indicates EventService.Ack is available.
+	CapabilityAck Capability = "ack_api"
 )
 
-// Capabilities reports detected server support.
+// Capabilities reports which optional server APIs were detected.
 type Capabilities struct {
+	// MetadataAPI is true when partition metadata listing is implemented.
 	MetadataAPI bool
-	ReplayAPI   bool
-	Subscribe   bool
-	Ack         bool
+	// ReplayAPI is true when historical replay is implemented.
+	ReplayAPI bool
+	// Subscribe is true when the bidi subscribe stream is implemented.
+	Subscribe bool
+	// Ack is true when the ack stream is implemented.
+	Ack bool
 }
 
 // Supports reports if a capability is available.
@@ -81,12 +89,19 @@ func (c *Client) DetectCapabilities(ctx context.Context) (Capabilities, error) {
 		return caps, nil
 	}
 
+	// Opening a bidi stream never round-trips, so a nil open error does NOT prove
+	// the server implements the method — Unimplemented surfaces only on the first
+	// Send/Recv. Probe with an actual round-trip: CloseSend, then Recv, and treat
+	// codes.Unimplemented as "not supported". Any other outcome (EOF, a real
+	// response, or an unrelated error) means the method exists.
 	openCtx, cancel := context.WithCancel(ctx)
 	start := time.Now()
 	subStream, subErr := eventClient.Subscribe(openCtx)
 	c.observeRequest("event.subscribe.open", addr, start, subErr)
 	if subErr == nil && subStream != nil {
-		caps.Subscribe = true
+		_ = subStream.CloseSend()
+		_, recvErr := subStream.Recv()
+		caps.Subscribe = !isUnimplemented(recvErr)
 	}
 	cancel()
 
@@ -95,11 +110,23 @@ func (c *Client) DetectCapabilities(ctx context.Context) (Capabilities, error) {
 	ackStream, ackErr := eventClient.Ack(openCtx)
 	c.observeRequest("event.ack.open", addr, start, ackErr)
 	if ackErr == nil && ackStream != nil {
-		caps.Ack = true
+		_ = ackStream.CloseSend()
+		_, recvErr := ackStream.Recv()
+		caps.Ack = !isUnimplemented(recvErr)
 	}
 	cancel()
 
 	return caps, nil
+}
+
+// isUnimplemented reports whether err is a gRPC Unimplemented status, indicating
+// the server does not implement the probed method.
+func isUnimplemented(err error) bool {
+	if err == nil {
+		return false
+	}
+	st, ok := status.FromError(err)
+	return ok && st.Code() == codes.Unimplemented
 }
 
 // RequireCapabilities validates server support and returns graceful fallback errors.

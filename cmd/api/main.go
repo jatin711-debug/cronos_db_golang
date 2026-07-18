@@ -1,3 +1,8 @@
+// Command cronos-api (package main) is the CronosDB node entrypoint.
+//
+// It loads configuration, wires partitions, cluster membership, public and
+// internal gRPC servers, HTTP health/metrics/dashboard, CDC sinks, retention,
+// backups, tracing, and SLO recording, then runs until SIGINT/SIGTERM.
 package main
 
 import (
@@ -279,7 +284,14 @@ func main() {
 				})
 			}
 			if crossRegionReplicator != nil && cfg.NodeRegion != "" {
-				crossRegionReplicator.ReplicateAsync(event)
+				// Do not re-replicate events that arrived FROM another region.
+				// CrossRegionServer.ReplicateEvents tags received events with
+				// source_region; without this guard, appending a received event
+				// fires this hook and ships it straight back out, creating an
+				// infinite cross-region echo loop.
+				if event.GetMeta()["source_region"] == "" {
+					crossRegionReplicator.ReplicateAsync(event)
+				}
 			}
 		})
 	}
@@ -402,14 +414,20 @@ func main() {
 
 	// Create partition metadata service handler
 	partitionHandler := api.NewPartitionServiceHandler(pm, clusterMgr, cfg.NodeID)
+	// Enforce admin authorization on destructive partition RPCs (Compact,
+	// RunRetention, SplitPartition) when auth is enabled.
+	if authConfig != nil {
+		partitionHandler.SetAuthPolicy(authConfig.Policy)
+	}
 
 	// Create transaction service handler (2PC)
 	transactionHandler := tx.NewHandler(pm)
 	grpcServer.SetTransactionHandler(transactionHandler)
 
-	// Register cross-region replication server
+	// Cross-region replication is registered on the INTERNAL listener below, not
+	// the public client port: it can inject/read arbitrary partition data, so it
+	// must stay on the peer-authenticated internal plane.
 	crossRegionServer := api.NewCrossRegionServer(pm)
-	grpcServer.RegisterCrossRegionServer(crossRegionServer)
 
 	// Create dedicated internal cluster gRPC listener for ReplicationService and
 	// RaftService. This keeps internal node traffic off the public client port
@@ -433,6 +451,7 @@ func main() {
 	// Register internal replication and raft metadata services on the internal listener.
 	replicationServer := api.NewReplicationServiceHandler(pm)
 	internalServer.RegisterReplicationServer(replicationServer)
+	internalServer.RegisterCrossRegionServer(crossRegionServer)
 	if clusterMgr != nil {
 		raftServer := api.NewRaftServiceHandler(clusterMgr, cfg.NodeID)
 		internalServer.RegisterRaftServer(raftServer)
@@ -510,6 +529,13 @@ func main() {
 	healthServer := &http.Server{
 		Addr:    cfg.HTTPAddress,
 		Handler: mux,
+		// Bound request phases so the admin/health/metrics plane cannot be held
+		// open by a slow client (Slowloris). Without these, the server had no
+		// read/write deadlines at all.
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	healthErr := make(chan error, 1)

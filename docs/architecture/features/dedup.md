@@ -22,14 +22,17 @@ Deduplication prevents duplicate message processing while keeping publish latenc
 
 ## Production Decisions
 
-- Two-tier design balances speed and correctness.
-- Rust bloom implementation improves throughput for hot dedup checks.
-- Persistent backend prevents relying only on probabilistic memory state.
+- Two-tier design balances speed and correctness (bloom fast-path, Pebble source of truth).
+- Rust bloom (cgo) improves throughput; pure-Go bloom is the Windows non-cgo fallback.
+- Publish path **claims** IDs before WAL append and **`RollbackBatch`** on write failure so retries are not spurious duplicates.
+- **Crash recovery:** on partition start, `recoverDedupFromWAL` re-seeds recent claims from the WAL tail so NoSync/DisableWAL paths cannot forget IDs after a crash.
+- TTL pruning bounds store growth (default 7 days).
 
 ## Debug Pointers
 
 - Duplicate false positives or misses: [internal/dedup/bloom_store.go](../../../internal/dedup/bloom_store.go)
 - Persistence and TTL behavior: [internal/dedup/pebble_store.go](../../../internal/dedup/pebble_store.go)
+- Recovery: [internal/partition/manager.go](../../../internal/partition/manager.go) (`recoverDedupFromWAL`)
 
 ## Related Diagrams
 

@@ -1,3 +1,8 @@
+// Package metrics registers Prometheus metrics and helpers used across CronosDB
+// subsystems (API, WAL, dedup, delivery, cluster, and admission control).
+//
+// Hot-path helpers such as IncGRPCRequest cache labeled counters to avoid
+// repeated WithLabelValues allocations under load.
 package metrics
 
 import (
@@ -85,20 +90,12 @@ var (
 		[]string{"partition"},
 	)
 
-	replicationLagSeconds = promauto.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "cronos_replication_lag_seconds",
-			Help: "Replication lag in seconds between leader and followers per partition",
-		},
-		[]string{"partition", "follower"},
-	)
-	partitionLeaderLeaseStatus = promauto.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "cronos_partition_leader_lease_status",
-			Help: "Leader lease status (1=valid, 0=expired) per partition",
-		},
-		[]string{"partition"},
-	)
+	// NOTE: the canonical, populated replication-lag metric is
+	// `cronos_replication_lag` (in events), registered and updated by the
+	// replication leader (internal/replication/leader.go). A former
+	// `cronos_replication_lag_seconds` gauge + SetReplicationMetrics() existed here
+	// with zero callers (dead) and were removed to avoid advertising a metric that
+	// was never emitted.
 
 	consumerGroupLag = promauto.NewGaugeVec(
 		prometheus.GaugeOpts{
@@ -128,6 +125,13 @@ var (
 			Help: "Number of events waiting in delivery worker queue",
 		},
 		[]string{"partition"},
+	)
+	dispatcherBackpressureSkips = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "cronos_dispatcher_backpressure_skips_total",
+			Help: "Deliveries skipped due to backpressure (no subscriber credits or in-flight cap), by reason",
+		},
+		[]string{"partition", "reason"},
 	)
 	consumerGroupMembers = promauto.NewGaugeVec(
 		prometheus.GaugeOpts{
@@ -264,16 +268,6 @@ func SetTimingWheelMetrics(partitionID string, activeTimers int64, overflowLevel
 	timingWheelOverflowLevel.WithLabelValues(partitionID).Set(float64(overflowLevel))
 }
 
-// SetReplicationMetrics sets replication metrics for a partition.
-func SetReplicationMetrics(partitionID, followerID string, lagSeconds float64, leaseValid bool) {
-	replicationLagSeconds.WithLabelValues(partitionID, followerID).Set(lagSeconds)
-	leaseStatus := 0.0
-	if leaseValid {
-		leaseStatus = 1.0
-	}
-	partitionLeaderLeaseStatus.WithLabelValues(partitionID).Set(leaseStatus)
-}
-
 // SetConsumerGroupMetrics sets consumer group metrics.
 func SetConsumerGroupMetrics(groupID, partitionID string, lag int64, memberCount int) {
 	consumerGroupLag.WithLabelValues(groupID, partitionID).Set(float64(lag))
@@ -307,6 +301,15 @@ func SetDeliveryMetrics(partitionID string, activeDeliveries int64, creditsInUse
 	dispatcherActiveDeliveries.WithLabelValues(partitionID).Set(float64(activeDeliveries))
 	dispatcherCreditsInUse.WithLabelValues(partitionID).Set(float64(creditsInUse))
 	workerQueueDepth.WithLabelValues(partitionID).Set(float64(queueDepth))
+}
+
+// IncDispatcherBackpressureSkip records a delivery skipped due to backpressure.
+// reason is a low-cardinality label such as "no_credits" or "in_flight_cap".
+func IncDispatcherBackpressureSkip(partitionID, reason string, n int) {
+	if n <= 0 {
+		n = 1
+	}
+	dispatcherBackpressureSkips.WithLabelValues(partitionID, reason).Add(float64(n))
 }
 
 // ObserveWALAppend records WAL append latency.

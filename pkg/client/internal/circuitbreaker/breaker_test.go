@@ -18,6 +18,22 @@ func TestDefaultConfig(t *testing.T) {
 	}
 }
 
+// TestRecordFailure_ThresholdZeroDisabled verifies that a non-positive
+// FailureThreshold disables the breaker (it never opens), instead of the previous
+// bug where `failures >= 0` opened it on the very first failure.
+func TestRecordFailure_ThresholdZeroDisabled(t *testing.T) {
+	cb := New(Config{FailureThreshold: 0, SuccessThreshold: 1, Timeout: time.Minute})
+	for i := 0; i < 100; i++ {
+		cb.RecordFailure()
+	}
+	if cb.CurrentState() != StateClosed {
+		t.Fatalf("breaker with threshold 0 must stay closed (disabled), got %v", cb.CurrentState())
+	}
+	if !cb.Allow() {
+		t.Fatal("disabled breaker must allow calls")
+	}
+}
+
 func TestNew(t *testing.T) {
 	cb := New(DefaultConfig())
 	if cb == nil {

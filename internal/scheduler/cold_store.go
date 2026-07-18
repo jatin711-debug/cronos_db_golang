@@ -13,10 +13,12 @@ import (
 // ColdStore persists timer references for far-future events using PebbleDB.
 // It stores only offsets, not full events — the WAL remains the single source of truth.
 // Key format: [schedule_ts:be64][offset:be64] → empty value.
+// Entries are scanned by schedule time range when the hydrator promotes them
+// into the hot timing wheel.
 type ColdStore struct {
 	db      *pebble.DB
 	dataDir string
-	count   atomic.Int64 // Approximate count for metrics (updated on Store/Delete)
+	count   atomic.Int64 // Approximate entry count for metrics (updated on Store/Delete)
 }
 
 // NewColdStore creates a new cold store for far-future scheduled events.
@@ -58,7 +60,7 @@ func (cs *ColdStore) Store(offset int64, scheduleTS int64) error {
 	return nil
 }
 
-// StoreBatch stores multiple offsets atomically in a single Pebble batch.
+// StoreBatch stores multiple offset references atomically in a single Pebble batch.
 func (cs *ColdStore) StoreBatch(entries []struct {
 	Offset     int64
 	ScheduleTS int64
@@ -126,7 +128,7 @@ func (cs *ColdStore) Delete(offset int64, scheduleTS int64) error {
 	return nil
 }
 
-// DeleteBatch removes multiple offsets atomically.
+// DeleteBatch removes multiple offset references atomically in a single Pebble batch.
 func (cs *ColdStore) DeleteBatch(entries []struct {
 	Offset     int64
 	ScheduleTS int64

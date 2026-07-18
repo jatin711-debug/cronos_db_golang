@@ -1,3 +1,5 @@
+// Package tx implements distributed two-phase commit (2PC) coordination across
+// partitions, including durable transaction logging and crash recovery.
 package tx
 
 import (
@@ -16,20 +18,26 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 )
 
-// TxID is a unique transaction identifier.
+// TxID is a unique distributed transaction identifier.
 type TxID string
 
-// Status represents a transaction state.
+// Status represents a transaction state in the 2PC lifecycle.
 type Status int
 
 const (
+	// StatusPending indicates the transaction has begun but not yet prepared.
 	StatusPending Status = iota
+	// StatusPrepared indicates all participants voted yes in phase 1.
 	StatusPrepared
+	// StatusCommitting indicates phase 2 commit is in progress (possibly partial).
 	StatusCommitting
+	// StatusCommitted indicates the transaction fully committed.
 	StatusCommitted
+	// StatusAborted indicates the transaction was aborted.
 	StatusAborted
 )
 
+// String returns a human-readable name for the transaction status.
 func (s Status) String() string {
 	switch s {
 	case StatusPending:
@@ -47,20 +55,29 @@ func (s Status) String() string {
 	}
 }
 
-// Participant is a partition involved in a transaction.
+// Participant is a resource manager involved in a distributed transaction
+// (typically a partition that writes prepare/commit/abort WAL markers).
 type Participant interface {
+	// Prepare runs phase-1 prepare for txID.
 	Prepare(ctx context.Context, txID TxID) error
+	// Commit runs phase-2 commit for txID.
 	Commit(ctx context.Context, txID TxID) error
+	// Abort aborts txID on this participant.
 	Abort(ctx context.Context, txID TxID) error
 }
 
 // txRecord is the on-disk format for transaction state.
 type txRecord struct {
-	TxID         string     `json:"tx_id"`
-	Status       string     `json:"status"`
-	PartitionIDs []int32    `json:"partition_ids"`
-	CreatedAt    time.Time  `json:"created_at"`
-	CommittedAt  *time.Time `json:"committed_at,omitempty"`
+	// TxID is the transaction identifier.
+	TxID string `json:"tx_id"`
+	// Status is the durable status string (e.g. prepared, committed, aborted).
+	Status string `json:"status"`
+	// PartitionIDs lists partitions participating in the transaction.
+	PartitionIDs []int32 `json:"partition_ids"`
+	// CreatedAt is when the transaction was first recorded.
+	CreatedAt time.Time `json:"created_at"`
+	// CommittedAt is set when the transaction commits (nil if not committed).
+	CommittedAt *time.Time `json:"committed_at,omitempty"`
 }
 
 // txLog persists transaction state for recovery.
@@ -145,7 +162,8 @@ func (tl *txLog) persistLocked() error {
 	return utils.AtomicWriteFile(tl.path, data, 0644)
 }
 
-// Coordinator manages 2PC across partitions.
+// Coordinator manages 2PC across partitions with a durable transaction log and
+// a background recovery loop for incomplete transactions.
 type Coordinator struct {
 	mu             sync.RWMutex
 	transactions   map[TxID]*Transaction
@@ -160,15 +178,20 @@ type Coordinator struct {
 	attemptsMu     sync.Mutex
 }
 
-// Transaction tracks a distributed transaction.
+// Transaction tracks an in-memory distributed transaction and its participants.
 type Transaction struct {
-	ID           TxID
+	// ID is the unique transaction identifier.
+	ID TxID
+	// Participants are the resource managers taking part in this transaction.
 	Participants []Participant
-	Status       Status
-	CreatedAt    time.Time
+	// Status is the current 2PC status.
+	Status Status
+	// CreatedAt is when the transaction was begun.
+	CreatedAt time.Time
 }
 
-// NewCoordinator creates a 2PC coordinator.
+// NewCoordinator creates a 2PC coordinator with the given per-operation timeout
+// and durable log under dataDir. It loads existing log records and starts recovery.
 func NewCoordinator(timeout time.Duration, dataDir string) *Coordinator {
 	c := &Coordinator{
 		transactions:   make(map[TxID]*Transaction),
@@ -355,6 +378,20 @@ func (c *Coordinator) Begin(txID TxID, participants []Participant) (*Transaction
 
 	if _, exists := c.transactions[txID]; exists {
 		return nil, fmt.Errorf("transaction %s already exists", txID)
+	}
+
+	// Inject the partition manager into any PartitionParticipant that lacks one.
+	// Callers (e.g. the gRPC TransactionService handler) build participants with
+	// only a PartitionID; without PM wired, Prepare/Commit silently write no WAL
+	// markers — a durable no-op. Centralizing the injection here makes every entry
+	// path correct.
+	if c.pm != nil {
+		for i, p := range participants {
+			if pp, ok := p.(PartitionParticipant); ok && pp.PM == nil {
+				pp.PM = c.pm
+				participants[i] = pp
+			}
+		}
 	}
 
 	tx := &Transaction{
@@ -714,13 +751,17 @@ func extractPartitionIDs(participants []Participant) []int32 {
 	return ids
 }
 
-// PartitionParticipant implements Participant for a single partition.
+// PartitionParticipant implements Participant for a single local partition by
+// writing prepare/commit/abort markers to that partition's WAL.
 type PartitionParticipant struct {
+	// PartitionID is the local partition participating in the transaction.
 	PartitionID int32
-	PM          *partition.PartitionManager
+	// PM is the partition manager used to resolve the partition and its WAL.
+	// May be injected by the Coordinator when Begin is called.
+	PM *partition.PartitionManager
 }
 
-// Prepare acquires the transaction lock for the partition.
+// Prepare writes a prepare WAL marker for txID on the participant partition.
 func (p PartitionParticipant) Prepare(ctx context.Context, txID TxID) error {
 	select {
 	case <-ctx.Done():
@@ -752,7 +793,7 @@ func (p PartitionParticipant) Prepare(ctx context.Context, txID TxID) error {
 	return nil
 }
 
-// Commit applies the transaction effects to the partition.
+// Commit writes a commit WAL marker for txID on the participant partition.
 func (p PartitionParticipant) Commit(ctx context.Context, txID TxID) error {
 	select {
 	case <-ctx.Done():
@@ -784,7 +825,7 @@ func (p PartitionParticipant) Commit(ctx context.Context, txID TxID) error {
 	return nil
 }
 
-// Abort rolls back any transaction effects on the partition.
+// Abort writes an abort WAL marker for txID on the participant partition.
 func (p PartitionParticipant) Abort(ctx context.Context, txID TxID) error {
 	select {
 	case <-ctx.Done():
