@@ -5,24 +5,28 @@ import (
 	"time"
 )
 
-// CircuitState represents the state of a circuit breaker.
+// CircuitState is the finite state of a CircuitBreaker.
 type CircuitState int32
 
 const (
-	CircuitClosed   CircuitState = 0 // Normal operation
-	CircuitOpen     CircuitState = 1 // Failing fast, rejecting requests
-	CircuitHalfOpen CircuitState = 2 // Testing if service recovered
+	// CircuitClosed allows all requests through (normal operation).
+	CircuitClosed CircuitState = 0
+	// CircuitOpen rejects requests until openUntilTS elapses.
+	CircuitOpen CircuitState = 1
+	// CircuitHalfOpen allows trial requests after an open period.
+	CircuitHalfOpen CircuitState = 2
 )
 
 // CircuitBreaker implements per-subscription circuit breaking.
-// When failure rate exceeds threshold over a time window, the circuit opens.
-// After openDuration, it transitions to half-open and allows a trial request.
+// When the failure rate exceeds a threshold after minAttempts, the circuit
+// opens and fails fast until openDuration elapses, then transitions to
+// half-open for a trial request.
 type CircuitBreaker struct {
-	state         atomic.Int32 // CircuitState
+	state         atomic.Int32 // current CircuitState
 	openUntilTS   atomic.Int64 // Unix ms — when to transition from Open to HalfOpen
-	failures      atomic.Int64 // Failure count in current window
-	successes     atomic.Int64 // Success count in current window
-	lastFailureTS atomic.Int64 // Unix ms of last failure
+	failures      atomic.Int64 // failure count in the current closed window
+	successes     atomic.Int64 // success count in the current closed window
+	lastFailureTS atomic.Int64 // Unix ms of last recorded failure
 }
 
 // NewCircuitBreaker creates a new circuit breaker.

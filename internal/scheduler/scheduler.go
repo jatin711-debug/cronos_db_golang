@@ -1,3 +1,10 @@
+// Package scheduler implements timestamp-triggered event scheduling for CronosDB.
+//
+// Events are routed into a hierarchical timing wheel when they fall within the
+// configured hot window, or into a Pebble-backed cold store for far-future work.
+// An adaptive hydrator periodically promotes cold entries into the wheel as their
+// schedule time approaches, and expired timers are drained into a ready queue for
+// the delivery layer.
 package scheduler
 
 import (
@@ -86,7 +93,12 @@ type EventReader interface {
 	ReadEvent(offset int64) (*types.Event, error)
 }
 
-// Scheduler manages timestamp-triggered event execution
+// Scheduler manages timestamp-triggered event execution for a single partition.
+//
+// Hot-path events are placed on a hierarchical TimingWheel; far-future events
+// (beyond hotWindowMs) are persisted as offset references in ColdStore and later
+// hydrated back into the wheel. Concurrent Schedule/GetReadyEvents callers share
+// the ready queue under readyMu, while checkpoint and hydrator state use mu.
 type Scheduler struct {
 	mu sync.RWMutex
 	// readyMu guards readyQueue on its own dedicated mutex, decoupled from mu.
@@ -95,28 +107,28 @@ type Scheduler struct {
 	// keeping it off the RWMutex shared with checkpoint/stats/hydrator state cuts
 	// contention. Never hold mu and readyMu at the same time.
 	readyMu          sync.Mutex
-	timingWheel      *TimingWheel
-	readyQueue       []*types.Event
-	readySignal      chan struct{}
+	timingWheel      *TimingWheel   // hierarchical wheel for near-future timers
+	readyQueue       []*types.Event // events whose schedule time has arrived
+	readySignal      chan struct{}  // buffered notify for ready-queue consumers
 	partitionID      int32
 	dataDir          string
-	active           bool
+	active           bool // true while worker/checkpoint/hydrator goroutines run
 	workerDone       chan struct{}
 	wg               sync.WaitGroup
 	stats            *SchedulerStats
 	lastCheckpointTS int64
-	startTimeMs      int64 // Scheduler start time (Unix ms)
+	startTimeMs      int64 // wall-clock epoch for tick 0 (Unix ms); persisted in checkpoints
 
 	// Two-tier scheduling: cold store for far-future events
-	coldStore   *ColdStore
-	eventReader EventReader
-	hotWindowMs int64
+	coldStore   *ColdStore  // nil when hot-window scheduling is disabled
+	eventReader EventReader // WAL reader used by the hydrator; may be nil
+	hotWindowMs int64       // events beyond now+hotWindowMs go to coldStore
 
 	// Adaptive hydrator state
-	hydratorMinInterval time.Duration
-	hydratorMaxInterval time.Duration
-	hydratorInterval    time.Duration
-	lastColdStoreCount  int64
+	hydratorMinInterval time.Duration // lower bound for scan interval
+	hydratorMaxInterval time.Duration // upper bound for scan interval
+	hydratorInterval    time.Duration // current adaptive scan interval
+	lastColdStoreCount  int64         // previous scan count used to detect growth
 }
 
 // NewScheduler creates a new scheduler.
@@ -181,7 +193,10 @@ func (s *Scheduler) ReadySignal() <-chan struct{} {
 	return s.readySignal
 }
 
-// Schedule schedules an event
+// Schedule schedules a single event for future delivery.
+// Already-due events go straight to the ready queue; far-future events are
+// stored in the cold store when configured; otherwise the event is placed on
+// the timing wheel.
 func (s *Scheduler) Schedule(event *types.Event) error {
 	now := time.Now().UnixMilli()
 	// If event is already expired, add to ready queue
@@ -207,7 +222,8 @@ func (s *Scheduler) Schedule(event *types.Event) error {
 	return nil
 }
 
-// ScheduleBatch schedules multiple events efficiently
+// ScheduleBatch schedules multiple events efficiently with a single wheel
+// lock acquisition for hot timers and a single cold-store batch write.
 func (s *Scheduler) ScheduleBatch(events []*types.Event) error {
 	if len(events) == 0 {
 		return nil
@@ -269,7 +285,8 @@ func (s *Scheduler) ScheduleBatch(events []*types.Event) error {
 	return nil
 }
 
-// GetReadyEvents returns events ready for execution
+// GetReadyEvents drains and returns events ready for execution.
+// The caller owns the returned slice; the internal queue is reset in place.
 func (s *Scheduler) GetReadyEvents() []*types.Event {
 	s.readyMu.Lock()
 	defer s.readyMu.Unlock()
@@ -330,7 +347,8 @@ func (s *Scheduler) SetHydratorIntervals(minMs, maxMs int) {
 	}
 }
 
-// Start starts the scheduler worker
+// Start starts the tick worker, checkpoint loop, and cold-store hydrator.
+// It is a no-op if the scheduler is already running.
 func (s *Scheduler) Start() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -679,7 +697,8 @@ func (s *Scheduler) recover() error {
 	return nil
 }
 
-// Stop stops the scheduler
+// Stop stops background goroutines, writes a final checkpoint, and closes
+// the cold store. Safe to call when the scheduler was never started.
 func (s *Scheduler) Stop() {
 	s.mu.Lock()
 	wasActive := s.active
@@ -709,7 +728,7 @@ func (s *Scheduler) Stop() {
 	}
 }
 
-// GetStats returns scheduler statistics
+// GetStats returns a snapshot of timing-wheel and ready-queue statistics.
 func (s *Scheduler) GetStats() *SchedulerStats {
 	twStats := s.timingWheel.GetStats() // timing wheel has its own lock
 	s.readyMu.Lock()
@@ -726,7 +745,9 @@ func (s *Scheduler) GetStats() *SchedulerStats {
 	}
 }
 
-// GetNextEventTime returns the time of the next event to trigger
+// GetNextEventTime returns an approximate wall time for the next wheel tick.
+// It is derived from the wheel's current tick and tick interval, not a scan of
+// pending timers, so it may not equal the earliest scheduled event.
 func (s *Scheduler) GetNextEventTime() time.Time {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -736,14 +757,23 @@ func (s *Scheduler) GetNextEventTime() time.Time {
 	return nextTime
 }
 
-// SchedulerCheckpoint represents scheduler checkpoint state
+// SchedulerCheckpoint represents durable scheduler state written to timer_state.json.
+// Timers themselves are re-added from WAL replay after recovery; this file only
+// preserves the wheel's absolute-time origin and summary metrics.
 type SchedulerCheckpoint struct {
-	PartitionID      int32 `json:"partition_id"`
-	CurrentTick      int64 `json:"current_tick"`
-	ActiveTimers     int64 `json:"active_timers"`
-	ReadyEvents      int64 `json:"ready_events"`
-	NextTickMs       int64 `json:"next_tick_ms"`
-	WheelSize        int64 `json:"wheel_size"`
+	// PartitionID is the partition this checkpoint belongs to.
+	PartitionID int32 `json:"partition_id"`
+	// CurrentTick is the timing wheel tick at checkpoint time.
+	CurrentTick int64 `json:"current_tick"`
+	// ActiveTimers is the number of timers in the wheel at checkpoint time.
+	ActiveTimers int64 `json:"active_timers"`
+	// ReadyEvents is the ready-queue depth at checkpoint time.
+	ReadyEvents int64 `json:"ready_events"`
+	// NextTickMs is the wheel tick interval in milliseconds.
+	NextTickMs int64 `json:"next_tick_ms"`
+	// WheelSize is the number of slots in the root timing wheel.
+	WheelSize int64 `json:"wheel_size"`
+	// LastCheckpointTS is the wall-clock time of this checkpoint (Unix ms).
 	LastCheckpointTS int64 `json:"last_checkpoint_ts"`
 	// StartTimeMs is the wall-clock epoch the timing wheel's tick 0 corresponds to.
 	// Persisting it lets recovery keep the wheel's absolute-time origin stable

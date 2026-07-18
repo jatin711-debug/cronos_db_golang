@@ -1,3 +1,8 @@
+// Package metrics registers Prometheus metrics and helpers used across CronosDB
+// subsystems (API, WAL, dedup, delivery, cluster, and admission control).
+//
+// Hot-path helpers such as IncGRPCRequest cache labeled counters to avoid
+// repeated WithLabelValues allocations under load.
 package metrics
 
 import (

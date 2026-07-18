@@ -12,17 +12,23 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/internal/metrics"
 )
 
-// BloomFilter interface abstracting the backend
+// BloomFilter abstracts bloom-filter backends (pure Go or Rust FFI).
 type BloomFilter interface {
+	// Add inserts key into the filter.
 	Add(key string)
+	// MayContain reports whether key might be present (false means definitely not).
 	MayContain(key string) bool
+	// MayContainBatch checks multiple keys; result[i] corresponds to keys[i].
 	MayContainBatch(keys []string) []bool
+	// Count returns the approximate number of Add operations.
 	Count() uint64
+	// Reset clears all bits and counters.
 	Reset()
+	// MemoryUsageBytes returns approximate memory used by the filter.
 	MemoryUsageBytes() uint64
 }
 
-// GoBloomFilter is a simple bloom filter implementation for fast dedup checks
+// GoBloomFilter is a lock-free pure-Go bloom filter for fast dedup negative checks.
 type GoBloomFilter struct {
 	bits       []uint64
 	size       uint64     // Number of bits
@@ -32,7 +38,7 @@ type GoBloomFilter struct {
 	generation uint64     // Generation counter for detecting resets
 }
 
-// NewBloomFilter creates a bloom filter sized for expectedItems with targetFPR false positive rate.
+// NewBloomFilter creates a bloom filter sized for expectedItems at targetFPR.
 // It prefers the Rust-backed implementation when available and falls back to a
 // pure-Go implementation on platforms without cgo or if the Rust filter fails.
 func NewBloomFilter(expectedItems uint64, targetFPR float64) BloomFilter {
@@ -49,7 +55,7 @@ func NewBloomFilter(expectedItems uint64, targetFPR float64) BloomFilter {
 	return bf
 }
 
-// NewGoBloomFilter creates a pure Go bloom filter
+// NewGoBloomFilter creates a pure-Go bloom filter sized for expectedItems at targetFPR.
 func NewGoBloomFilter(expectedItems uint64, targetFPR float64) *GoBloomFilter {
 	var bitsPerItem uint64
 	if targetFPR <= 0.001 {
@@ -84,7 +90,7 @@ func NewGoBloomFilter(expectedItems uint64, targetFPR float64) *GoBloomFilter {
 	}
 }
 
-// Fast inline FNV-1a hash - no allocations
+// fnvHash computes two FNV-1a hashes for double-hashing without allocations.
 func fnvHash(key string) (h1, h2 uint64) {
 	// FNV-1a for h1
 	h1 = 14695981039346656037 // FNV offset basis
@@ -104,7 +110,7 @@ func fnvHash(key string) (h1, h2 uint64) {
 	return h1, h2
 }
 
-// Add adds a key to the bloom filter (lock-free using atomic CAS)
+// Add inserts key into the bloom filter using lock-free atomic bit sets.
 func (bf *GoBloomFilter) Add(key string) {
 	h1, h2 := fnvHash(key)
 
@@ -128,7 +134,8 @@ func (bf *GoBloomFilter) Add(key string) {
 	atomic.AddUint64(&bf.count, 1)
 }
 
-// MayContain returns true if key might be in the set (lock-free)
+// MayContain reports whether key might be in the set (lock-free).
+// A false result means the key was definitely never added.
 func (bf *GoBloomFilter) MayContain(key string) bool {
 	h1, h2 := fnvHash(key)
 
@@ -144,7 +151,7 @@ func (bf *GoBloomFilter) MayContain(key string) bool {
 	return true
 }
 
-// MayContainBatch checks multiple keys efficiently
+// MayContainBatch checks multiple keys; result[i] corresponds to keys[i].
 func (bf *GoBloomFilter) MayContainBatch(keys []string) []bool {
 	results := make([]bool, len(keys))
 	for i, key := range keys {
@@ -153,12 +160,12 @@ func (bf *GoBloomFilter) MayContainBatch(keys []string) []bool {
 	return results
 }
 
-// Count returns approximate number of items added
+// Count returns the approximate number of items added.
 func (bf *GoBloomFilter) Count() uint64 {
 	return atomic.LoadUint64(&bf.count)
 }
 
-// Reset clears the bloom filter
+// Reset clears all bits and the item counter.
 func (bf *GoBloomFilter) Reset() {
 	for i := range bf.bits {
 		atomic.StoreUint64(&bf.bits[i], 0)
@@ -166,16 +173,15 @@ func (bf *GoBloomFilter) Reset() {
 	atomic.StoreUint64(&bf.count, 0)
 }
 
-// MemoryUsageBytes returns approximate memory usage
+// MemoryUsageBytes returns approximate memory usage of the bit array.
 func (bf *GoBloomFilter) MemoryUsageBytes() uint64 {
 	return uint64(len(bf.bits)) * 8
 }
 
-// =============================================================================
-// BloomPebbleStore wraps PebbleStore with a bloom filter for fast path
-// =============================================================================
-
-// BloomPebbleStore combines bloom filter with PebbleDB for fast dedup
+// BloomPebbleStore combines a bloom filter with PebbleDB for fast-path dedup.
+// Negative bloom results skip Pebble reads entirely; positives fall through to
+// the durable store. On startup the bloom is rebuilt from Pebble before serving
+// the fast path so restart does not break idempotency.
 type BloomPebbleStore struct {
 	bloom  BloomFilter
 	pebble *PebbleStore
@@ -183,15 +189,15 @@ type BloomPebbleStore struct {
 	// Claims are striped so unrelated message IDs can proceed concurrently,
 	// while the check-and-store sequence for the same ID remains atomic.
 	claimLocks [64]sync.Mutex
-	bloomReady atomic.Bool
-	bloomEpoch atomic.Uint64
+	bloomReady atomic.Bool   // true after startup rebuild completes
+	bloomEpoch atomic.Uint64 // bumped on reset so batch paths reclassify
 	rebuildWG  sync.WaitGroup
 
-	// RWMutex to protect bloom filter reset from concurrent Add operations.
+	// bloomMu protects bloom filter reset from concurrent Add operations.
 	// Readers (CheckAndStore) take RLock; reset takes Lock.
 	bloomMu sync.RWMutex
 
-	// Stats - atomic for lock-free access
+	// Stats — atomic for lock-free access
 	bloomHits     uint64 // Bloom filter said "definitely not exists"
 	bloomFalsePos uint64 // Bloom said "maybe exists" but PebbleDB said "no"
 	pebbleHits    uint64 // Actually found in PebbleDB
@@ -202,9 +208,10 @@ type BloomPebbleStore struct {
 	resetInProgress     atomic.Bool // True when a reset is in progress (kept for compat)
 }
 
-// NewBloomPebbleStore creates a new bloom filter + PebbleDB store
-// expectedItems: expected number of unique message IDs (e.g., 10_000_000 for 10M)
-// falsePositiveRate: acceptable false positive rate (e.g., 0.01 for 1%)
+// NewBloomPebbleStore creates a bloom-accelerated Pebble dedup store.
+// expectedItems is the expected number of unique message IDs (e.g. 10_000_000).
+// falsePositiveRate is the target bloom FPR (e.g. 0.01 for 1%).
+// cache may be a *pebble.Cache or nil.
 func NewBloomPebbleStore(dataDir string, partitionID int32, ttlHours int32, expectedItems uint64, falsePositiveRate float64, cache interface{}) (*BloomPebbleStore, error) {
 	// Create underlying PebbleDB store
 	var pebbleCache *pebble.Cache
@@ -305,7 +312,8 @@ func (s *BloomPebbleStore) rebuildBloom() {
 	s.bloomReady.Store(true)
 }
 
-// CheckAndStore checks if message ID exists using bloom filter first
+// CheckAndStore claims messageID using the bloom filter as a fast negative path,
+// falling through to Pebble when the bloom reports a possible hit.
 func (s *BloomPebbleStore) CheckAndStore(messageID string, offset int64) (bool, error) {
 	stripe := bloomClaimStripe(messageID)
 	s.claimLocks[stripe].Lock()
@@ -503,7 +511,7 @@ func (s *BloomPebbleStore) RollbackBatch(messageIDs []string) error {
 	return s.pebble.RollbackClaim(messageIDs)
 }
 
-// GetOffset returns stored offset for message ID
+// GetOffset returns the stored WAL offset for messageID, using the bloom fast path.
 func (s *BloomPebbleStore) GetOffset(messageID string) (int64, bool, error) {
 	if !s.bloomReady.Load() {
 		return s.pebble.GetOffset(messageID)
@@ -520,7 +528,7 @@ func (s *BloomPebbleStore) GetOffset(messageID string) (int64, bool, error) {
 	return s.pebble.GetOffset(messageID)
 }
 
-// Exists checks if message ID exists
+// Exists reports whether messageID is recorded, using the bloom fast path.
 func (s *BloomPebbleStore) Exists(messageID string) (bool, error) {
 	if !s.bloomReady.Load() {
 		return s.pebble.Exists(messageID)
@@ -537,7 +545,7 @@ func (s *BloomPebbleStore) Exists(messageID string) (bool, error) {
 	return s.pebble.Exists(messageID)
 }
 
-// GetTimestamp returns stored timestamp for message ID
+// GetTimestamp returns the creation time for messageID, using the bloom fast path.
 func (s *BloomPebbleStore) GetTimestamp(messageID string) (time.Time, bool, error) {
 	if !s.bloomReady.Load() {
 		return s.pebble.GetTimestamp(messageID)
@@ -554,7 +562,7 @@ func (s *BloomPebbleStore) GetTimestamp(messageID string) (time.Time, bool, erro
 	return s.pebble.GetTimestamp(messageID)
 }
 
-// Put inserts or overwrites an entry directly with a given created timestamp
+// Put inserts or overwrites an entry in Pebble, then publishes the bloom bit.
 func (s *BloomPebbleStore) Put(messageID string, offset int64, createdTS int64) error {
 	// Persist first, then publish the Bloom bit. This preserves the rebuild
 	// lock order (Pebble claim -> Bloom lock) and avoids a Put/rebuild deadlock.
@@ -567,8 +575,8 @@ func (s *BloomPebbleStore) Put(messageID string, offset int64, createdTS int64) 
 	return nil
 }
 
-// PruneExpired removes expired entries and checks bloom filter health
-// If false positive rate is too high, resets the bloom filter
+// PruneExpired removes expired Pebble entries and may reset the bloom filter
+// when the observed false-positive rate exceeds the configured threshold.
 func (s *BloomPebbleStore) PruneExpired() (int, error) {
 	// Prune expired entries from PebbleDB
 	count, err := s.pebble.PruneExpired()
@@ -613,15 +621,15 @@ func (s *BloomPebbleStore) checkAndResetBloomLocked() {
 	}
 }
 
-// CheckAndResetBloom forces a bloom filter health check and reset if needed
-// Call this during low-traffic periods for maintenance
+// CheckAndResetBloom forces a bloom health check and reset if FPR is too high.
+// Prefer calling this during low-traffic maintenance windows.
 func (s *BloomPebbleStore) CheckAndResetBloom() {
 	s.bloomMu.Lock()
 	defer s.bloomMu.Unlock()
 	s.checkAndResetBloomLocked()
 }
 
-// GetStats returns store statistics
+// GetStats returns Pebble stats merged with bloom hit/false-positive counters.
 func (s *BloomPebbleStore) GetStats() (*DedupStats, error) {
 	stats, err := s.pebble.GetStats()
 	if err != nil {
@@ -637,7 +645,7 @@ func (s *BloomPebbleStore) GetStats() (*DedupStats, error) {
 	return stats, nil
 }
 
-// Close closes the store
+// Close waits for bloom rebuild and closes the underlying Pebble store.
 func (s *BloomPebbleStore) Close() error {
 	s.rebuildWG.Wait()
 	return s.pebble.Close()
@@ -650,8 +658,8 @@ func (s *BloomPebbleStore) Checkpoint(destDir string) error {
 	return s.pebble.Checkpoint(destDir)
 }
 
-// ResetBloom resets the bloom filter (use during maintenance)
-// Uses lock to prevent race with concurrent Add operations
+// ResetBloom clears the bloom filter under bloomMu (maintenance only).
+// Stale bits after a partial rebuild only force the Pebble slow path.
 func (s *BloomPebbleStore) ResetBloom() {
 	s.bloomMu.Lock()
 	defer s.bloomMu.Unlock()

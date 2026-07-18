@@ -1,3 +1,4 @@
+// Package errs classifies gRPC and message errors for client retry and routing decisions.
 package errs
 
 import (

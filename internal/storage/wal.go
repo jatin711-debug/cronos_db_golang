@@ -1,3 +1,7 @@
+// Package storage implements durable segmented write-ahead logging (WAL) for
+// CronosDB partitions. It provides mmap-backed segment files, sparse indexes,
+// optional AES-256-GCM at-rest encryption, incremental backups, and coalesced
+// fsync across many partitions.
 package storage
 
 import (
@@ -21,16 +25,20 @@ import (
 )
 
 // FsyncMode controls when the WAL performs fsync.
-// Using int enum instead of string comparison eliminates per-write overhead.
+// Using an int enum instead of string comparison eliminates per-write overhead.
 type FsyncMode int
 
 const (
-	FsyncPeriodic   FsyncMode = iota // Sync in background flush loop
-	FsyncEveryEvent                  // Sync after every write (safest, slowest)
-	FsyncBatch                       // Sync after each append request via group commit
+	// FsyncPeriodic syncs in the background flush loop (or FsyncCoalescer).
+	FsyncPeriodic FsyncMode = iota
+	// FsyncEveryEvent syncs after every write (safest, slowest).
+	FsyncEveryEvent
+	// FsyncBatch syncs after each append request via group-commit coalescing.
+	FsyncBatch
 )
 
-// ParseFsyncMode converts a string to FsyncMode enum
+// ParseFsyncMode converts a config string to FsyncMode.
+// Accepted values: "every_event", "batch"; any other value maps to FsyncPeriodic.
 func ParseFsyncMode(s string) FsyncMode {
 	switch s {
 	case "every_event":
@@ -51,33 +59,35 @@ var walFlushErrorsTotal = promauto.NewCounterVec(
 	[]string{"partition"},
 )
 
-// WAL represents Write-Ahead Log with segmented storage
+// WAL is a segmented write-ahead log for a single partition.
+// Offsets are reserved atomically, then written in strict order via an append
+// sequencer so concurrent producers never interleave records on disk.
 type WAL struct {
 	mu                 sync.RWMutex
-	dataDir            string
-	partitionID        int32
-	partitionLabel     string // cached string for metrics
+	dataDir            string // root directory for segments/ and index/
+	partitionID        int32  // owning partition ID
+	partitionLabel     string // cached string form of partitionID for metrics
 	segments           []*Segment
 	activeSegment      *Segment
-	nextSegment        *Segment     // Pre-created next segment for fast rotation
-	nextSegMu          sync.Mutex   // Protects nextSegment
-	preCreateTriggered atomic.Bool  // Atomic flag to avoid duplicate pre-creation goroutines
-	nextOffset         atomic.Int64 // Next offset to assign; atomically reserved outside w.mu
-	highWatermark      int64
-	appendSeq          atomic.Int64 // Next offset that must be appended; enforces in-order segment writes
+	nextSegment        *Segment     // pre-created next segment for fast rotation
+	nextSegMu          sync.Mutex   // protects nextSegment
+	preCreateTriggered atomic.Bool  // avoids duplicate pre-creation goroutines
+	nextOffset         atomic.Int64 // next offset to assign; reserved outside w.mu
+	highWatermark      int64        // highest durable offset written (inclusive)
+	appendSeq          atomic.Int64 // next offset that must be appended (in-order writes)
 	appendSeqMu        sync.Mutex
 	appendSeqCond      *sync.Cond
 	config             *WALConfig
-	fsyncMode          FsyncMode   // Parsed once at init, avoids per-write string cmp
-	dirty              atomic.Bool // Set on write, cleared on flush
+	fsyncMode          FsyncMode   // parsed once at init; avoids per-write string cmp
+	dirty              atomic.Bool // set on write, cleared on flush
 	flushErrors        atomic.Int64
 	quit               chan struct{}
 	quitOnce           sync.Once
 	wg                 sync.WaitGroup
-	cipher             *SegmentCipher
-	currentTerm        int64                    // Raft term used for new records
-	appendHook         func(event *types.Event) // Called after successful append (e.g. CDC)
-	coalescer          *FsyncCoalescer          // Optional global fsync coalescer
+	cipher             *SegmentCipher           // optional at-rest encryption; nil = plaintext
+	currentTerm        int64                    // Raft term stamped on newly produced records
+	appendHook         func(event *types.Event) // called after successful append (e.g. CDC)
+	coalescer          *FsyncCoalescer          // optional global fsync coalescer
 
 	// Group-commit coordinator for FsyncBatch mode. When multiple concurrent
 	// writers need to fsync the same segment, the first becomes the leader and
@@ -86,23 +96,32 @@ type WAL struct {
 	// This preserves the "durable after AppendBatch returns" guarantee of
 	// FsyncBatch while collapsing N concurrent fsyncs into one.
 	gcMu        sync.Mutex
-	gcLeaderSeg *Segment    // non-nil while a leader is mid-sync
+	gcLeaderSeg *Segment    // non-nil while a leader is mid-sync for this segment
 	gcFollowers []*gcWaiter // writers waiting for the leader's sync result
 }
 
 // gcWaiter is a follower in the group-commit protocol. The leader fills err
 // and closes done after its fsync completes.
 type gcWaiter struct {
-	done chan struct{}
-	err  error
+	done chan struct{} // closed when the leader finishes fsync
+	err  error         // fsync error shared with followers; nil on success
 }
 
-// WALConfig represents WAL configuration
+// WALConfig configures segment sizing, sparse indexing, and durability mode.
 type WALConfig struct {
+	// SegmentSizeBytes is the target maximum size of each segment file in bytes.
+	// Segments rotate when they reach this size. Zero uses a library default.
 	SegmentSizeBytes int64
-	IndexInterval    int64
-	FsyncMode        string // Raw string config, parsed to enum at WAL init
-	FlushIntervalMS  int32
+	// IndexInterval is the sparse-index period in number of events
+	// (one index entry every IndexInterval events).
+	IndexInterval int64
+	// FsyncMode is the raw string durability mode ("periodic", "every_event",
+	// "batch"), parsed to FsyncMode at WAL construction.
+	FsyncMode string
+	// FlushIntervalMS is the background buffer-flush interval in milliseconds.
+	// Used by the per-WAL flush loop or the shared FsyncCoalescer. Zero disables
+	// periodic flush when no coalescer is provided.
+	FlushIntervalMS int32
 }
 
 // NewWAL creates a new WAL using a per-WAL background flush loop.
@@ -268,11 +287,16 @@ func (w *WAL) verifySegment(segment *Segment) error {
 	return nil
 }
 
-// PreparedRecord holds pre-encoded record buffer for fast serialization
+// PreparedRecord holds a pre-encoded WAL record buffer for fast serialization.
+// Offset and CRC placeholders in Buf are filled after the offset is reserved.
 type PreparedRecord struct {
+	// Event is the source event; Offset and PartitionId are filled during append.
 	Event *types.Event
-	Buf   []byte
-	Term  int64
+	// Buf is the full on-disk record (length prefix through meta), with offset/CRC
+	// placeholders until assignment.
+	Buf []byte
+	// Term is the Raft term encoded into the record.
+	Term int64
 }
 
 var recordBufPool = sync.Pool{
@@ -455,7 +479,8 @@ func (w *WAL) advanceAppendTurn(endOffset int64) {
 	w.appendSeqMu.Unlock()
 }
 
-// AppendBatch appends a batch of events to WAL
+// AppendBatch appends a batch of events to the WAL, assigning contiguous offsets
+// and applying the configured fsync mode. Empty batches are a no-op.
 func (w *WAL) AppendBatch(events []*types.Event) error {
 	if len(events) == 0 {
 		return nil
@@ -767,7 +792,7 @@ func (w *WAL) maybePreCreateNextSegment(nextOffset int64) {
 	w.nextSegMu.Unlock()
 }
 
-// openActiveSegment opens or creates active segment
+// openActiveSegment opens the last active segment or creates a new one.
 func (w *WAL) openActiveSegment() error {
 	if len(w.segments) > 0 {
 		lastSegment := w.segments[len(w.segments)-1]
@@ -788,7 +813,8 @@ func (w *WAL) openActiveSegment() error {
 	return nil
 }
 
-// AppendEvent appends an event to WAL
+// AppendEvent appends a single event to the WAL, assigning the next offset and
+// applying the configured fsync mode.
 func (w *WAL) AppendEvent(event *types.Event) error {
 	start := time.Now()
 	defer func() {
@@ -958,7 +984,8 @@ func (w *WAL) rotateSegment() error {
 	return nil
 }
 
-// ReadEvents reads events in offset range
+// ReadEvents reads events in the inclusive offset range [startOffset, endOffset]
+// across all segments that overlap the range.
 func (w *WAL) ReadEvents(startOffset, endOffset int64) ([]*types.Event, error) {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
@@ -998,7 +1025,7 @@ func (w *WAL) ReadEvents(startOffset, endOffset int64) ([]*types.Event, error) {
 	return result, nil
 }
 
-// ReadEvent reads a single event by offset
+// ReadEvent reads a single event by absolute partition offset.
 func (w *WAL) ReadEvent(offset int64) (*types.Event, error) {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
@@ -1019,7 +1046,8 @@ func (w *WAL) ReadEvent(offset int64) (*types.Event, error) {
 	return nil, fmt.Errorf("event at offset %d not found", offset)
 }
 
-// ReadEventsByTime reads events in timestamp range
+// ReadEventsByTime reads events whose schedule timestamp falls in the inclusive
+// range [startTS, endTS] (milliseconds since epoch).
 func (w *WAL) ReadEventsByTime(startTS, endTS int64) ([]*types.Event, error) {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
@@ -1274,7 +1302,7 @@ func (w *WAL) Close() error {
 	return errors.Join(errs...)
 }
 
-// GetSegments returns all segments
+// GetSegments returns a snapshot copy of all open segments (active and historical).
 func (w *WAL) GetSegments() []*Segment {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
@@ -1444,14 +1472,14 @@ func (w *WAL) CompactByTimestamp(upToTS int64) (int, error) {
 	return deletedCount, nil
 }
 
-// GetActiveSegment returns active segment
+// GetActiveSegment returns the segment currently accepting appends.
 func (w *WAL) GetActiveSegment() *Segment {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 	return w.activeSegment
 }
 
-// GetNextOffset returns next offset to write
+// GetNextOffset returns the next offset that will be assigned to a new event.
 func (w *WAL) GetNextOffset() int64 {
 	return w.nextOffset.Load()
 }
@@ -1464,13 +1492,18 @@ func (w *WAL) GetTermForOffset(offset int64) (int64, error) {
 	}
 	return event.GetTerm(), nil
 }
+
+// GetHighWatermark returns the highest durable offset written to the WAL
+// (inclusive). Zero-value before any writes is 0; an empty WAL may report
+// lastOffset-based values via GetLastOffset instead.
 func (w *WAL) GetHighWatermark() int64 {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 	return w.highWatermark
 }
 
-// GetLastOffset returns last offset in WAL
+// GetLastOffset returns the last offset present in the highest segment, or -1
+// if the WAL has no segments.
 func (w *WAL) GetLastOffset() int64 {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
@@ -1482,14 +1515,15 @@ func (w *WAL) GetLastOffset() int64 {
 	return w.segments[len(w.segments)-1].GetLastOffset()
 }
 
-// GetDataDir returns the WAL data directory
+// GetDataDir returns the WAL data directory path.
 func (w *WAL) GetDataDir() string {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 	return w.dataDir
 }
 
-// ReloadSegments reloads segments from disk (used after bulk file sync)
+// ReloadSegments reloads segments from disk after bulk file sync (e.g. snapshot
+// install). Existing open segment handles are closed first.
 func (w *WAL) ReloadSegments() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()

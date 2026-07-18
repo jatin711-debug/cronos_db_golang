@@ -10,7 +10,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// mmapFile memory maps a file for reading and writing.
+// mmapFile memory-maps a file for reading and writing on Unix.
 //
 // The mapping is MAP_SHARED with PROT_READ|PROT_WRITE so that writes performed
 // through the returned slice (e.g. writeRecordMmap) are reflected in the

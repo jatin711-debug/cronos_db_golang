@@ -22,60 +22,84 @@ const (
 	defaultMetadataRefresh    = 5 * time.Second
 )
 
-// MetadataConfig controls metadata cache behavior.
+// MetadataConfig controls how the client caches and refreshes cluster metadata.
 type MetadataConfig struct {
-	TTL             time.Duration
+	// TTL is how long cached partition/leader metadata is considered fresh.
+	TTL time.Duration
+	// RefreshInterval is how often background refresh runs; must be <= TTL.
 	RefreshInterval time.Duration
 }
 
-// SecurityConfig controls transport and per-RPC credentials.
+// SecurityConfig controls transport security and per-RPC credentials.
 type SecurityConfig struct {
 	// Insecure uses plaintext transport credentials.
 	// This should be false in production.
 	Insecure bool
 
-	// TLS options (used when Insecure=false).
-	ServerName         string
-	CACertFile         string
-	ClientCertFile     string
-	ClientKeyFile      string
+	// ServerName overrides the TLS server name used for certificate verification.
+	ServerName string
+	// CACertFile is the path to a CA PEM used to verify the server certificate.
+	CACertFile string
+	// ClientCertFile is the path to a client certificate PEM for mTLS.
+	ClientCertFile string
+	// ClientKeyFile is the path to the client private key PEM for mTLS.
+	ClientKeyFile string
+	// InsecureSkipVerify disables server certificate verification (development only).
 	InsecureSkipVerify bool
 
-	// PerRPCCredentials is used when provided.
+	// PerRPCCredentials is used when provided (e.g. custom token providers).
 	PerRPCCredentials credentials.PerRPCCredentials
 
-	// Static bearer token fallback when PerRPCCredentials is nil.
-	BearerToken  string
+	// BearerToken is a static bearer token used when PerRPCCredentials is nil.
+	BearerToken string
+	// BearerScheme is the auth scheme prefix (default "Bearer").
 	BearerScheme string
 }
 
-// Config defines client runtime settings.
+// Config defines client runtime settings used by Dial for pooling, metadata,
+// security, and default RPC deadlines.
 type Config struct {
+	// BootstrapAddresses is the initial list of gRPC endpoints used to discover
+	// cluster metadata. At least one address is required.
 	BootstrapAddresses []string
 
-	// Optional explicit mapping for leader_id -> address.
+	// NodeIDToAddress is an optional explicit mapping for leader_id → address.
 	// Useful until server metadata includes leader addresses.
 	NodeIDToAddress map[string]string
 
-	// Optional fallback for partition hashing if metadata is temporarily empty.
+	// PartitionCount is an optional fallback for key hashing when metadata is
+	// temporarily empty. 0 means rely only on server-advertised counts.
 	PartitionCount int
 
+	// ConnectionsPerNode is how many pooled gRPC connections to keep per node address.
 	ConnectionsPerNode int
-	DialTimeout        time.Duration
-	RequestTimeout     time.Duration
+	// DialTimeout bounds how long Dial waits when opening a connection.
+	DialTimeout time.Duration
+	// RequestTimeout is the default per-RPC timeout when the call context has no deadline.
+	RequestTimeout time.Duration
 
+	// ResolveDNS enables DNS resolution of bootstrap addresses when true.
 	ResolveDNS bool
 
-	KeepaliveTime    time.Duration
+	// KeepaliveTime is the gRPC keepalive ping interval.
+	KeepaliveTime time.Duration
+	// KeepaliveTimeout is how long to wait for a keepalive ack before closing.
 	KeepaliveTimeout time.Duration
-	MaxRecvMsgSize   int
-	MaxSendMsgSize   int
-	ReadBufferSize   int
-	WriteBufferSize  int
+	// MaxRecvMsgSize is the max inbound message size in bytes.
+	MaxRecvMsgSize int
+	// MaxSendMsgSize is the max outbound message size in bytes.
+	MaxSendMsgSize int
+	// ReadBufferSize is the gRPC transport read buffer size in bytes.
+	ReadBufferSize int
+	// WriteBufferSize is the gRPC transport write buffer size in bytes.
+	WriteBufferSize int
 
+	// Metadata configures partition/leader metadata caching.
 	Metadata MetadataConfig
+	// Security configures TLS/mTLS and bearer credentials.
 	Security SecurityConfig
-	Hooks    Hooks
+	// Hooks receives optional instrumentation callbacks (may be nil → NopHooks).
+	Hooks Hooks
 
 	// CircuitBreaker controls per-address resilience gates for requests issued
 	// through this client (e.g. by Producer). Threshold of 0 disables breakers.
@@ -83,6 +107,7 @@ type Config struct {
 }
 
 // DefaultConfig returns a config with throughput-safe defaults.
+// Security defaults to Insecure=true for local development; set Insecure=false for production.
 func DefaultConfig(bootstrapAddresses ...string) Config {
 	return Config{
 		BootstrapAddresses: append([]string(nil), bootstrapAddresses...),
@@ -112,6 +137,7 @@ func DefaultConfig(bootstrapAddresses ...string) Config {
 	}
 }
 
+// withDefaults fills zero-valued optional fields with production-oriented defaults.
 func (c Config) withDefaults() Config {
 	out := c
 
@@ -164,7 +190,7 @@ func (c Config) withDefaults() Config {
 	return out
 }
 
-// Validate validates config for correctness and safety.
+// Validate checks config for correctness and safety before Dial.
 func (c Config) Validate() error {
 	if len(c.BootstrapAddresses) == 0 {
 		return fmt.Errorf("bootstrap addresses are required")

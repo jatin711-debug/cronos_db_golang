@@ -12,8 +12,9 @@ import (
 	"github.com/hashicorp/memberlist"
 )
 
-// MemberlistMembership is a Membership implementation backed by HashiCorp Memberlist (SWIM protocol).
-// It provides production-grade failure detection with lower overhead than custom TCP heartbeats.
+// MemberlistMembership is a MembershipService implementation backed by HashiCorp
+// Memberlist (SWIM). It provides production-grade failure detection with lower
+// overhead than the custom TCP heartbeat Membership implementation.
 type MemberlistMembership struct {
 	config    *ClusterConfig
 	list      *memberlist.Memberlist
@@ -272,11 +273,16 @@ func (mm *MemberlistMembership) metaBytes() []byte {
 
 // nodeMeta is the metadata exchanged via memberlist.
 type nodeMeta struct {
-	NodeID     string `json:"node_id"`
-	GRPCAddr   string `json:"grpc_addr"`
+	// NodeID is this node's unique cluster identifier.
+	NodeID string `json:"node_id"`
+	// GRPCAddr is the internal cluster gRPC advertise address.
+	GRPCAddr string `json:"grpc_addr"`
+	// GossipAddr is the membership/gossip advertise address.
 	GossipAddr string `json:"gossip_addr"`
-	HTTPAddr   string `json:"http_addr"`
-	RaftAddr   string `json:"raft_addr"`
+	// HTTPAddr is the HTTP (health/UI) advertise address when known.
+	HTTPAddr string `json:"http_addr"`
+	// RaftAddr is the Raft transport advertise address.
+	RaftAddr string `json:"raft_addr"`
 }
 
 // mlDelegate implements memberlist.Delegate for metadata exchange.
@@ -284,20 +290,29 @@ type mlDelegate struct {
 	mm *MemberlistMembership
 }
 
+// NodeMeta returns JSON-encoded nodeMeta limited by the memberlist size budget.
 func (d *mlDelegate) NodeMeta(limit int) []byte {
 	return d.mm.metaBytes()
 }
 
-func (d *mlDelegate) NotifyMsg([]byte)                           {}
+// NotifyMsg implements memberlist.Delegate (no custom user messages).
+func (d *mlDelegate) NotifyMsg([]byte) {}
+
+// GetBroadcasts implements memberlist.Delegate (no broadcasts).
 func (d *mlDelegate) GetBroadcasts(overhead, limit int) [][]byte { return nil }
-func (d *mlDelegate) LocalState(join bool) []byte                { return nil }
-func (d *mlDelegate) MergeRemoteState(buf []byte, join bool)     {}
+
+// LocalState implements memberlist.Delegate (no push/pull state).
+func (d *mlDelegate) LocalState(join bool) []byte { return nil }
+
+// MergeRemoteState implements memberlist.Delegate (no push/pull state).
+func (d *mlDelegate) MergeRemoteState(buf []byte, join bool) {}
 
 // mlEventDelegate implements memberlist.EventDelegate for join/leave notifications.
 type mlEventDelegate struct {
 	mm *MemberlistMembership
 }
 
+// NotifyJoin records a newly joined memberlist peer into local membership state.
 func (e *mlEventDelegate) NotifyJoin(member *memberlist.Node) {
 	e.mm.nodesMu.Lock()
 	node := e.mm.nodeFromMember(member)
@@ -315,6 +330,7 @@ func (e *mlEventDelegate) NotifyJoin(member *memberlist.Node) {
 	log.Printf("[MEMBERSHIP] Node joined: %s at %s", member.Name, member.Address())
 }
 
+// NotifyLeave marks a departed peer dead and emits a leave event.
 func (e *mlEventDelegate) NotifyLeave(member *memberlist.Node) {
 	e.mm.nodesMu.Lock()
 	if node, ok := e.mm.nodes[member.Name]; ok {
@@ -333,6 +349,7 @@ func (e *mlEventDelegate) NotifyLeave(member *memberlist.Node) {
 	log.Printf("[MEMBERSHIP] Node left: %s", member.Name)
 }
 
+// NotifyUpdate refreshes local state when a peer's memberlist metadata changes.
 func (e *mlEventDelegate) NotifyUpdate(member *memberlist.Node) {
 	node := e.mm.nodeFromMember(member)
 	e.mm.nodesMu.Lock()

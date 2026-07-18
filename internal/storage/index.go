@@ -18,23 +18,29 @@ const (
 	indexSyncInterval = 100 // Sync every N entries for performance
 )
 
-// IndexEntry represents a sparse index entry
+// IndexEntry is one sparse index entry mapping an event to a byte position.
 type IndexEntry struct {
-	Timestamp    int64 // Event schedule timestamp
-	Offset       int64 // Event offset in partition
-	FilePosition int64 // Byte position in segment file
+	// Timestamp is the event schedule timestamp (Unix milliseconds).
+	Timestamp int64
+	// Offset is the event offset within the partition.
+	Offset int64
+	// FilePosition is the byte position of the record in the segment file.
+	FilePosition int64
 }
 
-// Index manages sparse index for a segment
+// Index manages a sparse index file for a single WAL segment.
+// Entries are appended periodically (every N events) so range reads can
+// seek near the target offset or timestamp without a full scan.
 type Index struct {
 	mu       sync.RWMutex
-	entries  []IndexEntry
-	file     *os.File
-	writer   *bufio.Writer // Buffered writer eliminates Seek+Write per entry
-	filePath string
+	entries  []IndexEntry  // in-memory copy of on-disk entries (offset-ordered)
+	file     *os.File      // O_APPEND handle for durable entry writes
+	writer   *bufio.Writer // buffered writer; eliminates Seek+Write per entry
+	filePath string        // absolute path to the .index file
 }
 
-// NewIndex creates or opens an index file
+// NewIndex creates or opens the sparse index file for the segment whose first
+// offset is segmentFirstOffset.
 func NewIndex(dataDir string, segmentFirstOffset int64) (*Index, error) {
 	indexDir := filepath.Join(dataDir, "index")
 	if err := os.MkdirAll(indexDir, 0755); err != nil {
@@ -154,8 +160,9 @@ func (idx *Index) addEntryLocked(timestamp, offset, filePosition int64) error {
 	return nil
 }
 
-// FindByOffset finds the closest index entry at or before the target offset
-// Returns the file position to start reading from
+// FindByOffset finds the closest index entry at or before targetOffset.
+// Returns the file position to start scanning from; found is false when the
+// scan should start after the segment header (no suitable entry).
 func (idx *Index) FindByOffset(targetOffset int64) (filePosition int64, found bool) {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
@@ -178,7 +185,8 @@ func (idx *Index) FindByOffset(targetOffset int64) (filePosition int64, found bo
 	return idx.entries[i-1].FilePosition, true
 }
 
-// FindByTimestamp finds the closest index entry at or before the target timestamp
+// FindByTimestamp finds the closest index entry at or before targetTS
+// (Unix milliseconds). Returns the file position to start scanning from.
 func (idx *Index) FindByTimestamp(targetTS int64) (filePosition int64, found bool) {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
@@ -199,7 +207,7 @@ func (idx *Index) FindByTimestamp(targetTS int64) (filePosition int64, found boo
 	return idx.entries[i-1].FilePosition, true
 }
 
-// GetEntries returns all index entries (for debugging/testing)
+// GetEntries returns a copy of all index entries (for debugging/testing).
 func (idx *Index) GetEntries() []IndexEntry {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
@@ -298,14 +306,14 @@ func (idx *Index) rewriteLocked() error {
 	return nil
 }
 
-// Count returns the number of index entries
+// Count returns the number of index entries currently loaded.
 func (idx *Index) Count() int {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 	return len(idx.entries)
 }
 
-// Flush syncs any pending writes to disk
+// Flush flushes the buffered writer and fsyncs the index file to disk.
 func (idx *Index) Flush() error {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
@@ -321,7 +329,7 @@ func (idx *Index) Flush() error {
 	return nil
 }
 
-// Close closes the index file
+// Close flushes, fsyncs, and closes the index file.
 func (idx *Index) Close() error {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()

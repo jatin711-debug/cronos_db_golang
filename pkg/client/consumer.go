@@ -25,41 +25,56 @@ var subscriptionCounter atomic.Uint64
 type AckMode string
 
 const (
-	AckModeAuto   AckMode = "auto"
+	// AckModeAuto acks successful handler returns without an explicit Ack call.
+	AckModeAuto AckMode = "auto"
+	// AckModeManual requires the handler to call Delivery.Ack* methods.
 	AckModeManual AckMode = "manual"
 )
 
-// CommitStrategy controls ack commit behavior.
+// CommitStrategy controls whether ack RPCs are flushed asynchronously or synchronously.
 type CommitStrategy string
 
 const (
+	// CommitStrategyAsync batches acks and flushes in the background.
 	CommitStrategyAsync CommitStrategy = "async"
-	CommitStrategySync  CommitStrategy = "sync"
+	// CommitStrategySync waits for ack RPC completion before returning from Ack.
+	CommitStrategySync CommitStrategy = "sync"
 )
 
 // Assignment carries consumer assignment details for callback hooks.
 type Assignment struct {
-	Topic          string
-	ConsumerGroup  string
-	PartitionID    int32
+	// Topic is the subscribed topic.
+	Topic string
+	// ConsumerGroup is the consumer group ID.
+	ConsumerGroup string
+	// PartitionID is the partition this subscription is consuming.
+	PartitionID int32
+	// SubscriptionID is the client-generated or server-visible subscription identifier.
 	SubscriptionID string
-	NodeAddress    string
+	// NodeAddress is the gRPC address of the node serving the stream.
+	NodeAddress string
 }
 
-// OffsetCheckpointStore persists committed offsets for recovery/resume.
+// OffsetCheckpointStore persists committed offsets for recovery/resume across process restarts.
 type OffsetCheckpointStore interface {
+	// LoadOffset returns the last saved next-offset, or a store-defined sentinel when missing.
 	LoadOffset(ctx context.Context, consumerGroup string, topic string, partitionID int32) (int64, error)
+	// SaveOffset records nextOffset after a successful commit progress.
 	SaveOffset(ctx context.Context, consumerGroup string, topic string, partitionID int32, nextOffset int64) error
 }
 
-// Delivery wraps server delivery payload for handler processing.
+// Delivery wraps a server delivery payload for handler processing and ack control.
 type Delivery struct {
-	Event      *types.Event
-	Batch      []*types.Event
+	// Event is the single event when the server did not batch deliveries.
+	Event *types.Event
+	// Batch is a multi-event delivery payload when the server batches.
+	Batch []*types.Event
+	// DeliveryID is the server-assigned ID required for Ack RPCs.
 	DeliveryID string
-	Attempt    int32
+	// Attempt is the 1-based delivery attempt count from the server.
+	Attempt int32
 
-	acker *deliveryAcker
+	acker *deliveryAcker // internal ack sender bound to this subscription stream
 }
 
 // LastOffset returns the highest event offset in this delivery payload.
@@ -110,48 +125,73 @@ func (d Delivery) Decode(codec Codec, out any) error {
 // MessageHandler is invoked by the consumer for each delivery.
 type MessageHandler func(context.Context, Delivery) error
 
-// ConsumerConfig controls consumer stream lifecycle and concurrency.
+// ConsumerConfig controls consumer stream lifecycle, ack behavior, and reconnect policy.
 type ConsumerConfig struct {
-	Topic          string
-	ConsumerGroup  string
+	// Topic is the topic to subscribe to (required).
+	Topic string
+	// ConsumerGroup is the consumer group ID used for offset tracking (required).
+	ConsumerGroup string
+	// SubscriptionID optionally labels this subscription; empty lets the client generate one.
 	SubscriptionID string
 
-	// -1 uses server auto-assignment.
+	// PartitionID selects a partition. -1 uses server auto-assignment.
 	PartitionID int32
-	// -1 starts at latest (server semantics).
+	// StartOffset is the initial read offset. -1 means latest (server semantics).
 	StartOffset int64
 
-	MaxBufferSize     int32
+	// MaxBufferSize is the max events the server may buffer for this subscription.
+	MaxBufferSize int32
+	// WorkerConcurrency is how many handler goroutines process deliveries concurrently.
 	WorkerConcurrency int
 
 	// AutoAck is kept for backward compatibility. Prefer AckMode.
 	AutoAck bool
+	// AckMode selects automatic vs manual acknowledgements.
 	AckMode AckMode
 
-	AckQueueSize     int
-	AckBatchSize     int
+	// AckQueueSize is the capacity of the outbound ack queue.
+	AckQueueSize int
+	// AckBatchSize is the max acks coalesced per flush when using async commits.
+	AckBatchSize int
+	// AckFlushInterval is the max time between async ack flushes.
 	AckFlushInterval time.Duration
-	CommitStrategy   CommitStrategy
-	CheckpointStore  OffsetCheckpointStore
+	// CommitStrategy selects async batching vs sync ack RPCs.
+	CommitStrategy CommitStrategy
+	// CheckpointStore optionally persists local resume offsets (nil disables local checkpoints).
+	CheckpointStore OffsetCheckpointStore
+	// ResumeCheckpoint loads StartOffset from CheckpointStore when true and a checkpoint exists.
 	ResumeCheckpoint bool
-	MaxPayloadBytes  int
-	PreferredCodec   Codec
+	// MaxPayloadBytes is reserved for future payload guards (handler-side limits).
+	MaxPayloadBytes int
+	// PreferredCodec is the default codec for Delivery.Decode helpers.
+	PreferredCodec Codec
 
-	// Optional preferred node for initial subscribe attempt.
+	// NodeAddress optionally pins the initial subscribe attempt to a specific node.
 	NodeAddress string
 
-	ReconnectBackoff     time.Duration
-	MaxReconnectBackoff  time.Duration
-	ReconnectJitter      float64
+	// ReconnectBackoff is the initial delay between subscribe reconnect attempts.
+	ReconnectBackoff time.Duration
+	// MaxReconnectBackoff caps exponential reconnect backoff.
+	MaxReconnectBackoff time.Duration
+	// ReconnectJitter is the fractional jitter applied to reconnect delays (e.g. 0.2 = ±20%).
+	ReconnectJitter float64
+	// MaxReconnectAttempts limits reconnects (0 = unlimited until context cancel).
 	MaxReconnectAttempts int
 
+	// HeartbeatInterval is how often optional OnHeartbeat callbacks fire while connected.
 	HeartbeatInterval time.Duration
-	OnJoin            func(context.Context, Assignment)
-	OnLeave           func(context.Context, Assignment)
-	OnHeartbeat       func(context.Context, Assignment)
-	OnAssigned        func(context.Context, Assignment)
-	OnRevoked         func(context.Context, Assignment)
-	OnReconnect       func(context.Context, int, error)
+	// OnJoin is called when a subscription successfully connects.
+	OnJoin func(context.Context, Assignment)
+	// OnLeave is called when a subscription disconnects cleanly or on shutdown.
+	OnLeave func(context.Context, Assignment)
+	// OnHeartbeat is called periodically while the stream is alive.
+	OnHeartbeat func(context.Context, Assignment)
+	// OnAssigned is called when a partition assignment is established.
+	OnAssigned func(context.Context, Assignment)
+	// OnRevoked is called when an assignment is lost (e.g. before reconnect).
+	OnRevoked func(context.Context, Assignment)
+	// OnReconnect is called before each reconnect attempt with attempt number and last error.
+	OnReconnect func(context.Context, int, error)
 }
 
 // DefaultConsumerConfig returns safe consumer defaults.
@@ -233,6 +273,7 @@ func (c ConsumerConfig) withDefaults() ConsumerConfig {
 	return out
 }
 
+// Validate checks that required consumer settings are present and positive where required.
 func (c ConsumerConfig) Validate() error {
 	if c.Topic == "" {
 		return fmt.Errorf("topic is required")
@@ -393,10 +434,11 @@ func (a *deliveryAcker) send(ctx context.Context, req *types.AckRequest) error {
 }
 
 // Consumer is a high-level subscribe runtime.
+// Consumer runs a subscribe stream, dispatches deliveries to a handler, and manages acks/reconnects.
 type Consumer struct {
-	client  *Client
-	cfg     ConsumerConfig
-	handler MessageHandler
+	client  *Client        // shared metadata-aware client
+	cfg     ConsumerConfig // resolved consumer settings
+	handler MessageHandler // user callback invoked per delivery
 }
 
 // NewConsumer creates a consumer runtime.

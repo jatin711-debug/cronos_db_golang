@@ -30,6 +30,7 @@ type InternalGRPCServer struct {
 
 // InternalConfig configures the internal cluster gRPC listener.
 type InternalConfig struct {
+	// Address is the listen address (host:port) for the internal gRPC server.
 	Address string
 	// TLS is the optional replication mTLS configuration. When enabled, the
 	// server requires and verifies client certificates.

@@ -1,3 +1,5 @@
+// Package utils provides small shared helpers used by the server and client SDK:
+// hashing, panic-safe goroutines, and atomic file writes.
 package utils
 
 import (
@@ -9,40 +11,47 @@ import (
 	"slices"
 )
 
-// Hash is a simple interface for hashing
+// Hash is a minimal hashing interface used by older helpers.
 type Hash interface {
+	// Sum appends the current hash to b and returns the resulting slice.
 	Sum(b []byte) []byte
+	// Reset clears the hasher state.
 	Reset()
 }
 
-// CRC32Calculator calculates CRC32 checksums
+// CRC32Calculator computes and verifies IEEE CRC32 checksums (WAL/record integrity).
 type CRC32Calculator struct {
-	crc uint32
+	crc uint32 // reserved for streaming use; Calculate uses IEEE over full buffers
 }
 
+// NewCRC32Calculator returns a new CRC32Calculator.
 func NewCRC32Calculator() *CRC32Calculator {
 	return &CRC32Calculator{}
 }
 
+// Calculate returns the IEEE CRC32 of data.
 func (c *CRC32Calculator) Calculate(data []byte) uint32 {
 	return crc32.ChecksumIEEE(data)
 }
 
+// Verify reports whether data's CRC32 matches expected.
 func (c *CRC32Calculator) Verify(data []byte, expected uint32) bool {
 	return c.Calculate(data) == expected
 }
 
-// SHA1Hasher calculates SHA1 hashes
+// SHA1Hasher computes hex-encoded SHA-1 digests.
 type SHA1Hasher struct {
-	hasher hash.Hash
+	hasher hash.Hash // reusable SHA-1 state
 }
 
+// NewSHA1Hasher returns a SHA1Hasher with a fresh SHA-1 instance.
 func NewSHA1Hasher() *SHA1Hasher {
 	return &SHA1Hasher{
 		hasher: sha1.New(),
 	}
 }
 
+// Hash returns the hex-encoded SHA-1 of data.
 func (h *SHA1Hasher) Hash(data []byte) string {
 	h.hasher.Reset()
 	h.hasher.Write(data)
@@ -50,18 +59,20 @@ func (h *SHA1Hasher) Hash(data []byte) string {
 	return hex.EncodeToString(hash)
 }
 
+// Verify reports whether data's SHA-1 hex digest equals hashStr.
 func (h *SHA1Hasher) Verify(data []byte, hashStr string) bool {
 	calculated := h.Hash(data)
 	return calculated == hashStr
 }
 
-// ConsistentHash represents a consistent hashing ring
+// ConsistentHash is a simple CRC32-based consistent hash ring (single vnode per node).
+// Prefer the cluster hashring for production placement; this helper is a lightweight utility.
 type ConsistentHash struct {
-	ring       map[uint32]string
-	sortedKeys []uint32
+	ring       map[uint32]string // hash position → node name
+	sortedKeys []uint32          // sorted ring positions for clockwise walks
 }
 
-// NewConsistentHash creates a new consistent hash
+// NewConsistentHash creates an empty consistent hash ring.
 func NewConsistentHash() *ConsistentHash {
 	return &ConsistentHash{
 		ring:       make(map[uint32]string),
@@ -69,7 +80,7 @@ func NewConsistentHash() *ConsistentHash {
 	}
 }
 
-// Add adds a node to the hash ring
+// Add inserts a node onto the ring at CRC32(node).
 func (c *ConsistentHash) Add(node string) {
 	// Simplified - would use multiple virtual nodes in production
 	hash := crc32.ChecksumIEEE([]byte(node))
@@ -77,14 +88,14 @@ func (c *ConsistentHash) Add(node string) {
 	c.sortedKeys = append(c.sortedKeys, hash)
 }
 
-// Remove removes a node from the hash ring
+// Remove deletes a node from the ring by its CRC32(node) position.
 func (c *ConsistentHash) Remove(node string) {
 	hash := crc32.ChecksumIEEE([]byte(node))
 	delete(c.ring, hash)
 	// Simplified - would rebuild sortedKeys in production
 }
 
-// Get finds the node responsible for a key
+// Get returns the node responsible for key (first ring position clockwise), or "".
 func (c *ConsistentHash) Get(key string) string {
 	if len(c.ring) == 0 {
 		return ""
@@ -103,7 +114,8 @@ func (c *ConsistentHash) Get(key string) string {
 	return c.ring[c.sortedKeys[0]]
 }
 
-// GetN finds N nodes for a key (replication)
+// GetN returns up to n distinct nodes for key (replication-style placement).
+// This implementation is simplified and may duplicate nodes if the ring is small.
 func (c *ConsistentHash) GetN(key string, n int) []string {
 	if len(c.ring) == 0 {
 		return nil

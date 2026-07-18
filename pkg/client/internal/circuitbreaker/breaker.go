@@ -15,6 +15,7 @@ const (
 	StateHalfOpen              // Testing if recovered
 )
 
+// String returns a stable name for the circuit state (closed/open/half-open).
 func (s State) String() string {
 	switch s {
 	case StateClosed:
@@ -29,10 +30,15 @@ func (s State) String() string {
 }
 
 // Config controls circuit breaker behavior.
+// A FailureThreshold of 0 disables tripping (Allow always returns true).
 type Config struct {
-	FailureThreshold int           // Consecutive failures to trip
-	SuccessThreshold int           // Successes in half-open to close
-	Timeout          time.Duration // How long to stay open before half-open
+	// FailureThreshold is consecutive failures required to open the circuit.
+	// 0 disables the breaker (never opens).
+	FailureThreshold int
+	// SuccessThreshold is consecutive successes in half-open required to close.
+	SuccessThreshold int
+	// Timeout is how long the breaker stays open before probing half-open.
+	Timeout time.Duration
 }
 
 // DefaultConfig returns safe defaults.
@@ -44,14 +50,14 @@ func DefaultConfig() Config {
 	}
 }
 
-// CircuitBreaker is a per-target resilience gate.
+// CircuitBreaker is a per-target resilience gate (closed → open → half-open).
 type CircuitBreaker struct {
-	cfg Config
+	cfg Config // trip thresholds and open timeout
 
-	state      atomic.Int32
-	failures   atomic.Int32
-	successes  atomic.Int32
-	lastFailAt atomic.Int64 // unix nano
+	state      atomic.Int32 // State enum stored as int32
+	failures   atomic.Int32 // consecutive failures in closed/open evaluation
+	successes  atomic.Int32 // consecutive successes while half-open
+	lastFailAt atomic.Int64 // unix nano of last recorded failure
 }
 
 // New creates a circuit breaker.
@@ -126,13 +132,14 @@ func (cb *CircuitBreaker) CurrentState() State {
 }
 
 // Manager holds per-address circuit breakers.
+// Manager owns a map of per-address CircuitBreakers sharing one Config.
 type Manager struct {
-	mu       sync.RWMutex
-	breakers map[string]*CircuitBreaker
-	cfg      Config
+	mu       sync.RWMutex               // guards breakers map
+	breakers map[string]*CircuitBreaker // address → breaker
+	cfg      Config                     // template config for new breakers
 }
 
-// NewManager creates a breaker manager.
+// NewManager creates a breaker manager with empty per-address state.
 func NewManager(cfg Config) *Manager {
 	return &Manager{
 		breakers: make(map[string]*CircuitBreaker),

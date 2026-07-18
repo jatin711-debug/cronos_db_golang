@@ -17,7 +17,8 @@ import (
 	"go.etcd.io/bbolt"
 )
 
-// RaftNode manages Raft consensus for cluster metadata
+// RaftNode manages HashiCorp Raft consensus for durable cluster metadata
+// (nodes, partition assignments) shared across the cluster.
 type RaftNode struct {
 	config        *ClusterConfig
 	raft          *raft.Raft
@@ -28,7 +29,7 @@ type RaftNode struct {
 	snapshotStore raft.SnapshotStore
 }
 
-// NewRaftNode creates a new Raft node
+// NewRaftNode creates a RaftNode with Bolt-backed log/stable stores and a file snapshot store.
 func NewRaftNode(config *ClusterConfig) (*RaftNode, error) {
 	// Create data directory
 	if err := os.MkdirAll(config.RaftDataDir, 0755); err != nil {
@@ -108,7 +109,7 @@ func NewRaftNode(config *ClusterConfig) (*RaftNode, error) {
 	}, nil
 }
 
-// Bootstrap bootstraps the Raft cluster (only for first node)
+// Bootstrap bootstraps a single-server Raft cluster. Only the first node should call this.
 func (n *RaftNode) Bootstrap() error {
 	configuration := raft.Configuration{
 		Servers: []raft.Server{
@@ -130,7 +131,7 @@ func (n *RaftNode) Bootstrap() error {
 	return nil
 }
 
-// Join joins an existing cluster
+// Join adds nodeID at addr as a Raft voter. Must be called on the current leader.
 func (n *RaftNode) Join(nodeID, addr string) error {
 	log.Printf("[RAFT] Requesting to join node %s at %s", nodeID, addr)
 
@@ -164,7 +165,7 @@ func (n *RaftNode) Join(nodeID, addr string) error {
 	return nil
 }
 
-// Leave removes a node from the cluster
+// Leave removes nodeID from the Raft configuration. Must be called on the current leader.
 func (n *RaftNode) Leave(nodeID string) error {
 	log.Printf("[RAFT] Removing node %s from cluster", nodeID)
 
@@ -231,7 +232,7 @@ func (n *RaftNode) GetPeers() ([]string, error) {
 	return peers, nil
 }
 
-// Apply applies a command to the FSM
+// Apply proposes cmd to the Raft log and applies it to the FSM. Fails if not leader.
 func (n *RaftNode) Apply(cmd *Command) error {
 	if !n.IsLeader() {
 		return fmt.Errorf("not leader")
@@ -255,12 +256,12 @@ func (n *RaftNode) Apply(cmd *Command) error {
 	return nil
 }
 
-// GetState returns the current cluster state from FSM
+// GetState returns a deep copy of the current cluster state from the FSM.
 func (n *RaftNode) GetState() *ClusterState {
 	return n.fsm.GetState()
 }
 
-// WaitForLeader waits for a leader to be elected
+// WaitForLeader blocks until a Raft leader is known or timeout elapses.
 func (n *RaftNode) WaitForLeader(timeout time.Duration) error {
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
@@ -280,36 +281,43 @@ func (n *RaftNode) WaitForLeader(timeout time.Duration) error {
 	}
 }
 
-// Shutdown shuts down the Raft node
+// Shutdown cleanly shuts down the Raft instance.
 func (n *RaftNode) Shutdown() error {
 	future := n.raft.Shutdown()
 	return future.Error()
 }
 
-// Command represents a Raft command
+// Command is a Raft-replicated mutation applied to ClusterFSM.
 type Command struct {
-	Type    CommandType     `json:"type"`
+	// Type selects which FSM mutation to apply.
+	Type CommandType `json:"type"`
+	// Payload is the JSON-encoded command body (node or partition info).
 	Payload json.RawMessage `json:"payload"`
 }
 
-// CommandType represents the type of Raft command
+// CommandType identifies a Raft FSM command kind.
 type CommandType int
 
 const (
+	// CommandTypeAddNode adds a node to the FSM cluster state.
 	CommandTypeAddNode CommandType = iota
+	// CommandTypeRemoveNode removes a node from the FSM cluster state.
 	CommandTypeRemoveNode
+	// CommandTypeUpdateNode updates an existing node's metadata in the FSM.
 	CommandTypeUpdateNode
+	// CommandTypeAssignPartition creates or assigns partition metadata.
 	CommandTypeAssignPartition
+	// CommandTypeUpdatePartition updates partition leadership, ISR, or offsets.
 	CommandTypeUpdatePartition
 )
 
-// ClusterFSM implements the Raft FSM for cluster metadata
+// ClusterFSM implements raft.FSM for durable cluster metadata (nodes and partitions).
 type ClusterFSM struct {
 	mu    sync.RWMutex
 	state *ClusterState
 }
 
-// NewClusterFSM creates a new cluster FSM
+// NewClusterFSM creates an empty ClusterFSM with initialized maps.
 func NewClusterFSM() *ClusterFSM {
 	return &ClusterFSM{
 		state: &ClusterState{
@@ -320,7 +328,7 @@ func NewClusterFSM() *ClusterFSM {
 	}
 }
 
-// Apply applies a Raft log entry to the FSM
+// Apply decodes and applies a Raft log entry to the in-memory cluster state.
 func (f *ClusterFSM) Apply(l *raft.Log) interface{} {
 	var cmd Command
 	if err := json.Unmarshal(l.Data, &cmd); err != nil {
@@ -436,7 +444,7 @@ func (f *ClusterFSM) applyUpdatePartition(payload json.RawMessage) interface{} {
 	return nil
 }
 
-// Snapshot returns a snapshot of the FSM state
+// Snapshot returns a point-in-time snapshot of the FSM state for Raft persistence.
 func (f *ClusterFSM) Snapshot() (raft.FSMSnapshot, error) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
@@ -450,7 +458,7 @@ func (f *ClusterFSM) Snapshot() (raft.FSMSnapshot, error) {
 	return &FSMSnapshot{data: data}, nil
 }
 
-// Restore restores the FSM from a snapshot
+// Restore replaces FSM state from a previously persisted Raft snapshot.
 func (f *ClusterFSM) Restore(rc io.ReadCloser) error {
 	defer rc.Close()
 
@@ -495,12 +503,12 @@ func (f *ClusterFSM) GetState() *ClusterState {
 	return &stateCopy
 }
 
-// FSMSnapshot represents a snapshot of the FSM
+// FSMSnapshot is a serialized ClusterState used by Raft snapshotting.
 type FSMSnapshot struct {
 	data []byte
 }
 
-// Persist writes the snapshot to the given sink
+// Persist writes the snapshot bytes to sink.
 func (s *FSMSnapshot) Persist(sink raft.SnapshotSink) error {
 	if _, err := sink.Write(s.data); err != nil {
 		sink.Cancel()
@@ -509,5 +517,5 @@ func (s *FSMSnapshot) Persist(sink raft.SnapshotSink) error {
 	return sink.Close()
 }
 
-// Release releases the snapshot
+// Release is a no-op; FSMSnapshot holds no external resources.
 func (s *FSMSnapshot) Release() {}

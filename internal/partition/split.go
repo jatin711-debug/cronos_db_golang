@@ -9,15 +9,19 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 )
 
-// SplitManager handles partition splitting and merging.
+// SplitManager handles partition splitting (and, eventually, merging).
+// It fences writes on the source, copies a key/offset range into a new
+// partition, updates bounds, and bumps epochs for fencing.
 type SplitManager struct {
-	mu              sync.Mutex
-	pm              *PartitionManager
-	splitting       map[int32]bool // partition -> in-progress
+	mu        sync.Mutex
+	pm        *PartitionManager
+	splitting map[int32]bool // source partitionID -> split in progress
+	// OnSplitComplete, if set, propagates the split (new epochs) to cluster
+	// consensus after local state is updated. A non-nil error rolls back.
 	OnSplitComplete func(sourceID, newID int32, sourceEpoch, newEpoch int64) error
 }
 
-// NewSplitManager creates a split manager.
+// NewSplitManager creates a SplitManager bound to the given PartitionManager.
 func NewSplitManager(pm *PartitionManager) *SplitManager {
 	return &SplitManager{
 		pm:        pm,
@@ -198,6 +202,7 @@ func (sm *SplitManager) SplitPartition(sourceID int32, newID int32, splitOffset 
 }
 
 // MergePartitions merges two partitions into one.
+// Not yet implemented; always returns an error.
 func (sm *SplitManager) MergePartitions(sourceID, targetID int32) error {
 	return fmt.Errorf("partition merge not yet implemented")
 }

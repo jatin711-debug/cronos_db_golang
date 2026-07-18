@@ -8,11 +8,14 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 )
 
-// Policy controls request hedging behavior.
+// Policy controls request hedging behavior (parallel speculative retries).
 type Policy struct {
-	Enabled   bool
-	Delay     time.Duration // How long to wait before sending hedge request
-	MaxHedges int           // Max additional requests (1 = one hedge)
+	// Enabled turns hedging on; when false Do just runs fn once.
+	Enabled bool
+	// Delay is how long to wait before launching each hedge request.
+	Delay time.Duration
+	// MaxHedges is the max additional requests beyond the primary (1 = one hedge).
+	MaxHedges int
 }
 
 // DefaultPolicy returns safe defaults (disabled).

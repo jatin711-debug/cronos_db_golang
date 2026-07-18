@@ -10,27 +10,30 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 )
 
-// HashRing implements consistent hashing with virtual nodes
+// HashRing implements consistent hashing with virtual nodes and optional
+// topology-aware replica placement (prefer different racks when possible).
 type HashRing struct {
 	mu           sync.RWMutex
-	ring         []uint64          // Sorted hash positions
-	nodeMap      map[uint64]string // Hash position -> node ID
-	nodes        map[string]int    // Node ID -> virtual node count
-	virtualNodes int               // Default virtual nodes per physical node
-	replicas     int               // Replication factor
-
-	// Topology-aware placement
-	topology map[string]NodeTopology // node ID -> rack/zone/region
+	ring         []uint64                // Sorted hash positions
+	nodeMap      map[uint64]string       // Hash position -> node ID
+	nodes        map[string]int          // Node ID -> virtual node count
+	virtualNodes int                     // Default virtual nodes per physical node
+	replicas     int                     // Replication factor
+	topology     map[string]NodeTopology // node ID -> rack/zone/region
 }
 
-// NodeTopology holds topology labels for a node.
+// NodeTopology holds topology labels for a node used by rack-aware placement.
 type NodeTopology struct {
-	Rack   string
-	Zone   string
+	// Rack is the rack label; GetNodes prefers distinct racks when enough nodes exist.
+	Rack string
+	// Zone is the availability-zone label.
+	Zone string
+	// Region is the geographic region label.
 	Region string
 }
 
-// NewHashRing creates a new consistent hash ring
+// NewHashRing creates a consistent hash ring with the given virtual-node count
+// and replication factor. Non-positive values fall back to defaults (150 VNs, RF=3).
 func NewHashRing(virtualNodes, replicas int) *HashRing {
 	if virtualNodes <= 0 {
 		virtualNodes = 150 // Good default for balance
@@ -56,12 +59,13 @@ func (h *HashRing) SetNodeTopology(nodeID string, topo NodeTopology) {
 	h.topology[nodeID] = topo
 }
 
-// AddNode adds a node to the ring
+// AddNode adds a physical node to the ring using the default virtual-node weight.
 func (h *HashRing) AddNode(nodeID string) {
 	h.AddNodeWithWeight(nodeID, h.virtualNodes)
 }
 
-// AddNodeWithWeight adds a node with a specific number of virtual nodes
+// AddNodeWithWeight adds a physical node with a specific number of virtual nodes
+// (higher weight claims a larger portion of the key space).
 func (h *HashRing) AddNodeWithWeight(nodeID string, weight int) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -86,7 +90,7 @@ func (h *HashRing) AddNodeWithWeight(nodeID string, weight int) {
 	})
 }
 
-// RemoveNode removes a node from the ring
+// RemoveNode removes a physical node and all of its virtual nodes from the ring.
 func (h *HashRing) RemoveNode(nodeID string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -115,7 +119,7 @@ func (h *HashRing) RemoveNode(nodeID string) {
 	h.ring = newRing
 }
 
-// GetNode returns the node responsible for a key
+// GetNode returns the primary node responsible for key under consistent hashing.
 func (h *HashRing) GetNode(key string) string {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -129,7 +133,7 @@ func (h *HashRing) GetNode(key string) string {
 	return h.nodeMap[h.ring[idx]]
 }
 
-// GetNodes returns n nodes responsible for a key (for replication)
+// GetNodes returns up to n distinct nodes responsible for key (primary plus replicas).
 func (h *HashRing) GetNodes(key string, n int) []string {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -189,12 +193,12 @@ func (h *HashRing) getNodesLocked(key string, n int) []string {
 	return nodes
 }
 
-// GetPartitionNode returns the node responsible for a partition
+// GetPartitionNode returns the primary (leader) node for a partition ID.
 func (h *HashRing) GetPartitionNode(partitionID int32) string {
 	return h.GetNode("partition-" + strconv.FormatInt(int64(partitionID), 10))
 }
 
-// GetPartitionNodes returns nodes for a partition (leader + replicas)
+// GetPartitionNodes returns the leader and replica nodes for a partition ID.
 func (h *HashRing) GetPartitionNodes(partitionID int32) []string {
 	return h.GetNodes("partition-"+strconv.FormatInt(int64(partitionID), 10), h.replicas)
 }
@@ -205,12 +209,12 @@ func (h *HashRing) getPartitionNodesLocked(partitionID int32) []string {
 	return h.getNodesLocked("partition-"+strconv.FormatInt(int64(partitionID), 10), h.replicas)
 }
 
-// GetTopicPartition returns the partition ID for a topic
+// GetTopicPartition returns the partition ID for a topic name within numPartitions.
 func (h *HashRing) GetTopicPartition(topic string, numPartitions int) int32 {
 	return utils.HashToPartitionID(topic, numPartitions)
 }
 
-// GetKeyPartition returns the partition ID for a key
+// GetKeyPartition returns the partition ID for a message key within numPartitions.
 func (h *HashRing) GetKeyPartition(key string, numPartitions int) int32 {
 	return utils.HashToPartitionID(key, numPartitions)
 }
@@ -235,14 +239,14 @@ func (h *HashRing) hash(key string) uint64 {
 	return binary.BigEndian.Uint64(has[:8])
 }
 
-// Size returns the number of physical nodes
+// Size returns the number of physical nodes currently on the ring.
 func (h *HashRing) Size() int {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return len(h.nodes)
 }
 
-// Nodes returns all node IDs
+// Nodes returns all physical node IDs currently on the ring.
 func (h *HashRing) Nodes() []string {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -288,7 +292,8 @@ func (h *HashRing) GetPartitionAssignments(numPartitions int) map[int32][]string
 	return assignments
 }
 
-// Rebalance returns the partition movements needed when a node joins/leaves
+// Rebalance compares oldAssignments to the current ring and returns the
+// PartitionMove set needed when a node joins or leaves.
 func (h *HashRing) Rebalance(oldAssignments map[int32][]string, numPartitions int) []PartitionMove {
 	newAssignments := h.GetPartitionAssignments(numPartitions)
 
@@ -340,10 +345,14 @@ func (h *HashRing) Rebalance(oldAssignments map[int32][]string, numPartitions in
 	return moves
 }
 
-// PartitionMove represents a partition movement during rebalancing
+// PartitionMove represents a single partition ownership change during rebalancing.
 type PartitionMove struct {
+	// PartitionID is the partition being moved.
 	PartitionID int32
-	FromNode    string
-	ToNode      string
-	IsLeader    bool
+	// FromNode is the previous owner node ID, or empty for a new assignment.
+	FromNode string
+	// ToNode is the destination node ID receiving the partition role.
+	ToNode string
+	// IsLeader is true when this move transfers leadership rather than only a replica role.
+	IsLeader bool
 }

@@ -20,25 +20,30 @@ var ErrNodeNotFound = errors.New("node not found in pool")
 
 // Config controls pool dialing behavior.
 type Config struct {
+	// ConnectionsPerNode is how many ClientConns to keep open per node address.
 	ConnectionsPerNode int
-	DialTimeout        time.Duration
-	ResolveDNS         bool
-	DialOptions        []grpc.DialOption
+	// DialTimeout bounds how long AddNode waits when dialing.
+	DialTimeout time.Duration
+	// ResolveDNS expands bootstrap hostnames to multiple addresses when true.
+	ResolveDNS bool
+	// DialOptions are passed to grpc.NewClient / Dial for every connection.
+	DialOptions []grpc.DialOption
 }
 
+// nodeState holds the connection set for a single node address.
 type nodeState struct {
-	conns []*grpc.ClientConn
-	next  atomic.Uint64
+	conns []*grpc.ClientConn // pooled connections for this address
+	next  atomic.Uint64      // round-robin cursor for connection selection
 }
 
-// Pool maintains per-node gRPC connection pools.
+// Pool maintains per-node gRPC connection pools and typed service clients.
 type Pool struct {
-	cfg Config
+	cfg Config // dial and pool sizing settings
 
-	mu     sync.RWMutex
-	nodes  map[string]*nodeState
-	order  []string
-	closed bool
+	mu     sync.RWMutex          // guards nodes, order, closed
+	nodes  map[string]*nodeState // address → connection set
+	order  []string              // insertion-ordered addresses for iteration
+	closed bool                  // true after Close; AddNode rejects new dials
 }
 
 // New creates a connection pool from bootstrap addresses.

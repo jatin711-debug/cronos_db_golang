@@ -387,6 +387,8 @@ func (h *PartitionServiceHandler) GetSchedulerStatus(ctx context.Context, req *t
 	}, nil
 }
 
+// Compact runs WAL compaction for a partition (admin-only when auth is enabled).
+// BeforeTs, Force, or min-consumed-offset policies select what can be deleted.
 func (h *PartitionServiceHandler) Compact(ctx context.Context, req *types.CompactRequest) (*types.CompactResponse, error) {
 	if err := h.requireAdmin(ctx); err != nil {
 		return nil, err
@@ -436,6 +438,7 @@ func (h *PartitionServiceHandler) Compact(ctx context.Context, req *types.Compac
 	}, nil
 }
 
+// RunRetention applies age/size retention policy to a partition's WAL segments (admin-only when auth is enabled).
 func (h *PartitionServiceHandler) RunRetention(ctx context.Context, req *types.RetentionRequest) (*types.RetentionResponse, error) {
 	if err := h.requireAdmin(ctx); err != nil {
 		return nil, err

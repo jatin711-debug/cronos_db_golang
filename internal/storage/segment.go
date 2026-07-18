@@ -16,32 +16,34 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 )
 
-// Segment represents a WAL segment file
+// Segment is a single WAL segment file holding a contiguous offset range.
+// Active segments accept appends via mmap (plaintext) or a buffered writer
+// (encrypted); rotated segments remain readable until retention deletes them.
 type Segment struct {
 	mu              sync.RWMutex
 	flushMu         sync.Mutex // serializes flush/sync with mmap remapping
 	segmentFile     *os.File
-	writer          *bufio.Writer
+	writer          *bufio.Writer // buffered path for encrypted or non-mmap writes
 	reader          io.ReaderAt
-	mmapData        []byte // Memory mapped data
-	mmapWritePos    int64  // Current write position in mmap
-	mmapSize        int64  // Total mmap size
-	firstOffset     int64
-	lastOffset      int64
-	firstTS         int64
-	lastTS          int64
-	nextOffset      int64
-	indexEntries    int64
-	nextIndexOffset int64
-	sizeBytes       int64
-	createdTS       int64
-	isActive        bool
-	closed          bool // Set to true after Close()
+	mmapData        []byte // memory-mapped file view; nil when encrypted or unmapped
+	mmapWritePos    int64  // current write cursor within mmapData (bytes)
+	mmapSize        int64  // mapped length in bytes (tracks len(mmapData))
+	firstOffset     int64  // first event offset stored in this segment
+	lastOffset      int64  // last event offset; -1 when empty
+	firstTS         int64  // schedule timestamp of first event (ms); 0 if unknown
+	lastTS          int64  // schedule timestamp of last event (ms)
+	nextOffset      int64  // next offset expected to be appended in this segment
+	indexEntries    int64  // number of sparse index entries written
+	nextIndexOffset int64  // relative event count threshold for next index entry
+	sizeBytes       int64  // logical data end in bytes (header + records)
+	createdTS       int64  // segment creation time (Unix ms)
+	isActive        bool   // true while this segment accepts appends
+	closed          bool   // true after Close(); reads/writes are rejected
 	dataDir         string
-	filename        string
-	indexFilename   string
-	index           *Index // sparse index for fast seeking
-	recordBuf       []byte // Reusable buffer for serialization
+	filename        string // e.g. "00000000000000000012.log"
+	indexFilename   string // e.g. "00000000000000000012.index"
+	index           *Index // sparse index for fast seeking by offset/timestamp
+	recordBuf       []byte // reusable buffer for serialization
 	cipher          *SegmentCipher
 }
 
@@ -160,7 +162,8 @@ func NewSegmentWithSize(dataDir string, firstOffset int64, isActive bool, cipher
 	return segment, nil
 }
 
-// OpenSegment opens an existing segment
+// OpenSegment opens an existing segment file, validates its header, scans
+// records for metadata, and recovers from a corrupt tail if needed.
 func OpenSegment(dataDir string, filename string, cipher *SegmentCipher) (*Segment, error) {
 	filePath := filepath.Join(dataDir, "segments", filename)
 
@@ -314,7 +317,8 @@ func buildSegmentHeader(firstOffset, createdTS int64) []byte {
 	return header
 }
 
-// AppendEvent appends an event to the segment
+// AppendEvent appends a single event to the active segment. indexInterval
+// controls sparse index density (one entry every N events).
 func (s *Segment) AppendEvent(event *types.Event, indexInterval int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -325,7 +329,7 @@ func (s *Segment) AppendEvent(event *types.Event, indexInterval int64) error {
 	return fmt.Errorf("cannot append to closed segment")
 }
 
-// AppendBatch appends a batch of events (thread-safe)
+// AppendBatch appends a batch of events to the segment (thread-safe; acquires s.mu).
 func (s *Segment) AppendBatch(events []*types.Event, indexInterval int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -408,7 +412,8 @@ func (s *Segment) AppendPreparedBatchUnsafe(prepared []*PreparedRecord, indexInt
 	return s.AppendPreparedBatchLocked(prepared, indexInterval)
 }
 
-// appendBatchInternal is the shared batch append implementation
+// appendBatchInternal is the shared batch append implementation.
+// Caller must already hold s.mu (or equivalent exclusive access).
 func (s *Segment) appendBatchInternal(events []*types.Event, indexInterval int64) error {
 	if !s.isActive {
 		return fmt.Errorf("cannot append to closed segment")
@@ -852,7 +857,7 @@ func (s *Segment) decryptRecord(ciphertext []byte, ciphertextPos int64) ([]byte,
 	return s.cipher.DecryptRecord(ciphertext, ciphertextPos)
 }
 
-// ReadEvent reads event at offset using index for fast seeking
+// ReadEvent reads the event at targetOffset, using the sparse index for seeking.
 func (s *Segment) ReadEvent(targetOffset int64) (*types.Event, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -1002,7 +1007,8 @@ func (s *Segment) readEventFile(targetOffset int64, startPos int64) (*types.Even
 	return nil, fmt.Errorf("event not found at offset %d", targetOffset)
 }
 
-// ReadEventsByTime reads events in the given timestamp range [startTS, endTS]
+// ReadEventsByTime reads events whose schedule timestamp is in [startTS, endTS]
+// (inclusive, Unix milliseconds).
 func (s *Segment) ReadEventsByTime(startTS, endTS int64) ([]*types.Event, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -1082,7 +1088,8 @@ func (s *Segment) ReadEventsByTime(startTS, endTS int64) ([]*types.Event, error)
 	return result, nil
 }
 
-// ReadEventsByOffsetRange reads events in the given offset range [startOffset, endOffset]
+// ReadEventsByOffsetRange reads events in the inclusive offset range
+// [startOffset, endOffset].
 func (s *Segment) ReadEventsByOffsetRange(startOffset, endOffset int64) ([]*types.Event, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -1626,7 +1633,8 @@ func (s *Segment) closeLocked() error {
 	return errors.Join(errs...)
 }
 
-// Delete permanently removes the segment and its index files from disk
+// Delete permanently removes the segment and its index files from disk after
+// closing open handles.
 func (s *Segment) Delete() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1655,46 +1663,46 @@ func (s *Segment) Delete() error {
 	return errors.Join(errs...)
 }
 
-// IsFull checks if segment is full
+// IsFull reports whether the segment's logical size is at or above maxSize bytes.
 func (s *Segment) IsFull(maxSize int64) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.sizeBytes >= maxSize
 }
 
-// GetSize returns segment size in bytes
+// GetSize returns the logical segment size in bytes (header plus records).
 func (s *Segment) GetSize() int64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.sizeBytes
 }
 
-// GetFilename returns filename
+// GetFilename returns the segment file name (e.g. "00000000000000000012.log").
 func (s *Segment) GetFilename() string {
 	return s.filename
 }
 
-// GetFirstOffset returns first offset
+// GetFirstOffset returns the first event offset stored in this segment.
 func (s *Segment) GetFirstOffset() int64 {
 	return s.firstOffset
 }
 
-// GetLastOffset returns last offset
+// GetLastOffset returns the last event offset in this segment, or -1 if empty.
 func (s *Segment) GetLastOffset() int64 {
 	return s.lastOffset
 }
 
-// GetFirstTS returns first timestamp
+// GetFirstTS returns the schedule timestamp of the first event (Unix ms), or 0.
 func (s *Segment) GetFirstTS() int64 {
 	return s.firstTS
 }
 
-// GetLastTS returns last timestamp
+// GetLastTS returns the schedule timestamp of the last event (Unix ms).
 func (s *Segment) GetLastTS() int64 {
 	return s.lastTS
 }
 
-// IsActive returns active status
+// IsActive reports whether this segment still accepts appends.
 func (s *Segment) IsActive() bool {
 	return s.isActive
 }

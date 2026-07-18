@@ -12,22 +12,30 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// Capability identifies an optional server feature.
+// Capability identifies an optional server feature probed at runtime.
 type Capability string
 
 const (
+	// CapabilityMetadataAPI indicates PartitionService.ListPartitions (or equivalent) is available.
 	CapabilityMetadataAPI Capability = "metadata_api"
-	CapabilityReplayAPI   Capability = "replay_api"
-	CapabilitySubscribe   Capability = "subscribe_api"
-	CapabilityAck         Capability = "ack_api"
+	// CapabilityReplayAPI indicates EventService.Replay is available.
+	CapabilityReplayAPI Capability = "replay_api"
+	// CapabilitySubscribe indicates EventService.Subscribe is available.
+	CapabilitySubscribe Capability = "subscribe_api"
+	// CapabilityAck indicates EventService.Ack is available.
+	CapabilityAck Capability = "ack_api"
 )
 
-// Capabilities reports detected server support.
+// Capabilities reports which optional server APIs were detected.
 type Capabilities struct {
+	// MetadataAPI is true when partition metadata listing is implemented.
 	MetadataAPI bool
-	ReplayAPI   bool
-	Subscribe   bool
-	Ack         bool
+	// ReplayAPI is true when historical replay is implemented.
+	ReplayAPI bool
+	// Subscribe is true when the bidi subscribe stream is implemented.
+	Subscribe bool
+	// Ack is true when the ack stream is implemented.
+	Ack bool
 }
 
 // Supports reports if a capability is available.

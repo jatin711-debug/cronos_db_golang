@@ -25,13 +25,13 @@ import (
 	"unsafe"
 )
 
-// RustBloomFilter is a wrapper around the Rust implementation.
+// RustBloomFilter is a cgo wrapper around the Rust cronos_dedup bloom filter.
 // On Windows this binds to the staged cronos_dedup.dll via its import library.
 type RustBloomFilter struct {
-	ptr unsafe.Pointer
+	ptr unsafe.Pointer // opaque handle owned by the Rust library
 }
 
-// NewRustBloomFilter creates a new Rust-backed bloom filter.
+// NewRustBloomFilter creates a Rust-backed bloom filter, or nil if native init fails.
 func NewRustBloomFilter(expectedItems uint64, fpr float64) *RustBloomFilter {
 	ptr := C.bloom_new(C.ulonglong(expectedItems), C.double(fpr))
 	if ptr == nil {
@@ -47,6 +47,7 @@ func NewRustBloomFilter(expectedItems uint64, fpr float64) *RustBloomFilter {
 	return bf
 }
 
+// Add inserts key into the native bloom filter without copying the string.
 func (bf *RustBloomFilter) Add(key string) {
 	p := unsafe.StringData(key)
 	C.bloom_add(bf.ptr, (*C.uchar)(unsafe.Pointer(p)), C.size_t(len(key)))
@@ -54,6 +55,7 @@ func (bf *RustBloomFilter) Add(key string) {
 	runtime.KeepAlive(bf)
 }
 
+// MayContain reports whether key might be present in the native bloom filter.
 func (bf *RustBloomFilter) MayContain(key string) bool {
 	p := unsafe.StringData(key)
 	result := bool(C.bloom_check(bf.ptr, (*C.uchar)(unsafe.Pointer(p)), C.size_t(len(key))))
@@ -62,6 +64,7 @@ func (bf *RustBloomFilter) MayContain(key string) bool {
 	return result
 }
 
+// MayContainBatch checks multiple keys in a single cgo crossing.
 func (bf *RustBloomFilter) MayContainBatch(keys []string) []bool {
 	n := len(keys)
 	if n == 0 {
@@ -112,17 +115,20 @@ func (bf *RustBloomFilter) MayContainBatch(keys []string) []bool {
 	return out
 }
 
+// Count returns the approximate number of items added to the native filter.
 func (bf *RustBloomFilter) Count() uint64 {
 	result := uint64(C.bloom_count(bf.ptr))
 	runtime.KeepAlive(bf)
 	return result
 }
 
+// Reset clears the native bloom filter.
 func (bf *RustBloomFilter) Reset() {
 	C.bloom_reset(bf.ptr)
 	runtime.KeepAlive(bf)
 }
 
+// MemoryUsageBytes returns the native filter's approximate memory footprint.
 func (bf *RustBloomFilter) MemoryUsageBytes() uint64 {
 	result := uint64(C.bloom_memory_usage(bf.ptr))
 	runtime.KeepAlive(bf)

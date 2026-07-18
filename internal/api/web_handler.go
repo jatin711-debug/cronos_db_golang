@@ -39,9 +39,12 @@ var dashboardFS embed.FS
 // directly without first running `make dashboard`), the SPA still
 // builds but /ui/ returns a 404 with a clear remediation message.
 type WebHandler struct {
+	// adminHandler is the AdminService implementation used by JSON proxy routes.
 	adminHandler *AdminServiceHandler
-	authCfg      *auth.Config
-	logger       *slog.Logger
+	// authCfg is optional; when non-nil and enabled, admin UI APIs require JWT admin auth.
+	authCfg *auth.Config
+	// logger records web-handler operational events.
+	logger *slog.Logger
 }
 
 // NewWebHandler constructs the handler. adminHandler must be non-nil
