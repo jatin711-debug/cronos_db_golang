@@ -842,8 +842,13 @@ See [proto/events.proto](proto/events.proto) for the complete specification.
 
 ## Documentation
 
+The full docs site (MkDocs Material — search, dark mode, zoomable diagrams) builds with
+`make docs-serve` (local preview at http://127.0.0.1:8000) and deploys to GitHub Pages
+automatically on every docs change via `.github/workflows/docs.yml`.
+
 | Document | Description |
 |----------|-------------|
+| **[mkdocs.yml](mkdocs.yml)** | MkDocs Material site config — root docs are injected at build time by `docs/hooks/github_source_links.py` (single source of truth) |
 | **[ARCHITECTURE.md](ARCHITECTURE.md)** | Deep-dive with 30+ Mermaid diagrams — data flows, sequence diagrams, state machines |
 | **[docs/architecture/README.md](docs/architecture/README.md)** | Architecture split by feature (cluster, compliance, dedup, delivery, schema, slo, storage, and more) — all diagrams embedded inline so they render on GitHub |
 | [docs/DEVELOPER_ARCHITECTURE_GUIDE.md](docs/DEVELOPER_ARCHITECTURE_GUIDE.md) | Comprehensive developer-oriented architecture and navigation guide |

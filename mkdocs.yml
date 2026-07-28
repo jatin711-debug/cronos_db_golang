@@ -1,0 +1,154 @@
+site_name: CronosDB Docs
+site_description: Documentation for CronosDB — a distributed, timestamp-triggered event database
+site_url: https://jatin711-debug.github.io/cronos_db_golang/
+repo_url: https://github.com/jatin711-debug/cronos_db_golang
+repo_name: jatin711-debug/cronos_db_golang
+
+# docs_dir is docs/. Root-level docs (README, ARCHITECTURE, DOCKER, plan, ...)
+# stay where they are (canonical for GitHub browsing) and are injected into
+# the site at build time by docs/hooks/github_source_links.py (on_files),
+# with their "docs/..." links rebased. Source-code links are rewritten to
+# GitHub URLs by the same hook (on_page_markdown).
+docs_dir: docs
+
+# The hooks module is Python, not documentation.
+exclude_docs: |
+  hooks/**
+
+hooks:
+  - docs/hooks/github_source_links.py
+
+theme:
+  name: material
+  language: en
+  icon:
+    repo: fontawesome/brands/github
+    logo: material/database-clock
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: blue grey
+      accent: deep orange
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: blue grey
+      accent: deep orange
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - navigation.instant.progress
+    - navigation.tracking
+    - navigation.top
+    - navigation.sections
+    - navigation.indexes
+    - search.highlight
+    - search.suggest
+    - search.share
+    - content.tooltips
+    - toc.follow
+
+plugins:
+  - search:
+      separator: '[\s\-,:!=\[\]()"/]+|(?!deprecated)(?!\b)'
+
+markdown_extensions:
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+      toc_depth: 3
+  - pymdownx.arithmatex:
+      generic: true
+  - pymdownx.betterem
+  - pymdownx.caret
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.keys
+  - pymdownx.mark
+  - pymdownx.smartsymbols
+  - pymdownx.snippets
+  # Mermaid: renders every ```mermaid block via the theme's built-in mermaid.js
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.tilde
+
+extra_css:
+  - stylesheets/extra.css
+
+extra_javascript:
+  - https://cdn.jsdelivr.net/npm/svg-pan-zoom@3.6.1/dist/svg-pan-zoom.min.js
+  - javascripts/mermaid-zoom.js
+
+extra:
+  generator: false
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/jatin711-debug/cronos_db_golang
+
+# Broken-link policy: warn (don't fail the build) — source-file links are
+# rewritten to GitHub by the hook, anything else shows up in build logs.
+validation:
+  absolute_links: warn
+  anchors: warn
+  unrecognized_links: warn
+
+nav:
+  - Home: index.md
+  - Architecture:
+      - Overview: ARCHITECTURE.md
+      - Technical Deep Dive: TECHNICAL_DEEP_DIVE.md
+      - Developer Guide: DEVELOPER_ARCHITECTURE_GUIDE.md
+      - By Feature:
+          - Index: architecture/README.md
+          - API Layer: architecture/features/api.md
+          - Audit: architecture/features/audit.md
+          - Auth: architecture/features/auth.md
+          - CDC: architecture/features/cdc.md
+          - Cluster Control Plane: architecture/features/cluster.md
+          - Compliance & Retention: architecture/features/compliance.md
+          - Config & Reload: architecture/features/config.md
+          - Consumer Groups: architecture/features/consumer.md
+          - Dashboard: architecture/features/dashboard.md
+          - Deduplication: architecture/features/dedup.md
+          - Delivery Pipeline: architecture/features/delivery.md
+          - Partition Runtime: architecture/features/partition.md
+          - Replay Engine: architecture/features/replay.md
+          - Replication: architecture/features/replication.md
+          - Scheduler & Timing Wheel: architecture/features/scheduler.md
+          - Schema Registry: architecture/features/schema.md
+          - SLO & Metrics: architecture/features/slo.md
+          - Storage & WAL: architecture/features/storage.md
+          - Tenant Accounting: architecture/features/tenant.md
+          - Tracing: architecture/features/tracing.md
+          - Transactions (2PC): architecture/features/tx.md
+  - Operations:
+      - Docker: DOCKER.md
+      - Performance & Benchmarks: PERFORMANCE.md
+  - Project:
+      - Remediation Plan: plan.md
+      - Contributing: CONTRIBUTING.md
+      - Code of Conduct: CODE_OF_CONDUCT.md
