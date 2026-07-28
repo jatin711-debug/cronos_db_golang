@@ -29,7 +29,24 @@ SLO module records service health signals such as latency and error rate and exp
 - Latency and error measurements: [internal/slo/slo.go](../../../internal/slo/slo.go)
 - Metric names and labels: [internal/api/metrics.go](../../../internal/api/metrics.go)
 
-## Related Diagrams
+## Diagrams
 
-- [observability_feedback_loop.mmd](../../mermaid/observability_feedback_loop.mmd)
-- [system_overview.mmd](../../mermaid/system_overview.mmd)
+### Observability feedback loop
+
+```mermaid
+flowchart TB
+    Requests[API requests] --> Metrics[Prometheus metrics]
+    Requests --> Traces[OpenTelemetry traces]
+    Requests --> Audit[Audit logs]
+    Metrics --> SLO[SLO recorder]
+    SLO --> Alerts["Alerts and SLO breaches<br/>(external Alertmanager — no in-process alerting)"]
+    Traces --> Debug[Distributed debugging]
+    Audit --> Compliance[Compliance review]
+    Alerts --> Ops[Operational actions]
+    Debug --> Ops
+    Compliance --> Ops
+```
+
+### Related diagrams
+
+- [System overview](../README.md#system-overview)

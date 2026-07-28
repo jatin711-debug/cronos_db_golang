@@ -34,5 +34,5 @@ The CDC module publishes change events to external systems without blocking the 
 
 ## Related Diagrams
 
-- [publish_flow.mmd](../../mermaid/publish_flow.mmd)
-- [cross_region_replication.mmd](../../mermaid/cross_region_replication.mmd)
+- [Publish flow](api.md#publish-flow)
+- [Cross-region replication](replication.md#cross-region-replication)

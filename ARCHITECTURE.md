@@ -7,7 +7,7 @@
 Quick navigation:
 
 - Feature-by-feature architecture docs: [docs/architecture/README.md](docs/architecture/README.md)
-- Standalone Mermaid source files: [docs/mermaid](docs/mermaid)
+- Inline-rendered diagrams live in the feature docs (see the [Diagram Index](docs/architecture/README.md#diagram-index))
 - Comprehensive developer walkthrough: [docs/DEVELOPER_ARCHITECTURE_GUIDE.md](docs/DEVELOPER_ARCHITECTURE_GUIDE.md)
 - **Known limitations (intentionally deferred):** [Known Limitations](#known-limitations)
 
@@ -321,27 +321,27 @@ graph LR
     subgraph Record Format v2
         RF1[Length - 4B]
         RF2[CRC32 - 4B]
-        RF3[Offset - 8B]
-        RF4[Raft Term - 8B]
+        RF3[Raft Term - 8B]
+        RF4[Offset - 8B]
         RF5[Schedule TS - 8B]
         RF6[MsgID Len + Data]
         RF7[Topic Len + Data]
         RF8[Payload Len + Data]
-        RF9[Meta Count + Entries]
-        RF10[Trailing Checksum - 4B]
+        RF9[Payload Checksum - 4B]
+        RF10[Meta Count + Entries]
     end
 ```
 
 ### Record Binary Format
 
-WAL records use **format v2**. Each record carries an 8-byte Raft term and a 4-byte trailing checksum in addition to the existing fields. Upgrading from older builds requires a clean `--data-dir`.
+WAL records use **format v2**. Each record carries an 8-byte Raft term and a 4-byte payload checksum (written immediately after the payload, before the metadata entries) in addition to the existing fields. Upgrading from older builds requires a clean `--data-dir`.
 
 | Field | Size | Description |
 |-------|------|-------------|
 | Length | 4 bytes | Total record size including this field |
-| CRC32 | 4 bytes | IEEE CRC32 of all bytes after this field (up to trailing checksum) |
-| Offset | 8 bytes | Monotonically increasing event offset |
+| CRC32 | 4 bytes | IEEE CRC32 of all bytes after the Length field |
 | Raft Term | 8 bytes | Raft term of the leader that authored the record |
+| Offset | 8 bytes | Monotonically increasing event offset |
 | Schedule TS | 8 bytes | Unix millisecond timestamp for trigger |
 | MsgID Len | 2 bytes | Length of message_id string |
 | MsgID | N bytes | Unique message identifier |
@@ -349,9 +349,9 @@ WAL records use **format v2**. Each record carries an 8-byte Raft term and a 4-b
 | Topic | N bytes | Topic/channel name |
 | Payload Len | 4 bytes | Length of payload |
 | Payload | N bytes | Arbitrary event data |
+| Payload Checksum | 4 bytes | IEEE CRC32 covering the payload only |
 | Meta Count | 2 bytes | Number of metadata key-value pairs |
 | Meta Entries | Variable | key_len(2) + key + val_len(2) + val per entry |
-| Trailing Checksum | 4 bytes | IEEE CRC32 covering the full record for end-to-end integrity |
 
 **Upgrade note:** WAL v2 is not backward-compatible with older segment files. Remove or move the old `--data-dir` before starting a newer binary.
 
@@ -375,7 +375,7 @@ graph TB
 
     subgraph Flush Modes
         FM1[every_event - fsync per write]
-        FM2[batch - group-commit per batch (default)]
+        FM2["batch - group-commit per batch (default)"]
         FM3[periodic - background flush loop]
     end
 
@@ -473,9 +473,9 @@ graph TB
 
 **Wheel Parameters:**
 - Level 0 (default): 10ms tick, 600 slots = 6 second window
-- Level 1: 6s tick, 60 slots = 360 second window
-- Level 2: 360s tick, 60 slots = 6 hour window
-- Max levels: 10 (configurable)
+- Level 1: 6s tick, 600 slots = 3600 second (60 min) window
+- Level 2: 3600s tick, 600 slots = 25 day window
+- Max levels: 10 (hardcoded; only `--tick-ms` and `--wheel-size` are configurable)
 
 ### Timer Lifecycle
 
@@ -566,7 +566,7 @@ flowchart TD
     A[Publish event] --> B{schedule_ts <= now + hotWindow?}
     B -->|Yes| C[Add to Timing Wheel]
     B -->|No| D[Store offset in Cold Store]
-    D --> E[PebbleDB key: [schedule_ts:be64][offset:be64]]
+    D --> E["PebbleDB key: [schedule_ts:be64][offset:be64]"]
 
     F[Hydrator Loop adaptive interval] --> G[Scan Cold Store range]
     G --> H[now+hotWindow to now+hotWindow+adaptiveLookahead]
@@ -854,7 +854,7 @@ graph TB
 
     subgraph Offset Commit Pipeline
         PEN[Pending Map - in-memory buffer]
-        FL[Flush Loop - every 50ms]
+        FL[Flush Loop - every 200ms]
         DB[PebbleDB Batch Write]
     end
 
@@ -903,8 +903,8 @@ graph LR
 ```
 
 **Behavior:**
-- `Emit` is non-blocking.
-- Events are dropped with a warning if the queue is full.
+- `Emit` blocks for up to `DefaultCDCWriteTimeout` (5s) waiting for queue capacity.
+- Events are dropped with a warning if the queue is still full after that timeout.
 - `Close` drains workers and sinks gracefully.
 
 ---
@@ -969,11 +969,11 @@ Toggle via config: `UseMemberlist: true`.
 
 ```mermaid
 graph TB
-    subgraph Hash Ring - SHA-256 with 150 vnodes per node
+    subgraph Hash Ring - SHA-256 with 2048 vnodes per node
         RING[Ring space: 0 to 2 pow 64]
-        VN1[Node1 - 150 virtual positions]
-        VN2[Node2 - 150 virtual positions]
-        VN3[Node3 - 150 virtual positions]
+        VN1[Node1 - 2048 virtual positions]
+        VN2[Node2 - 2048 virtual positions]
+        VN3[Node3 - 2048 virtual positions]
     end
 
     subgraph Partition Assignment
@@ -1181,7 +1181,7 @@ sequenceDiagram
     F->>F: rename segments → segments.old, index → index.old
     F->>F: rename snapshot-staging/segments → segments, snapshot-staging/index → index
     F->>F: rm *.old
-    F->>F: WAL.ReloadSegments(); update nextOffset + epoch from trailer
+    F->>F: WAL.ReloadSegments(), update nextOffset + epoch from trailer
 ```
 
 Trigger policy:
@@ -1300,14 +1300,22 @@ graph LR
     APP[CronosDB Node] -->|:8080/metrics| PROM[Prometheus Scraper]
     APP --> HEALTH[:8080/health]
 
-    subgraph Interceptor Chain
-        I1[Rate Limit Interceptor]
-        I2[Metrics Interceptor]
-        I3[Tracing Interceptor]
+    subgraph IC["Interceptor Chain - unary, in order"]
+        I1[Tracing]
+        I2[SLO]
+        I3[Version Gate]
+        I4[JWT Auth]
+        I5[Topic Rate Limit]
+        I6[Audit]
+        I7[Metrics]
+        I8[Per-IP Rate Limit]
     end
 
-    I1 --> I2 --> I3
+    I1 --> I2 --> I3 --> I4 --> I5 --> I6 --> I7 --> I8
 ```
+
+In `--dev` mode (auth disabled) the SLO, Metrics, and Per-IP Rate Limit interceptors are
+skipped, so `cronos_api_grpc_*` and `cronos_slo_*` series stay empty in dev installs.
 
 ### Tracing - OpenTelemetry
 

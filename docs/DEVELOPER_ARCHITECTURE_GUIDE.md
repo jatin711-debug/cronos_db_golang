@@ -7,7 +7,7 @@ This document explains the production architecture as implemented in code, not o
 Related docs:
 
 - Feature-split architecture index: [docs/architecture/README.md](architecture/README.md)
-- Mermaid source diagrams: [docs/mermaid](mermaid)
+- Inline-rendered diagrams: see the [Diagram Index](architecture/README.md#diagram-index)
 
 ## Table of Contents
 
@@ -50,76 +50,19 @@ Think in three planes:
 
 ## 3. System Overview
 
-```mermaid
-flowchart TB
-    subgraph Client_Side[Clients]
-      Producer[Producer SDK]
-      Consumer[Consumer SDK]
-      Admin[Ops and Admin]
-    end
+The canonical system-overview diagram lives in
+[docs/architecture/README.md](architecture/README.md#system-overview) (rendered inline on
+GitHub). In brief:
 
-    subgraph Data_Plane[Data Plane]
-      APIGW[gRPC API Layer]
-      EventH[Event Handlers]
-      PM[Partition Manager]
-      Partition[Per Partition Runtime]
-      WAL[WAL and Segments]
-      Sched[Scheduler Timing Wheel]
-      Worker[Delivery Worker]
-      Disp[Dispatcher and Credits]
-      Group[Consumer Groups and Offsets]
-      DLQ[Dead Letter Queue]
-    end
-
-    subgraph Control_Plane[Control Plane]
-      ClusterM[Cluster Manager]
-      Router[Hash Ring Router]
-      Membership[Membership Gossip]
-      Raft[Raft Metadata]
-      Replication[Leader Follower Replication]
-      CrossRegion[Cross Region Replicator]
-    end
-
-    subgraph Guardrails[Reliability Guardrails]
-      Dedup[Dedup Bloom and Pebble]
-      Auth[Auth RBAC]
-      Audit[Audit Logger]
-      Schema[Schema Registry]
-      Tenant[Tenant Accountant]
-      SLO[SLO Recorder and Metrics]
-      Compliance[Retention and Backup]
-    end
-
-    Producer --> APIGW
-    Consumer --> APIGW
-    Admin --> APIGW
-
-    APIGW --> EventH
-    EventH --> PM
-    PM --> Partition
-    Partition --> WAL
-    Partition --> Sched
-    Sched --> Worker
-    Worker --> Disp
-    Disp --> Consumer
-    Disp --> Group
-    Disp --> DLQ
-
-    EventH --> Dedup
-    EventH --> Auth
-    EventH --> Schema
-    EventH --> Tenant
-    APIGW --> Audit
-    APIGW --> SLO
-
-    PM --> Router
-    Router --> ClusterM
-    ClusterM --> Membership
-    ClusterM --> Raft
-    Partition --> Replication
-    Partition --> CrossRegion
-    Compliance --> WAL
-```
+- **Clients** (Producer/Consumer SDKs, ops CLI + dashboard) hit the **process edge**:
+  public gRPC `:9000`, HTTP `:8080` (health/metrics/UI), internal gRPC `:7947`.
+- The **data plane** (handlers → partition manager → per-partition WAL, scheduler,
+  worker, dispatcher, consumer groups, DLQ, dedup) serves event traffic.
+- The **control plane** (cluster manager, hash-ring router, gossip/Memberlist, Raft
+  metadata, leader-follower replication, cross-region) manages placement and consistency.
+- **Guardrails** (JWT+RBAC, audit, schema registry, tenant accounting, SLO/metrics/tracing,
+  retention/backup) and **production security** (public TLS, encryption at rest v2,
+  replication mTLS, `--dev` bypass) wrap both planes.
 
 ## 4. Startup Composition and Lifecycle
 
@@ -141,7 +84,51 @@ The runtime is composed in `cmd/api/main.go` in this order:
 
 ### 4.2 Startup and Shutdown Sequence
 
-See the canonical Mermaid source: [docs/mermaid/startup_sequence.mmd](mermaid/startup_sequence.mmd).
+This is the canonical startup/shutdown diagram:
+
+```mermaid
+sequenceDiagram
+    participant Main as cmd/api/main.go
+    participant Config as internal/config
+    participant Guard as audit schema tenant cdc slo tracing
+    participant PM as internal/partition
+    participant Cluster as internal/cluster
+    participant Pub as Public gRPC :9000
+    participant Int as Internal gRPC :7947
+    participant HTTP as HTTP :8080
+    participant BG as Background loops
+
+    Main->>Config: LoadConfig + ValidateConfig
+    Main->>Main: --dev relaxes production security gates
+    Main->>Guard: Init audit, schema, tenant, CDC sinks, tracing, SLO
+    Main->>PM: NewPartitionManagerWithCache(shared Pebble cache)
+    Main->>BG: Disk monitor, backup scheduler, retention ticker
+    alt cluster enabled
+        Main->>Cluster: NewManager + SetPartitionAccessor
+        Main->>Cluster: Start Raft then membership/router
+        Main->>Cluster: JoinCluster seeds when provided
+    end
+    Main->>PM: Create/start partitions<br/>(standalone: all, cluster: partition 0 then lazy)
+    Main->>PM: Wire WAL appendHook CDC + cross-region echo guard
+    Main->>Pub: NewGRPCServer + interceptors
+    Main->>Pub: SetTransactionHandler (PM-injected 2PC)
+    Main->>Pub: RegisterServices: Event, ConsumerGroup, Partition, Admin, Transaction
+    Main->>Int: NewInternalGRPCServer
+    Main->>Int: Register Replication, Raft, CrossRegion
+    Main->>HTTP: Health + metrics + WebHandler /ui + /api/admin
+    Main->>Pub: Start + ServeError monitor
+    Main->>Int: Start + ServeError monitor
+    Main->>HTTP: ListenAndServe with timeouts
+    Main->>BG: Stats loop + autoscaler
+    Note over Main,BG: SIGINT / SIGTERM
+    Main->>Pub: GracefulStopWithTimeout 25s then Stop
+    Main->>Int: GracefulStopWithTimeout then Stop
+    Main->>HTTP: Shutdown
+    Main->>PM: Close (stop all partitions)
+    Main->>PM: Final WAL flush across partitions
+    Main->>Cluster: Stop when enabled
+    Note over Main,Cluster: 60s overall shutdown budget
+```
 
 ## 5. End-to-End Runtime Flows
 
@@ -213,7 +200,7 @@ This section is organized by feature area and tells you where to read first, wha
 - Purpose: external and internal RPC surface.
 - Key files:
   - `internal/api/grpc_server.go` (public listener on `:9000`)
-  - `internal/api/internal_grpc_server.go` (internal cluster listener on `:7947`, registers `ReplicationServiceServer` + `RaftServiceServer`)
+  - `internal/api/internal_grpc_server.go` (internal cluster listener on `:7947`, registers `ReplicationServiceServer` + `RaftServiceServer` + `CrossRegionServiceServer`)
   - `internal/api/handlers.go`
   - `internal/api/consumer_handler.go`
   - `internal/api/partition_handler.go`
@@ -319,7 +306,7 @@ This section is organized by feature area and tells you where to read first, wha
   - `internal/dedup/bloom_store.go`
   - `internal/dedup/pebble_store.go`
   - `internal/dedup/rust_bloom_unix.go`
-  - `internal/dedup/rust_bloom_windows.go`
+  - `internal/dedup/rust_bloom_windows_cgo.go` / `internal/dedup/rust_bloom_windows_nocgo.go`
 - Main flow:
   - Fast probabilistic check first, persistent confirmation fallback when needed.
   - Store update keeps recent message IDs with TTL behavior.
@@ -410,25 +397,25 @@ flowchart LR
   - `internal/api/internal_grpc_server.go` — `InternalGRPCServer` on the dedicated internal listener (default `:7947`).
   - `internal/api/crossregion_server.go` — `CrossRegionServiceServer`.
   - `internal/partition/manager.go` — `PartitionManager.SyncPartitionFromLeader` (trigger for bulk install).
-  - `internal/cluster/manager.go` — `Manager.JoinCluster` (the only caller of `SyncPartitionFromLeader`).
+  - `internal/cluster/manager.go` — `Manager.JoinCluster` (calls `SyncPartitionFromLeader` on join; the cluster router also calls it during partition moves).
 - Main flow:
   - **Happy path** — `Leader.Replicate(events)` fans the contiguous batch out concurrently to every connected follower via gRPC `ReplicationService.Append` on the internal listener. The call carries `PartitionId`, `Events`, `ExpectedNextOffset`, `Term`, `PrevLogTerm`, and an IEEE CRC32 batch checksum.
-  - **Quorum** — `Leader.Replicate` returns success to the client only after `min-insync-replicas` followers have durably appended via `WAL.AppendReplicatedBatch`.
+  - **Quorum** — `Leader.Replicate` returns success to the client only after `min-insync-replicas` replicas **including the leader** have appended via `WAL.AppendReplicatedBatch`. (A follower ack reflects an in-memory append; in `batch`/`periodic` fsync modes it does not imply the follower has fsynced.)
   - **Incremental catch-up** — when a follower reports `NextOffset < events[0].Offset`, `Leader.catchUpFollower` slices `[from, to)` from the leader's WAL into `batchSize`-sized chunks and replays them through `Append`. For very long ranges the leader also serves the server-streaming `ReplicationService.Sync` RPC.
   - **Bulk install** — `Follower.InstallSnapshot(ctx, leaderAddr, partitionID, 0)` dials the leader over the internal listener and calls `ReplicationService.Snapshot`. The leader flushes its active segment and streams each segment + sparse-index file with a `ReplicationSnapshotHeader` (per-file IEEE CRC32, first/last offset, file size, `is_index`) followed by 1 MB data chunks and a final trailer carrying `{success, last_offset, epoch}`. The follower stages files under `<dataDir>/snapshot-staging/{segments,index}/`, verifies the last-file CRC32, closes the local WAL, atomically renames `segments`/`index` to `*.old`, moves the staged dirs into place, removes `*.old`, and calls `wal.ReloadSegments()`.
-  - **Trigger** — bulk install is invoked only by `PartitionManager.SyncPartitionFromLeader` under a 10-minute context, which is itself called from `Manager.JoinCluster` when a node joins and iterates its `router.GetLocalPartitions()`. After formation, `Manager.reconcileLocalLeadership` runs every 5s and idempotently wires up `PromoteToLeader` + `AddFollower` on every locally-led partition, which is what enables streaming `Append` on a healthy cluster.
+  - **Trigger** — bulk install is invoked by `PartitionManager.SyncPartitionFromLeader` under a 10-minute context, called from `Manager.JoinCluster` when a node joins and iterates its `router.GetLocalPartitions()`, and from the router during partition moves. After formation, `Manager.reconcileLocalLeadership` runs every 5s and idempotently wires up `PromoteToLeader` + `AddFollower` on every locally-led partition, which is what enables streaming `Append` on a healthy cluster.
   - **Cross-region** — `CrossRegionReplicator` queues per region, batches (100 events / 100 ms), and pushes via `CrossRegionService.ReplicateEvents`. Best-effort, no ISR semantics.
 - Reliability decisions:
   - **Channel isolation** — replication traffic runs over `InternalGRPCServer` (default `:7947`), a separate listener from the public API on `:9000`. Public clients cannot reach replication.
-  - **Per-batch CRC32** on `ReplicationAppendRequest`; verified before `WAL.AppendReplicatedBatch`.
-  - **Per-file CRC32** on `ReplicationSnapshotHeader`; abort + cleanup on mismatch.
+  - **Per-batch CRC32** on `ReplicationAppendRequest` — computed and sent by the leader, but currently **not verified** by the follower handler (per-record WAL CRCs still protect on disk).
+  - **Per-file CRC32** on `ReplicationSnapshotHeader`; the follower verifies the final file's CRC and aborts + cleans up on mismatch (earlier files' CRCs are sent but unverified).
   - **Term fencing** in `ReplicationServiceHandler.Append`: rejects `req.Term < p.Epoch`, steps up on newer terms. Prevents stale-leader replays after a leadership change.
-  - **Expected-next-offset check** on `Append` rejects gaps and triggers catch-up.
+  - **Gap rejection** — `WAL.AppendReplicatedBatch` rejects non-contiguous batches ("replicated batch gap"), which drives leader-side catch-up. (The `ExpectedNextOffset` proto field is set by the leader but unused server-side.)
   - **Quorum durability** — `min-insync-replicas` enforced before client ack. With RF=3 / minISR=2 the leader + at least one follower must ack; cluster degradation below minISR fails closed rather than silently succeeding on leader-only.
   - **Atomic swap** during snapshot install — WAL closed before rename, matching `StopPartition`'s ordering; avoids Windows file-lock contention.
   - **mTLS optional** — `--replication-tls-enabled` plus `--replication-tls-{ca,cert,key}-file`. Server enforces `tls.RequireAndVerifyClientCert`; both sides pin against the cluster CA. `Follower.dialCredentials` falls back to insecure credentials when the flag is off (intentional for `--dev`, refused by `config.ValidateConfig` in production).
   - **Cross-region** is intentionally separate from intra-cluster — no ISR, last-write-wins conflict handling, fire-and-forget.
-  - **Trigger caveat** — `--snapshot-catchup-threshold` (default `10000`) is used on join / `SyncPartitionFromLeader`. Automatic mid-flight lag-driven InstallSnapshot is **not** wired; a far-behind connected follower still uses incremental `Sync`/`Append` catch-up.
+  - **Trigger caveat** — `--snapshot-catchup-threshold` (default `10000`) is a **dead config key** (parsed, never read). Automatic mid-flight lag-driven InstallSnapshot is **not** wired; a far-behind connected follower still uses incremental `Sync`/`Append` catch-up.
 
 ### 6.12 Cross-Region Topology
 

@@ -31,5 +31,5 @@ The consumer module manages group membership and committed offsets for ordered, 
 
 ## Related Diagrams
 
-- [publish_flow.mmd](../../mermaid/publish_flow.mmd)
-- [delivery_state_machine.mmd](../../mermaid/delivery_state_machine.mmd)
+- [Publish flow](api.md#publish-flow)
+- [Delivery state machine](delivery.md#delivery-state-machine)

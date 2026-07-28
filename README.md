@@ -20,7 +20,7 @@ All numbers below are from single-machine benchmarks (3 nodes on one host, AMD R
 | Metric | Value |
 |--------|-------|
 | **Cluster Throughput (max)** | **~790K events/sec** — `make loadtest-max`: RF=1, `periodic` fsync, 256B, batch=4000, 96 publishers, 19.2M events, 100% success |
-| **Standard batch profile** | **~767K events/sec** — `make loadtest-batch`: RF=1, 72 publishers, batch=4000, 7.2M events |
+| **Standard batch profile** | **~767K events/sec** — `make loadtest-batch`: RF=1, 24 publishers/node (72 total), batch=4000, 3.6M events |
 | **Replicated durable (RF=3, minISR=2)** | **~200K events/sec** — synchronous quorum: every write blocks until a follower acks (batch=4000 amortizes the round-trip) |
 | **Publish Latency (RF=1, `periodic`, batch)** | **P50 ~150µs · P95 ~400µs · P99 ~540µs** (max observed ~800µs — sub-millisecond tail) |
 | **Publish Latency (RF=3, minISR=2)** | **P50 ~890µs · P99 ~1.3ms** (includes the quorum replication round-trip) |
@@ -121,7 +121,7 @@ graph TB
 
 > For the full architecture with Mermaid diagrams, sequence diagrams, and deep-dive explanations, see **[ARCHITECTURE.md](ARCHITECTURE.md)** (includes a **[Known Limitations](ARCHITECTURE.md#known-limitations)** section for deferred gaps such as mid-flight lag snapshots, admin rebalance soft-stub, and deep delivery requeue).
 >
-> For per-feature architecture docs and standalone Mermaid source files, see **[docs/architecture/README.md](docs/architecture/README.md)** and **[docs/mermaid](docs/mermaid)**.
+> For per-feature architecture docs with inline-rendered Mermaid diagrams, see **[docs/architecture/README.md](docs/architecture/README.md)** (diagrams are embedded directly in the feature docs — see its [Diagram Index](docs/architecture/README.md#diagram-index)).
 
 ---
 
@@ -468,7 +468,7 @@ Measured on a 3-node cluster on one host (AMD Ryzen 7 6800H, NVMe SSD):
 | Profile | Throughput | Notes |
 |--------|------------|-------|
 | `make loadtest-max` | **~790K events/sec** | RF=1, `periodic` fsync, batch 4000, 32 publishers/node (96 total), 19.2M events, P99 ~540µs |
-| `make loadtest-batch` | **~767K events/sec** | RF=1, batch 4000, 24 publishers/node (72 total), 7.2M events, P99 ~416µs |
+| `make loadtest-batch` | **~767K events/sec** | RF=1, batch 4000, 24 publishers/node (72 total), 3.6M events, P99 ~416µs |
 | Replicated (RF=3, minISR=2) | **~200K events/sec** | Synchronous quorum durability, batch=4000, 16 partitions; P99 ~1.3ms; `replication_lag=0` (followers fully caught up) |
 | Single-event mode | ~10K events/sec | One event per RPC (no batching) |
 
@@ -534,9 +534,10 @@ This is the intended safety property: the system refuses to acknowledge a write 
 
 ### Flags
 
-Defaults are sourced from `internal/config/defaults.go`. Every flag has an
-equivalent `CRONOS_*` environment variable override (see [Environment
-Variables](#environment-variables)).
+Defaults are sourced from `internal/config/defaults.go`. A subset of flags has
+equivalent `CRONOS_*` environment variable overrides (see [Environment
+Variables](#environment-variables) for the exact list — flags not listed there are
+flag-only).
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -573,7 +574,7 @@ Variables](#environment-variables)).
 | `-replication-batch` | `100` | Replication batch size |
 | `-replication-timeout` | `10s` | Replication RPC timeout |
 | `-min-insync-replicas` | `1` | Minimum in-sync replicas (incl. leader) required to ack a write; production target ≥2 |
-| `-snapshot-catchup-threshold` | `10000` | Replication lag (events) above which a follower would request a full snapshot; **automatic lag-driven trigger not yet wired** — currently invoked only by `SyncPartitionFromLeader` on node join |
+| `-snapshot-catchup-threshold` | `10000` | Intended: replication lag (events) above which a follower requests a full snapshot. **Currently a dead config key** — parsed but never read; snapshot install is unconditional on the join/`SyncPartitionFromLeader` path and no lag-driven trigger is wired |
 | `-raft-dir` | `./raft` | Raft data directory |
 | `-raft-join` | *(empty)* | Raft cluster join address |
 | `-cluster` | `false` | Enable cluster mode |
@@ -622,8 +623,8 @@ Variables](#environment-variables)).
 
 ### Environment Variables
 
-Every flag in the table above has an equivalent `CRONOS_*` environment
-variable. The variables registered in `internal/config/config.go` are:
+Only the flags listed below have `CRONOS_*` environment variable overrides; all
+other flags are flag-only. The variables registered in `internal/config/config.go` are:
 
 | Variable | Overrides |
 |----------|-----------|
@@ -844,10 +845,9 @@ See [proto/events.proto](proto/events.proto) for the complete specification.
 | Document | Description |
 |----------|-------------|
 | **[ARCHITECTURE.md](ARCHITECTURE.md)** | Deep-dive with 30+ Mermaid diagrams — data flows, sequence diagrams, state machines |
-| **[docs/architecture/README.md](docs/architecture/README.md)** | Architecture split by feature (cluster, compliance, dedup, delivery, schema, slo, storage, and more) |
-| **[docs/mermaid](docs/mermaid)** | Standalone Mermaid diagram source files (.mmd) for architecture and runtime flows |
+| **[docs/architecture/README.md](docs/architecture/README.md)** | Architecture split by feature (cluster, compliance, dedup, delivery, schema, slo, storage, and more) — all diagrams embedded inline so they render on GitHub |
 | [docs/DEVELOPER_ARCHITECTURE_GUIDE.md](docs/DEVELOPER_ARCHITECTURE_GUIDE.md) | Comprehensive developer-oriented architecture and navigation guide |
-| [proto/events.proto](proto/events.proto) | Complete gRPC API specification (5 services, 30+ message types) |
+| [proto/events.proto](proto/events.proto) | Complete gRPC API specification (7 services, 60+ message types) |
 | [pkg/client](pkg/client) | Production Go SDK (producer/consumer/replay/metadata routing) |
 | [pkg.go.dev/client page](https://pkg.go.dev/github.com/jatin711-debug/cronos_db_golang/pkg/client) | Generated API reference and package docs |
 | [examples/pubsub_demo/main.go](examples/pubsub_demo/main.go) | Runnable publish+subscribe demo with scheduled delivery |
