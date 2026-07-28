@@ -16,7 +16,7 @@ Storage module provides durable append-only event persistence with indexed reads
 
 ## Main Flow
 
-1. Append assigns offsets and writes WAL v2 records (8-byte Raft term + 4-byte trailing checksum) to the active segment.
+1. Append assigns offsets and writes WAL v2 records (8-byte Raft term + 4-byte payload checksum) to the active segment.
 2. Sparse index tracks offsets for read and replay efficiency.
 3. Durability depends on fsync mode:
    - `every_event` — fsync each write
@@ -27,7 +27,7 @@ Storage module provides durable append-only event persistence with indexed reads
 
 ## Production Decisions
 
-- WAL records use format v2: each record carries an 8-byte Raft term and a 4-byte trailing checksum. Upgrading from older builds requires a clean `--data-dir`.
+- WAL records use format v2: each record carries an 8-byte Raft term and a 4-byte payload checksum (written immediately after the payload, before metadata). Upgrading from older builds requires a clean `--data-dir`.
 - CRC checks protect record integrity; critical metadata uses `utils.AtomicWriteFile`.
 - Default fsync mode is `batch`.
 - Encryption at rest v2 uses random GCM nonces to avoid cross-segment keystream reuse; v1 remains readable for migration.
@@ -39,7 +39,26 @@ Storage module provides durable append-only event persistence with indexed reads
 - Segment boundaries and rotation: [internal/storage/segment.go](../../../internal/storage/segment.go)
 - Backup behavior: [internal/storage/backup_scheduler.go](../../../internal/storage/backup_scheduler.go)
 
-## Related Diagrams
+## Diagrams
 
-- [wal_lifecycle.mmd](../../mermaid/wal_lifecycle.mmd)
-- [publish_flow.mmd](../../mermaid/publish_flow.mmd)
+### WAL lifecycle
+
+```mermaid
+flowchart TB
+    Append["AppendEvent / AppendBatch"] --> Active["Write active segment<br/>WAL v2: term + payload checksum<br/>optional AES-GCM record v2 random nonce"]
+    Active --> Index["Update sparse index"]
+    Index --> Flush{Fsync mode}
+    Flush -- every_event --> SyncNow["fsync every write"]
+    Flush -- batch --> GroupCommit["Group-commit fsync<br/>one leader sync per concurrent batch"]
+    Flush -- periodic --> Coalesce["Background / FsyncCoalescer sweep<br/>loss window up to flush interval"]
+    Active --> Rotate{Segment full?}
+    Rotate -- yes --> NewSegment["Rotate; keep prior segment readable"]
+    Rotate -- no --> Active
+    NewSegment --> Compaction["Compaction by committed consumer offsets<br/>(time-based compaction not wired)"]
+    Compaction --> Retention["Retention enforcer: age/size<br/>never deletes active segment<br/>deletes segment + .index"]
+    Retention --> Backup["Backup scheduler"]
+```
+
+### Related diagrams
+
+- [Publish flow](api.md#publish-flow)

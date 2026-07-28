@@ -74,7 +74,33 @@ Canonical cross-link: [ARCHITECTURE.md § Known Limitations](../../../ARCHITECTU
 - Subscriber instability: [internal/delivery/circuit_breaker.go](../../../internal/delivery/circuit_breaker.go)
 - Backpressure skips: [internal/delivery/dispatcher.go](../../../internal/delivery/dispatcher.go) + Prometheus metric above
 
-## Related Diagrams
+## Diagrams
 
-- [delivery_state_machine.mmd](../../mermaid/delivery_state_machine.mmd)
-- [publish_flow.mmd](../../mermaid/publish_flow.mmd)
+### Delivery state machine
+
+```mermaid
+stateDiagram-v2
+    direction LR
+
+    [*] --> Pending
+    Pending --> Delivered: stream send ok
+    Delivered --> Acked: ack success
+    Acked --> [*]
+
+    Pending --> RetryQueued: send failed
+    Delivered --> RetryQueued: nack or ack timeout
+    RetryQueued --> Pending: retry_at reached
+    RetryQueued --> DLQ: max retries exceeded
+    DLQ --> [*]
+
+    note right of RetryQueued
+        The circuit breaker is per-subscription, not
+        per-delivery: after the failure threshold it opens
+        (gating dispatch via CanTry), half-opens after the
+        open duration, and closes on a successful probe.
+    end note
+```
+
+### Related diagrams
+
+- [Publish flow](api.md#publish-flow)

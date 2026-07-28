@@ -56,8 +56,36 @@ failure detection; do not rely on the Rebalance button as a manual “reshuffle 
 - Raft status and peers: [internal/cluster/raft.go](../../../internal/cluster/raft.go)
 - Why UI rebalance did nothing: [internal/api/admin_handler.go](../../../internal/api/admin_handler.go)
 
-## Related Diagrams
+## Diagrams
 
-- [cluster_rebalance_flow.mmd](../../mermaid/cluster_rebalance_flow.mmd)
-- [system_overview.mmd](../../mermaid/system_overview.mmd)
-- [startup_sequence.mmd](../../mermaid/startup_sequence.mmd)
+### Cluster rebalance
+
+```mermaid
+flowchart LR
+    NodeJoin[Node joins or leaves]
+    Membership[Membership service emits event]
+    Router[Router updates hash ring assignments]
+    Moves[Compute partition moves]
+    Sync["State transfer from current leader<br/>SyncPartitionFromLeader (bulk snapshot install)"]
+    Promote[Promote local partition leader if assigned]
+    Follower[Register followers and ISR]
+    RaftSync[Persist partition metadata in Raft]
+    Healthy[Cluster converged]
+
+    AdminBtn[Admin TriggerRebalance / UI button]
+    SoftStub["Soft stub: no forced reshuffle<br/>Success + explanatory message"]
+
+    NodeJoin --> Membership --> Router --> Moves
+    Moves --> Sync --> Promote --> Follower --> RaftSync --> Healthy
+    AdminBtn --> SoftStub
+    SoftStub -.->|does not replace| Membership
+```
+
+Note: the steps above run across different loops in code (router rebalance
+goroutine, manager `reconcileLocalLeadership`, periodic Raft state sync), so the
+depicted order is logical rather than a single linear sequence.
+
+### Related diagrams
+
+- [System overview](../README.md#system-overview)
+- [Startup lifecycle](../../DEVELOPER_ARCHITECTURE_GUIDE.md#42-startup-and-shutdown-sequence)

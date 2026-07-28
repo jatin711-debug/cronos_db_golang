@@ -144,7 +144,7 @@ Representative median values after Tier 3 #15:
 | # | Optimization | Expected delta | Measured delta | Primary benchmark |
 |---|--------------|----------------|----------------|-------------------|
 | 12 | Real `FsyncBatch` group commit | True per-request durability; `batch`≡`periodic` removed | `batch` now durable per request; large batches faster than `every_event` | `BenchmarkWAL_AppendBatch_Matrix/fsync=batch/...` |
-| 13 | Cache AES-GCM AEAD + counter nonce | Fewer allocs, lower CPU per record | Allocs reduced; throughput neutral-to-slightly-better at par=1 | `BenchmarkWAL_AppendBatch_Encrypted_Matrix/...` |
+| 13 | Cache AES-GCM AEAD + random 12-byte nonce per record (cipher v2) | Fewer allocs, lower CPU per record | Allocs reduced; throughput neutral-to-slightly-better at par=1. **Note:** v2 uses a fresh random nonce per record, not a counter nonce — the counter nonce survives only for legacy v1 decryption (see §2) | `BenchmarkWAL_AppendBatch_Encrypted_Matrix/...` |
 | 14 | Decouple index fsync from WAL lock | Lower p99, higher par=16 throughput | par=1 unchanged; high-concurrency p99 expected to improve | `BenchmarkWAL_AppendBatch_Matrix/.../par=16` |
 | 15 | PublishBatch pooling + batched dedup | Lower allocs/op in gRPC path | ~11% geomean latency reduction, ~13% geomean throughput gain (count=3) | `BenchmarkPublishBatch_EndToEnd_Matrix/...` |
 | 16 | Vectorized CRC + mmap growth tuning | TBD; only swap if `benchstat` wins | No change; stdlib already hardware-accelerated; mmap policy unchanged | `BenchmarkWAL_AppendBatch_Matrix/...` |

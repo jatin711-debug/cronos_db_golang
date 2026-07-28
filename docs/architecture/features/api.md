@@ -65,8 +65,63 @@ The API layer is the system entrypoint for all client and internal RPC traffic. 
 - Service registration and middleware chain: [internal/api/grpc_server.go](../../../internal/api/grpc_server.go)
 - Rebalance stub response: [internal/api/admin_handler.go](../../../internal/api/admin_handler.go)
 
-## Related Diagrams
+## Diagrams
 
-- [publish_flow.mmd](../../mermaid/publish_flow.mmd)
-- [system_overview.mmd](../../mermaid/system_overview.mmd)
-- [startup_sequence.mmd](../../mermaid/startup_sequence.mmd)
+### Publish flow
+
+```mermaid
+sequenceDiagram
+    participant Producer
+    participant API as EventService.Publish
+    participant Auth as Auth / RBAC / schema
+    participant PM as PartitionManager
+    participant Dedup
+    participant WAL
+    participant Repl as Replication Leader optional
+    participant Scheduler
+    participant Worker
+    participant Dispatcher
+    participant Consumer
+    participant Group as ConsumerGroup
+
+    Producer->>API: Publish / PublishBatch
+    API->>Auth: JWT topic perms + schema validation optional
+    API->>PM: Resolve partition for message_id or meta partition_key
+    API->>API: Cluster writability: ownership + leadership + epoch fence
+    API->>API: Admission control: ready queue / wheel / in-flight caps
+    API->>Dedup: Claim message_id batch
+    alt duplicate
+      Dedup-->>API: duplicate
+      API-->>Producer: duplicate / already exists
+    else new
+      Dedup-->>API: claimed
+      API->>API: Tenant quota reservation
+      API->>WAL: Append WAL v2 term + payload checksum
+      alt WAL fails
+        API->>Dedup: RollbackBatch
+        API-->>Producer: error
+      else appended
+        WAL-->>API: offsets
+        opt replication leader present
+          API->>Repl: Replicate until ISR quorum incl. leader
+          Note over API,Repl: On replication failure the dedup claim is KEPT
+        end
+        opt cronos.durable_ack meta set
+          API->>WAL: fsync active segment before ack
+        end
+        API->>Scheduler: Schedule by schedule_ts
+        API-->>Producer: success offsets
+      end
+    end
+
+    Scheduler->>Worker: ready events
+    Worker->>Dispatcher: dispatch
+    Dispatcher->>Consumer: Subscribe delivery stream
+    Consumer->>API: Ack
+    API->>Group: CommitOffset
+```
+
+### Related diagrams
+
+- [System overview](../README.md#system-overview)
+- [Startup lifecycle](../../DEVELOPER_ARCHITECTURE_GUIDE.md#42-startup-and-shutdown-sequence)

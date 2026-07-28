@@ -5,7 +5,7 @@ subsystem docs independently.
 
 ## Production-Hardening Highlights (current code)
 
-- **WAL v2 record format** with Raft term and trailing checksum; upgrading from
+- **WAL v2 record format** with Raft term and payload checksum; upgrading from
   older layouts requires a clean data directory.
 - **Encryption at rest v2** uses a **random 12-byte GCM nonce per record**;
   legacy v1 counter nonces remain decrypt-only.
@@ -17,7 +17,7 @@ subsystem docs independently.
   downtime are delivered immediately (not dropped).
 - **2PC handler injects PartitionManager** so prepare/commit write durable markers.
 - **Bounded CDC worker pool** (`DefaultCDCWorkers=4`, queue 10000) with
-  non-blocking `Emit` and graceful `Close`.
+  bounded-blocking `Emit` (drops after 5s) and graceful `Close`.
 - **Retention enforcer** protects active segments/system dirs and deletes aged
   or size-eligible segments plus matching `.index` files.
 - **Listener split:**
@@ -46,7 +46,7 @@ Details and mermaid: [ARCHITECTURE.md § Known Limitations](../../ARCHITECTURE.m
 - Composition root: [cmd/api/main.go](../../cmd/api/main.go)
 - Narrative guide: [docs/DEVELOPER_ARCHITECTURE_GUIDE.md](../DEVELOPER_ARCHITECTURE_GUIDE.md)
 - Full architecture: [ARCHITECTURE.md](../../ARCHITECTURE.md)
-- Mermaid sources: [docs/mermaid](../mermaid)
+- Diagrams: embedded inline (see [Diagram Index](#diagram-index)) so they render on GitHub
 
 ## Feature Documents
 
@@ -86,15 +86,111 @@ Details and mermaid: [ARCHITECTURE.md § Known Limitations](../../ARCHITECTURE.m
 
 ## Diagram Index
 
-- System overview: [system_overview.mmd](../mermaid/system_overview.mmd)
-- Startup lifecycle: [startup_sequence.mmd](../mermaid/startup_sequence.mmd)
-- Publish flow: [publish_flow.mmd](../mermaid/publish_flow.mmd)
-- Delivery state model: [delivery_state_machine.mmd](../mermaid/delivery_state_machine.mmd)
-- Scheduler hot/cold path: [scheduler_hot_cold_flow.mmd](../mermaid/scheduler_hot_cold_flow.mmd)
-- WAL lifecycle: [wal_lifecycle.mmd](../mermaid/wal_lifecycle.mmd)
-- Dedup decision path: [dedup_decision_flow.mmd](../mermaid/dedup_decision_flow.mmd)
-- Cluster rebalance: [cluster_rebalance_flow.mmd](../mermaid/cluster_rebalance_flow.mmd)
-- Cross-region replication: [cross_region_replication.mmd](../mermaid/cross_region_replication.mmd)
-- Transaction state model: [transaction_state_machine.mmd](../mermaid/transaction_state_machine.mmd)
-- Schema validation: [schema_validation_flow.mmd](../mermaid/schema_validation_flow.mmd)
-- Observability feedback loop: [observability_feedback_loop.mmd](../mermaid/observability_feedback_loop.mmd)
+Diagrams are embedded inline in their canonical feature doc so they render
+directly on GitHub (single source of truth — no separate `.mmd` files):
+
+- System overview: below
+- Startup lifecycle: [DEVELOPER_ARCHITECTURE_GUIDE.md §4.2](../DEVELOPER_ARCHITECTURE_GUIDE.md#42-startup-and-shutdown-sequence)
+- Publish flow: [features/api.md](features/api.md#publish-flow)
+- Delivery state model: [features/delivery.md](features/delivery.md#delivery-state-machine)
+- Scheduler hot/cold path: [features/scheduler.md](features/scheduler.md#scheduler-hot-cold-path)
+- WAL lifecycle: [features/storage.md](features/storage.md#wal-lifecycle)
+- Dedup decision path: [features/dedup.md](features/dedup.md#dedup-decision-flow)
+- Cluster rebalance: [features/cluster.md](features/cluster.md#cluster-rebalance)
+- Cross-region replication: [features/replication.md](features/replication.md#cross-region-replication)
+- Transaction state model: [features/tx.md](features/tx.md#transaction-state-machine)
+- Schema validation: [features/schema.md](features/schema.md#schema-validation)
+- Observability feedback loop: [features/slo.md](features/slo.md#observability-feedback-loop)
+
+### System overview
+
+```mermaid
+flowchart TB
+    subgraph Client_Side[Clients]
+      Producer[Producer SDK]
+      Consumer[Consumer SDK]
+      Admin[Ops CLI and Dashboard]
+    end
+
+    subgraph Edge[Process edge]
+      APIGW[Public gRPC :9000]
+      HTTP[HTTP :8080 health metrics UI]
+      IGRPC[Internal gRPC :7947]
+    end
+
+    subgraph Data_Plane[Data plane]
+      EventH[Event / Partition / CG / Tx handlers]
+      AdminH[AdminService handler]
+      PM[Partition Manager]
+      Partition[Per partition runtime]
+      WAL[WAL segments + index]
+      Sched[Scheduler wheel + cold store]
+      Worker[Delivery worker]
+      Disp[Dispatcher credits CB retry]
+      Group[Consumer groups + offsets]
+      DLQ[Dead letter queue]
+      Dedup[Dedup bloom + Pebble]
+    end
+
+    subgraph Control_Plane[Control plane]
+      ClusterM[Cluster manager]
+      Router[Hash ring router SHA-256 vnodes]
+      Membership[Gossip or Memberlist]
+      Raft[Raft metadata]
+      Replication[Leader follower ReplicationService]
+      CrossRegion[CrossRegionService]
+    end
+
+    subgraph Guardrails[Guardrails]
+      Auth[JWT + RBAC]
+      Audit[Audit logger]
+      Schema[Schema registry]
+      Tenant[Tenant accountant]
+      SLO[SLO + metrics + tracing]
+      Compliance[Retention + backup]
+    end
+
+    subgraph Security[Production security]
+      TLS[Public TLS]
+      EncAtRest[Encryption at rest v2]
+      ReplMTLS[Replication mTLS]
+      DevMode[--dev bypass]
+    end
+
+    Producer --> APIGW
+    Consumer --> APIGW
+    Admin --> APIGW
+    Admin --> HTTP
+
+    APIGW --> EventH
+    APIGW --> AdminH
+    HTTP --> AdminH
+    EventH --> PM
+    PM --> Partition
+    Partition --> WAL
+    Partition --> Sched
+    Partition --> Dedup
+    Sched --> Worker
+    Worker --> Disp
+    Disp --> Consumer
+    Disp --> Group
+    Disp --> DLQ
+
+    APIGW --> TLS
+    EventH --> Auth
+    EventH --> Schema
+    EventH --> Tenant
+    APIGW --> Audit
+    APIGW --> SLO
+    AdminH --> Auth
+
+    PM --> Router
+    Router --> ClusterM
+    ClusterM --> Membership
+    ClusterM --> Raft
+    Partition --> Replication
+    Replication --> IGRPC
+    CrossRegion --> IGRPC
+    Replication --> ReplMTLS
+    Compliance --> WAL
+```

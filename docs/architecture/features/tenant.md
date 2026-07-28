@@ -29,5 +29,5 @@ Tenant module enables per-tenant resource accounting and rate control hooks for 
 
 ## Related Diagrams
 
-- [system_overview.mmd](../../mermaid/system_overview.mmd)
-- [observability_feedback_loop.mmd](../../mermaid/observability_feedback_loop.mmd)
+- [System overview](../README.md#system-overview)
+- [Observability feedback loop](slo.md#observability-feedback-loop)

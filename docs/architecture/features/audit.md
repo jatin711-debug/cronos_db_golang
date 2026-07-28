@@ -29,5 +29,5 @@ The audit module records important actions and security-relevant requests for co
 
 ## Related Diagrams
 
-- [observability_feedback_loop.mmd](../../mermaid/observability_feedback_loop.mmd)
-- [system_overview.mmd](../../mermaid/system_overview.mmd)
+- [Observability feedback loop](slo.md#observability-feedback-loop)
+- [System overview](../README.md#system-overview)

@@ -32,5 +32,5 @@ The compliance module enforces retention and storage lifecycle constraints while
 
 ## Related Diagrams
 
-- [wal_lifecycle.mmd](../../mermaid/wal_lifecycle.mmd)
-- [observability_feedback_loop.mmd](../../mermaid/observability_feedback_loop.mmd)
+- [WAL lifecycle](storage.md#wal-lifecycle)
+- [Observability feedback loop](slo.md#observability-feedback-loop)

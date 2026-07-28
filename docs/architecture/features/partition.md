@@ -37,5 +37,5 @@ The partition module is the core execution unit that groups WAL, scheduler, dedu
 
 ## Related Diagrams
 
-- [system_overview.mmd](../../mermaid/system_overview.mmd)
-- [cluster_rebalance_flow.mmd](../../mermaid/cluster_rebalance_flow.mmd)
+- [System overview](../README.md#system-overview)
+- [Cluster rebalance](cluster.md#cluster-rebalance)
