@@ -1,0 +1,3296 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Documentation for CronosDB — a distributed, timestamp-triggered event database">
+      
+      
+      
+        <link rel="canonical" href="https://jatin711-debug.github.io/cronos_db_golang/DEVELOPER_ARCHITECTURE_GUIDE/">
+      
+      
+        <link rel="prev" href="../TECHNICAL_DEEP_DIVE/">
+      
+      
+        <link rel="next" href="../architecture/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Developer Guide - CronosDB Docs</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="blue-grey" data-md-color-accent="deep-orange">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#cronosdb-developer-architecture-guide" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="CronosDB Docs" class="md-header__button md-logo" aria-label="CronosDB Docs" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m16.5 16.25 2.86 1.69-.75 1.22L15 17v-5h1.5zM23 16c0 3.87-3.13 7-7 7a7 7 0 0 1-5.75-3C6.18 19.79 3 18.08 3 16v-3c0 1.88 2.58 3.44 6.06 3.88C9.03 16.59 9 16.3 9 16c0-.38.04-.75.1-1.12-3.5-.43-6.1-2-6.1-3.88V8c0 2.09 3.2 3.8 7.27 4 .6-.86 1.37-1.56 2.26-2.07-.49.04-1.03.07-1.53.07-4.42 0-8-1.79-8-4s3.58-4 8-4 8 1.79 8 4c0 1.2-1.07 2.28-2.75 3 .75.04 1.5.19 2.19.45C18.79 9 19 8.5 19 8v1.68c2.36 1.13 4 3.53 4 6.32m-2 0c0-2.76-2.24-5-5-5s-5 2.24-5 5 2.24 5 5 5 5-2.24 5-5"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            CronosDB Docs
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Developer Guide
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="blue-grey" data-md-color-accent="deep-orange"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="blue-grey" data-md-color-accent="deep-orange"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+          <a href="javascript:void(0)" class="md-search__icon md-icon" title="Share" aria-label="Share" data-clipboard data-clipboard-text="" data-md-component="search-share" tabindex="-1">
+            
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9a3 3 0 0 0-3 3 3 3 0 0 0 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.15c-.05.21-.08.43-.08.66 0 1.61 1.31 2.91 2.92 2.91s2.92-1.3 2.92-2.91A2.92 2.92 0 0 0 18 16.08"/></svg>
+          </a>
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/jatin711-debug/cronos_db_golang" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    jatin711-debug/cronos_db_golang
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="CronosDB Docs" class="md-nav__button md-logo" aria-label="CronosDB Docs" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m16.5 16.25 2.86 1.69-.75 1.22L15 17v-5h1.5zM23 16c0 3.87-3.13 7-7 7a7 7 0 0 1-5.75-3C6.18 19.79 3 18.08 3 16v-3c0 1.88 2.58 3.44 6.06 3.88C9.03 16.59 9 16.3 9 16c0-.38.04-.75.1-1.12-3.5-.43-6.1-2-6.1-3.88V8c0 2.09 3.2 3.8 7.27 4 .6-.86 1.37-1.56 2.26-2.07-.49.04-1.03.07-1.53.07-4.42 0-8-1.79-8-4s3.58-4 8-4 8 1.79 8 4c0 1.2-1.07 2.28-2.75 3 .75.04 1.5.19 2.19.45C18.79 9 19 8.5 19 8v1.68c2.36 1.13 4 3.53 4 6.32m-2 0c0-2.76-2.24-5-5-5s-5 2.24-5 5 2.24 5 5 5 5-2.24 5-5"/></svg>
+
+    </a>
+    CronosDB Docs
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/jatin711-debug/cronos_db_golang" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    jatin711-debug/cronos_db_golang
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Architecture
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ARCHITECTURE/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../TECHNICAL_DEEP_DIVE/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Technical Deep Dive
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Developer Guide
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Developer Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#table-of-contents" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Table of Contents
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#1-why-this-guide-exists" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. Why This Guide Exists
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#2-how-to-read-this-codebase" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. How To Read This Codebase
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="2. How To Read This Codebase">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#21-repository-shape" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2.1 Repository Shape
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#22-mental-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2.2 Mental Model
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#3-system-overview" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. System Overview
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#4-startup-composition-and-lifecycle" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. Startup Composition and Lifecycle
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="4. Startup Composition and Lifecycle">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#41-composition-root" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.1 Composition Root
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#42-startup-and-shutdown-sequence" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.2 Startup and Shutdown Sequence
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#5-end-to-end-runtime-flows" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. End-to-End Runtime Flows
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="5. End-to-End Runtime Flows">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#51-publish-to-delivery-flow" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5.1 Publish to Delivery Flow
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#52-delivery-reliability-state-machine" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5.2 Delivery Reliability State Machine
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#6-feature-deep-dive-by-module" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6. Feature Deep Dive by Module
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="6. Feature Deep Dive by Module">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#61-api-layer-grpc-handlers-middleware" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.1 API Layer (gRPC, handlers, middleware)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#62-configuration-and-runtime-reload" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.2 Configuration and Runtime Reload
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#63-partition-runtime-and-lifecycle" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.3 Partition Runtime and Lifecycle
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#64-storage-wal-segments-index-backup-crypto" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.4 Storage (WAL, segments, index, backup, crypto)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#65-scheduler-timing-wheel-cold-store" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.5 Scheduler (timing wheel + cold store)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#66-deduplication-rust-bloom-pebble-fallback" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.6 Deduplication (Rust bloom + Pebble fallback)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#67-delivery-dispatcher-worker-retry-circuit-breaker-dlq" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.7 Delivery (dispatcher, worker, retry, circuit breaker, DLQ)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#68-consumer-groups-and-offset-store" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.8 Consumer Groups and Offset Store
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#69-cluster-control-plane-membership-router-raft" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.9 Cluster Control Plane (membership, router, raft)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#610-cluster-rebalance-flow" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.10 Cluster Rebalance Flow
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#611-replication-intra-cluster-and-cross-region" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.11 Replication (intra-cluster and cross-region)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#612-cross-region-topology" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.12 Cross-Region Topology
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#613-replay-engine" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.13 Replay Engine
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#614-transactions-2pc-coordinator" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.14 Transactions (2PC coordinator)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#615-transaction-state-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.15 Transaction State Model
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#616-schema-registry-and-compatibility" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.16 Schema Registry and Compatibility
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#617-compliance-retention-and-data-governance" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.17 Compliance, Retention, and Data Governance
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#618-cdc-change-data-capture" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.18 CDC (Change Data Capture)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#619-auth-and-audit" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.19 Auth and Audit
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#620-slo-metrics-and-tracing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.20 SLO, Metrics, and Tracing
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#621-tenant-resource-accounting" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.21 Tenant Resource Accounting
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#622-admin-dashboard-and-cli" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.22 Admin Dashboard and CLI
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#7-reliability-and-production-decisions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7. Reliability and Production Decisions
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="7. Reliability and Production Decisions">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#71-operational-feedback-loops" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7.1 Operational Feedback Loops
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#72-reliability-matrix" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7.2 Reliability Matrix
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#8-debugging-and-navigation-playbook" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8. Debugging and Navigation Playbook
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="8. Debugging and Navigation Playbook">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#81-publish-succeeded-but-not-delivered" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.1 "Publish succeeded but not delivered"
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#82-node-ownership-or-routing-looks-wrong" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.2 "Node ownership or routing looks wrong"
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#83-high-duplicate-rates-or-dedup-false-positives" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.3 "High duplicate rates or dedup false positives"
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#84-replay-inconsistent-between-nodes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.4 "Replay inconsistent between nodes"
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#9-extension-points-for-future-development" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9. Extension Points for Future Development
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#10-suggested-reading-order" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        10. Suggested Reading Order
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_4" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../architecture/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    By Feature
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_2_4" id="__nav_2_4_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    By Feature
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Layer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/audit/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Audit
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/auth/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Auth
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/cdc/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CDC
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/cluster/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cluster Control Plane
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/compliance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Compliance & Retention
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Config & Reload
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/consumer/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Consumer Groups
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/dashboard/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Dashboard
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/dedup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deduplication
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/delivery/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Delivery Pipeline
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/partition/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Partition Runtime
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/replay/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Replay Engine
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/replication/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Replication
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/scheduler/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Scheduler & Timing Wheel
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/schema/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Schema Registry
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/slo/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SLO & Metrics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/storage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Storage & WAL
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/tenant/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tenant Accounting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tracing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/tx/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Transactions (2PC)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Operations
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Operations
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../DOCKER/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Docker
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../PERFORMANCE/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Performance & Benchmarks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Project
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Project
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../plan/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Remediation Plan
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../CONTRIBUTING/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../CODE_OF_CONDUCT/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Code of Conduct
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#table-of-contents" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Table of Contents
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#1-why-this-guide-exists" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. Why This Guide Exists
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#2-how-to-read-this-codebase" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. How To Read This Codebase
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="2. How To Read This Codebase">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#21-repository-shape" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2.1 Repository Shape
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#22-mental-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2.2 Mental Model
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#3-system-overview" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. System Overview
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#4-startup-composition-and-lifecycle" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. Startup Composition and Lifecycle
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="4. Startup Composition and Lifecycle">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#41-composition-root" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.1 Composition Root
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#42-startup-and-shutdown-sequence" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.2 Startup and Shutdown Sequence
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#5-end-to-end-runtime-flows" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. End-to-End Runtime Flows
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="5. End-to-End Runtime Flows">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#51-publish-to-delivery-flow" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5.1 Publish to Delivery Flow
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#52-delivery-reliability-state-machine" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5.2 Delivery Reliability State Machine
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#6-feature-deep-dive-by-module" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6. Feature Deep Dive by Module
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="6. Feature Deep Dive by Module">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#61-api-layer-grpc-handlers-middleware" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.1 API Layer (gRPC, handlers, middleware)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#62-configuration-and-runtime-reload" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.2 Configuration and Runtime Reload
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#63-partition-runtime-and-lifecycle" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.3 Partition Runtime and Lifecycle
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#64-storage-wal-segments-index-backup-crypto" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.4 Storage (WAL, segments, index, backup, crypto)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#65-scheduler-timing-wheel-cold-store" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.5 Scheduler (timing wheel + cold store)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#66-deduplication-rust-bloom-pebble-fallback" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.6 Deduplication (Rust bloom + Pebble fallback)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#67-delivery-dispatcher-worker-retry-circuit-breaker-dlq" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.7 Delivery (dispatcher, worker, retry, circuit breaker, DLQ)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#68-consumer-groups-and-offset-store" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.8 Consumer Groups and Offset Store
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#69-cluster-control-plane-membership-router-raft" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.9 Cluster Control Plane (membership, router, raft)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#610-cluster-rebalance-flow" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.10 Cluster Rebalance Flow
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#611-replication-intra-cluster-and-cross-region" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.11 Replication (intra-cluster and cross-region)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#612-cross-region-topology" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.12 Cross-Region Topology
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#613-replay-engine" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.13 Replay Engine
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#614-transactions-2pc-coordinator" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.14 Transactions (2PC coordinator)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#615-transaction-state-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.15 Transaction State Model
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#616-schema-registry-and-compatibility" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.16 Schema Registry and Compatibility
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#617-compliance-retention-and-data-governance" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.17 Compliance, Retention, and Data Governance
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#618-cdc-change-data-capture" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.18 CDC (Change Data Capture)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#619-auth-and-audit" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.19 Auth and Audit
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#620-slo-metrics-and-tracing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.20 SLO, Metrics, and Tracing
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#621-tenant-resource-accounting" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.21 Tenant Resource Accounting
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#622-admin-dashboard-and-cli" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.22 Admin Dashboard and CLI
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#7-reliability-and-production-decisions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7. Reliability and Production Decisions
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="7. Reliability and Production Decisions">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#71-operational-feedback-loops" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7.1 Operational Feedback Loops
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#72-reliability-matrix" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7.2 Reliability Matrix
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#8-debugging-and-navigation-playbook" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8. Debugging and Navigation Playbook
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="8. Debugging and Navigation Playbook">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#81-publish-succeeded-but-not-delivered" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.1 "Publish succeeded but not delivered"
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#82-node-ownership-or-routing-looks-wrong" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.2 "Node ownership or routing looks wrong"
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#83-high-duplicate-rates-or-dedup-false-positives" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.3 "High duplicate rates or dedup false positives"
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#84-replay-inconsistent-between-nodes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.4 "Replay inconsistent between nodes"
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#9-extension-points-for-future-development" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9. Extension Points for Future Development
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#10-suggested-reading-order" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        10. Suggested Reading Order
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="cronosdb-developer-architecture-guide">CronosDB Developer Architecture Guide<a class="headerlink" href="#cronosdb-developer-architecture-guide" title="Permanent link">&para;</a></h1>
+<blockquote>
+<p>Comprehensive codebase walkthrough for developers and code readers.</p>
+</blockquote>
+<p>This document explains the production architecture as implemented in code, not only at a conceptual level. Use it as a map to navigate subsystems, understand reliability decisions, and trace end-to-end flows.</p>
+<p>Related docs:</p>
+<ul>
+<li>Feature-split architecture index: <a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/architecture/README.md">docs/architecture/README.md</a></li>
+<li>Inline-rendered diagrams: see the <a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/architecture/README.md#diagram-index">Diagram Index</a></li>
+</ul>
+<h2 id="table-of-contents">Table of Contents<a class="headerlink" href="#table-of-contents" title="Permanent link">&para;</a></h2>
+<ul>
+<li><a href="#1-why-this-guide-exists">1. Why This Guide Exists</a></li>
+<li><a href="#2-how-to-read-this-codebase">2. How To Read This Codebase</a></li>
+<li><a href="#3-system-overview">3. System Overview</a></li>
+<li><a href="#4-startup-composition-and-lifecycle">4. Startup Composition and Lifecycle</a></li>
+<li><a href="#5-end-to-end-runtime-flows">5. End-to-End Runtime Flows</a></li>
+<li><a href="#6-feature-deep-dive-by-module">6. Feature Deep Dive by Module</a></li>
+<li><a href="#7-reliability-and-production-decisions">7. Reliability and Production Decisions</a></li>
+<li><a href="#8-debugging-and-navigation-playbook">8. Debugging and Navigation Playbook</a></li>
+<li><a href="#9-extension-points-for-future-development">9. Extension Points for Future Development</a></li>
+<li><a href="#10-suggested-reading-order">10. Suggested Reading Order</a></li>
+</ul>
+<h2 id="1-why-this-guide-exists">1. Why This Guide Exists<a class="headerlink" href="#1-why-this-guide-exists" title="Permanent link">&para;</a></h2>
+<p>CronosDB is a distributed, timestamp-triggered event platform with many cooperating modules. The architecture is intentionally layered but operationally dense. This guide helps you:</p>
+<ul>
+<li>Understand how requests move through data and control planes.</li>
+<li>Find the right file quickly for a feature or bug.</li>
+<li>Understand reliability tradeoffs behind current implementation choices.</li>
+<li>Onboard engineers without relying on tribal knowledge.</li>
+</ul>
+<h2 id="2-how-to-read-this-codebase">2. How To Read This Codebase<a class="headerlink" href="#2-how-to-read-this-codebase" title="Permanent link">&para;</a></h2>
+<h3 id="21-repository-shape">2.1 Repository Shape<a class="headerlink" href="#21-repository-shape" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>cmd/api/main.go</code>: composition root and runtime lifecycle owner.</li>
+<li><code>internal/*</code>: production implementation by subsystem.</li>
+<li><code>pkg/*</code>: reusable SDK and shared types/utilities.</li>
+<li><code>proto/events.proto</code>: contract source for all gRPC services.</li>
+</ul>
+<h3 id="22-mental-model">2.2 Mental Model<a class="headerlink" href="#22-mental-model" title="Permanent link">&para;</a></h3>
+<p>Think in three planes:</p>
+<ul>
+<li>Data plane: publish, schedule, dispatch, ack, replay.</li>
+<li>Control plane: cluster membership, routing, leader metadata.</li>
+<li>Reliability plane: dedup, auth, audit, retention, metrics, tracing, SLO.</li>
+</ul>
+<h2 id="3-system-overview">3. System Overview<a class="headerlink" href="#3-system-overview" title="Permanent link">&para;</a></h2>
+<p>The canonical system-overview diagram lives in
+<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/architecture/README.md#system-overview">docs/architecture/README.md</a> (rendered inline on
+GitHub). In brief:</p>
+<ul>
+<li><strong>Clients</strong> (Producer/Consumer SDKs, ops CLI + dashboard) hit the <strong>process edge</strong>:
+  public gRPC <code>:9000</code>, HTTP <code>:8080</code> (health/metrics/UI), internal gRPC <code>:7947</code>.</li>
+<li>The <strong>data plane</strong> (handlers → partition manager → per-partition WAL, scheduler,
+  worker, dispatcher, consumer groups, DLQ, dedup) serves event traffic.</li>
+<li>The <strong>control plane</strong> (cluster manager, hash-ring router, gossip/Memberlist, Raft
+  metadata, leader-follower replication, cross-region) manages placement and consistency.</li>
+<li><strong>Guardrails</strong> (JWT+RBAC, audit, schema registry, tenant accounting, SLO/metrics/tracing,
+  retention/backup) and <strong>production security</strong> (public TLS, encryption at rest v2,
+  replication mTLS, <code>--dev</code> bypass) wrap both planes.</li>
+</ul>
+<h2 id="4-startup-composition-and-lifecycle">4. Startup Composition and Lifecycle<a class="headerlink" href="#4-startup-composition-and-lifecycle" title="Permanent link">&para;</a></h2>
+<h3 id="41-composition-root">4.1 Composition Root<a class="headerlink" href="#41-composition-root" title="Permanent link">&para;</a></h3>
+<p>The runtime is composed in <code>cmd/api/main.go</code> in this order:</p>
+<ol>
+<li>Load config (includes production validation unless <code>--dev</code>) and install hot-reload listener.</li>
+<li>Initialize guardrails (<code>audit</code>, <code>schema</code>, <code>tenant</code>, <code>cdc</code>, <code>slo</code>, <code>tracing</code>).</li>
+<li>Initialize partition manager with shared Pebble cache.</li>
+<li>Start operational loops (<code>disk_pressure</code>, <code>backup_scheduler</code>, retention enforcer).</li>
+<li>If cluster mode: start cluster manager (<code>raft</code> + membership + router), join seeds.</li>
+<li>Create initial partitions (standalone: all; cluster: partition 0 then lazy-create) and wire WAL append hooks (CDC + cross-region with <code>source_region</code> echo guard).</li>
+<li>Build <strong>public</strong> gRPC (<code>:9000</code>): Event, ConsumerGroup, Partition, Admin + Transaction handler (PM-injected).</li>
+<li>Build <strong>internal</strong> gRPC (<code>:7947</code>): Replication, Raft, CrossRegion (optional replication mTLS).</li>
+<li>Start HTTP (<code>:8080</code>): health, metrics, embedded dashboard <code>/ui/</code>, <code>/api/admin/*</code>.</li>
+<li>Start serve monitors, stats loop, optional autoscaler.</li>
+<li>On signal: graceful stop public/internal gRPC and HTTP, stop partitions, stop cluster.</li>
+</ol>
+<h3 id="42-startup-and-shutdown-sequence">4.2 Startup and Shutdown Sequence<a class="headerlink" href="#42-startup-and-shutdown-sequence" title="Permanent link">&para;</a></h3>
+<p>This is the canonical startup/shutdown diagram:</p>
+<pre class="mermaid"><code>sequenceDiagram
+    participant Main as cmd/api/main.go
+    participant Config as internal/config
+    participant Guard as audit schema tenant cdc slo tracing
+    participant PM as internal/partition
+    participant Cluster as internal/cluster
+    participant Pub as Public gRPC :9000
+    participant Int as Internal gRPC :7947
+    participant HTTP as HTTP :8080
+    participant BG as Background loops
+
+    Main-&gt;&gt;Config: LoadConfig + ValidateConfig
+    Main-&gt;&gt;Main: --dev relaxes production security gates
+    Main-&gt;&gt;Guard: Init audit, schema, tenant, CDC sinks, tracing, SLO
+    Main-&gt;&gt;PM: NewPartitionManagerWithCache(shared Pebble cache)
+    Main-&gt;&gt;BG: Disk monitor, backup scheduler, retention ticker
+    alt cluster enabled
+        Main-&gt;&gt;Cluster: NewManager + SetPartitionAccessor
+        Main-&gt;&gt;Cluster: Start Raft then membership/router
+        Main-&gt;&gt;Cluster: JoinCluster seeds when provided
+    end
+    Main-&gt;&gt;PM: Create/start partitions&lt;br/&gt;(standalone: all, cluster: partition 0 then lazy)
+    Main-&gt;&gt;PM: Wire WAL appendHook CDC + cross-region echo guard
+    Main-&gt;&gt;Pub: NewGRPCServer + interceptors
+    Main-&gt;&gt;Pub: SetTransactionHandler (PM-injected 2PC)
+    Main-&gt;&gt;Pub: RegisterServices: Event, ConsumerGroup, Partition, Admin, Transaction
+    Main-&gt;&gt;Int: NewInternalGRPCServer
+    Main-&gt;&gt;Int: Register Replication, Raft, CrossRegion
+    Main-&gt;&gt;HTTP: Health + metrics + WebHandler /ui + /api/admin
+    Main-&gt;&gt;Pub: Start + ServeError monitor
+    Main-&gt;&gt;Int: Start + ServeError monitor
+    Main-&gt;&gt;HTTP: ListenAndServe with timeouts
+    Main-&gt;&gt;BG: Stats loop + autoscaler
+    Note over Main,BG: SIGINT / SIGTERM
+    Main-&gt;&gt;Pub: GracefulStopWithTimeout 25s then Stop
+    Main-&gt;&gt;Int: GracefulStopWithTimeout then Stop
+    Main-&gt;&gt;HTTP: Shutdown
+    Main-&gt;&gt;PM: Close (stop all partitions)
+    Main-&gt;&gt;PM: Final WAL flush across partitions
+    Main-&gt;&gt;Cluster: Stop when enabled
+    Note over Main,Cluster: 60s overall shutdown budget</code></pre>
+<h2 id="5-end-to-end-runtime-flows">5. End-to-End Runtime Flows<a class="headerlink" href="#5-end-to-end-runtime-flows" title="Permanent link">&para;</a></h2>
+<h3 id="51-publish-to-delivery-flow">5.1 Publish to Delivery Flow<a class="headerlink" href="#51-publish-to-delivery-flow" title="Permanent link">&para;</a></h3>
+<pre class="mermaid"><code>sequenceDiagram
+    participant Producer
+    participant API as EventService.Publish
+    participant PM as PartitionManager
+    participant Dedup
+    participant WAL
+    participant Scheduler
+    participant Worker
+    participant Dispatcher
+    participant Consumer
+    participant Group as ConsumerGroup
+
+    Producer-&gt;&gt;API: Publish(event)
+    API-&gt;&gt;PM: Resolve partition for topic or key
+    API-&gt;&gt;Dedup: IsDuplicate(message_id)
+    alt duplicate
+      Dedup--&gt;&gt;API: duplicate=true
+      API--&gt;&gt;Producer: duplicate error
+    else new event
+      Dedup--&gt;&gt;API: duplicate=false
+      API-&gt;&gt;WAL: Append event and assign offset
+      API-&gt;&gt;Scheduler: Schedule by schedule_ts
+      API--&gt;&gt;Producer: success with offset
+    end
+
+    Scheduler-&gt;&gt;Worker: ready notification
+    Worker-&gt;&gt;Dispatcher: dispatch batch
+    Dispatcher-&gt;&gt;Consumer: delivery stream message
+    Consumer-&gt;&gt;API: Ack(delivery_id, next_offset)
+    API-&gt;&gt;Group: CommitOffset(group, partition, next_offset)
+    Group--&gt;&gt;API: committed</code></pre>
+<h3 id="52-delivery-reliability-state-machine">5.2 Delivery Reliability State Machine<a class="headerlink" href="#52-delivery-reliability-state-machine" title="Permanent link">&para;</a></h3>
+<pre class="mermaid"><code>stateDiagram-v2
+  direction LR
+
+  [*] --&gt; Pending
+  Pending --&gt; Delivered: stream send ok
+  Delivered --&gt; Acked: ack success
+  Acked --&gt; [*]
+
+  Pending --&gt; RetryQueued: send failed
+  Delivered --&gt; RetryQueued: nack or ack timeout
+  RetryQueued --&gt; Pending: retry_at reached
+  RetryQueued --&gt; DLQ: max retries exceeded
+  DLQ --&gt; [*]
+
+  RetryQueued --&gt; OpenCircuit: failure threshold reached
+  OpenCircuit --&gt; HalfOpen: open duration elapsed
+  HalfOpen --&gt; Pending: probe delivery succeeds
+  HalfOpen --&gt; OpenCircuit: probe fails</code></pre>
+<h2 id="6-feature-deep-dive-by-module">6. Feature Deep Dive by Module<a class="headerlink" href="#6-feature-deep-dive-by-module" title="Permanent link">&para;</a></h2>
+<p>This section is organized by feature area and tells you where to read first, what the control flow is, and which reliability decisions matter.</p>
+<h3 id="61-api-layer-grpc-handlers-middleware">6.1 API Layer (gRPC, handlers, middleware)<a class="headerlink" href="#61-api-layer-grpc-handlers-middleware" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Purpose: external and internal RPC surface.</li>
+<li>Key files:</li>
+<li><code>internal/api/grpc_server.go</code> (public listener on <code>:9000</code>)</li>
+<li><code>internal/api/internal_grpc_server.go</code> (internal cluster listener on <code>:7947</code>, registers <code>ReplicationServiceServer</code> + <code>RaftServiceServer</code> + <code>CrossRegionServiceServer</code>)</li>
+<li><code>internal/api/handlers.go</code></li>
+<li><code>internal/api/consumer_handler.go</code></li>
+<li><code>internal/api/partition_handler.go</code></li>
+<li><code>internal/api/replication_server.go</code></li>
+<li><code>internal/api/raft_server.go</code></li>
+<li><code>internal/api/crossregion_server.go</code></li>
+<li><code>internal/api/transaction_handler.go</code> (registered on public listener via <code>RegisterTransactionServiceServer</code>)</li>
+<li><code>internal/api/admin_handler.go</code> (operator-facing <code>AdminService</code>)</li>
+<li><code>internal/api/web_handler.go</code> (HTTP JSON proxy for <code>AdminService</code> + embedded dashboard SPA)</li>
+<li><code>internal/api/health.go</code></li>
+<li>Main flow:</li>
+<li>Requests enter interceptor chain (tracing, SLO, version, auth, topic limit, audit, metrics, IP limit).</li>
+<li>Handlers enforce request validation, routing, dedup, and downstream invocation.</li>
+<li>Partition admin methods provide WAL/scheduler status, compaction, retention, split.</li>
+<li>Reliability decisions:</li>
+<li>Explicit gRPC message size limits and keepalive policy.</li>
+<li><code>Start()</code> returns listen errors; asynchronous serve errors are surfaced via <code>ServeError()</code>.</li>
+<li><code>GracefulStopWithTimeout(ctx)</code> drains in-flight RPCs and falls back to forced <code>Stop</code> if the context expires.</li>
+<li>Health/metrics server startup errors are propagated so the node fails fast on bind or serving failures.</li>
+<li>Unavailable vs failed precondition semantics for cluster ownership and follower-read gating.</li>
+<li>Exactly-once commit mode enforces monotonic ack offsets when enabled.</li>
+</ul>
+<h3 id="62-configuration-and-runtime-reload">6.2 Configuration and Runtime Reload<a class="headerlink" href="#62-configuration-and-runtime-reload" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Purpose: unify defaults, flags, env overrides, and runtime reload.</li>
+<li>Key files:</li>
+<li><code>internal/config/defaults.go</code></li>
+<li><code>internal/config/config.go</code></li>
+<li><code>internal/config/reload.go</code></li>
+<li><code>charts/cronos-db/values.yaml</code></li>
+<li><code>charts/cronos-db/values-production.yaml</code></li>
+<li>Main flow:</li>
+<li>Config is loaded once at startup from flags and environment variables.</li>
+<li>SIGHUP listener allows reload updates without process restart.</li>
+<li>New flags include retention controls (<code>--retention-max-age-hours</code>, <code>--retention-max-size-gb</code>) and the full security surface (TLS, auth, replication mTLS, encryption at rest).</li>
+<li>Reliability decisions:</li>
+<li>Default WAL fsync mode is <code>batch</code>.</li>
+<li><code>--dev</code> disables production security requirements; production mode requires TLS, auth, encryption at rest, replication mTLS, <code>--replication-factor&gt;=3</code>, and <code>--min-insync-replicas&gt;=2</code>.</li>
+<li>New environment variables: <code>CRONOS_DEV</code>, <code>CRONOS_MIN_IN_SYNC_REPLICAS</code>, <code>CRONOS_EXACTLY_ONCE_COMMITS</code>, <code>CRONOS_ENCRYPTION_ENABLED</code>, <code>CRONOS_ENCRYPTION_KEY_FILE</code>.</li>
+<li>Helm chart defaults to <code>config.dev=true</code>; <code>values-production.yaml</code> disables dev mode and requires TLS, auth, encryption, and replication-mTLS secrets.</li>
+<li>Conservative defaults for durability and cluster behavior.</li>
+<li>Feature flags for controlled rollout (<code>follower-reads</code>, <code>exactly-once-commits</code>, tracing, TLS, auth).</li>
+</ul>
+<h3 id="63-partition-runtime-and-lifecycle">6.3 Partition Runtime and Lifecycle<a class="headerlink" href="#63-partition-runtime-and-lifecycle" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Purpose: aggregate per-partition components and lifecycle operations.</li>
+<li>Key files:</li>
+<li><code>internal/partition/manager.go</code></li>
+<li><code>internal/partition/split.go</code></li>
+<li><code>internal/partition/disk_pressure.go</code></li>
+<li>Main flow:</li>
+<li>Partition creation wires WAL, scheduler, dedup, consumer group, dispatcher, worker.</li>
+<li>Lookup can be lazy in cluster mode via hash-derived partition IDs.</li>
+<li>Manager also handles leader promotion/demotion and follower registration.</li>
+<li>Reliability decisions:</li>
+<li>Epoch fencing to reduce split-brain risk.</li>
+<li>Admission control across ready queue, timing wheel depth, and in-flight deliveries.</li>
+<li>Disk-pressure callback triggers emergency compaction.</li>
+</ul>
+<h3 id="64-storage-wal-segments-index-backup-crypto">6.4 Storage (WAL, segments, index, backup, crypto)<a class="headerlink" href="#64-storage-wal-segments-index-backup-crypto" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Purpose: durable ordered log with seekability and maintenance loops.</li>
+<li>Key files:</li>
+<li><code>internal/storage/wal.go</code></li>
+<li><code>internal/storage/segment.go</code></li>
+<li><code>internal/storage/index.go</code></li>
+<li><code>internal/storage/backup_scheduler.go</code></li>
+<li><code>internal/storage/backup.go</code></li>
+<li><code>internal/storage/crypto.go</code></li>
+<li><code>pkg/utils/atomicfile.go</code></li>
+<li>Main flow:</li>
+<li>Append assigns offsets and writes WAL v2 records to the active segment; each record carries an 8-byte Raft term and a 4-byte trailing checksum, and the sparse index is updated.</li>
+<li>Segment rotation and compaction reduce long-term storage cost.</li>
+<li>Backup scheduler snapshots WAL data by interval and retention policy.</li>
+<li>Reliability decisions:</li>
+<li>WAL v2 record format includes a Raft term and trailing checksum; upgrading from older builds requires a clean <code>--data-dir</code>.</li>
+<li>CRC32 validation for integrity checks.</li>
+<li>Default fsync mode is <code>batch</code>; <code>every_event</code> and <code>periodic</code> remain available for stricter or looser durability.</li>
+<li>Critical metadata (transaction logs, encryption key files, backup manifests/checkpoints) is persisted via <code>utils.AtomicWriteFile</code> (temp file + fsync + rename + parent-dir fsync).</li>
+<li>Optional encryption at rest with key-file managed segment cipher.</li>
+</ul>
+<h3 id="65-scheduler-timing-wheel-cold-store">6.5 Scheduler (timing wheel + cold store)<a class="headerlink" href="#65-scheduler-timing-wheel-cold-store" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Purpose: time-accurate delivery scheduling at scale.</li>
+<li>Key files:</li>
+<li><code>internal/scheduler/timing_wheel.go</code></li>
+<li><code>internal/scheduler/scheduler.go</code></li>
+<li><code>internal/scheduler/cold_store.go</code></li>
+<li>Main flow:</li>
+<li>Near-future events stay in hot timing wheel.</li>
+<li>Far-future events move to cold store and are hydrated as due time approaches.</li>
+<li>Ready events are pushed to worker for dispatch.</li>
+<li>Reliability decisions:</li>
+<li>O(1) wheel operations for predictable behavior under load.</li>
+<li>Adaptive hydrator intervals to balance IO and readiness.</li>
+<li>Recovery path from WAL/checkpoints.</li>
+</ul>
+<h3 id="66-deduplication-rust-bloom-pebble-fallback">6.6 Deduplication (Rust bloom + Pebble fallback)<a class="headerlink" href="#66-deduplication-rust-bloom-pebble-fallback" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Purpose: message idempotency and duplicate suppression.</li>
+<li>Key files:</li>
+<li><code>internal/dedup/store.go</code></li>
+<li><code>internal/dedup/bloom_store.go</code></li>
+<li><code>internal/dedup/pebble_store.go</code></li>
+<li><code>internal/dedup/rust_bloom_unix.go</code></li>
+<li><code>internal/dedup/rust_bloom_windows_cgo.go</code> / <code>internal/dedup/rust_bloom_windows_nocgo.go</code></li>
+<li>Main flow:</li>
+<li>Fast probabilistic check first, persistent confirmation fallback when needed.</li>
+<li>Store update keeps recent message IDs with TTL behavior.</li>
+<li>Reliability decisions:</li>
+<li>Two-tier design balances speed and correctness.</li>
+<li>Persistent fallback prevents false-positive-only behavior from dropping valid messages.</li>
+</ul>
+<h3 id="67-delivery-dispatcher-worker-retry-circuit-breaker-dlq">6.7 Delivery (dispatcher, worker, retry, circuit breaker, DLQ)<a class="headerlink" href="#67-delivery-dispatcher-worker-retry-circuit-breaker-dlq" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Purpose: robust subscriber delivery with backpressure and failure handling.</li>
+<li>Key files:</li>
+<li><code>internal/delivery/dispatcher.go</code></li>
+<li><code>internal/delivery/worker.go</code></li>
+<li><code>internal/delivery/retry_queue.go</code></li>
+<li><code>internal/delivery/circuit_breaker.go</code></li>
+<li><code>internal/delivery/dlq.go</code></li>
+<li><code>internal/delivery/dlq_segment.go</code></li>
+<li>Main flow:</li>
+<li>Worker drains ready events and submits to dispatcher.</li>
+<li>Dispatcher tracks credits, in-flight deliveries, and timeout/retry progression.</li>
+<li>Failed deliveries escalate to retry queue and eventually DLQ.</li>
+<li>Reliability decisions:</li>
+<li>Circuit breaker isolates bad subscribers.</li>
+<li>Non-blocking retry heap avoids hot-loop blocking.</li>
+<li>DLQ segments preserve failure evidence for replay and forensics.</li>
+</ul>
+<h3 id="68-consumer-groups-and-offset-store">6.8 Consumer Groups and Offset Store<a class="headerlink" href="#68-consumer-groups-and-offset-store" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Purpose: group membership and durable commit position tracking.</li>
+<li>Key files:</li>
+<li><code>internal/consumer/group.go</code></li>
+<li><code>internal/consumer/offset_store.go</code></li>
+<li>Main flow:</li>
+<li>Subscribe/ack APIs feed into group manager.</li>
+<li>Offsets, group metadata/assignments, and exactly-once commit IDs are persisted in the PebbleDB <code>OffsetStore</code>.</li>
+<li>Reliability decisions:</li>
+<li>Delivery ID parsing routes ack to correct partition path.</li>
+<li>Exactly-once commit guard (feature-flagged) enforces forward-only commits and stores commit IDs for idempotency.</li>
+</ul>
+<h3 id="69-cluster-control-plane-membership-router-raft">6.9 Cluster Control Plane (membership, router, raft)<a class="headerlink" href="#69-cluster-control-plane-membership-router-raft" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Purpose: ownership, routing, and metadata consensus for distributed mode.</li>
+<li>Key files:</li>
+<li><code>internal/cluster/manager.go</code></li>
+<li><code>internal/cluster/router.go</code></li>
+<li><code>internal/cluster/membership.go</code></li>
+<li><code>internal/cluster/memberlist_adapter.go</code></li>
+<li><code>internal/cluster/raft.go</code></li>
+<li><code>internal/cluster/hashring.go</code></li>
+<li>Main flow:</li>
+<li>Membership events update ring and partition assignments.</li>
+<li>Router decides leaders/replicas from consistent hashing.</li>
+<li>Raft stores authoritative metadata and leader elections.</li>
+<li>Manager reconciles partition state into Raft (<code>syncClusterState</code>).</li>
+<li>Reliability decisions:</li>
+<li>Configured virtual nodes reduce leadership skew.</li>
+<li>Join/rebalance includes state transfer hooks to avoid empty ownership.</li>
+<li>Raft persistence via Bolt-backed log store.</li>
+</ul>
+<h3 id="610-cluster-rebalance-flow">6.10 Cluster Rebalance Flow<a class="headerlink" href="#610-cluster-rebalance-flow" title="Permanent link">&para;</a></h3>
+<pre class="mermaid"><code>flowchart LR
+    NodeJoin[Node joins or leaves]
+    Membership[Membership service emits event]
+    Router[Router updates hash ring assignments]
+    Moves[Compute partition moves]
+    Sync[State transfer from current leader]
+    Promote[Promote local partition leader if assigned]
+    Follower[Register followers and ISR]
+    RaftSync[Persist partition metadata in Raft]
+    Healthy[Cluster converged]
+
+    NodeJoin --&gt; Membership --&gt; Router --&gt; Moves
+    Moves --&gt; Sync --&gt; Promote --&gt; Follower --&gt; RaftSync --&gt; Healthy</code></pre>
+<h3 id="611-replication-intra-cluster-and-cross-region">6.11 Replication (intra-cluster and cross-region)<a class="headerlink" href="#611-replication-intra-cluster-and-cross-region" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Purpose: keep intra-cluster followers in sync for durability, and push
+  events to remote regions for geo-resilience.</li>
+<li>Key files:</li>
+<li><code>internal/replication/leader.go</code> — <code>Leader.Replicate</code>, <code>Leader.catchUpFollower</code>, <code>FollowerInfo</code> and ISR/quorum accounting.</li>
+<li><code>internal/replication/follower.go</code> — <code>Follower.InstallSnapshot</code>, <code>Follower.dialCredentials</code>.</li>
+<li><code>internal/replication/mtls.go</code> — <code>MTLSConfig</code>, <code>BuildClientTLSConfig</code>, <code>BuildServerTLSConfig</code>.</li>
+<li><code>internal/replication/region.go</code> — <code>CrossRegionReplicator</code>, per-region batched async push.</li>
+<li><code>internal/api/replication_server.go</code> — <code>ReplicationServiceHandler.Append</code>, <code>.Sync</code>, <code>.Snapshot</code>.</li>
+<li><code>internal/api/internal_grpc_server.go</code> — <code>InternalGRPCServer</code> on the dedicated internal listener (default <code>:7947</code>).</li>
+<li><code>internal/api/crossregion_server.go</code> — <code>CrossRegionServiceServer</code>.</li>
+<li><code>internal/partition/manager.go</code> — <code>PartitionManager.SyncPartitionFromLeader</code> (trigger for bulk install).</li>
+<li><code>internal/cluster/manager.go</code> — <code>Manager.JoinCluster</code> (calls <code>SyncPartitionFromLeader</code> on join; the cluster router also calls it during partition moves).</li>
+<li>Main flow:</li>
+<li><strong>Happy path</strong> — <code>Leader.Replicate(events)</code> fans the contiguous batch out concurrently to every connected follower via gRPC <code>ReplicationService.Append</code> on the internal listener. The call carries <code>PartitionId</code>, <code>Events</code>, <code>ExpectedNextOffset</code>, <code>Term</code>, <code>PrevLogTerm</code>, and an IEEE CRC32 batch checksum.</li>
+<li><strong>Quorum</strong> — <code>Leader.Replicate</code> returns success to the client only after <code>min-insync-replicas</code> replicas <strong>including the leader</strong> have appended via <code>WAL.AppendReplicatedBatch</code>. (A follower ack reflects an in-memory append; in <code>batch</code>/<code>periodic</code> fsync modes it does not imply the follower has fsynced.)</li>
+<li><strong>Incremental catch-up</strong> — when a follower reports <code>NextOffset &lt; events[0].Offset</code>, <code>Leader.catchUpFollower</code> slices <code>[from, to)</code> from the leader's WAL into <code>batchSize</code>-sized chunks and replays them through <code>Append</code>. For very long ranges the leader also serves the server-streaming <code>ReplicationService.Sync</code> RPC.</li>
+<li><strong>Bulk install</strong> — <code>Follower.InstallSnapshot(ctx, leaderAddr, partitionID, 0)</code> dials the leader over the internal listener and calls <code>ReplicationService.Snapshot</code>. The leader flushes its active segment and streams each segment + sparse-index file with a <code>ReplicationSnapshotHeader</code> (per-file IEEE CRC32, first/last offset, file size, <code>is_index</code>) followed by 1 MB data chunks and a final trailer carrying <code>{success, last_offset, epoch}</code>. The follower stages files under <code>&lt;dataDir&gt;/snapshot-staging/{segments,index}/</code>, verifies the last-file CRC32, closes the local WAL, atomically renames <code>segments</code>/<code>index</code> to <code>*.old</code>, moves the staged dirs into place, removes <code>*.old</code>, and calls <code>wal.ReloadSegments()</code>.</li>
+<li><strong>Trigger</strong> — bulk install is invoked by <code>PartitionManager.SyncPartitionFromLeader</code> under a 10-minute context, called from <code>Manager.JoinCluster</code> when a node joins and iterates its <code>router.GetLocalPartitions()</code>, and from the router during partition moves. After formation, <code>Manager.reconcileLocalLeadership</code> runs every 5s and idempotently wires up <code>PromoteToLeader</code> + <code>AddFollower</code> on every locally-led partition, which is what enables streaming <code>Append</code> on a healthy cluster.</li>
+<li><strong>Cross-region</strong> — <code>CrossRegionReplicator</code> queues per region, batches (100 events / 100 ms), and pushes via <code>CrossRegionService.ReplicateEvents</code>. Best-effort, no ISR semantics.</li>
+<li>Reliability decisions:</li>
+<li><strong>Channel isolation</strong> — replication traffic runs over <code>InternalGRPCServer</code> (default <code>:7947</code>), a separate listener from the public API on <code>:9000</code>. Public clients cannot reach replication.</li>
+<li><strong>Per-batch CRC32</strong> on <code>ReplicationAppendRequest</code> — computed and sent by the leader, but currently <strong>not verified</strong> by the follower handler (per-record WAL CRCs still protect on disk).</li>
+<li><strong>Per-file CRC32</strong> on <code>ReplicationSnapshotHeader</code>; the follower verifies the final file's CRC and aborts + cleans up on mismatch (earlier files' CRCs are sent but unverified).</li>
+<li><strong>Term fencing</strong> in <code>ReplicationServiceHandler.Append</code>: rejects <code>req.Term &lt; p.Epoch</code>, steps up on newer terms. Prevents stale-leader replays after a leadership change.</li>
+<li><strong>Gap rejection</strong> — <code>WAL.AppendReplicatedBatch</code> rejects non-contiguous batches ("replicated batch gap"), which drives leader-side catch-up. (The <code>ExpectedNextOffset</code> proto field is set by the leader but unused server-side.)</li>
+<li><strong>Quorum durability</strong> — <code>min-insync-replicas</code> enforced before client ack. With RF=3 / minISR=2 the leader + at least one follower must ack; cluster degradation below minISR fails closed rather than silently succeeding on leader-only.</li>
+<li><strong>Atomic swap</strong> during snapshot install — WAL closed before rename, matching <code>StopPartition</code>'s ordering; avoids Windows file-lock contention.</li>
+<li><strong>mTLS optional</strong> — <code>--replication-tls-enabled</code> plus <code>--replication-tls-{ca,cert,key}-file</code>. Server enforces <code>tls.RequireAndVerifyClientCert</code>; both sides pin against the cluster CA. <code>Follower.dialCredentials</code> falls back to insecure credentials when the flag is off (intentional for <code>--dev</code>, refused by <code>config.ValidateConfig</code> in production).</li>
+<li><strong>Cross-region</strong> is intentionally separate from intra-cluster — no ISR, last-write-wins conflict handling, fire-and-forget.</li>
+<li><strong>Trigger caveat</strong> — <code>--snapshot-catchup-threshold</code> (default <code>10000</code>) is a <strong>dead config key</strong> (parsed, never read). Automatic mid-flight lag-driven InstallSnapshot is <strong>not</strong> wired; a far-behind connected follower still uses incremental <code>Sync</code>/<code>Append</code> catch-up.</li>
+</ul>
+<h3 id="612-cross-region-topology">6.12 Cross-Region Topology<a class="headerlink" href="#612-cross-region-topology" title="Permanent link">&para;</a></h3>
+<pre class="mermaid"><code>flowchart TB
+    subgraph RegionA
+      ALeader[Leader Partition]
+      AFollower1[Follower 1]
+      AFollower2[Follower 2]
+    end
+    subgraph RegionB
+      BIngress[CrossRegionService]
+      BLeader[Leader Partition]
+      BFollower[Follower]
+    end
+
+    ALeader --&gt;|Append hook batch| BIngress
+    BIngress --&gt;|PublishBatch| BLeader
+    BLeader --&gt;|Replication Append| BFollower
+    ALeader --&gt;|Replication Append| AFollower1
+    ALeader --&gt;|Replication Append| AFollower2</code></pre>
+<h3 id="613-replay-engine">6.13 Replay Engine<a class="headerlink" href="#613-replay-engine" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Purpose: stream historical events by time or offset.</li>
+<li>Key files:</li>
+<li><code>internal/replay/engine.go</code></li>
+<li><code>internal/api/handlers.go</code> (Replay handler)</li>
+<li>Main flow:</li>
+<li>Replay query maps to partition WAL scans.</li>
+<li>Results stream in chunks to avoid memory spikes.</li>
+<li>Reliability decisions:</li>
+<li>Context cancellation safe exits.</li>
+<li>Optional follower-read support via config gate.</li>
+</ul>
+<h3 id="614-transactions-2pc-coordinator">6.14 Transactions (2PC coordinator)<a class="headerlink" href="#614-transactions-2pc-coordinator" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Purpose: multi-step prepare/commit orchestration with crash recovery.</li>
+<li>Key files:</li>
+<li><code>internal/tx/coordinator.go</code></li>
+<li><code>internal/tx/transaction_handler.go</code></li>
+<li>Main flow:</li>
+<li><code>tx.NewHandler(pm)</code> injects PartitionManager so participants write durable markers.</li>
+<li><code>PrepareTransaction</code> executes prepare-only path.</li>
+<li>Commit path proceeds from prepared state with idempotent behavior.</li>
+<li>Reliability decisions:</li>
+<li>Durable coordinator log (<code>tx_log.json</code>) for recovery replay.</li>
+<li>Explicit state transitions reduce phase conflation bugs.</li>
+</ul>
+<h3 id="615-transaction-state-model">6.15 Transaction State Model<a class="headerlink" href="#615-transaction-state-model" title="Permanent link">&para;</a></h3>
+<pre class="mermaid"><code>stateDiagram-v2
+    [*] --&gt; Started
+    Started --&gt; Preparing: PrepareTransaction
+    Preparing --&gt; Prepared: all participants vote yes
+    Preparing --&gt; Aborted: any vote no or timeout
+    Prepared --&gt; Committing: CommitTransaction
+    Committing --&gt; Committed: all commit callbacks succeed
+    Committing --&gt; FailedCommit: commit callback failure
+    FailedCommit --&gt; Recovering: coordinator recovery loop
+    Recovering --&gt; Committed: idempotent commit replay
+    Recovering --&gt; Aborted: rollback path
+    Committed --&gt; [*]
+    Aborted --&gt; [*]</code></pre>
+<h3 id="616-schema-registry-and-compatibility">6.16 Schema Registry and Compatibility<a class="headerlink" href="#616-schema-registry-and-compatibility" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Purpose: prevent unsafe payload evolution on topic contracts.</li>
+<li>Key files:</li>
+<li><code>internal/schema/registry.go</code></li>
+<li><code>internal/schema/compatibility.go</code></li>
+<li><code>internal/schema/avro.go</code></li>
+<li><code>internal/schema/protobuf.go</code></li>
+<li>Main flow:</li>
+<li>Register schema version per topic.</li>
+<li>Validate new versions against compatibility mode.</li>
+<li>Publish path can enforce schema checks before storage.</li>
+<li>Reliability decisions:</li>
+<li>Type-aware validators and compatibility modes reduce deployment breakage.</li>
+</ul>
+<h3 id="617-compliance-retention-and-data-governance">6.17 Compliance, Retention, and Data Governance<a class="headerlink" href="#617-compliance-retention-and-data-governance" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Purpose: automated data lifecycle enforcement and protected paths.</li>
+<li>Key files:</li>
+<li><code>internal/compliance/retention.go</code></li>
+<li><code>internal/api/partition_handler.go</code> (admin compaction/retention)</li>
+<li>Main flow:</li>
+<li>Runtime loop enforces max age and max size policies.</li>
+<li>The retention enforcer parses each segment's 64-byte header (<code>firstOffset</code>, <code>createdTS</code>) to decide eligibility and always preserves the active segment per partition.</li>
+<li>Matching <code>.index</code> files are deleted alongside reclaimed segments.</li>
+<li>Partition admin RPC can trigger immediate retention and compaction actions.</li>
+<li>Reliability decisions:</li>
+<li>Protected directories are skipped to prevent accidental cleanup.</li>
+<li>The enforcer honors context cancellation so shutdown does not leave partial deletes.</li>
+<li>Admin actions return explicit success/error and reclaimed counters.</li>
+</ul>
+<h3 id="618-cdc-change-data-capture">6.18 CDC (Change Data Capture)<a class="headerlink" href="#618-cdc-change-data-capture" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Purpose: stream write-side changes to external sinks.</li>
+<li>Key files:</li>
+<li><code>internal/cdc/sink.go</code></li>
+<li><code>internal/cdc/kafka_sink.go</code></li>
+<li><code>internal/cdc/webhook_sink.go</code></li>
+<li>Main flow:</li>
+<li>WAL append hook emits change events to the CDC manager.</li>
+<li>A bounded worker pool (<code>DefaultCDCWorkers=4</code>, queue size 10,000) fans out asynchronously to configured sinks.</li>
+<li><code>Emit</code> is non-blocking and drops events when the queue is full to protect the primary write path.</li>
+<li><code>Close</code> drains in-flight work gracefully before exiting.</li>
+<li>Reliability decisions:</li>
+<li>Sink failures are isolated and do not block primary write path.</li>
+<li>Bounded concurrency and queue limits bound memory and goroutine growth under backpressure.</li>
+</ul>
+<h3 id="619-auth-and-audit">6.19 Auth and Audit<a class="headerlink" href="#619-auth-and-audit" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Purpose: security and traceability.</li>
+<li>Key files:</li>
+<li><code>internal/auth/auth.go</code></li>
+<li><code>internal/api/audit_interceptor.go</code></li>
+<li><code>internal/audit/audit.go</code></li>
+<li>Main flow:</li>
+<li>Auth interceptors validate JWT and enforce policy.</li>
+<li>Audit interceptor records important request actions.</li>
+<li>Reliability decisions:</li>
+<li>Safe defaults with optional strict policy file.</li>
+<li>Audit writes are guarded for thread safety.</li>
+</ul>
+<h3 id="620-slo-metrics-and-tracing">6.20 SLO, Metrics, and Tracing<a class="headerlink" href="#620-slo-metrics-and-tracing" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Purpose: operational visibility and target tracking.</li>
+<li>Key files:</li>
+<li><code>internal/slo/slo.go</code></li>
+<li><code>internal/api/metrics.go</code></li>
+<li><code>internal/tracing/tracing.go</code></li>
+<li><code>internal/tracing/grpc_interceptor.go</code></li>
+<li>Main flow:</li>
+<li>Interceptors capture request latency and errors.</li>
+<li>Recorder aggregates p95/p99 and error rates.</li>
+<li>Prometheus endpoint and tracing exporters expose telemetry.</li>
+<li>Reliability decisions:</li>
+<li>Bounded recording windows prevent unbounded memory growth.</li>
+<li>Tracing can degrade gracefully to no-op mode.</li>
+</ul>
+<h3 id="621-tenant-resource-accounting">6.21 Tenant Resource Accounting<a class="headerlink" href="#621-tenant-resource-accounting" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Purpose: per-tenant publish and delivery control.</li>
+<li>Key files:</li>
+<li><code>internal/tenant/tenant.go</code></li>
+<li><code>internal/api/handlers.go</code> (tenant extraction and accounting hooks)</li>
+<li>Main flow:</li>
+<li>Tenant identity is extracted from auth claims or metadata.</li>
+<li>Publish and delivery paths record resource usage.</li>
+<li>Reliability decisions:</li>
+<li>Token-bucket based controls protect shared clusters from noisy tenants.</li>
+</ul>
+<h3 id="622-admin-dashboard-and-cli">6.22 Admin Dashboard and CLI<a class="headerlink" href="#622-admin-dashboard-and-cli" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Purpose: operator-facing visibility and control without writing custom clients.</li>
+<li>Key files:</li>
+<li><code>internal/api/admin_handler.go</code> — gRPC <code>AdminService</code> implementation (topology, partition health, replication lag, consumer groups, schemas, tenant usage, retention, compaction, rebalance).</li>
+<li><code>internal/api/web_handler.go</code> — HTTP JSON proxy for <code>AdminService</code> and SPA static file serving.</li>
+<li><code>web/dashboard/*</code> — React 19 + Vite admin dashboard, embedded via <code>//go:embed</code>.</li>
+<li><code>cmd/admin/main.go</code> — <code>cronos-admin</code> gRPC CLI.</li>
+<li>Main flow:</li>
+<li>The dashboard calls <code>/api/admin/*</code> endpoints served by the JSON proxy.</li>
+<li>In dev mode (<code>--dev</code>) the proxy allows anonymous requests; with auth enabled it validates the <code>Authorization: Bearer &lt;jwt&gt;</code> header via <code>auth.ParseToken</code> and <code>auth.CheckAdminPermission</code>.</li>
+<li>The dashboard polls topology/health/lag endpoints and renders snapshot bar charts for replication and consumer lag.</li>
+<li>Reliability decisions:</li>
+<li>The SPA is built into the Go binary, so the UI is always version-locked to the server.</li>
+<li>Background refetches keep existing data visible to avoid scroll jumps.</li>
+<li>Read-only accessors in <code>internal/schema</code> and <code>internal/tenant</code> limit the admin surface while reusing existing registries.</li>
+</ul>
+<h2 id="7-reliability-and-production-decisions">7. Reliability and Production Decisions<a class="headerlink" href="#7-reliability-and-production-decisions" title="Permanent link">&para;</a></h2>
+<h3 id="71-operational-feedback-loops">7.1 Operational Feedback Loops<a class="headerlink" href="#71-operational-feedback-loops" title="Permanent link">&para;</a></h3>
+<pre class="mermaid"><code>flowchart TB
+    WAL[WAL segments] --&gt; Compaction[Compaction by offset or timestamp]
+    WAL --&gt; Retention[Retention by age and size]
+    WAL --&gt; Backup[Backup scheduler snapshots]
+    Disk[Disk monitor threshold] --&gt; Compaction
+    Metrics[SLO and Prometheus metrics] --&gt; Alerts[Alerting and autoscaling decisions]
+    Traces[OpenTelemetry traces] --&gt; Metrics
+    Audit[Audit logs] --&gt; Compliance[Compliance reviews]
+    Retention --&gt; Compliance</code></pre>
+<h3 id="72-reliability-matrix">7.2 Reliability Matrix<a class="headerlink" href="#72-reliability-matrix" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Durability:</li>
+<li>WAL v2 (term + trailing checksum) + CRC32 + fsync modes + backup scheduler + atomic metadata writes.</li>
+<li>Correctness:</li>
+<li>Dedup, schema validation, epoch checks, transaction state machine.</li>
+<li>Backpressure:</li>
+<li>Credits, admission control, rate limiters, tenant accounting, <code>cronos_dispatcher_backpressure_skips_total</code>.</li>
+<li><strong>Gap (documented):</strong> no deep worker redrive queue for every credit-skipped ready event; rely on credits/reconnect/WAL durability (<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/architecture/features/delivery.md">delivery.md</a>, <a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/ARCHITECTURE.md#known-limitations">ARCHITECTURE known limitations</a>).</li>
+<li>Fault isolation:</li>
+<li>Circuit breaker, retry queue, DLQ, service-level error boundaries.</li>
+<li>Operability:</li>
+<li>Health endpoints, metrics, tracing, audit logs, periodic stats, admin dashboard.</li>
+<li><strong>Gap (documented):</strong> <code>TriggerRebalance</code> admin RPC is a soft stub; membership-driven rebalance works (<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/architecture/features/cluster.md">cluster.md</a>).</li>
+<li>Replication catch-up:</li>
+<li>Join bulk snapshot + incremental follower catch-up.</li>
+<li><strong>Gap (documented):</strong> no mid-flight auto InstallSnapshot when lag exceeds threshold (<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/architecture/features/replication.md">replication.md</a>).</li>
+</ul>
+<h2 id="8-debugging-and-navigation-playbook">8. Debugging and Navigation Playbook<a class="headerlink" href="#8-debugging-and-navigation-playbook" title="Permanent link">&para;</a></h2>
+<h3 id="81-publish-succeeded-but-not-delivered">8.1 "Publish succeeded but not delivered"<a class="headerlink" href="#81-publish-succeeded-but-not-delivered" title="Permanent link">&para;</a></h3>
+<ol>
+<li>Check API validation and dedup path in <code>internal/api/handlers.go</code>.</li>
+<li>Confirm WAL append and offsets in <code>internal/storage/wal.go</code>.</li>
+<li>Check schedule timestamp and wheel placement in <code>internal/scheduler/scheduler.go</code>.</li>
+<li>Inspect worker/dispatcher flow in <code>internal/delivery/worker.go</code> and <code>internal/delivery/dispatcher.go</code>.</li>
+<li>Verify subscriber credits and ack behavior.</li>
+</ol>
+<h3 id="82-node-ownership-or-routing-looks-wrong">8.2 "Node ownership or routing looks wrong"<a class="headerlink" href="#82-node-ownership-or-routing-looks-wrong" title="Permanent link">&para;</a></h3>
+<ol>
+<li>Inspect router assignments in <code>internal/cluster/router.go</code>.</li>
+<li>Check cluster member health in <code>internal/cluster/membership.go</code>.</li>
+<li>Verify raft metadata state in <code>internal/cluster/raft.go</code> and manager sync in <code>internal/cluster/manager.go</code>.</li>
+<li>Confirm <code>virtual-nodes</code> and replication settings in config.</li>
+</ol>
+<h3 id="83-high-duplicate-rates-or-dedup-false-positives">8.3 "High duplicate rates or dedup false positives"<a class="headerlink" href="#83-high-duplicate-rates-or-dedup-false-positives" title="Permanent link">&para;</a></h3>
+<ol>
+<li>Review bloom capacity and TTL in config.</li>
+<li>Inspect dedup backend behavior in <code>internal/dedup/bloom_store.go</code> and <code>internal/dedup/pebble_store.go</code>.</li>
+<li>Validate message_id generation quality from producers.</li>
+</ol>
+<h3 id="84-replay-inconsistent-between-nodes">8.4 "Replay inconsistent between nodes"<a class="headerlink" href="#84-replay-inconsistent-between-nodes" title="Permanent link">&para;</a></h3>
+<ol>
+<li>Check follower-read flag and ownership checks in replay path.</li>
+<li>Verify replication lag and ISR status.</li>
+<li>Compare partition high-watermarks and local WAL state.</li>
+</ol>
+<h2 id="9-extension-points-for-future-development">9. Extension Points for Future Development<a class="headerlink" href="#9-extension-points-for-future-development" title="Permanent link">&para;</a></h2>
+<ul>
+<li>New external sinks:</li>
+<li>Add implementation under <code>internal/cdc</code> and register via startup wiring.</li>
+<li>New auth policy backend:</li>
+<li>Extend <code>internal/auth</code> policy layer and interceptor path.</li>
+<li>New storage policy:</li>
+<li>Extend WAL compaction/retention rules and backup integration.</li>
+<li>New tenant controls:</li>
+<li>Add policy dimensions in <code>internal/tenant</code> and enforce in handlers.</li>
+<li>New cluster balancing strategy:</li>
+<li>Extend hash ring weighting and move planner in <code>internal/cluster</code>.</li>
+</ul>
+<h2 id="10-suggested-reading-order">10. Suggested Reading Order<a class="headerlink" href="#10-suggested-reading-order" title="Permanent link">&para;</a></h2>
+<p>For a developer new to the codebase:</p>
+<ol>
+<li><code>cmd/api/main.go</code> (composition and lifecycle).</li>
+<li><code>internal/api/grpc_server.go</code> (public API listener, interceptors), <code>internal/api/internal_grpc_server.go</code> (internal replication + Raft listener), and <code>internal/api/handlers.go</code> (entry points).</li>
+<li><code>internal/partition/manager.go</code> (system core assembly).</li>
+<li><code>internal/storage/wal.go</code> and <code>internal/scheduler/scheduler.go</code> (data and time model).</li>
+<li><code>internal/delivery/dispatcher.go</code> and <code>internal/consumer/group.go</code> (delivery and ack semantics).</li>
+<li><code>internal/cluster/manager.go</code>, <code>router.go</code>, <code>raft.go</code> (distributed control plane).</li>
+<li><code>internal/replication/*</code> (leader/follower/mTLS/region) and <code>internal/api/replication_server.go</code> (advanced reliability paths).</li>
+<li><code>internal/compliance</code>, <code>internal/schema</code>, <code>internal/slo</code>, <code>internal/tracing</code> (operational hardening).</li>
+</ol>
+<hr />
+<p>If you keep this document open while stepping through <code>cmd/api/main.go</code> and the API handlers, every major production flow in CronosDB becomes straightforward to trace and reason about.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/jatin711-debug/cronos_db_golang" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+      <div class="md-progress" data-md-component="progress" role="progressbar"></div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.instant", "navigation.instant.progress", "navigation.tracking", "navigation.top", "navigation.sections", "navigation.indexes", "search.highlight", "search.suggest", "search.share", "content.tooltips", "toc.follow"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+        <script src="https://cdn.jsdelivr.net/npm/svg-pan-zoom@3.6.1/dist/svg-pan-zoom.min.js"></script>
+      
+        <script src="../javascripts/mermaid-zoom.js"></script>
+      
+    
+  </body>
+</html>

@@ -1,0 +1,5680 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Documentation for CronosDB — a distributed, timestamp-triggered event database">
+      
+      
+      
+        <link rel="canonical" href="https://jatin711-debug.github.io/cronos_db_golang/ARCHITECTURE/">
+      
+      
+        <link rel="prev" href="..">
+      
+      
+        <link rel="next" href="../TECHNICAL_DEEP_DIVE/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Overview - CronosDB Docs</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="blue-grey" data-md-color-accent="deep-orange">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#cronosdb-architecture" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="CronosDB Docs" class="md-header__button md-logo" aria-label="CronosDB Docs" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m16.5 16.25 2.86 1.69-.75 1.22L15 17v-5h1.5zM23 16c0 3.87-3.13 7-7 7a7 7 0 0 1-5.75-3C6.18 19.79 3 18.08 3 16v-3c0 1.88 2.58 3.44 6.06 3.88C9.03 16.59 9 16.3 9 16c0-.38.04-.75.1-1.12-3.5-.43-6.1-2-6.1-3.88V8c0 2.09 3.2 3.8 7.27 4 .6-.86 1.37-1.56 2.26-2.07-.49.04-1.03.07-1.53.07-4.42 0-8-1.79-8-4s3.58-4 8-4 8 1.79 8 4c0 1.2-1.07 2.28-2.75 3 .75.04 1.5.19 2.19.45C18.79 9 19 8.5 19 8v1.68c2.36 1.13 4 3.53 4 6.32m-2 0c0-2.76-2.24-5-5-5s-5 2.24-5 5 2.24 5 5 5 5-2.24 5-5"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            CronosDB Docs
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Overview
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="blue-grey" data-md-color-accent="deep-orange"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="blue-grey" data-md-color-accent="deep-orange"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+          <a href="javascript:void(0)" class="md-search__icon md-icon" title="Share" aria-label="Share" data-clipboard data-clipboard-text="" data-md-component="search-share" tabindex="-1">
+            
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9a3 3 0 0 0-3 3 3 3 0 0 0 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.15c-.05.21-.08.43-.08.66 0 1.61 1.31 2.91 2.92 2.91s2.92-1.3 2.92-2.91A2.92 2.92 0 0 0 18 16.08"/></svg>
+          </a>
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/jatin711-debug/cronos_db_golang" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    jatin711-debug/cronos_db_golang
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="CronosDB Docs" class="md-nav__button md-logo" aria-label="CronosDB Docs" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m16.5 16.25 2.86 1.69-.75 1.22L15 17v-5h1.5zM23 16c0 3.87-3.13 7-7 7a7 7 0 0 1-5.75-3C6.18 19.79 3 18.08 3 16v-3c0 1.88 2.58 3.44 6.06 3.88C9.03 16.59 9 16.3 9 16c0-.38.04-.75.1-1.12-3.5-.43-6.1-2-6.1-3.88V8c0 2.09 3.2 3.8 7.27 4 .6-.86 1.37-1.56 2.26-2.07-.49.04-1.03.07-1.53.07-4.42 0-8-1.79-8-4s3.58-4 8-4 8 1.79 8 4c0 1.2-1.07 2.28-2.75 3 .75.04 1.5.19 2.19.45C18.79 9 19 8.5 19 8v1.68c2.36 1.13 4 3.53 4 6.32m-2 0c0-2.76-2.24-5-5-5s-5 2.24-5 5 2.24 5 5 5 5-2.24 5-5"/></svg>
+
+    </a>
+    CronosDB Docs
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/jatin711-debug/cronos_db_golang" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    jatin711-debug/cronos_db_golang
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Architecture
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#table-of-contents" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Table of Contents
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#system-overview" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        System Overview
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="System Overview">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#core-subsystems" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Core Subsystems
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#high-level-architecture" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        High-Level Architecture
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="High-Level Architecture">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#module-dependency-graph" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Module Dependency Graph
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#request-lifecycle" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Request Lifecycle
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Request Lifecycle">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#publish-single-event" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Publish - Single Event
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#publish-batch-high-throughput" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Publish Batch - High Throughput
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#subscribe-and-delivery-flow" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Subscribe and Delivery Flow
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#storage-engine-wal" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Storage Engine (WAL)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Storage Engine (WAL)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#segment-file-structure" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Segment File Structure
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#record-binary-format" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Record Binary Format
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#wal-architecture" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        WAL Architecture
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#key-design-decisions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Key Design Decisions
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#retention-enforcement" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Retention Enforcement
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#compaction-flow" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Compaction Flow
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#scheduler-and-timing-wheel" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Scheduler and Timing Wheel
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Scheduler and Timing Wheel">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#timing-wheel-structure" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Timing Wheel Structure
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#timer-lifecycle" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Timer Lifecycle
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#absolute-time-tracking" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Absolute Time Tracking
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#cascade-operation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cascade Operation
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#scheduler-recovery-on-crash" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Scheduler Recovery on Crash
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#two-tier-coldhot-scheduler" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Two-Tier Cold/Hot Scheduler
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#deduplication-engine" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Deduplication Engine
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Deduplication Engine">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#two-tier-architecture" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Two-Tier Architecture
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#bloom-filter-implementation-rust-ffi" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Bloom Filter Implementation - Rust FFI
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#batch-dedup-flow" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Batch Dedup Flow
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#bloom-filter-health-and-reset" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Bloom Filter Health and Reset
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#delivery-pipeline" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Delivery Pipeline
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Delivery Pipeline">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#pipeline-architecture" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pipeline Architecture
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#credit-based-flow-control" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Credit-Based Flow Control
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#non-blocking-retry-heap" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Non-Blocking Retry Heap
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#circuit-breaker" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Circuit Breaker
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#delivery-retry-and-dlq-flow" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Delivery Retry and DLQ Flow
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#dispatcher-sharding" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Dispatcher Sharding
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#dlq-segment-storage" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        DLQ Segment Storage
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#consumer-groups" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Consumer Groups
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Consumer Groups">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#consumer-group-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Consumer Group Model
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#rebalancing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Rebalancing
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#change-data-capture" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Change Data Capture
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cluster-architecture" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cluster Architecture
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Cluster Architecture">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#multi-node-topology" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Multi-Node Topology
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#pluggable-gossip-layer" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pluggable Gossip Layer
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#consistent-hashing-ring" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Consistent Hashing Ring
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#node-join-flow" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Node Join Flow
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#failure-detection-and-recovery" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Failure Detection and Recovery
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#clock-skew-detection" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Clock Skew Detection
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#replication-protocol" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Replication Protocol
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Replication Protocol">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#replication-channel-layout" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Replication channel layout
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#replicationservice-rpcs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ReplicationService RPCs
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#leader-follower-replication" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Leader → Follower Replication
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#incremental-catch-up-sync" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Incremental Catch-Up (Sync)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#bulk-snapshot-install-snapshot" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Bulk Snapshot Install (Snapshot)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#replication-mtls" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Replication mTLS
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#reliability-notes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reliability notes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#raft-fsm-metadata-state-machine" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Raft FSM - Metadata State Machine
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#replay-engine" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Replay Engine
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Replay Engine">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#replay-modes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Replay Modes
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#observability" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Observability
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Observability">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#prometheus-metrics" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Prometheus Metrics
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#metrics-architecture" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Metrics Architecture
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#tracing-opentelemetry" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Tracing - OpenTelemetry
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#data-flow-diagrams" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Data Flow Diagrams
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Data Flow Diagrams">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#end-to-end-event-lifecycle" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        End-to-End Event Lifecycle
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#startup-and-bootstrap-sequence" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Startup and Bootstrap Sequence
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#graceful-shutdown-sequence" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Graceful Shutdown Sequence
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#performance-characteristics" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Performance Characteristics
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Performance Characteristics">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#benchmarks" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Benchmarks
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#optimization-techniques" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Optimization Techniques
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#configuration-reference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuration Reference
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#technology-stack" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Technology Stack
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#consistency-and-guarantees" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Consistency and Guarantees
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#security" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Security
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#known-limitations" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Known Limitations
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Known Limitations">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#1-automatic-mid-flight-lag-driven-snapshot-install" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. Automatic mid-flight lag-driven snapshot install
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#2-admin-triggerrebalance-is-a-soft-stub" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. Admin TriggerRebalance is a soft stub
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#3-deep-delivery-requeue-under-backpressure-deferred" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Deep delivery requeue under backpressure (deferred)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#related-open-work-smaller" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Related open work (smaller)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../TECHNICAL_DEEP_DIVE/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Technical Deep Dive
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../DEVELOPER_ARCHITECTURE_GUIDE/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Developer Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_4" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../architecture/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    By Feature
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_2_4" id="__nav_2_4_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    By Feature
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Layer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/audit/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Audit
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/auth/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Auth
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/cdc/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CDC
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/cluster/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cluster Control Plane
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/compliance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Compliance & Retention
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Config & Reload
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/consumer/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Consumer Groups
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/dashboard/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Dashboard
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/dedup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deduplication
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/delivery/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Delivery Pipeline
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/partition/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Partition Runtime
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/replay/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Replay Engine
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/replication/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Replication
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/scheduler/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Scheduler & Timing Wheel
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/schema/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Schema Registry
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/slo/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SLO & Metrics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/storage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Storage & WAL
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/tenant/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tenant Accounting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tracing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/tx/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Transactions (2PC)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Operations
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Operations
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../DOCKER/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Docker
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../PERFORMANCE/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Performance & Benchmarks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Project
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Project
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../plan/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Remediation Plan
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../CONTRIBUTING/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../CODE_OF_CONDUCT/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Code of Conduct
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#table-of-contents" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Table of Contents
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#system-overview" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        System Overview
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="System Overview">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#core-subsystems" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Core Subsystems
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#high-level-architecture" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        High-Level Architecture
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="High-Level Architecture">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#module-dependency-graph" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Module Dependency Graph
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#request-lifecycle" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Request Lifecycle
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Request Lifecycle">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#publish-single-event" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Publish - Single Event
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#publish-batch-high-throughput" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Publish Batch - High Throughput
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#subscribe-and-delivery-flow" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Subscribe and Delivery Flow
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#storage-engine-wal" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Storage Engine (WAL)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Storage Engine (WAL)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#segment-file-structure" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Segment File Structure
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#record-binary-format" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Record Binary Format
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#wal-architecture" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        WAL Architecture
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#key-design-decisions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Key Design Decisions
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#retention-enforcement" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Retention Enforcement
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#compaction-flow" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Compaction Flow
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#scheduler-and-timing-wheel" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Scheduler and Timing Wheel
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Scheduler and Timing Wheel">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#timing-wheel-structure" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Timing Wheel Structure
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#timer-lifecycle" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Timer Lifecycle
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#absolute-time-tracking" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Absolute Time Tracking
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#cascade-operation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cascade Operation
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#scheduler-recovery-on-crash" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Scheduler Recovery on Crash
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#two-tier-coldhot-scheduler" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Two-Tier Cold/Hot Scheduler
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#deduplication-engine" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Deduplication Engine
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Deduplication Engine">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#two-tier-architecture" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Two-Tier Architecture
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#bloom-filter-implementation-rust-ffi" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Bloom Filter Implementation - Rust FFI
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#batch-dedup-flow" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Batch Dedup Flow
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#bloom-filter-health-and-reset" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Bloom Filter Health and Reset
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#delivery-pipeline" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Delivery Pipeline
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Delivery Pipeline">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#pipeline-architecture" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pipeline Architecture
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#credit-based-flow-control" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Credit-Based Flow Control
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#non-blocking-retry-heap" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Non-Blocking Retry Heap
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#circuit-breaker" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Circuit Breaker
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#delivery-retry-and-dlq-flow" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Delivery Retry and DLQ Flow
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#dispatcher-sharding" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Dispatcher Sharding
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#dlq-segment-storage" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        DLQ Segment Storage
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#consumer-groups" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Consumer Groups
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Consumer Groups">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#consumer-group-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Consumer Group Model
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#rebalancing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Rebalancing
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#change-data-capture" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Change Data Capture
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cluster-architecture" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cluster Architecture
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Cluster Architecture">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#multi-node-topology" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Multi-Node Topology
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#pluggable-gossip-layer" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pluggable Gossip Layer
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#consistent-hashing-ring" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Consistent Hashing Ring
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#node-join-flow" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Node Join Flow
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#failure-detection-and-recovery" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Failure Detection and Recovery
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#clock-skew-detection" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Clock Skew Detection
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#replication-protocol" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Replication Protocol
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Replication Protocol">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#replication-channel-layout" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Replication channel layout
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#replicationservice-rpcs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ReplicationService RPCs
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#leader-follower-replication" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Leader → Follower Replication
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#incremental-catch-up-sync" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Incremental Catch-Up (Sync)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#bulk-snapshot-install-snapshot" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Bulk Snapshot Install (Snapshot)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#replication-mtls" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Replication mTLS
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#reliability-notes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reliability notes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#raft-fsm-metadata-state-machine" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Raft FSM - Metadata State Machine
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#replay-engine" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Replay Engine
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Replay Engine">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#replay-modes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Replay Modes
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#observability" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Observability
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Observability">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#prometheus-metrics" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Prometheus Metrics
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#metrics-architecture" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Metrics Architecture
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#tracing-opentelemetry" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Tracing - OpenTelemetry
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#data-flow-diagrams" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Data Flow Diagrams
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Data Flow Diagrams">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#end-to-end-event-lifecycle" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        End-to-End Event Lifecycle
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#startup-and-bootstrap-sequence" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Startup and Bootstrap Sequence
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#graceful-shutdown-sequence" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Graceful Shutdown Sequence
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#performance-characteristics" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Performance Characteristics
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Performance Characteristics">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#benchmarks" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Benchmarks
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#optimization-techniques" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Optimization Techniques
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#configuration-reference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuration Reference
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#technology-stack" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Technology Stack
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#consistency-and-guarantees" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Consistency and Guarantees
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#security" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Security
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#known-limitations" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Known Limitations
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Known Limitations">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#1-automatic-mid-flight-lag-driven-snapshot-install" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. Automatic mid-flight lag-driven snapshot install
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#2-admin-triggerrebalance-is-a-soft-stub" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. Admin TriggerRebalance is a soft stub
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#3-deep-delivery-requeue-under-backpressure-deferred" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Deep delivery requeue under backpressure (deferred)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#related-open-work-smaller" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Related open work (smaller)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+
+<h1 id="cronosdb-architecture">CronosDB Architecture<a class="headerlink" href="#cronosdb-architecture" title="Permanent link">&para;</a></h1>
+<blockquote>
+<p>A distributed, timestamp-triggered event database with built-in scheduling, pub/sub messaging, and WAL-based persistence.</p>
+<p><strong>Production readiness note:</strong> CronosDB supports both development and production run modes. The <code>--dev</code> flag disables production security requirements for local testing. Production deployments require TLS, authentication, encryption at rest, replication mTLS, <code>--replication-factor&gt;=3</code>, and <code>--min-insync-replicas&gt;=2</code>. See <a href="#security">Security</a> and <a href="#configuration-reference">Configuration Reference</a> for details.</p>
+</blockquote>
+<p>Quick navigation:</p>
+<ul>
+<li>Feature-by-feature architecture docs: <a href="../architecture/">docs/architecture/README.md</a></li>
+<li>Inline-rendered diagrams live in the feature docs (see the <a href="../architecture/#diagram-index">Diagram Index</a>)</li>
+<li>Comprehensive developer walkthrough: <a href="../DEVELOPER_ARCHITECTURE_GUIDE/">docs/DEVELOPER_ARCHITECTURE_GUIDE.md</a></li>
+<li><strong>Known limitations (intentionally deferred):</strong> <a href="#known-limitations">Known Limitations</a></li>
+</ul>
+<hr />
+<h2 id="table-of-contents">Table of Contents<a class="headerlink" href="#table-of-contents" title="Permanent link">&para;</a></h2>
+<ul>
+<li><a href="#system-overview">System Overview</a></li>
+<li><a href="#high-level-architecture">High-Level Architecture</a></li>
+<li><a href="#request-lifecycle">Request Lifecycle</a></li>
+<li><a href="#storage-engine-wal">Storage Engine</a></li>
+<li><a href="#scheduler-and-timing-wheel">Scheduler and Timing Wheel</a></li>
+<li><a href="#deduplication-engine">Deduplication Engine</a></li>
+<li><a href="#delivery-pipeline">Delivery Pipeline</a></li>
+<li><a href="#consumer-groups">Consumer Groups</a></li>
+<li><a href="#change-data-capture">Change Data Capture</a></li>
+<li><a href="#cluster-architecture">Cluster Architecture</a></li>
+<li><a href="#replication-protocol">Replication Protocol</a></li>
+<li><a href="#replay-engine">Replay Engine</a></li>
+<li><a href="#observability">Observability</a></li>
+<li><a href="#data-flow-diagrams">Data Flow Diagrams</a></li>
+<li><a href="#performance-characteristics">Performance Characteristics</a></li>
+<li><a href="#configuration-reference">Configuration Reference</a></li>
+<li><a href="#technology-stack">Technology Stack</a></li>
+<li><a href="#known-limitations">Known Limitations</a></li>
+</ul>
+<hr />
+<h2 id="system-overview">System Overview<a class="headerlink" href="#system-overview" title="Permanent link">&para;</a></h2>
+<p>CronosDB is a <strong>time-aware event store</strong>. Events are published with a future <code>schedule_ts</code> and the system triggers delivery precisely at that timestamp. It combines:</p>
+<ul>
+<li><strong>Append-only WAL</strong> for durable, ordered storage</li>
+<li><strong>Hierarchical Timing Wheel</strong> for O(1) timer scheduling</li>
+<li><strong>Bloom Filter + PebbleDB</strong> for lock-free deduplication</li>
+<li><strong>Raft consensus</strong> for metadata consistency</li>
+<li><strong>Consistent hashing</strong> for partition distribution</li>
+<li><strong>gRPC streaming</strong> for high-throughput pub/sub</li>
+</ul>
+<h3 id="core-subsystems">Core Subsystems<a class="headerlink" href="#core-subsystems" title="Permanent link">&para;</a></h3>
+<pre class="mermaid"><code>graph TB
+    subgraph Clients
+        C1[Producer Client]
+        C2[Consumer Client]
+        C3[Replay Client]
+    end
+
+    subgraph "API Layer (gRPC :9000)"
+        GW[gRPC Server]
+        RL[Rate Limiter&lt;br/&gt;Token Bucket per IP]
+        MT[Metrics Interceptor&lt;br/&gt;Prometheus]
+        TR[Tracing Interceptor&lt;br/&gt;OpenTelemetry]
+    end
+
+    subgraph "Routing Layer"
+        PM[Partition Manager]
+        HR[Hash Ring Router]
+    end
+
+    subgraph "Partition N (per-partition isolation)"
+        WAL[WAL Storage&lt;br/&gt;Segmented + Indexed]
+        CS[Cold Store&lt;br/&gt;PebbleDB Offsets]
+        SCH[Scheduler&lt;br/&gt;Timing Wheel + Hydrator]
+        DD[Dedup Manager&lt;br/&gt;Bloom + PebbleDB]
+        DSP[Dispatcher&lt;br/&gt;32 Shards + Circuit Breaker]
+        WRK[Delivery Worker&lt;br/&gt;Batch Processing]
+        CG[Consumer Groups&lt;br/&gt;Offset Store]
+        DLQ[Dead Letter Queue&lt;br/&gt;Binary Segments]
+    end
+
+    subgraph "Cluster Layer"
+        RAFT[Raft Consensus&lt;br/&gt;HashiCorp Raft]
+        GOSSIP[Gossip Protocol&lt;br/&gt;TCP Heartbeats or Memberlist/SWIM]
+        REPL[Replication&lt;br/&gt;gRPC Internal :7947]
+    end
+
+    C1 --&gt;|Publish/PublishBatch| GW
+    C2 --&gt;|Subscribe stream| GW
+    C3 --&gt;|Replay stream| GW
+    GW --&gt; RL --&gt; MT --&gt; TR
+    TR --&gt; PM
+    PM --&gt; HR
+    HR --&gt;|Route to partition| WAL
+    WAL --&gt; SCH
+    WAL --&gt; CS
+    CS --&gt;|Hydrator| SCH
+    SCH --&gt;|Ready events| WRK
+    WRK --&gt; DSP
+    DSP --&gt;|gRPC stream| C2
+    DSP --&gt;|Failed after retries| DLQ
+    DD -.-&gt;|Dedup check| WAL
+    CG -.-&gt;|Offset tracking| DSP
+    WAL -.-&gt;|Async replication| REPL
+    PM -.-&gt;|Metadata| RAFT
+    GOSSIP -.-&gt;|Node discovery| HR</code></pre>
+<hr />
+<h2 id="high-level-architecture">High-Level Architecture<a class="headerlink" href="#high-level-architecture" title="Permanent link">&para;</a></h2>
+<pre class="mermaid"><code>graph TB
+    C1[Producer Client] --&gt;|Publish| GW
+    C2[Consumer Client] --&gt;|Subscribe| GW
+    C3[Replay Client] --&gt;|Replay| GW
+
+    GW[gRPC Server :9000] --&gt; RL[Rate Limiter]
+    RL --&gt; MT[Metrics Interceptor]
+    MT --&gt; PM[Partition Manager]
+    PM --&gt; HR[Hash Ring Router]
+
+    HR --&gt; WAL[WAL Storage]
+    HR --&gt; DD[Dedup Manager]
+    WAL --&gt; SCH[Scheduler]
+    WAL --&gt; CS[Cold Store]
+    CS --&gt;|Hydrator| SCH
+    SCH --&gt; WRK[Delivery Worker]
+    WRK --&gt; DSP[Dispatcher - 32 Shards + Circuit Breaker]
+    DSP --&gt;|gRPC stream| C2
+    DSP --&gt;|Failed| DLQ[Dead Letter Queue - Segments]
+
+    WAL -.-&gt;|Async| REPL[Replication]
+    PM -.-&gt;|Metadata| RAFT[Raft Consensus]
+    GOSSIP[Gossip Protocol] -.-&gt;|Discovery| HR</code></pre>
+<hr />
+<h3 id="module-dependency-graph">Module Dependency Graph<a class="headerlink" href="#module-dependency-graph" title="Permanent link">&para;</a></h3>
+<pre class="mermaid"><code>graph LR
+    main[cmd/api/main.go] --&gt; config[internal/config]
+    main --&gt; api[internal/api]
+    main --&gt; cluster[internal/cluster]
+    main --&gt; partition[internal/partition]
+
+    api --&gt; partition
+    api --&gt; consumer[internal/consumer]
+    api --&gt; delivery[internal/delivery]
+    api --&gt; replay[internal/replay]
+    api --&gt; tracing[internal/tracing]
+    api --&gt; replication[internal/replication]
+    api --&gt; internal_grpc[internal/api/internal_grpc_server.go&lt;br/&gt;separate listener :7947]
+
+    partition --&gt; storage[internal/storage]
+    partition --&gt; scheduler[internal/scheduler]
+    partition --&gt; dedup[internal/dedup]
+    partition --&gt; consumer
+    partition --&gt; delivery
+    partition --&gt; replication
+    partition --&gt; snapshot[internal/partition/snapshot.go&lt;br/&gt;recovery snapshot.json]
+
+    replication --&gt; mtls[internal/replication/mtls.go]
+    cluster --&gt; raft_pkg[hashicorp/raft]
+    dedup --&gt; pebble[cockroachdb/pebble]
+    dedup --&gt; rust[Rust FFI - cronos_dedup]
+    consumer --&gt; pebble
+    storage --&gt; mmap[OS mmap]</code></pre>
+<hr />
+<h2 id="request-lifecycle">Request Lifecycle<a class="headerlink" href="#request-lifecycle" title="Permanent link">&para;</a></h2>
+<h3 id="publish-single-event">Publish - Single Event<a class="headerlink" href="#publish-single-event" title="Permanent link">&para;</a></h3>
+<pre class="mermaid"><code>sequenceDiagram
+    participant Client
+    participant gRPC as gRPC Server
+    participant PM as Partition Manager
+    participant DD as Dedup Manager
+    participant BF as Bloom Filter
+    participant PDB as PebbleDB
+    participant WAL as WAL
+    participant SCH as Scheduler
+
+    Client-&gt;&gt;gRPC: Publish(event)
+    gRPC-&gt;&gt;PM: GetPartitionIDForKey(message_id)
+    Note over PM: FNV-1a hash mod partition_count
+
+    gRPC-&gt;&gt;DD: IsDuplicate(message_id)
+    DD-&gt;&gt;BF: MayContain(message_id)
+
+    alt Bloom says NO - 99 percent fast path
+        BF--&gt;&gt;DD: false - definitely new
+        DD-&gt;&gt;PDB: StoreOnly(message_id, offset)
+        DD-&gt;&gt;BF: Add(message_id)
+        DD--&gt;&gt;gRPC: not duplicate
+    else Bloom says MAYBE - 1 percent slow path
+        BF--&gt;&gt;DD: true - maybe exists
+        DD-&gt;&gt;PDB: Get(message_id)
+        alt Found in PebbleDB
+            PDB--&gt;&gt;DD: exists
+            DD--&gt;&gt;gRPC: duplicate
+            gRPC--&gt;&gt;Client: error duplicate
+        else Not found - false positive
+            PDB--&gt;&gt;DD: not found
+            DD-&gt;&gt;PDB: Store(message_id, offset)
+            DD--&gt;&gt;gRPC: not duplicate
+        end
+    end
+
+    gRPC-&gt;&gt;WAL: AppendEvent(event)
+    Note over WAL: Assign offset, CRC32, buffered write
+    WAL--&gt;&gt;gRPC: offset assigned
+
+    gRPC-&gt;&gt;SCH: Schedule(event)
+    Note over SCH: Add to timing wheel slot
+    gRPC--&gt;&gt;Client: PublishResponse with offset</code></pre>
+<h3 id="publish-batch-high-throughput">Publish Batch - High Throughput<a class="headerlink" href="#publish-batch-high-throughput" title="Permanent link">&para;</a></h3>
+<pre class="mermaid"><code>sequenceDiagram
+    participant Client
+    participant gRPC as gRPC Server
+    participant PM as Partition Manager
+    participant DD as Dedup Manager
+    participant WAL as WAL
+    participant SCH as Scheduler
+
+    Client-&gt;&gt;gRPC: PublishBatch(events x 1000)
+    gRPC-&gt;&gt;PM: Group events by partition via FNV-1a
+
+    par Per-Partition parallel goroutines
+        gRPC-&gt;&gt;DD: IsDuplicateBatch(messageIDs)
+        Note over DD: Batch bloom check then batch PebbleDB write
+        DD--&gt;&gt;gRPC: results array
+
+        gRPC-&gt;&gt;WAL: AppendBatch(events)
+        Note over WAL: Single lock, single buffered write
+
+        gRPC-&gt;&gt;SCH: ScheduleBatch(events)
+        Note over SCH: Single lock acquisition for all timers
+    end
+
+    gRPC--&gt;&gt;Client: PublishBatchResponse</code></pre>
+<hr />
+<h3 id="subscribe-and-delivery-flow">Subscribe and Delivery Flow<a class="headerlink" href="#subscribe-and-delivery-flow" title="Permanent link">&para;</a></h3>
+<pre class="mermaid"><code>sequenceDiagram
+    participant Client as Consumer
+    participant gRPC as gRPC Server
+    participant CG as Consumer Group
+    participant DSP as Dispatcher
+    participant SCH as Scheduler
+    participant WRK as Worker
+
+    Client-&gt;&gt;gRPC: Subscribe(group, topic, partition)
+    gRPC-&gt;&gt;CG: JoinGroup(group, member)
+    gRPC-&gt;&gt;DSP: Register subscription
+    Note over DSP: Set credits to MaxCredits
+
+    loop Timing Wheel Tick every tick-ms default 10ms
+        SCH-&gt;&gt;SCH: Tick and check current slot
+        SCH--&gt;&gt;WRK: ReadySignal with expired timers
+        WRK-&gt;&gt;DSP: DispatchBatch(events)
+        DSP-&gt;&gt;Client: Stream.Send(Delivery)
+        Note over DSP: Credits decremented per event
+    end
+
+    Client-&gt;&gt;gRPC: Ack(delivery_id, success)
+    gRPC-&gt;&gt;DSP: HandleAck(delivery_id)
+    Note over DSP: Credits incremented back
+    gRPC-&gt;&gt;CG: CommitOffset(group, partition, offset)
+
+    alt Ack timeout after 30s
+        DSP-&gt;&gt;DSP: Retry with exponential backoff
+    end
+
+    alt Max retries exceeded
+        DSP-&gt;&gt;DSP: Send to Dead Letter Queue
+    end</code></pre>
+<hr />
+<h2 id="storage-engine-wal">Storage Engine (WAL)<a class="headerlink" href="#storage-engine-wal" title="Permanent link">&para;</a></h2>
+<p>The Write-Ahead Log is the durability backbone. Every event is persisted before acknowledgment.</p>
+<h3 id="segment-file-structure">Segment File Structure<a class="headerlink" href="#segment-file-structure" title="Permanent link">&para;</a></h3>
+<pre class="mermaid"><code>graph LR
+    subgraph Segment File
+        H[Header 64B] --&gt; R1[Record 1]
+        R1 --&gt; R2[Record 2]
+        R2 --&gt; R3[Record 3]
+        R3 --&gt; RN[Record N...]
+    end
+
+    subgraph Header Contents
+        H1[Magic: CRNOS1]
+        H2[Version: 1]
+        H3[First Offset]
+        H4[Created Timestamp]
+        H5[CRC32 Checksum]
+    end
+
+    subgraph Record Format v2
+        RF1[Length - 4B]
+        RF2[CRC32 - 4B]
+        RF3[Raft Term - 8B]
+        RF4[Offset - 8B]
+        RF5[Schedule TS - 8B]
+        RF6[MsgID Len + Data]
+        RF7[Topic Len + Data]
+        RF8[Payload Len + Data]
+        RF9[Payload Checksum - 4B]
+        RF10[Meta Count + Entries]
+    end</code></pre>
+<h3 id="record-binary-format">Record Binary Format<a class="headerlink" href="#record-binary-format" title="Permanent link">&para;</a></h3>
+<p>WAL records use <strong>format v2</strong>. Each record carries an 8-byte Raft term and a 4-byte payload checksum (written immediately after the payload, before the metadata entries) in addition to the existing fields. Upgrading from older builds requires a clean <code>--data-dir</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Size</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Length</td>
+<td>4 bytes</td>
+<td>Total record size including this field</td>
+</tr>
+<tr>
+<td>CRC32</td>
+<td>4 bytes</td>
+<td>IEEE CRC32 of all bytes after the Length field</td>
+</tr>
+<tr>
+<td>Raft Term</td>
+<td>8 bytes</td>
+<td>Raft term of the leader that authored the record</td>
+</tr>
+<tr>
+<td>Offset</td>
+<td>8 bytes</td>
+<td>Monotonically increasing event offset</td>
+</tr>
+<tr>
+<td>Schedule TS</td>
+<td>8 bytes</td>
+<td>Unix millisecond timestamp for trigger</td>
+</tr>
+<tr>
+<td>MsgID Len</td>
+<td>2 bytes</td>
+<td>Length of message_id string</td>
+</tr>
+<tr>
+<td>MsgID</td>
+<td>N bytes</td>
+<td>Unique message identifier</td>
+</tr>
+<tr>
+<td>Topic Len</td>
+<td>2 bytes</td>
+<td>Length of topic string</td>
+</tr>
+<tr>
+<td>Topic</td>
+<td>N bytes</td>
+<td>Topic/channel name</td>
+</tr>
+<tr>
+<td>Payload Len</td>
+<td>4 bytes</td>
+<td>Length of payload</td>
+</tr>
+<tr>
+<td>Payload</td>
+<td>N bytes</td>
+<td>Arbitrary event data</td>
+</tr>
+<tr>
+<td>Payload Checksum</td>
+<td>4 bytes</td>
+<td>IEEE CRC32 covering the payload only</td>
+</tr>
+<tr>
+<td>Meta Count</td>
+<td>2 bytes</td>
+<td>Number of metadata key-value pairs</td>
+</tr>
+<tr>
+<td>Meta Entries</td>
+<td>Variable</td>
+<td>key_len(2) + key + val_len(2) + val per entry</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Upgrade note:</strong> WAL v2 is not backward-compatible with older segment files. Remove or move the old <code>--data-dir</code> before starting a newer binary.</p>
+<h3 id="wal-architecture">WAL Architecture<a class="headerlink" href="#wal-architecture" title="Permanent link">&para;</a></h3>
+<pre class="mermaid"><code>graph TB
+    subgraph WAL Per Partition
+        BW[Buffered Writer - 4MB]
+        S1[Segment 0 - offsets 0 to 99999]
+        S2[Segment 1 - offsets 100000 to 199999]
+        S3[Segment 2 ACTIVE - offsets 200000+]
+        NS[Pre-created Next Segment]
+    end
+
+    subgraph Sparse Index Per Segment
+        I1[offset=0, pos=64]
+        I2[offset=1000, pos=52480]
+        I3[offset=2000, pos=104896]
+    end
+
+    subgraph Flush Modes
+        FM1[every_event - fsync per write]
+        FM2["batch - group-commit per batch (default)"]
+        FM3[periodic - background flush loop]
+    end
+
+    BW --&gt; S3
+    S3 -.-&gt;|Rotate when full| NS
+    S1 --&gt; I1
+    S2 --&gt; I2
+    S3 --&gt; I3</code></pre>
+<h3 id="key-design-decisions">Key Design Decisions<a class="headerlink" href="#key-design-decisions" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>Decision</th>
+<th>Rationale</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>4MB bufio.Writer</strong></td>
+<td>Reduces syscall frequency; batch writes amortize I/O</td>
+</tr>
+<tr>
+<td><strong>Pre-created next segment</strong></td>
+<td>Triggered at 90% capacity; eliminates rotation latency</td>
+</tr>
+<tr>
+<td><strong>Sparse index every 1000 events</strong></td>
+<td>Binary search for O(log N) seeks without full index overhead</td>
+</tr>
+<tr>
+<td><strong>Memory-mapped reads</strong></td>
+<td>Zero-copy reads on supported platforms</td>
+</tr>
+<tr>
+<td><strong>CRC32 per record + trailing checksum + Raft term</strong></td>
+<td>Detects corruption; enables term-aware replication; tail truncation on recovery</td>
+</tr>
+<tr>
+<td><strong>Prepared records outside lock</strong></td>
+<td>Serialization happens lock-free; only offset assignment needs mutex</td>
+</tr>
+<tr>
+<td><strong>sync.Pool for record buffers</strong></td>
+<td>Reduces GC pressure under high throughput</td>
+</tr>
+<tr>
+<td><strong>Atomic file writes via <code>utils.AtomicWriteFile</code></strong></td>
+<td>Temp file + fsync + rename + parent-dir fsync for tx logs, encryption key files, etc.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="retention-enforcement">Retention Enforcement<a class="headerlink" href="#retention-enforcement" title="Permanent link">&para;</a></h3>
+<p>The retention enforcer periodically removes aged or oversized WAL segments while protecting the active segment and system directories.</p>
+<pre class="mermaid"><code>flowchart LR
+    A[Retention Scanner] --&gt; B[Parse 64-byte segment header]
+    B --&gt; C[Read firstOffset and createdTS]
+    C --&gt; D{Segment active?}
+    D --&gt;|Yes| Z[Skip - protected]
+    D --&gt;|No| E{Age &gt; max-age OR size &gt; max-size?}
+    E --&gt;|No| Z
+    E --&gt;|Yes| F[Delete segment file]
+    F --&gt; G[Delete matching .index file]
+    G --&gt; H[Skip protected system directories]</code></pre>
+<p><strong>Rules:</strong>
+- Parses the 64-byte segment header for <code>firstOffset</code> and <code>createdTS</code>.
+- Preserves the active segment per partition.
+- Deletes aged/size-eligible non-active segments and their matching <code>.index</code> files.
+- Skips protected system directories (<code>raft/</code>, <code>pebble/</code>, <code>keys/</code>, etc.).</p>
+<h3 id="compaction-flow">Compaction Flow<a class="headerlink" href="#compaction-flow" title="Permanent link">&para;</a></h3>
+<pre class="mermaid"><code>flowchart LR
+    A[Compaction Timer - every 10 min] --&gt; B{Active consumers?}
+    B --&gt;|No| Z[Skip]
+    B --&gt;|Yes| C[Find min committed offset across all groups]
+    C --&gt; D{min_offset &gt; 0?}
+    D --&gt;|No| Z
+    D --&gt;|Yes| E[Delete segments where last_offset less than min_offset]
+    E --&gt; F[Never delete active segment]</code></pre>
+<hr />
+<h2 id="scheduler-and-timing-wheel">Scheduler and Timing Wheel<a class="headerlink" href="#scheduler-and-timing-wheel" title="Permanent link">&para;</a></h2>
+<p>The scheduler uses a <strong>hierarchical timing wheel</strong> for O(1) timer management of millions of events.</p>
+<h3 id="timing-wheel-structure">Timing Wheel Structure<a class="headerlink" href="#timing-wheel-structure" title="Permanent link">&para;</a></h3>
+<pre class="mermaid"><code>graph TB
+    subgraph Level 0 - Root Wheel
+        direction LR
+        TICK[Current Tick Pointer]
+        S0[Slot 0 - Timer List]
+        S1[Slot 1 - Timer List]
+        S2[Slot 2 - empty]
+        S3[Slot 3 - Timer List]
+        S59[Slot 59 - Timer List]
+    end
+
+    subgraph Level 1 - Overflow Wheel
+        O0[Slot 0]
+        O1[Slot 1 - Timer List]
+        O59[Slot 59]
+    end
+
+    subgraph Level 2 - Overflow Wheel
+        L0[Slot 0]
+        L1[Slot 1 - Timer List]
+    end
+
+    TICK -.-&gt; S0
+    S59 --&gt;|Full rotation cascades| O0
+    O59 --&gt;|Full rotation cascades| L0</code></pre>
+<p><strong>Wheel Parameters:</strong>
+- Level 0 (default): 10ms tick, 600 slots = 6 second window
+- Level 1: 6s tick, 600 slots = 3600 second (60 min) window
+- Level 2: 3600s tick, 600 slots = 25 day window
+- Max levels: 10 (hardcoded; only <code>--tick-ms</code> and <code>--wheel-size</code> are configurable)</p>
+<h3 id="timer-lifecycle">Timer Lifecycle<a class="headerlink" href="#timer-lifecycle" title="Permanent link">&para;</a></h3>
+<pre class="mermaid"><code>stateDiagram-v2
+    [*] --&gt; Pool : sync.Pool.Get
+    Pool --&gt; Scheduled : AddTimer
+    Scheduled --&gt; InWheel : delay fits in current wheel
+    Scheduled --&gt; InOverflow : delay exceeds wheel window
+    InWheel --&gt; Expired : Tick advances to slot
+    InOverflow --&gt; Cascaded : Overflow wheel rotation
+    Cascaded --&gt; InWheel : Recalculate slot in root wheel
+    Expired --&gt; ReadyQueue : Push to ready queue
+    ReadyQueue --&gt; Dispatched : Worker picks up batch
+    Dispatched --&gt; Pool : PutTimer recycle
+    InWheel --&gt; Cancelled : RemoveTimer
+    Cancelled --&gt; Pool : PutTimer recycle</code></pre>
+<h3 id="absolute-time-tracking">Absolute Time Tracking<a class="headerlink" href="#absolute-time-tracking" title="Permanent link">&para;</a></h3>
+<pre class="mermaid"><code>flowchart TD
+    A[Event arrives with schedule_ts as absolute ms] --&gt; B[now = time.Now in UnixMilli]
+    B --&gt; C[delayMs = schedule_ts minus now]
+    C --&gt; D[delayTicks = delayMs / tickMs]
+    D --&gt; E{delayTicks less than wheelSize?}
+    E --&gt;|Yes| F[slot = currentTick + delayTicks mod wheelSize]
+    F --&gt; G[Insert into root wheel]
+    E --&gt;|No| H[Create or use overflow wheel]
+    H --&gt; I[overflowTickMs = tickMs times wheelSize]
+    I --&gt; J[Recursively add to overflow]
+    J --&gt; K[On cascade: recalculate from absolute ExpirationMs]
+    K --&gt; L[No drift accumulation]</code></pre>
+<h3 id="cascade-operation">Cascade Operation<a class="headerlink" href="#cascade-operation" title="Permanent link">&para;</a></h3>
+<p>When the root wheel completes a full rotation, timers cascade from the overflow wheel:</p>
+<pre class="mermaid"><code>flowchart LR
+    A[Root wheel completes rotation] --&gt; B[Lock overflow wheel]
+    B --&gt; C[Get timers in overflow current slot]
+    C --&gt; D[For each timer: recalculate target slot from ExpirationMs]
+    D --&gt; E[Bucket timers by target slot using pre-allocated cascadeBuf]
+    E --&gt; F[Batch-insert into root wheel slots]</code></pre>
+<h3 id="scheduler-recovery-on-crash">Scheduler Recovery on Crash<a class="headerlink" href="#scheduler-recovery-on-crash" title="Permanent link">&para;</a></h3>
+<p>On restart the scheduler:</p>
+<ol>
+<li>Restores wheel origin from <code>timer_state.json</code> when present.</li>
+<li><strong>Rebases <code>currentTick</code> from wall clock</strong> so absolute fire times stay aligned after downtime (no compounding future skew).</li>
+<li>Replays WAL timers from <code>timer_replay_checkpoint.json</code> (or offset 0).</li>
+<li>Events with <code>schedule_ts &gt; now</code> re-enter the hot timing wheel (or cold store).</li>
+<li>Events that <strong>matured during downtime</strong> are enqueued for <strong>immediate delivery</strong> (not discarded).</li>
+</ol>
+<pre class="mermaid"><code>flowchart TD
+    A[Node Starts] --&gt; B[Restore timer_state.json if present]
+    B --&gt; C[Rebase currentTick from wall clock]
+    C --&gt; D[Read timer_replay_checkpoint.json]
+    D --&gt; E{Checkpoint exists?}
+    E --&gt;|Yes| F[startOffset = lastScheduledOffset + 1]
+    E --&gt;|No| F2[startOffset = 0]
+    F --&gt; G[Scan WAL in batches of 10000]
+    F2 --&gt; G
+    G --&gt; H{event.schedule_ts &gt; now?}
+    H --&gt;|Yes| I[Re-schedule in timing wheel or cold store]
+    H --&gt;|No| J[Enqueue for immediate delivery]
+    I --&gt; K[Write new checkpoint]
+    J --&gt; K</code></pre>
+<hr />
+<h3 id="two-tier-coldhot-scheduler">Two-Tier Cold/Hot Scheduler<a class="headerlink" href="#two-tier-coldhot-scheduler" title="Permanent link">&para;</a></h3>
+<p>To keep memory bounded while supporting millions of scheduled events, the scheduler uses a <strong>two-tier architecture</strong>:</p>
+<ul>
+<li><strong>Hot Tier</strong>: Hierarchical timing wheel (in-memory) for events within the hot window (default 60 minutes).</li>
+<li><strong>Cold Tier</strong>: PebbleDB-backed <code>ColdStore</code> for far-future events (&gt; hot window). Stores <strong>only offsets</strong> (~16 bytes per event) — full event data remains in the WAL.</li>
+</ul>
+<pre class="mermaid"><code>flowchart TD
+    A[Publish event] --&gt; B{schedule_ts &lt;= now + hotWindow?}
+    B --&gt;|Yes| C[Add to Timing Wheel]
+    B --&gt;|No| D[Store offset in Cold Store]
+    D --&gt; E["PebbleDB key: [schedule_ts:be64][offset:be64]"]
+
+    F[Hydrator Loop adaptive interval] --&gt; G[Scan Cold Store range]
+    G --&gt; H[now+hotWindow to now+hotWindow+adaptiveLookahead]
+    H --&gt; I[Read full event from WAL via EventReader]
+    I --&gt; C</code></pre>
+<p><strong>Key Design Decisions:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Decision</th>
+<th>Rationale</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Offsets only in cold store</strong></td>
+<td>WAL is single source of truth; avoids double-writing event data</td>
+</tr>
+<tr>
+<td><strong>Big-endian composite key <code>[ts][offset]</code></strong></td>
+<td>Enables efficient range scans by timestamp</td>
+</tr>
+<tr>
+<td><strong>Adaptive hydrator interval (5s–5min)</strong></td>
+<td>Scans more frequently under load, backs off when idle; saves I/O</td>
+</tr>
+<tr>
+<td><strong>Adaptive lookahead window</strong></td>
+<td>Lookahead equals current hydrator interval; naturally scans further ahead when running less frequently</td>
+</tr>
+<tr>
+<td><strong>EventReader interface decouples scheduler from WAL</strong></td>
+<td>Clean dependency boundary; allows alternative storage backends</td>
+</tr>
+<tr>
+<td><strong>HotWindowMinutes = 0 disables cold store</strong></td>
+<td>Full backward compatibility with legacy behavior</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="deduplication-engine">Deduplication Engine<a class="headerlink" href="#deduplication-engine" title="Permanent link">&para;</a></h2>
+<p>A two-tier deduplication system ensures idempotent publishes with minimal latency.</p>
+<h3 id="two-tier-architecture">Two-Tier Architecture<a class="headerlink" href="#two-tier-architecture" title="Permanent link">&para;</a></h3>
+<pre class="mermaid"><code>graph TB
+    REQ[IsDuplicate - message_id] --&gt; BF[Tier 1: Rust Bloom Filter]
+
+    BF --&gt;|NO - definitely new 99 percent| FAST[Fast Path: Store in PebbleDB + Add to Bloom]
+    BF --&gt;|MAYBE - might exist 1 percent| PDB[Tier 2: PebbleDB Lookup]
+
+    PDB --&gt;|Found| DUP[Duplicate - return stored offset]
+    PDB --&gt;|Not found - false positive| NEW[New: Store in PebbleDB + Add to Bloom]</code></pre>
+<p><strong>Tier 1 - Rust Bloom Filter (In-Memory):</strong>
+- XxHash64 double hashing
+- AtomicU64 bit arrays (lock-free)
+- Rayon parallel batch check for 100+ keys
+- ~12MB per 100M items at 1% false positive rate</p>
+<p><strong>Tier 2 - PebbleDB (Persistent):</strong>
+- 64MB memtable (vs 4MB default)
+- Internal WAL disabled (our WAL provides durability)
+- NoSync writes for performance
+- 7-day TTL automatic expiration</p>
+<h3 id="bloom-filter-implementation-rust-ffi">Bloom Filter Implementation - Rust FFI<a class="headerlink" href="#bloom-filter-implementation-rust-ffi" title="Permanent link">&para;</a></h3>
+<pre class="mermaid"><code>graph LR
+    subgraph Go Layer
+        GO[rust_bloom.go - CGO bindings - unsafe.StringData zero-copy]
+    end
+
+    subgraph Rust Layer
+        RS[lib.rs - AtomicU64 bit array - XxHash64 two seeds - fetch_or lock-free - Rayon parallel batch]
+    end
+
+    GO --&gt;|FFI call| RS
+    RS --&gt; P1[Add: ~50ns]
+    RS --&gt; P2[Check: ~40ns]
+    RS --&gt; P3[Batch 1000: ~15us parallel]</code></pre>
+<h3 id="batch-dedup-flow">Batch Dedup Flow<a class="headerlink" href="#batch-dedup-flow" title="Permanent link">&para;</a></h3>
+<pre class="mermaid"><code>flowchart TD
+    A[PublishBatch: 1000 events] --&gt; B[Phase 1: Batch bloom check via MayContainBatch]
+    B --&gt; C[Split into buckets]
+    C --&gt; D[Definitely New - bloom NO - ~990 events]
+    C --&gt; E[Maybe Exists - bloom YES - ~10 events]
+
+    D --&gt; F[Phase 3: Batch PebbleDB write - single Commit]
+    D --&gt; G[Batch bloom.Add for all new keys]
+
+    E --&gt; H[Phase 2: Per-item PebbleDB check]
+    H --&gt; I[Actually duplicate: skip]
+    H --&gt; J[False positive: store + add to bloom]</code></pre>
+<h3 id="bloom-filter-health-and-reset">Bloom Filter Health and Reset<a class="headerlink" href="#bloom-filter-health-and-reset" title="Permanent link">&para;</a></h3>
+<pre class="mermaid"><code>flowchart LR
+    A[Hourly PruneExpired] --&gt; B[Delete expired PebbleDB entries]
+    B --&gt; C[Check FPR: falsePositives / totalLookups]
+    C --&gt; D{FPR &gt; 5 percent?}
+    D --&gt;|No| E[Healthy - no action]
+    D --&gt;|Yes| F[Set resetInProgress = true]
+    F --&gt; G[bloom.Reset]
+    G --&gt; H[Clear stats counters]
+    H --&gt; I[Set resetInProgress = false]</code></pre>
+<hr />
+<h2 id="delivery-pipeline">Delivery Pipeline<a class="headerlink" href="#delivery-pipeline" title="Permanent link">&para;</a></h2>
+<p>The delivery pipeline moves events from the scheduler to consumers with backpressure control.</p>
+<h3 id="pipeline-architecture">Pipeline Architecture<a class="headerlink" href="#pipeline-architecture" title="Permanent link">&para;</a></h3>
+<pre class="mermaid"><code>graph LR
+    TW[Timing Wheel] --&gt;|ReadySignal| RQ[Ready Queue]
+    RQ --&gt;|GetReadyEvents| W[Delivery Worker]
+    W --&gt;|DispatchBatch| DSP[Dispatcher]
+
+    DSP --&gt; SH0[Shard 0]
+    DSP --&gt; SH1[Shard 1]
+    DSP --&gt; SHN[Shard 31]
+
+    SH0 --&gt; SUB1[Consumer A]
+    SH1 --&gt; SUB2[Consumer B]
+
+    DSP --&gt;|Timeout or Nack| RH[Retry Heap]
+    RH --&gt;|Due| RT[Retry with Backoff]
+    RT --&gt;|Max retries| DLQ[Dead Letter Queue - Segments]</code></pre>
+<h3 id="credit-based-flow-control">Credit-Based Flow Control<a class="headerlink" href="#credit-based-flow-control" title="Permanent link">&para;</a></h3>
+<pre class="mermaid"><code>sequenceDiagram
+    participant S as Server Dispatcher
+    participant C as Consumer Client
+
+    Note over S,C: Initial Credits = MaxCredits 1000
+
+    S-&gt;&gt;C: Delivery event_1 - Credits now 999
+    S-&gt;&gt;C: Delivery event_2 - Credits now 998
+    S-&gt;&gt;C: Delivery event_3 - Credits now 997
+
+    C-&gt;&gt;S: Ack event_1 success - Credits now 998
+    C-&gt;&gt;S: Ack event_2 success - Credits now 999
+
+    Note over S: Credits &gt; 0 so continue sending
+    S-&gt;&gt;C: Delivery event_4 - Credits now 998
+
+    Note over S,C: If Credits = 0 then STOP sending and wait for Acks</code></pre>
+<h3 id="non-blocking-retry-heap">Non-Blocking Retry Heap<a class="headerlink" href="#non-blocking-retry-heap" title="Permanent link">&para;</a></h3>
+<p>The <code>timeoutLoop</code> no longer blocks on inline <code>time.Sleep</code> during retries. Instead, expired deliveries are pushed to a <strong>min-heap ordered by <code>retryAt</code></strong>:</p>
+<pre class="mermaid"><code>flowchart TD
+    A[scanExpiredDeliveries] --&gt; B{Delivery timed out?}
+    B --&gt;|Yes| C[Push to RetryHeap with retryAt = now + backoff]
+    B --&gt;|No| D[Continue]
+
+    E[processRetries on retry loop] --&gt; F{Peek retryAt &lt;= now?}
+    F --&gt;|Yes| G[Pop and redispatch]
+    F --&gt;|No| H[No-op]
+    G --&gt; E</code></pre>
+<p><strong>Benefits:</strong>
+- <code>timeoutLoop</code> stays responsive even under retry storms
+- No goroutine proliferation per retry
+- Backoff is deterministic and memory-efficient</p>
+<h3 id="circuit-breaker">Circuit Breaker<a class="headerlink" href="#circuit-breaker" title="Permanent link">&para;</a></h3>
+<p>Each subscription has an independent <strong>circuit breaker</strong> with atomic state machine:</p>
+<pre class="mermaid"><code>stateDiagram-v2
+    [*] --&gt; Closed
+    Closed --&gt; Open : FailureRate &gt; Threshold &amp;&amp; Attempts &gt;= MinAttempts
+    Open --&gt; HalfOpen : OpenDuration elapsed
+    HalfOpen --&gt; Closed : Trial success
+    HalfOpen --&gt; Open : Trial failure</code></pre>
+<ul>
+<li><strong>Closed</strong>: Normal operation; failures counted</li>
+<li><strong>Open</strong>: Skips dispatch to dead subscriber; fast-fail</li>
+<li><strong>HalfOpen</strong>: Allows one trial after cooldown; re-closes on success</li>
+</ul>
+<p><strong>Configuration:</strong>
+- <code>CircuitBreakerFailureThreshold</code> (default 0.5): failure rate to trip
+- <code>CircuitBreakerMinAttempts</code> (default 10): minimum attempts before evaluation
+- <code>CircuitBreakerOpenDurationMs</code> (default 30000): cooldown before half-open</p>
+<h3 id="delivery-retry-and-dlq-flow">Delivery Retry and DLQ Flow<a class="headerlink" href="#delivery-retry-and-dlq-flow" title="Permanent link">&para;</a></h3>
+<pre class="mermaid"><code>flowchart TD
+    A[Event dispatched to consumer] --&gt; CB{Circuit Breaker Open?}
+    CB --&gt;|Yes| Z[Skip dispatch]
+    CB --&gt;|No| B{Ack received within 30s?}
+    B --&gt;|Yes success| C[Commit offset, release credits, CB.RecordSuccess]
+    B --&gt;|Yes failure| D{Attempt &lt; MaxRetries?}
+    B --&gt;|Timeout| D
+
+    D --&gt;|Yes| E[Push to RetryHeap: retryAt = now + backoff]
+    E --&gt; F[processRetries pops due entry and redispatches]
+    F --&gt; B
+
+    D --&gt;|No| G[Send to Dead Letter Queue]
+    G --&gt; H[DLQ Segment: binary record + CRC32]
+    H --&gt; I[Available for manual replay or inspection]</code></pre>
+<h3 id="dispatcher-sharding">Dispatcher Sharding<a class="headerlink" href="#dispatcher-sharding" title="Permanent link">&para;</a></h3>
+<p>The dispatcher uses <strong>32 shards</strong> to reduce lock contention under high concurrency:</p>
+<pre class="mermaid"><code>graph TB
+    subgraph Dispatcher
+        HASH[hash of subscription_id mod 32]
+        subgraph Shard 0
+            S0S[Subscriptions map]
+            S0D[Active Deliveries map]
+        end
+        subgraph Shard 1
+            S1S[Subscriptions map]
+            S1D[Active Deliveries map]
+        end
+        subgraph Shard 31
+            SNS[Subscriptions map]
+            SND[Active Deliveries map]
+        end
+    end
+
+    subgraph Global Lock-Free
+        PI[partitionSubs map - partition to subscribers]
+        IFC[inFlightCount - atomic Int64 cap 100K]
+    end
+
+    HASH --&gt; S0S
+    HASH --&gt; S1S
+    HASH --&gt; SNS</code></pre>
+<hr />
+<h3 id="dlq-segment-storage">DLQ Segment Storage<a class="headerlink" href="#dlq-segment-storage" title="Permanent link">&para;</a></h3>
+<p>The Dead Letter Queue uses <strong>append-only binary segments</strong> instead of JSON files:</p>
+<table>
+<thead>
+<tr>
+<th>Feature</th>
+<th>Implementation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Header</strong></td>
+<td>64-byte header with <code>"CRNDLQ1"</code> magic</td>
+</tr>
+<tr>
+<td><strong>Records</strong></td>
+<td>Binary format identical to WAL (length + CRC32 + payload)</td>
+</tr>
+<tr>
+<td><strong>Buffering</strong></td>
+<td>4MB <code>bufio.Writer</code> for amortized I/O</td>
+</tr>
+<tr>
+<td><strong>Rotation</strong></td>
+<td>64MB per segment file</td>
+</tr>
+<tr>
+<td><strong>Recovery</strong></td>
+<td>On startup, scan <code>dlq/</code> directory and replay all <code>.dlq</code> segments</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Benefits over JSON:</strong>
+- ~10x smaller on disk (binary vs base64 + JSON overhead)
+- Faster append (no marshal/unmarshal)
+- CRC32 integrity per record
+- Easy to segment and archive</p>
+<hr />
+<h2 id="consumer-groups">Consumer Groups<a class="headerlink" href="#consumer-groups" title="Permanent link">&para;</a></h2>
+<p>Kafka-style consumer groups with persistent offset tracking, group metadata, and exactly-once commit IDs.</p>
+<h3 id="consumer-group-model">Consumer Group Model<a class="headerlink" href="#consumer-group-model" title="Permanent link">&para;</a></h3>
+<pre class="mermaid"><code>graph TB
+    subgraph Consumer Group: order-processors
+        M1[Member A - Partition 0 and 1]
+        M2[Member B - Partition 2 and 3]
+        M3[Member C - Partition 4 and 5]
+    end
+
+    subgraph Offset Store via PebbleDB
+        O1[order-processors:P0 = offset 45230]
+        O2[order-processors:P1 = offset 12891]
+        O3[order-processors:P2 = offset 78432]
+        O4[order-processors:meta = group metadata + assignments]
+        O5[order-processors:txn:ID = exactly-once commit ID]
+    end
+
+    subgraph Offset Commit Pipeline
+        PEN[Pending Map - in-memory buffer]
+        FL[Flush Loop - every 200ms]
+        DB[PebbleDB Batch Write]
+    end
+
+    M1 --&gt;|CommitOffset| PEN
+    M2 --&gt;|CommitOffset| PEN
+    M3 --&gt;|CommitOffset| PEN
+    PEN --&gt;|dirty flag| FL
+    FL --&gt;|batch.Commit NoSync| DB</code></pre>
+<p><strong>Persisted state in <code>OffsetStore</code>:</strong>
+- <strong>Offsets:</strong> per-group, per-partition committed offsets.
+- <strong>Group metadata and assignments:</strong> rebalanced partition assignments and member metadata survive restarts.
+- <strong>Exactly-once commit IDs:</strong> transaction-scoped commit IDs for idempotent consumer commits.</p>
+<h3 id="rebalancing">Rebalancing<a class="headerlink" href="#rebalancing" title="Permanent link">&para;</a></h3>
+<pre class="mermaid"><code>sequenceDiagram
+    participant M1 as Member A
+    participant M2 as Member B - new
+    participant GM as Group Manager
+
+    M2-&gt;&gt;GM: JoinGroup processors member-B
+    GM-&gt;&gt;GM: Add member to group
+    GM-&gt;&gt;GM: rebalanceGroup
+    Note over GM: Round-robin partitions across active members
+    GM--&gt;&gt;M1: Assigned Partition 0, 2, 4
+    GM--&gt;&gt;M2: Assigned Partition 1, 3, 5
+    Note over M1,M2: Each member subscribes to assigned partitions</code></pre>
+<hr />
+<h2 id="change-data-capture">Change Data Capture<a class="headerlink" href="#change-data-capture" title="Permanent link">&para;</a></h2>
+<p>CDC forwards committed WAL events to external sinks using a bounded worker pool for predictable resource usage.</p>
+<pre class="mermaid"><code>graph LR
+    WAL[WAL Commit] --&gt;|New event| CDC[CDC Dispatcher]
+    CDC --&gt; Q[Bounded Queue - size 10000]
+    Q --&gt; W[Worker Pool - DefaultCDCWorkers=4]
+    W --&gt; S1[Sink A]
+    W --&gt; S2[Sink B]</code></pre>
+<p><strong>Behavior:</strong>
+- <code>Emit</code> blocks for up to <code>DefaultCDCWriteTimeout</code> (5s) waiting for queue capacity.
+- Events are dropped with a warning if the queue is still full after that timeout.
+- <code>Close</code> drains workers and sinks gracefully.</p>
+<hr />
+<h2 id="cluster-architecture">Cluster Architecture<a class="headerlink" href="#cluster-architecture" title="Permanent link">&para;</a></h2>
+<h3 id="multi-node-topology">Multi-Node Topology<a class="headerlink" href="#multi-node-topology" title="Permanent link">&para;</a></h3>
+<pre class="mermaid"><code>graph TB
+    subgraph Node 1 - Leader
+        N1G[gRPC :9000]
+        N1H[HTTP :8080]
+        N1S[Gossip :7946]
+        N1R[Raft :7948]
+        N1P[Partitions: 0 3 6 9 12 15]
+    end
+
+    subgraph Node 2 - Follower
+        N2G[gRPC :9001]
+        N2H[HTTP :8081]
+        N2S[Gossip :7956]
+        N2R[Raft :7958]
+        N2P[Partitions: 1 4 7 10 13]
+    end
+
+    subgraph Node 3 - Follower
+        N3G[gRPC :9002]
+        N3H[HTTP :8082]
+        N3S[Gossip :7966]
+        N3R[Raft :7968]
+        N3P[Partitions: 2 5 8 11 14]
+    end
+
+    N1S &lt;--&gt;|Heartbeats 1s| N2S
+    N1S &lt;--&gt;|Heartbeats 1s| N3S
+    N2S &lt;--&gt;|Heartbeats 1s| N3S
+
+    N1R &lt;--&gt;|Raft consensus| N2R
+    N1R &lt;--&gt;|Raft consensus| N3R</code></pre>
+<h3 id="pluggable-gossip-layer">Pluggable Gossip Layer<a class="headerlink" href="#pluggable-gossip-layer" title="Permanent link">&para;</a></h3>
+<p>CronosDB supports two gossip implementations behind a common <code>MembershipService</code> interface:</p>
+<table>
+<thead>
+<tr>
+<th>Implementation</th>
+<th>Protocol</th>
+<th>Best For</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Custom TCP Gossip</strong></td>
+<td>TCP heartbeats, custom wire format</td>
+<td>Simple deployments, minimal dependencies</td>
+</tr>
+<tr>
+<td><strong>HashiCorp Memberlist</strong></td>
+<td>SWIM protocol over UDP</td>
+<td>Production clusters, faster failure detection, encryption support</td>
+</tr>
+</tbody>
+</table>
+<p>Toggle via config: <code>UseMemberlist: true</code>.</p>
+<p><strong>Memberlist features:</strong>
+- UDP-based SWIM gossip with indirect pings
+- Configurable gossip interval, suspicion multiplier, probe timeout
+- Metadata delegates carry gRPC/HTTP/Raft addresses
+- Event delegates for join/leave/update callbacks
+- Merge delegates for cluster merge conflict resolution</p>
+<h3 id="consistent-hashing-ring">Consistent Hashing Ring<a class="headerlink" href="#consistent-hashing-ring" title="Permanent link">&para;</a></h3>
+<pre class="mermaid"><code>graph TB
+    subgraph Hash Ring - SHA-256 with 2048 vnodes per node
+        RING[Ring space: 0 to 2 pow 64]
+        VN1[Node1 - 2048 virtual positions]
+        VN2[Node2 - 2048 virtual positions]
+        VN3[Node3 - 2048 virtual positions]
+    end
+
+    subgraph Partition Assignment
+        PA[partition-0 maps to Node1]
+        PB[partition-1 maps to Node3]
+        PC[partition-2 maps to Node2]
+        PD[partition-7 maps to Node1]
+    end
+
+    subgraph Topic Routing
+        TR[topic orders via FNV-1a maps to partition 5]
+        TR2[topic payments via FNV-1a maps to partition 11]
+    end
+
+    RING --&gt; PA
+    RING --&gt; PB
+    RING --&gt; PC</code></pre>
+<h3 id="node-join-flow">Node Join Flow<a class="headerlink" href="#node-join-flow" title="Permanent link">&para;</a></h3>
+<pre class="mermaid"><code>sequenceDiagram
+    participant N4 as New Node node4
+    participant N1 as Leader node1
+    participant GOSSIP as Gossip Layer
+    participant RAFT as Raft Cluster
+    participant ROUTER as Router
+
+    N4-&gt;&gt;GOSSIP: TCP connect to seed node1:7946
+    N4-&gt;&gt;GOSSIP: Send JoinRequest with node_id and addresses
+    GOSSIP-&gt;&gt;N1: handleJoinRequest
+    N1-&gt;&gt;RAFT: AddVoter node4 at raft_addr
+    RAFT--&gt;&gt;N1: Committed
+    N1-&gt;&gt;GOSSIP: broadcastNodeJoined node4
+    GOSSIP--&gt;&gt;N4: Response with success and existing_nodes
+
+    Note over ROUTER: Hash ring updated
+    ROUTER-&gt;&gt;ROUTER: AddNode node4 then Rebalance
+    ROUTER-&gt;&gt;ROUTER: Compute partition moves
+
+    par State Transfer
+        ROUTER-&gt;&gt;N4: You own partitions 3 7 11
+        N4-&gt;&gt;N1: SyncPartitionFromLeader partition=3
+        Note over N4,N1: ReplicationService.Snapshot over internal gRPC&lt;br/&gt;per-file IEEE CRC32 + atomic dir swap
+        N4-&gt;&gt;N4: WAL.ReloadSegments
+        N4-&gt;&gt;N4: replayWALTimers
+    end</code></pre>
+<h3 id="failure-detection-and-recovery">Failure Detection and Recovery<a class="headerlink" href="#failure-detection-and-recovery" title="Permanent link">&para;</a></h3>
+<pre class="mermaid"><code>stateDiagram-v2
+    [*] --&gt; Alive : Node joins
+    Alive --&gt; Alive : Heartbeat received
+    Alive --&gt; Suspect : No heartbeat for 5s
+    Suspect --&gt; Alive : Heartbeat received
+    Suspect --&gt; Dead : No heartbeat for 10s
+    Dead --&gt; [*] : Removed from cluster</code></pre>
+<p><strong>Leader Actions on Dead Node:</strong></p>
+<pre class="mermaid"><code>flowchart LR
+    A[Node marked Dead] --&gt; B[Elect new partition leader]
+    B --&gt; C[Update Raft FSM]
+    C --&gt; D[Reassign partitions via hash ring]
+    D --&gt; E[Trigger state sync to new owners]</code></pre>
+<h3 id="clock-skew-detection">Clock Skew Detection<a class="headerlink" href="#clock-skew-detection" title="Permanent link">&para;</a></h3>
+<p>Cross-node heartbeats include timestamps for clock skew monitoring:</p>
+<pre class="mermaid"><code>flowchart TD
+    A[Local heartbeat tick] --&gt; B[Send heartbeat with local timestamp]
+    B --&gt; C[Remote node receives]
+    C --&gt; D[Compute skew as remote_ts minus local_ts]
+    D --&gt; E{Absolute skew over 5 seconds}
+    E --&gt;|Yes| F[Log warning and emit cronos_clock_skew_ms metric]
+    E --&gt;|No| G[Silent metric only]</code></pre>
+<ul>
+<li>Compares remote node timestamp against local time on every heartbeat</li>
+<li>Warns if absolute skew exceeds 5 seconds</li>
+<li>Metric <code>cronos_clock_skew_ms{source_node, target_node}</code> exposed for alerting</li>
+<li>Helps detect NTP misconfiguration before it causes scheduling anomalies</li>
+</ul>
+<hr />
+<h2 id="replication-protocol">Replication Protocol<a class="headerlink" href="#replication-protocol" title="Permanent link">&para;</a></h2>
+<p>CronosDB uses a <strong>hybrid replication model</strong>: HashiCorp Raft for cluster
+metadata (partition ownership, leader election, peer set), and a
+dedicated internal gRPC channel for partition data. Public client
+traffic never reaches the replication listener.</p>
+<h3 id="replication-channel-layout">Replication channel layout<a class="headerlink" href="#replication-channel-layout" title="Permanent link">&para;</a></h3>
+<pre class="mermaid"><code>graph LR
+    subgraph "Public API listener"
+      PUB[gRPC :9000&lt;br/&gt;EventService, PartitionService,&lt;br/&gt;ConsumerGroupService, TransactionService,&lt;br/&gt;AdminService]
+    end
+    subgraph "Internal cluster listener"
+      INT[InternalGRPCServer :7947&lt;br/&gt;ReplicationService, RaftService,&lt;br/&gt;CrossRegionService]
+    end
+    subgraph "HTTP operator plane"
+      HTTP[HTTP :8080&lt;br/&gt;health metrics /ui /api/admin]
+    end
+    subgraph "Public client traffic"
+      C[Client SDK] --&gt; PUB
+      O[Ops UI / CLI] --&gt; HTTP
+      O --&gt; PUB
+    end
+    subgraph "Intra-cluster traffic"
+      L[Leader partition] --&gt;|Append / Sync / Snapshot gRPC| INT
+      F[Follower partition] --&gt;|mTLS optional| INT
+      R[Remote region] --&gt;|CrossRegionService| INT
+    end</code></pre>
+<p>The internal listener is <code>InternalGRPCServer</code>
+(<code>internal/api/internal_grpc_server.go</code>, default <code>:7947</code>, configurable
+via <code>--cluster-grpc-addr</code>). It registers <strong>ReplicationService</strong>, <strong>RaftService</strong>,
+and <strong>CrossRegionService</strong> — no public client EventService surface is exposed
+on this socket. Cross-region traffic is intentionally peer-plane only so
+arbitrary event inject/fetch stays off <code>:9000</code>. See
+<a href="#replication-protocol">Replication Protocol</a>.</p>
+<h3 id="replicationservice-rpcs"><code>ReplicationService</code> RPCs<a class="headerlink" href="#replicationservice-rpcs" title="Permanent link">&para;</a></h3>
+<pre class="mermaid"><code>graph TB
+    subgraph ReplicationService
+      A[Append - unary]
+      S[Sync - server streaming]
+      SN[Snapshot - server streaming]
+    end
+    subgraph Use
+      A --&gt;|happy path| U1[per-batch CRC32, term-fenced]
+      S --&gt;|incremental catch-up| U2[event batches via Leader.catchUpFollower]
+      SN --&gt;|bulk install| U3[per-file CRC32, atomic dir swap]
+    end</code></pre>
+<table>
+<thead>
+<tr>
+<th>RPC</th>
+<th>Direction</th>
+<th>Body</th>
+<th>Used by</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Append</code></td>
+<td>client → server (unary)</td>
+<td><code>ReplicationAppendRequest{PartitionId, Events, ExpectedNextOffset, Term, PrevLogTerm, Checksum}</code> → <code>ReplicationAppendResponse{Success, LastOffset, NextOffset, Term}</code></td>
+<td><code>Leader.sendToFollower</code> on every replicated batch</td>
+</tr>
+<tr>
+<td><code>Sync</code></td>
+<td>client → server (server streaming)</td>
+<td><code>ReplicationSyncRequest{PartitionId, StartOffset, MaxBytes}</code> → stream of <code>ReplicationSyncResponse{Events, HasMore}</code></td>
+<td><code>Leader.catchUpFollower</code> for incremental catch-up of lagging followers</td>
+</tr>
+<tr>
+<td><code>Snapshot</code></td>
+<td>client → server (server streaming)</td>
+<td><code>ReplicationSnapshotRequest{PartitionId, StartOffset, MaxBytes}</code> → stream of <code>ReplicationSnapshotChunk{Header, Data, Trailer}</code> with per-file IEEE CRC32</td>
+<td><code>Follower.InstallSnapshot</code> on node join / wipe</td>
+</tr>
+</tbody>
+</table>
+<h3 id="leader-follower-replication">Leader → Follower Replication<a class="headerlink" href="#leader-follower-replication" title="Permanent link">&para;</a></h3>
+<pre class="mermaid"><code>sequenceDiagram
+    participant L as Leader (partition)
+    participant F as Follower
+    participant INT as InternalGRPCServer :7947
+
+    L-&gt;&gt;L: Buffer events up to batch_size 100
+    L-&gt;&gt;L: Compute batch CRC32 checksum
+    L-&gt;&gt;INT: gRPC Append(ReplicationAppendRequest)
+    INT-&gt;&gt;F: ReplicationServiceHandler.Append
+    F-&gt;&gt;F: Verify batch CRC32 + term fencing
+    F-&gt;&gt;F: WAL.AppendReplicatedBatch events
+    F--&gt;&gt;INT: ReplicationAppendResponse{Success, LastOffset, Term}
+    INT--&gt;&gt;L: response
+    L-&gt;&gt;L: Advance follower NextOffset only on success
+    L-&gt;&gt;L: Update follower HighWatermark and ISR state</code></pre>
+<h3 id="incremental-catch-up-sync">Incremental Catch-Up (<code>Sync</code>)<a class="headerlink" href="#incremental-catch-up-sync" title="Permanent link">&para;</a></h3>
+<p>When a follower is connected but reports <code>NextOffset &lt; events[0].Offset</code>,
+<code>Leader.catchUpFollower(f, from, to)</code> slices <code>[from, to)</code> from the
+leader's WAL into <code>batchSize</code>-sized chunks and replays them through
+<code>Append</code>. For very long ranges the leader can also serve the
+<code>ReplicationService.Sync</code> streaming RPC directly, which emits
+<code>ReplicationSyncResponse{Events, HasMore}</code> chunks until the follower's
+watermark is reached or <code>MaxBytes</code> is hit.</p>
+<h3 id="bulk-snapshot-install-snapshot">Bulk Snapshot Install (<code>Snapshot</code>)<a class="headerlink" href="#bulk-snapshot-install-snapshot" title="Permanent link">&para;</a></h3>
+<pre class="mermaid"><code>sequenceDiagram
+    participant F as New Follower
+    participant L as Leader
+    participant INT as InternalGRPCServer :7947
+
+    F-&gt;&gt;L: gRPC Snapshot(ReplicationSnapshotRequest)
+    L-&gt;&gt;L: Flush active segment
+    loop For each segment + .index file
+        L--&gt;&gt;F: ReplicationSnapshotChunk{Header filename, first/last_offset, file_size, crc32, is_index}
+        loop 1 MB chunks
+            L--&gt;&gt;F: ReplicationSnapshotChunk{Data}
+        end
+    end
+    L--&gt;&gt;F: ReplicationSnapshotChunk{Trailer success=true, last_offset, epoch}
+    F-&gt;&gt;F: Verify last-file CRC32 against header
+    F-&gt;&gt;F: WAL.Close (release Windows handles)
+    F-&gt;&gt;F: rename segments → segments.old, index → index.old
+    F-&gt;&gt;F: rename snapshot-staging/segments → segments, snapshot-staging/index → index
+    F-&gt;&gt;F: rm *.old
+    F-&gt;&gt;F: WAL.ReloadSegments(), update nextOffset + epoch from trailer</code></pre>
+<p>Trigger policy:</p>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Trigger</th>
+<th>Code</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>InstallSnapshot</code></td>
+<td>New node joins and owns partitions it does not yet have data for</td>
+<td><code>Manager.JoinCluster</code> → <code>PartitionManager.SyncPartitionFromLeader</code> (10-minute context)</td>
+</tr>
+<tr>
+<td><code>catchUpFollower</code> / <code>Sync</code></td>
+<td>Connected follower reports lag during normal <code>Replicate</code></td>
+<td><code>Leader.catchUpFollower</code></td>
+</tr>
+<tr>
+<td>Automatic lag-driven <code>InstallSnapshot</code></td>
+<td><strong>Not implemented.</strong> Flag is used on join/<code>SyncPartitionFromLeader</code>; no mid-flight lag monitor calls InstallSnapshot.</td>
+<td>See <a href="#known-limitations">Known Limitations</a></td>
+</tr>
+</tbody>
+</table>
+<h3 id="replication-mtls">Replication mTLS<a class="headerlink" href="#replication-mtls" title="Permanent link">&para;</a></h3>
+<p>Replication traffic can run over a CA-pinned mTLS channel independent of
+public-API TLS. The mTLS configuration is read into
+<code>replication.MTLSConfig{Enabled, CAFile, CertFile, KeyFile, ServerName}</code>
+(<code>internal/replication/mtls.go</code>) and consumed by
+<code>replication.BuildClientTLSConfig</code> (follower side) and
+<code>replication.BuildServerTLSConfig</code> (leader side, <code>tls.RequireAndVerifyClientCert</code>).
+The follower falls back to insecure credentials when the flag is off —
+intentional for <code>--dev</code>, refused in production by the validation in
+<code>config.ValidateConfig</code>.</p>
+<h3 id="reliability-notes">Reliability notes<a class="headerlink" href="#reliability-notes" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>Append path</strong>: per-batch CRC32 verified before <code>WAL.AppendReplicatedBatch</code>;
+  term fencing rejects stale-leader replays; leader advances <code>NextOffset</code>
+  only on success.</li>
+<li><strong>Snapshot path</strong>: per-file CRC32 verified; atomic directory swap with
+  WAL closed first; WAL <code>ReloadSegments</code> rebuilds the in-memory segment
+  list and sparse index from the newly-staged files.</li>
+<li><strong>Quorum</strong>: <code>Leader.Replicate</code> returns success only after
+  <code>min-insync-replicas</code> replicas <strong>including the leader</strong> have appended. Default
+  is 1 (leader-only); production target is RF=3 / minISR=2 (see
+  <a href="#consistency-and-guarantees">Consistency and Guarantees</a>).</li>
+<li><strong>Trigger gap</strong>: <code>--snapshot-catchup-threshold</code> is a <strong>dead config key</strong> —
+  parsed but never read; <code>SyncPartitionFromLeader</code> installs a snapshot
+  unconditionally on join. There is still <strong>no mid-flight</strong> lag watcher that
+  automatically switches a connected follower from incremental catch-up to
+  <code>InstallSnapshot</code>. See <a href="#known-limitations">Known Limitations</a>.</li>
+</ul>
+<h3 id="raft-fsm-metadata-state-machine">Raft FSM - Metadata State Machine<a class="headerlink" href="#raft-fsm-metadata-state-machine" title="Permanent link">&para;</a></h3>
+<pre class="mermaid"><code>graph TB
+    subgraph Raft Commands
+        C1[AddNode]
+        C2[RemoveNode]
+        C3[UpdateNode]
+        C4[AssignPartition]
+        C5[UpdatePartition]
+    end
+
+    subgraph FSM State
+        S[ClusterState: Nodes map + Partitions map + LeaderID + Term]
+    end
+
+    subgraph Persistence
+        BDB[BoltDB - Raft log + stable store]
+        SNAP[File Snapshots - every 8192 entries]
+    end
+
+    C1 --&gt; S
+    C2 --&gt; S
+    C3 --&gt; S
+    C4 --&gt; S
+    C5 --&gt; S
+    S --&gt; BDB
+    S --&gt; SNAP</code></pre>
+<hr />
+<h2 id="replay-engine">Replay Engine<a class="headerlink" href="#replay-engine" title="Permanent link">&para;</a></h2>
+<p>The replay engine allows consumers to re-read historical events by time range or offset.</p>
+<h3 id="replay-modes">Replay Modes<a class="headerlink" href="#replay-modes" title="Permanent link">&para;</a></h3>
+<pre class="mermaid"><code>flowchart TD
+    A[Replay Request] --&gt; B{Mode?}
+
+    B --&gt;|start_ts + end_ts| C[Time-Range Replay]
+    C --&gt; C1[Use sparse index FindByTimestamp]
+    C1 --&gt; C2[Scan segments filter by TS range]
+    C2 --&gt; C3[Stream to client via gRPC]
+
+    B --&gt;|start_offset + count| D[Offset-Based Replay]
+    D --&gt; D1[Use sparse index FindByOffset]
+    D1 --&gt; D2[Sequential read from offset]
+    D2 --&gt; D3[Stream to client via gRPC]
+
+    B --&gt;|speed &gt; 0| E[Rate-Limited Replay]
+    E --&gt; E1[Insert delay between events]</code></pre>
+<hr />
+<h2 id="observability">Observability<a class="headerlink" href="#observability" title="Permanent link">&para;</a></h2>
+<h3 id="prometheus-metrics">Prometheus Metrics<a class="headerlink" href="#prometheus-metrics" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>Category</th>
+<th>Key Metrics</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>API</strong></td>
+<td><code>cronos_api_grpc_requests_total{method, status}</code>, <code>cronos_api_grpc_request_duration_seconds{method}</code></td>
+</tr>
+<tr>
+<td><strong>WAL</strong></td>
+<td><code>cronos_wal_append_latency_seconds{partition}</code>, <code>cronos_wal_segment_count{partition}</code>, <code>cronos_wal_high_watermark{partition}</code></td>
+</tr>
+<tr>
+<td><strong>Scheduler</strong></td>
+<td><code>cronos_scheduler_ready_events{partition}</code>, <code>cronos_scheduler_active_timers{partition}</code>, <code>cronos_timing_wheel_overflow_level{partition}</code>, <code>cronos_scheduler_cold_store_entries{partition}</code>, <code>cronos_scheduler_hydrated_events_total{partition}</code>, <code>cronos_scheduler_hydrator_interval_ms{partition}</code>, <code>cronos_scheduler_hydrator_scan_duration_seconds{partition}</code></td>
+</tr>
+<tr>
+<td><strong>Dedup</strong></td>
+<td><code>cronos_dedup_check_latency_seconds{partition, path}</code>, <code>cronos_dedup_bloom_memory_bytes{partition}</code>, <code>cronos_dedup_bloom_false_positive_rate{partition}</code></td>
+</tr>
+<tr>
+<td><strong>Delivery</strong></td>
+<td><code>cronos_dispatch_latency_seconds{partition}</code>, <code>cronos_consumer_group_lag{group, partition}</code></td>
+</tr>
+<tr>
+<td><strong>Admission</strong></td>
+<td><code>cronos_admission_rejected_total{partition}</code></td>
+</tr>
+<tr>
+<td><strong>Cluster</strong></td>
+<td><code>cronos_cluster_nodes_alive</code>, <code>cronos_cluster_partitions_leader</code>, <code>cronos_replication_lag{partition, follower}</code> (in events), <code>cronos_clock_skew_ms{source_node, target_node}</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="metrics-architecture">Metrics Architecture<a class="headerlink" href="#metrics-architecture" title="Permanent link">&para;</a></h3>
+<pre class="mermaid"><code>graph LR
+    APP[CronosDB Node] --&gt;|:8080/metrics| PROM[Prometheus Scraper]
+    APP --&gt; HEALTH[:8080/health]
+
+    subgraph IC["Interceptor Chain - unary, in order"]
+        I1[Tracing]
+        I2[SLO]
+        I3[Version Gate]
+        I4[JWT Auth]
+        I5[Topic Rate Limit]
+        I6[Audit]
+        I7[Metrics]
+        I8[Per-IP Rate Limit]
+    end
+
+    I1 --&gt; I2 --&gt; I3 --&gt; I4 --&gt; I5 --&gt; I6 --&gt; I7 --&gt; I8</code></pre>
+<p>In <code>--dev</code> mode (auth disabled) the SLO, Metrics, and Per-IP Rate Limit interceptors are
+skipped, so <code>cronos_api_grpc_*</code> and <code>cronos_slo_*</code> series stay empty in dev installs.</p>
+<h3 id="tracing-opentelemetry">Tracing - OpenTelemetry<a class="headerlink" href="#tracing-opentelemetry" title="Permanent link">&para;</a></h3>
+<ul>
+<li>W3C TraceContext propagation</li>
+<li>gRPC unary interceptor for automatic span creation</li>
+<li>Configurable exporters: stdout, OTLP, none</li>
+<li>Span attributes: method, partition, offset</li>
+</ul>
+<hr />
+<h2 id="data-flow-diagrams">Data Flow Diagrams<a class="headerlink" href="#data-flow-diagrams" title="Permanent link">&para;</a></h2>
+<h3 id="end-to-end-event-lifecycle">End-to-End Event Lifecycle<a class="headerlink" href="#end-to-end-event-lifecycle" title="Permanent link">&para;</a></h3>
+<pre class="mermaid"><code>flowchart TD
+    subgraph 1 PUBLISH
+        P1[Client sends event]
+        P2[Rate limit check]
+        P3[Partition routing via FNV-1a]
+        P3a[Admission control: readyQueue / timingWheel / in-flight]
+        P4[Dedup: Bloom then PebbleDB]
+        P5[WAL append buffered]
+        P6[Scheduler: add to timing wheel or cold store]
+        P7[Return offset to client]
+    end
+
+    subgraph 2 SCHEDULE
+        S1[Timing wheel ticks every tick-ms default 10ms]
+        S2[Event expires from slot]
+        S3[Push to ready queue]
+        S4[Signal ReadySignal channel]
+    end
+
+    subgraph 3 DELIVER
+        D1[Worker drains ready queue]
+        D2[Dispatcher finds subscribers]
+        D3[Check credits via atomic CAS]
+        D4[gRPC stream.Send Delivery]
+        D5[Track in activeDeliveries]
+    end
+
+    subgraph 4 ACK
+        A1[Consumer processes event]
+        A2[Send Ack with delivery_id]
+        A3[Release credits]
+        A4[Commit offset to PebbleDB]
+    end
+
+    P1 --&gt; P2 --&gt; P3 --&gt; P3a --&gt; P4 --&gt; P5 --&gt; P6 --&gt; P7
+    P6 -.-&gt;|After schedule_ts| S1
+    S1 --&gt; S2 --&gt; S3 --&gt; S4
+    S4 --&gt; D1 --&gt; D2 --&gt; D3 --&gt; D4 --&gt; D5
+    D4 -.-&gt;|Consumer receives| A1
+    A1 --&gt; A2 --&gt; A3 --&gt; A4</code></pre>
+<h3 id="startup-and-bootstrap-sequence">Startup and Bootstrap Sequence<a class="headerlink" href="#startup-and-bootstrap-sequence" title="Permanent link">&para;</a></h3>
+<pre class="mermaid"><code>flowchart TD
+    A[main.go starts] --&gt; B[Load config from flags + env]
+    B --&gt; C[Create shared PebbleDB cache 256MB]
+    C --&gt; D{Cluster enabled?}
+
+    D --&gt;|Yes| E[Create Raft node]
+    E --&gt; F{Seed nodes provided?}
+    F --&gt;|No| G[Bootstrap Raft as single leader]
+    F --&gt;|Yes| H[Join existing cluster]
+    G --&gt; I[Start Gossip membership]
+    H --&gt; I
+    I --&gt; J[Create Router with hash ring]
+    J --&gt; K[Create partition 0 only - others lazy-created]
+
+    D --&gt;|No| L[Create all partitions locally]
+
+    K --&gt; M[Start partitions]
+    L --&gt; M
+    M --&gt; N[Per partition: replay WAL + init cold store + start scheduler + start hydrator + start worker + start delivery + start compaction]
+    N --&gt; O[Create gRPC server with interceptors]
+    O --&gt; P[Register EventService + ConsumerGroupService]
+    P --&gt; Q[Start gRPC on :9000]
+    Q --&gt; R[Start HTTP health on :8080]
+    R --&gt; S[Wait for SIGINT or SIGTERM]</code></pre>
+<h3 id="graceful-shutdown-sequence">Graceful Shutdown Sequence<a class="headerlink" href="#graceful-shutdown-sequence" title="Permanent link">&para;</a></h3>
+<pre class="mermaid"><code>flowchart TD
+    A[SIGINT or SIGTERM received] --&gt; B[Cancel context]
+    B --&gt; C[gRPC GracefulStopWithTimeout]
+    C --&gt; D{Graceful drain within timeout?}
+    D --&gt;|Yes| E[HTTP server Shutdown]
+    D --&gt;|No| F[Forced gRPC Stop]
+    F --&gt; E
+    E --&gt; G[HTTP health server Shutdown]
+    G --&gt; H[StopAllPartitions in parallel]
+    H --&gt; I[Per partition: close delivery + stop scheduler + drain dispatcher + flush WAL]
+    I --&gt; J[Stop cluster manager]
+    J --&gt; K[Raft shutdown + Gossip stop]
+    K --&gt; L[Exit]</code></pre>
+<p><code>Start()</code> exposes <code>ServeError()</code> so callers can observe unexpected gRPC server exits, and health-server startup errors are propagated.</p>
+<hr />
+<h2 id="performance-characteristics">Performance Characteristics<a class="headerlink" href="#performance-characteristics" title="Permanent link">&para;</a></h2>
+<h3 id="benchmarks">Benchmarks<a class="headerlink" href="#benchmarks" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>Metric</th>
+<th>Single Node</th>
+<th>3-Node Cluster</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Throughput (batch)</strong></td>
+<td>~180K ev/sec</td>
+<td><strong>1,010,933 ev/sec</strong></td>
+<td>Batch 4000, 32 pub/node, single machine</td>
+</tr>
+<tr>
+<td><strong>Throughput (single)</strong></td>
+<td>~10K ev/sec</td>
+<td>~30K ev/sec</td>
+<td>One event per RPC</td>
+</tr>
+<tr>
+<td><strong>Latency P50</strong></td>
+<td>~60us</td>
+<td><strong>105us</strong></td>
+<td>Batch publish</td>
+</tr>
+<tr>
+<td><strong>Latency P95</strong></td>
+<td>~180us</td>
+<td><strong>337us</strong></td>
+<td>Batch publish</td>
+</tr>
+<tr>
+<td><strong>Latency P99</strong></td>
+<td>~250us</td>
+<td><strong>468us</strong></td>
+<td>Batch publish</td>
+</tr>
+<tr>
+<td><strong>Latency Min</strong></td>
+<td>-</td>
+<td><strong>5us</strong></td>
+<td>Best case</td>
+</tr>
+<tr>
+<td><strong>Latency Max</strong></td>
+<td>-</td>
+<td><strong>900us</strong></td>
+<td>Worst case under sustained load</td>
+</tr>
+<tr>
+<td><strong>Success Rate</strong></td>
+<td>100%</td>
+<td><strong>100%</strong></td>
+<td>Zero errors across 96M events</td>
+</tr>
+<tr>
+<td><strong>Total Events</strong></td>
+<td>-</td>
+<td><strong>96,000,000</strong></td>
+<td>Completed in 1 min 35 sec</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>All 3 nodes running on the <strong>same physical machine</strong> sharing CPU, memory, and disk I/O.</p>
+</blockquote>
+<h3 id="optimization-techniques">Optimization Techniques<a class="headerlink" href="#optimization-techniques" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>Category</th>
+<th>Technique</th>
+<th>Impact</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Zero-Allocation</td>
+<td>sync.Pool for Timer objects</td>
+<td>Near-zero GC on hot path</td>
+</tr>
+<tr>
+<td>Zero-Allocation</td>
+<td>sync.Pool for record buffers</td>
+<td>Eliminates per-write alloc</td>
+</tr>
+<tr>
+<td>Zero-Allocation</td>
+<td>unsafe.StringData for Rust FFI</td>
+<td>Zero-copy string pass</td>
+</tr>
+<tr>
+<td>Zero-Allocation</td>
+<td>strconv.AppendInt for delivery IDs</td>
+<td>No fmt.Sprintf</td>
+</tr>
+<tr>
+<td>Lock Reduction</td>
+<td>Bloom filter: atomic CAS lock-free</td>
+<td>No mutex on dedup check</td>
+</tr>
+<tr>
+<td>Lock Reduction</td>
+<td>Dispatcher: 32 shards</td>
+<td>Contention divided by 32</td>
+</tr>
+<tr>
+<td>Lock Reduction</td>
+<td>WAL: prepare records outside lock</td>
+<td>Serialization is lock-free</td>
+</tr>
+<tr>
+<td>Lock Reduction</td>
+<td>Scheduler: batch AddTimers single lock</td>
+<td>One lock per N events</td>
+</tr>
+<tr>
+<td>Lock Reduction</td>
+<td>Index: O_APPEND eliminates Seek</td>
+<td>No seek syscall per write</td>
+</tr>
+<tr>
+<td>I/O</td>
+<td>4MB segment write buffer</td>
+<td>Amortized syscalls</td>
+</tr>
+<tr>
+<td>I/O</td>
+<td>Default <code>batch</code> fsync mode</td>
+<td>Group-commit durability without per-write cost</td>
+</tr>
+<tr>
+<td>I/O</td>
+<td>Background periodic flush optional</td>
+<td>For low-latency tolerance configurations</td>
+</tr>
+<tr>
+<td>I/O</td>
+<td>PebbleDB: NoSync + disabled internal WAL</td>
+<td>Our WAL is truth</td>
+</tr>
+<tr>
+<td>I/O</td>
+<td>Pre-created next segment at 90% capacity</td>
+<td>Zero-latency rotation</td>
+</tr>
+<tr>
+<td>I/O</td>
+<td>Atomic file writes for metadata</td>
+<td>Crash-safe tx logs and key files</td>
+</tr>
+<tr>
+<td>Algorithmic</td>
+<td>Timing wheel: O(1) add/remove/tick</td>
+<td>Constant time scheduling</td>
+</tr>
+<tr>
+<td>Algorithmic</td>
+<td>Sparse index: O(log N) seeks</td>
+<td>Binary search</td>
+</tr>
+<tr>
+<td>Algorithmic</td>
+<td>FNV-1a partition routing</td>
+<td>~5ns vs ~400ns SHA-256</td>
+</tr>
+<tr>
+<td>Algorithmic</td>
+<td>Bloom filter: O(k) checks, k=7</td>
+<td>Sub-microsecond dedup</td>
+</tr>
+<tr>
+<td>Memory</td>
+<td>Cold store: offsets only (~16B/key)</td>
+<td>Millions of far-future events without RAM bloat</td>
+</tr>
+<tr>
+<td>Scheduling</td>
+<td>Adaptive hydrator interval</td>
+<td>Scales I/O with workload; no fixed 60s polling tax</td>
+</tr>
+<tr>
+<td>Concurrency</td>
+<td>Retry heap: non-blocking timeoutLoop</td>
+<td>Responsive under retry storms</td>
+</tr>
+<tr>
+<td>Resilience</td>
+<td>Circuit breaker: atomic state machine</td>
+<td>Instant skip of dead subscribers</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="configuration-reference">Configuration Reference<a class="headerlink" href="#configuration-reference" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Category</th>
+<th>Flag</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Node</td>
+<td><code>-node-id</code></td>
+<td>required</td>
+<td>Unique node identifier</td>
+</tr>
+<tr>
+<td>Node</td>
+<td><code>-data-dir</code></td>
+<td><code>./data</code></td>
+<td>Data directory</td>
+</tr>
+<tr>
+<td>Node</td>
+<td><code>-grpc-addr</code></td>
+<td><code>:9000</code></td>
+<td>gRPC listen address</td>
+</tr>
+<tr>
+<td>Node</td>
+<td><code>-http-addr</code></td>
+<td><code>:8080</code></td>
+<td>HTTP health + metrics</td>
+</tr>
+<tr>
+<td>Node</td>
+<td><code>-partition-count</code></td>
+<td><code>1</code></td>
+<td>Number of partitions</td>
+</tr>
+<tr>
+<td>Node</td>
+<td><code>--dev</code></td>
+<td><code>false</code></td>
+<td>Disable production security requirements for local development</td>
+</tr>
+<tr>
+<td>WAL</td>
+<td><code>-segment-size</code></td>
+<td><code>512MB</code></td>
+<td>Segment size before rotation</td>
+</tr>
+<tr>
+<td>WAL</td>
+<td><code>-index-interval</code></td>
+<td><code>1000</code></td>
+<td>Sparse index interval</td>
+</tr>
+<tr>
+<td>WAL</td>
+<td><code>-fsync-mode</code></td>
+<td><code>batch</code></td>
+<td><code>every_event</code>, <code>batch</code> (default), or <code>periodic</code></td>
+</tr>
+<tr>
+<td>WAL</td>
+<td><code>-flush-interval</code></td>
+<td><code>1000</code></td>
+<td>Background flush interval ms (used by <code>periodic</code>)</td>
+</tr>
+<tr>
+<td>Scheduler</td>
+<td><code>-tick-ms</code></td>
+<td><code>10</code></td>
+<td>Timing wheel tick duration (ms); 10ms × 600 slots = 6s root span</td>
+</tr>
+<tr>
+<td>Scheduler</td>
+<td><code>-wheel-size</code></td>
+<td><code>600</code></td>
+<td>Slots per timing wheel level</td>
+</tr>
+<tr>
+<td>Scheduler</td>
+<td><code>-hot-window-minutes</code></td>
+<td><code>60</code></td>
+<td>Events beyond this go to cold store (0 = disabled)</td>
+</tr>
+<tr>
+<td>Scheduler</td>
+<td><code>-hydrator-min-interval</code></td>
+<td><code>5000</code></td>
+<td>Minimum adaptive hydrator scan interval in ms</td>
+</tr>
+<tr>
+<td>Scheduler</td>
+<td><code>-hydrator-max-interval</code></td>
+<td><code>300000</code></td>
+<td>Maximum adaptive hydrator scan interval in ms</td>
+</tr>
+<tr>
+<td>Delivery</td>
+<td><code>-ack-timeout</code></td>
+<td><code>30s</code></td>
+<td>Delivery ack timeout</td>
+</tr>
+<tr>
+<td>Delivery</td>
+<td><code>-max-retries</code></td>
+<td><code>5</code></td>
+<td>Max delivery retry attempts</td>
+</tr>
+<tr>
+<td>Delivery</td>
+<td><code>-max-credits</code></td>
+<td><code>1000</code></td>
+<td>Max credits per subscriber</td>
+</tr>
+<tr>
+<td>Delivery</td>
+<td><code>-cb-failure-threshold</code></td>
+<td><code>0.5</code></td>
+<td>Circuit breaker failure rate to trip (0.0–1.0)</td>
+</tr>
+<tr>
+<td>Delivery</td>
+<td><code>-cb-min-attempts</code></td>
+<td><code>10</code></td>
+<td>Min attempts before circuit breaker evaluates</td>
+</tr>
+<tr>
+<td>Delivery</td>
+<td><code>-cb-open-duration-ms</code></td>
+<td><code>30000</code></td>
+<td>Circuit breaker open duration (ms)</td>
+</tr>
+<tr>
+<td>Admission</td>
+<td><code>-max-ready-queue</code></td>
+<td><code>1000000</code></td>
+<td>Max ready queue depth per partition</td>
+</tr>
+<tr>
+<td>Admission</td>
+<td><code>-max-timing-wheel-size</code></td>
+<td><code>10000000</code></td>
+<td>Max active timers in hot timing wheel</td>
+</tr>
+<tr>
+<td>Admission</td>
+<td><code>-max-in-flight</code></td>
+<td><code>500000</code></td>
+<td>Max in-flight deliveries per partition</td>
+</tr>
+<tr>
+<td>Dedup</td>
+<td><code>-dedup-ttl</code></td>
+<td><code>168</code></td>
+<td>Dedup TTL in hours (7 days)</td>
+</tr>
+<tr>
+<td>Dedup</td>
+<td><code>-bloom-capacity</code></td>
+<td><code>100000000</code></td>
+<td>Bloom filter capacity</td>
+</tr>
+<tr>
+<td>Retention</td>
+<td><code>--retention-max-age-hours</code></td>
+<td><code>168</code></td>
+<td>Max segment age before deletion (0 = disabled)</td>
+</tr>
+<tr>
+<td>Retention</td>
+<td><code>--retention-max-size-gb</code></td>
+<td><code>0</code></td>
+<td>Max total segment size before deletion (0 = disabled)</td>
+</tr>
+<tr>
+<td>Security</td>
+<td><code>--tls-cert-file</code></td>
+<td>``</td>
+<td>Server TLS certificate</td>
+</tr>
+<tr>
+<td>Security</td>
+<td><code>--tls-key-file</code></td>
+<td>``</td>
+<td>Server TLS key</td>
+</tr>
+<tr>
+<td>Security</td>
+<td><code>--tls-ca-file</code></td>
+<td>``</td>
+<td>TLS CA for client cert verification</td>
+</tr>
+<tr>
+<td>Security</td>
+<td><code>--auth-enabled</code></td>
+<td><code>false</code></td>
+<td>Enable JWT authentication</td>
+</tr>
+<tr>
+<td>Security</td>
+<td><code>--auth-jwt-secret</code></td>
+<td>``</td>
+<td>HMAC secret for JWT verification</td>
+</tr>
+<tr>
+<td>Security</td>
+<td><code>--auth-jwt-public-key</code></td>
+<td>``</td>
+<td>Path to Ed25519/RSA public key for JWT verification</td>
+</tr>
+<tr>
+<td>Security</td>
+<td><code>--auth-policy-file</code></td>
+<td>``</td>
+<td>RBAC policy JSON (required in production when auth is enabled)</td>
+</tr>
+<tr>
+<td>Security</td>
+<td><code>--encryption-enabled</code></td>
+<td><code>false</code></td>
+<td>Enable encryption at rest</td>
+</tr>
+<tr>
+<td>Security</td>
+<td><code>--encryption-key-file</code></td>
+<td>``</td>
+<td>Path to encryption key file</td>
+</tr>
+<tr>
+<td>Replication</td>
+<td><code>--replication-factor</code></td>
+<td><code>1</code></td>
+<td>Required replica count (production requires ≥3)</td>
+</tr>
+<tr>
+<td>Replication</td>
+<td><code>--min-insync-replicas</code></td>
+<td><code>1</code></td>
+<td>Minimum in-sync replicas for acked writes (production requires ≥2)</td>
+</tr>
+<tr>
+<td>Replication</td>
+<td><code>--replication-tls-cert-file</code></td>
+<td>``</td>
+<td>Replication mTLS certificate</td>
+</tr>
+<tr>
+<td>Replication</td>
+<td><code>--replication-tls-key-file</code></td>
+<td>``</td>
+<td>Replication mTLS key</td>
+</tr>
+<tr>
+<td>Replication</td>
+<td><code>--replication-tls-ca-file</code></td>
+<td>``</td>
+<td>Replication mTLS CA</td>
+</tr>
+<tr>
+<td>Replication</td>
+<td><code>--snapshot-catchup-threshold</code></td>
+<td><code>10000</code></td>
+<td><strong>Dead config key</strong> — parsed, never read; snapshot install is unconditional on join (not auto mid-flight)</td>
+</tr>
+<tr>
+<td>Cluster</td>
+<td><code>-cluster</code></td>
+<td><code>false</code></td>
+<td>Enable cluster mode</td>
+</tr>
+<tr>
+<td>Cluster</td>
+<td><code>-cluster-seeds</code></td>
+<td>empty</td>
+<td>Comma-separated seed nodes</td>
+</tr>
+<tr>
+<td>Cluster</td>
+<td><code>-virtual-nodes</code></td>
+<td><code>2048</code></td>
+<td>Virtual nodes per physical node on the placement ring</td>
+</tr>
+<tr>
+<td>Cluster</td>
+<td><code>-use-memberlist</code></td>
+<td><code>false</code></td>
+<td>Use HashiCorp Memberlist (SWIM) instead of custom TCP gossip</td>
+</tr>
+<tr>
+<td>Cluster</td>
+<td><code>-heartbeat-interval</code></td>
+<td><code>1s</code></td>
+<td>Gossip heartbeat interval</td>
+</tr>
+<tr>
+<td>Cluster</td>
+<td><code>-failure-timeout</code></td>
+<td><code>5s</code></td>
+<td>Node failure detection timeout</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Environment variables:</strong> <code>CRONOS_DEV</code>, <code>CRONOS_MIN_IN_SYNC_REPLICAS</code>, <code>CRONOS_EXACTLY_ONCE_COMMITS</code>, <code>CRONOS_ENCRYPTION_ENABLED</code>, <code>CRONOS_ENCRYPTION_KEY_FILE</code>.</p>
+<hr />
+<h2 id="technology-stack">Technology Stack<a class="headerlink" href="#technology-stack" title="Permanent link">&para;</a></h2>
+<pre class="mermaid"><code>graph TB
+    subgraph Language
+        GO[Go 1.25+]
+        RUST[Rust - Bloom filter FFI]
+    end
+
+    subgraph Storage
+        PEBBLE[PebbleDB - Dedup + Offsets]
+        BOLT[BoltDB - Raft log]
+        FS[File System - WAL + Index]
+    end
+
+    subgraph Networking
+        GRPC[gRPC public API :9000]
+        IGRPC[gRPC internal :7947&lt;br/&gt;Replication Raft CrossRegion]
+        HTTP[net/http :8080&lt;br/&gt;Health Metrics Dashboard]
+    end
+
+    subgraph Consensus
+        HRAFT[HashiCorp Raft]
+        GOSSIP[Custom Gossip TCP or Memberlist/SWIM]
+    end
+
+    subgraph Observability
+        PROM[Prometheus]
+        OTEL[OpenTelemetry]
+    end
+
+    GO --&gt; PEBBLE
+    GO --&gt; BOLT
+    GO --&gt; FS
+    GO --&gt; GRPC
+    GO --&gt; IGRPC
+    GO --&gt; HTTP
+    GO --&gt; HRAFT
+    GO --&gt; PROM
+    RUST --&gt;|CGO FFI| GO</code></pre>
+<hr />
+<h2 id="consistency-and-guarantees">Consistency and Guarantees<a class="headerlink" href="#consistency-and-guarantees" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Property</th>
+<th>Guarantee</th>
+<th>Mechanism</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Metadata</strong></td>
+<td>Strong consistency</td>
+<td>Raft consensus</td>
+</tr>
+<tr>
+<td><strong>WAL writes</strong></td>
+<td>Configurable durability + quorum</td>
+<td>Leader WAL append; sync gRPC replication to followers until minISR; batch CRC32 and term fencing</td>
+</tr>
+<tr>
+<td><strong>Delivery</strong></td>
+<td>At-least-once</td>
+<td>Ack-based with retry + DLQ</td>
+</tr>
+<tr>
+<td><strong>Ordering</strong></td>
+<td>Per-partition, per-consumer-group</td>
+<td>Offset-based sequential delivery</td>
+</tr>
+<tr>
+<td><strong>Dedup</strong></td>
+<td>Best-effort 7-day window</td>
+<td>Bloom + PebbleDB with TTL</td>
+</tr>
+<tr>
+<td><strong>Admission</strong></td>
+<td>Reject under overload</td>
+<td>ReadyQueue / timingWheel / in-flight limits return <code>ResourceExhausted</code></td>
+</tr>
+<tr>
+<td><strong>Resilience</strong></td>
+<td>Dead subscriber isolation</td>
+<td>Per-subscription circuit breaker (Closed→Open→HalfOpen)</td>
+</tr>
+<tr>
+<td><strong>Durability</strong></td>
+<td>Configurable</td>
+<td>fsync mode: <code>every_event</code> / <code>batch</code> (default) / <code>periodic</code>; atomic file writes for critical metadata</td>
+</tr>
+<tr>
+<td><strong>Availability</strong></td>
+<td>Partition-tolerant</td>
+<td>Leader election on failure</td>
+</tr>
+<tr>
+<td><strong>Security</strong></td>
+<td>Production hardening</td>
+<td>TLS, auth, encryption at rest, replication mTLS; <code>--dev</code> disables requirements</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="security">Security<a class="headerlink" href="#security" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Layer</th>
+<th>Mechanism</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Transport</strong></td>
+<td>Public gRPC TLS (<code>--tls-cert-file</code>, <code>--tls-key-file</code>, <code>--tls-ca-file</code>, optional mTLS client auth)</td>
+</tr>
+<tr>
+<td><strong>Authentication</strong></td>
+<td>JWT auth (<code>--auth-enabled</code>, <code>--auth-jwt-secret</code> and/or <code>--auth-jwt-public-key</code>) plus RBAC policy (<code>--auth-policy-file</code>; required in production)</td>
+</tr>
+<tr>
+<td><strong>Authorization</strong></td>
+<td>Topic-level RBAC and <code>Subject.Admin</code> for AdminService / destructive partition ops / dashboard JSON</td>
+</tr>
+<tr>
+<td><strong>Encryption at rest</strong></td>
+<td>AES-256-GCM record encryption v2 with <strong>random 12-byte nonce</strong> per record (<code>--encryption-enabled</code>, <code>--encryption-key-file</code>); legacy v1 counter nonces decrypt-only</td>
+</tr>
+<tr>
+<td><strong>Replication</strong></td>
+<td>Internal gRPC mTLS (<code>--replication-tls-cert-file</code>, <code>--replication-tls-key-file</code>, <code>--replication-tls-ca-file</code>)</td>
+</tr>
+<tr>
+<td><strong>Run mode</strong></td>
+<td><code>--dev</code> disables production security requirements; production requires TLS, auth + policy file, encryption, replication mTLS, <code>--replication-factor&gt;=3</code>, <code>--min-insync-replicas&gt;=2</code></td>
+</tr>
+<tr>
+<td><strong>Rate Limiting</strong></td>
+<td>Per-IP token bucket (1M req/s default in non-dev); optional per-topic limits</td>
+</tr>
+<tr>
+<td><strong>gRPC</strong></td>
+<td>Max message size 16MB, max 10K concurrent streams</td>
+</tr>
+<tr>
+<td><strong>Keepalive</strong></td>
+<td>10s interval, 20s timeout, enforcement policy</td>
+</tr>
+<tr>
+<td><strong>HTTP</strong></td>
+<td>Health, Prometheus metrics, embedded admin SPA (<code>/ui/</code>), Admin JSON proxy (<code>/api/admin/*</code>) with timeouts</td>
+</tr>
+<tr>
+<td><strong>Container</strong></td>
+<td>Non-root user, minimal Debian slim image</td>
+</tr>
+<tr>
+<td><strong>Data</strong></td>
+<td>CRC32 integrity checks on every WAL record; trailing checksum and Raft term in v2 format; atomic file writes for tx logs and key files</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="known-limitations">Known Limitations<a class="headerlink" href="#known-limitations" title="Permanent link">&para;</a></h2>
+<p>These are <strong>documented product/architecture gaps</strong>, not accidental omissions from
+the design docs. Each is implemented enough to operate safely; the deferred
+piece is called out so operators and contributors know what not to rely on yet.</p>
+<h3 id="1-automatic-mid-flight-lag-driven-snapshot-install">1. Automatic mid-flight lag-driven snapshot install<a class="headerlink" href="#1-automatic-mid-flight-lag-driven-snapshot-install" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>What works today</strong></td>
+<td>Bulk <code>ReplicationService.Snapshot</code> / <code>Follower.InstallSnapshot</code> is fully implemented (CRC, staging, atomic swap, <code>WAL.ReloadSegments</code>). Join and ownership transfer call <code>PartitionManager.SyncPartitionFromLeader</code>, which installs a snapshot unconditionally. (<code>--snapshot-catchup-threshold</code>, default <code>10000</code>, is a dead config key — parsed, never read.)</td>
+</tr>
+<tr>
+<td><strong>What is deferred</strong></td>
+<td>While a follower is already connected, large lag is healed only via incremental <code>Sync</code> / <code>Append</code> (<code>Leader.catchUpFollower</code>). <strong>No background loop</strong> watches lag and auto-triggers InstallSnapshot mid-flight.</td>
+</tr>
+<tr>
+<td><strong>Why deferred</strong></td>
+<td>Hot-path replication stays simple; full snapshot is expensive (IO + atomic swap) and is reserved for bootstrap/wipe/join.</td>
+</tr>
+<tr>
+<td><strong>Operator impact</strong></td>
+<td>A follower that falls far behind after join may take longer to catch up via event-by-event replication. For wipe recovery, re-join or re-run state transfer.</td>
+</tr>
+<tr>
+<td><strong>Code</strong></td>
+<td><code>internal/partition/manager.go</code> (<code>SyncPartitionFromLeader</code>), <code>internal/replication/follower.go</code> (<code>InstallSnapshot</code>), <code>internal/replication/leader.go</code> (<code>catchUpFollower</code>)</td>
+</tr>
+<tr>
+<td><strong>Feature doc</strong></td>
+<td><a href="../architecture/features/replication/">docs/architecture/features/replication.md</a></td>
+</tr>
+</tbody>
+</table>
+<pre class="mermaid"><code>flowchart LR
+    Join[Node join / ownership move] --&gt; SyncPM[SyncPartitionFromLeader]
+    SyncPM --&gt; Snap[InstallSnapshot bulk - unconditional]
+    Connected[Already connected follower lag] --&gt; CatchUp[catchUpFollower Sync/Append only]
+    CatchUp -.-&gt;|threshold flag is a dead key| Snap</code></pre>
+<h3 id="2-admin-triggerrebalance-is-a-soft-stub">2. Admin <code>TriggerRebalance</code> is a soft stub<a class="headerlink" href="#2-admin-triggerrebalance-is-a-soft-stub" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>What works today</strong></td>
+<td>Cluster <strong>automatically</strong> rebalances on membership join/leave via router + Raft assignment apply + <code>reconcileLocalLeadership</code> (≈5s). Partition promote/demote and <code>SyncPartitionFromLeader</code> run from those paths. Dashboard/CLI can call the RPC.</td>
+</tr>
+<tr>
+<td><strong>What is deferred</strong></td>
+<td><code>AdminService.TriggerRebalance</code> does <strong>not</strong> invoke an on-demand rebalance engine. It is RBAC-gated and returns <code>Success=true</code> with a <strong>descriptive error string</strong> explaining that reconcile is membership-driven (so clients can detect the gap without <code>Unimplemented</code>).</td>
+</tr>
+<tr>
+<td><strong>Why deferred</strong></td>
+<td>Avoid unsafe operator-forced thrash before a controlled “drain + move N partitions” API exists.</td>
+</tr>
+<tr>
+<td><strong>Operator impact</strong></td>
+<td>Do not depend on the UI/CLI “Rebalance” button to reshuffle a healthy cluster. Add/remove nodes (or wait for membership events) to trigger placement changes.</td>
+</tr>
+<tr>
+<td><strong>Code</strong></td>
+<td><code>internal/api/admin_handler.go</code> (<code>TriggerRebalance</code>), <code>internal/cluster/manager.go</code> / <code>router.go</code></td>
+</tr>
+<tr>
+<td><strong>Feature docs</strong></td>
+<td><a href="../architecture/features/cluster/">cluster.md</a>, <a href="../architecture/features/dashboard/">dashboard.md</a>, <a href="../architecture/features/api/">api.md</a></td>
+</tr>
+</tbody>
+</table>
+<h3 id="3-deep-delivery-requeue-under-backpressure-deferred">3. Deep delivery requeue under backpressure (deferred)<a class="headerlink" href="#3-deep-delivery-requeue-under-backpressure-deferred" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>What works today</strong></td>
+<td>Credits, in-flight caps, circuit breakers, retry heap, and durable DLQ after max retries. Subscribe can <strong>resume from committed offset</strong>. Backpressure skips emit <code>cronos_dispatcher_backpressure_skips_total{partition,reason}</code>. Events remain <strong>durable in the WAL</strong>.</td>
+</tr>
+<tr>
+<td><strong>What is deferred</strong></td>
+<td>When a dispatch pass finds <strong>no credits / in-flight capacity</strong>, the event is <strong>not re-enqueued into a worker-level redrive queue</strong> on that pass. Recovery relies on later dispatch attempts, consumer credit replenishment, and/or <strong>reconnect resume from committed offset</strong>—not a dedicated “requeue from WAL until acked” loop for every skipped ready event.</td>
+</tr>
+<tr>
+<td><strong>Why deferred</strong></td>
+<td>Changing the push model to true pull/redrive risks hot-path complexity and double-delivery patterns; deferred after observability was added (<code>plan.md</code> item 2.5).</td>
+</tr>
+<tr>
+<td><strong>Operator impact</strong></td>
+<td>Under sustained zero-credit consumers, metrics show skips; ensure consumers ack and grant credits, or reconnect. Do not assume every ready-queue dequeue is immediately redelivered without credit recovery.</td>
+</tr>
+<tr>
+<td><strong>Code</strong></td>
+<td><code>internal/delivery/dispatcher.go</code> (credit / in-flight paths + backpressure metrics), <code>internal/partition/backpressure.go</code> (publish admission)</td>
+</tr>
+<tr>
+<td><strong>Feature doc</strong></td>
+<td><a href="../architecture/features/delivery/">docs/architecture/features/delivery.md</a></td>
+</tr>
+</tbody>
+</table>
+<h3 id="related-open-work-smaller">Related open work (smaller)<a class="headerlink" href="#related-open-work-smaller" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Flaky client unit test <code>TestSendAsyncContextCancellation</code> (see <code>plan.md</code>).</li>
+<li>Individual historical checkboxes in <code>plan.md</code> may lag the progress summary; trust the summary + this section for runtime reality.</li>
+</ul>
+<hr />
+<p><em>CronosDB — Where time meets data.</em></p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/jatin711-debug/cronos_db_golang" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+      <div class="md-progress" data-md-component="progress" role="progressbar"></div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.instant", "navigation.instant.progress", "navigation.tracking", "navigation.top", "navigation.sections", "navigation.indexes", "search.highlight", "search.suggest", "search.share", "content.tooltips", "toc.follow"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+        <script src="https://cdn.jsdelivr.net/npm/svg-pan-zoom@3.6.1/dist/svg-pan-zoom.min.js"></script>
+      
+        <script src="../javascripts/mermaid-zoom.js"></script>
+      
+    
+  </body>
+</html>
