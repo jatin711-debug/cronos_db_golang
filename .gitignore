@@ -18,3 +18,10 @@ web/dashboard/dist/
 # tree. The Makefile's STAGE_DASHBOARD_DIST_CMD copies
 # web/dashboard/dist/ into internal/api/web/dist/ before go build.
 # In CI, `make build` runs the stage command automatically.
+
+# MkDocs site output
+site/
+
+# Python
+__pycache__/
+*.pyc

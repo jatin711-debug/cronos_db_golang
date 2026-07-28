@@ -1105,7 +1105,7 @@ via `--cluster-grpc-addr`). It registers **ReplicationService**, **RaftService**
 and **CrossRegionService** — no public client EventService surface is exposed
 on this socket. Cross-region traffic is intentionally peer-plane only so
 arbitrary event inject/fetch stays off `:9000`. See
-[Cross-Region Replication](#cross-region-replication).
+[Replication Protocol](#replication-protocol).
 
 ### `ReplicationService` RPCs
 
@@ -1213,11 +1213,12 @@ intentional for `--dev`, refused in production by the validation in
   WAL closed first; WAL `ReloadSegments` rebuilds the in-memory segment
   list and sparse index from the newly-staged files.
 - **Quorum**: `Leader.Replicate` returns success only after
-  `min-insync-replicas` followers have appended. Default is 1 (leader-only);
-  production target is RF=3 / minISR=2 (see [Durability & Fault
-  Tolerance](#durability--fault-tolerance)).
-- **Trigger gap**: `--snapshot-catchup-threshold` is applied on **join /
-  `SyncPartitionFromLeader`**. There is still **no mid-flight** lag watcher that
+  `min-insync-replicas` replicas **including the leader** have appended. Default
+  is 1 (leader-only); production target is RF=3 / minISR=2 (see
+  [Consistency and Guarantees](#consistency-and-guarantees)).
+- **Trigger gap**: `--snapshot-catchup-threshold` is a **dead config key** —
+  parsed but never read; `SyncPartitionFromLeader` installs a snapshot
+  unconditionally on join. There is still **no mid-flight** lag watcher that
   automatically switches a connected follower from incremental catch-up to
   `InstallSnapshot`. See [Known Limitations](#known-limitations).
 
@@ -1519,7 +1520,7 @@ flowchart TD
 | Replication | `--replication-tls-cert-file` | `` | Replication mTLS certificate |
 | Replication | `--replication-tls-key-file` | `` | Replication mTLS key |
 | Replication | `--replication-tls-ca-file` | `` | Replication mTLS CA |
-| Replication | `--snapshot-catchup-threshold` | `10000` | Lag (events) above which join path may request Snapshot; 0 disables (not auto mid-flight) |
+| Replication | `--snapshot-catchup-threshold` | `10000` | **Dead config key** — parsed, never read; snapshot install is unconditional on join (not auto mid-flight) |
 | Cluster | `-cluster` | `false` | Enable cluster mode |
 | Cluster | `-cluster-seeds` | empty | Comma-separated seed nodes |
 | Cluster | `-virtual-nodes` | `2048` | Virtual nodes per physical node on the placement ring |
@@ -1621,7 +1622,7 @@ piece is called out so operators and contributors know what not to rely on yet.
 
 | | |
 |--|--|
-| **What works today** | Bulk `ReplicationService.Snapshot` / `Follower.InstallSnapshot` is fully implemented (CRC, staging, atomic swap, `WAL.ReloadSegments`). Join and ownership transfer call `PartitionManager.SyncPartitionFromLeader`, which can use `--snapshot-catchup-threshold` (default `10000` events; `0` disables). |
+| **What works today** | Bulk `ReplicationService.Snapshot` / `Follower.InstallSnapshot` is fully implemented (CRC, staging, atomic swap, `WAL.ReloadSegments`). Join and ownership transfer call `PartitionManager.SyncPartitionFromLeader`, which installs a snapshot unconditionally. (`--snapshot-catchup-threshold`, default `10000`, is a dead config key — parsed, never read.) |
 | **What is deferred** | While a follower is already connected, large lag is healed only via incremental `Sync` / `Append` (`Leader.catchUpFollower`). **No background loop** watches lag and auto-triggers InstallSnapshot mid-flight. |
 | **Why deferred** | Hot-path replication stays simple; full snapshot is expensive (IO + atomic swap) and is reserved for bootstrap/wipe/join. |
 | **Operator impact** | A follower that falls far behind after join may take longer to catch up via event-by-event replication. For wipe recovery, re-join or re-run state transfer. |
@@ -1631,11 +1632,9 @@ piece is called out so operators and contributors know what not to rely on yet.
 ```mermaid
 flowchart LR
     Join[Node join / ownership move] --> SyncPM[SyncPartitionFromLeader]
-    SyncPM --> Threshold{lag vs snapshot-catchup-threshold}
-    Threshold -->|above or cold start| Snap[InstallSnapshot bulk]
-    Threshold -->|below| IncrJoin[Incremental Sync]
+    SyncPM --> Snap[InstallSnapshot bulk - unconditional]
     Connected[Already connected follower lag] --> CatchUp[catchUpFollower Sync/Append only]
-    CatchUp -.->|not wired| Snap
+    CatchUp -.->|threshold flag is a dead key| Snap
 ```
 
 ### 2. Admin `TriggerRebalance` is a soft stub
