@@ -9,6 +9,7 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/internal/auth"
 	"github.com/jatin711-debug/cronos_db_golang/internal/cluster"
 	"github.com/jatin711-debug/cronos_db_golang/internal/partition"
+	"github.com/jatin711-debug/cronos_db_golang/internal/storage"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 
 	"google.golang.org/grpc/codes"
@@ -27,105 +28,16 @@ func summarizeSegmentUsage(p *partition.Partition) (count int32, totalBytes int6
 	return count, totalBytes
 }
 
-func minConsumedOffsetForPartition(p *partition.Partition) (int64, bool) {
-	if p == nil || p.Wal == nil || p.ConsumerGroup == nil {
-		return 0, false
-	}
-
-	groups := p.ConsumerGroup.ListGroups()
-	hasActiveConsumers := false
-	minConsumedOffset := p.Wal.GetHighWatermark()
-
-	for _, group := range groups {
-		hasPartition := false
-		for _, partID := range group.Partitions {
-			if partID == p.ID {
-				hasPartition = true
-				break
-			}
-		}
-
-		if !hasPartition {
-			continue
-		}
-
-		hasActiveConsumers = true
-
-		offset, ok := group.CommittedOffsets[p.ID]
-		if ok {
-			if offset == -1 {
-				minConsumedOffset = 0
-			} else if offset < minConsumedOffset {
-				minConsumedOffset = offset
-			}
-		} else {
-			minConsumedOffset = 0
-		}
-	}
-
-	if !hasActiveConsumers {
-		return 0, false
-	}
-
-	return minConsumedOffset, true
-}
-
-func compactByMaxSize(p *partition.Partition, maxSizeBytes int64) (int, error) {
-	if p == nil || p.Wal == nil || maxSizeBytes <= 0 {
-		return 0, nil
-	}
-
-	deletedTotal := 0
-
-	for {
-		segments := p.Wal.GetSegments()
-		if len(segments) <= 1 {
-			return deletedTotal, nil
-		}
-
-		var totalSize int64
-		for _, seg := range segments {
-			totalSize += seg.GetSize()
-		}
-		if totalSize <= maxSizeBytes {
-			return deletedTotal, nil
-		}
-
-		active := p.Wal.GetActiveSegment()
-		var oldestNonActiveOffset int64 = -1
-		for _, seg := range segments {
-			if seg == active {
-				continue
-			}
-			if oldestNonActiveOffset < 0 || seg.GetFirstOffset() < oldestNonActiveOffset {
-				oldestNonActiveOffset = seg.GetLastOffset()
-			}
-		}
-
-		if oldestNonActiveOffset < 0 {
-			return deletedTotal, nil
-		}
-
-		deleted, err := p.Wal.CompactByOffset(oldestNonActiveOffset + 1)
-		if err != nil {
-			return deletedTotal, err
-		}
-		if deleted == 0 {
-			return deletedTotal, nil
-		}
-		deletedTotal += deleted
-	}
-}
-
 // PartitionServiceHandler implements metadata-focused partition APIs.
 // It is intentionally read-only on the hot path used by clients for routing.
 type PartitionServiceHandler struct {
 	types.UnimplementedPartitionServiceServer
 
-	partitionManager *partition.PartitionManager
-	clusterManager   *cluster.Manager // nil in standalone mode
-	localNodeID      string
-	splitManager     *partition.SplitManager
+	partitionManager     *partition.PartitionManager
+	clusterManager       *cluster.Manager // nil in standalone mode
+	localNodeID          string
+	splitManager         *partition.SplitManager
+	experimentalFeatures bool
 
 	authPolicy  *auth.Policy
 	authEnabled bool // true when JWT authentication is active
@@ -137,6 +49,12 @@ type PartitionServiceHandler struct {
 func (h *PartitionServiceHandler) SetAuthPolicy(p *auth.Policy) {
 	h.authPolicy = p
 	h.authEnabled = true
+}
+
+// SetExperimentalFeatures enables online splitting for development only.
+// Startup validates that this opt-in cannot be used in production mode.
+func (h *PartitionServiceHandler) SetExperimentalFeatures(enabled bool) {
+	h.experimentalFeatures = enabled
 }
 
 // requireAdmin enforces global admin privileges on destructive operations. It is
@@ -388,7 +306,7 @@ func (h *PartitionServiceHandler) GetSchedulerStatus(ctx context.Context, req *t
 }
 
 // Compact runs WAL compaction for a partition (admin-only when auth is enabled).
-// BeforeTs, Force, or min-consumed-offset policies select what can be deleted.
+// BeforeTs limits eligible events; Force never bypasses completion checks.
 func (h *PartitionServiceHandler) Compact(ctx context.Context, req *types.CompactRequest) (*types.CompactResponse, error) {
 	if err := h.requireAdmin(ctx); err != nil {
 		return nil, err
@@ -405,20 +323,9 @@ func (h *PartitionServiceHandler) Compact(ctx context.Context, req *types.Compac
 
 	beforeCount, beforeSize := summarizeSegmentUsage(p)
 
-	if req.GetBeforeTs() > 0 {
-		if _, err := p.Wal.CompactByTimestamp(req.GetBeforeTs()); err != nil {
-			return &types.CompactResponse{Success: false, Error: err.Error()}, nil
-		}
-	} else if req.GetForce() {
-		if _, err := p.Wal.CompactByOffset(p.Wal.GetHighWatermark()); err != nil {
-			return &types.CompactResponse{Success: false, Error: err.Error()}, nil
-		}
-	} else {
-		if minOffset, ok := minConsumedOffsetForPartition(p); ok && minOffset > 0 {
-			if _, err := p.Wal.CompactByOffset(minOffset); err != nil {
-				return &types.CompactResponse{Success: false, Error: err.Error()}, nil
-			}
-		}
+	opts := storage.PruneOptions{AllCompleted: true, BeforeTimestamp: req.GetBeforeTs()}
+	if _, err := p.PruneWAL(ctx, opts); err != nil {
+		return &types.CompactResponse{Success: false, Error: err.Error()}, nil
 	}
 
 	afterCount, afterSize := summarizeSegmentUsage(p)
@@ -456,20 +363,20 @@ func (h *PartitionServiceHandler) RunRetention(ctx context.Context, req *types.R
 	beforeCount, beforeSize := summarizeSegmentUsage(p)
 
 	if req.GetMinOffset() > 0 {
-		if _, err := p.Wal.CompactByOffset(req.GetMinOffset()); err != nil {
+		if _, err := p.PruneWAL(ctx, storage.PruneOptions{BeforeOffset: req.GetMinOffset()}); err != nil {
 			return &types.RetentionResponse{Success: false, Error: err.Error()}, nil
 		}
 	}
 
 	if req.GetMaxAgeHours() > 0 {
 		cutoffTS := time.Now().Add(-time.Duration(req.GetMaxAgeHours()) * time.Hour).UnixMilli()
-		if _, err := p.Wal.CompactByTimestamp(cutoffTS); err != nil {
+		if _, err := p.PruneWAL(ctx, storage.PruneOptions{BeforeTimestamp: cutoffTS}); err != nil {
 			return &types.RetentionResponse{Success: false, Error: err.Error()}, nil
 		}
 	}
 
 	if req.GetMaxSizeBytes() > 0 {
-		if _, err := compactByMaxSize(p, req.GetMaxSizeBytes()); err != nil {
+		if _, err := p.PruneWAL(ctx, storage.PruneOptions{MaxBytes: req.GetMaxSizeBytes()}); err != nil {
 			return &types.RetentionResponse{Success: false, Error: err.Error()}, nil
 		}
 	}
@@ -495,6 +402,10 @@ func (h *PartitionServiceHandler) RunRetention(ctx context.Context, req *types.R
 func (h *PartitionServiceHandler) SplitPartition(ctx context.Context, req *types.SplitPartitionRequest) (*types.SplitPartitionResponse, error) {
 	if err := h.requireAdmin(ctx); err != nil {
 		return nil, err
+	}
+
+	if !h.experimentalFeatures {
+		return nil, status.Error(codes.Unimplemented, "online partition splitting is disabled; use fixed partitions in production")
 	}
 
 	if req == nil {

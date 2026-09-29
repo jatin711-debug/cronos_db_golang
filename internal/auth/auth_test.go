@@ -40,7 +40,7 @@ func TestNewPolicyFromFile_NotFound(t *testing.T) {
 func TestNewPolicyFromFile_Valid(t *testing.T) {
 	tmpDir := t.TempDir()
 	path := filepath.Join(tmpDir, "policy.json")
-	os.WriteFile(path, []byte(`{}`), 0644)
+	os.WriteFile(path, []byte(`{"reader":{"topics":{"telemetry":{"subscribe":true}}}}`), 0644)
 
 	p, err := NewPolicyFromFile(path)
 	if err != nil {

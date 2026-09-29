@@ -79,10 +79,30 @@ type Partition struct {
 	UpdatedTS time.Time
 	// deliveryQuit is closed to stop delivery, compaction, and snapshot loops.
 	deliveryQuit chan struct{}
+	started      bool
+	background   sync.WaitGroup
 	// deliveryQuitOnce ensures deliveryQuit is closed at most once.
 	deliveryQuitOnce sync.Once
 	// replayErr holds the last WAL timer-replay error, if any.
-	replayErr atomic.Pointer[error]
+	replayErr        atomic.Pointer[error]
+	retentionBlocked bool // immutable: clustered/replicated completion is not yet safely prunable
+}
+
+// PersistEpoch durably fences older leaders before accepting their successors.
+// Callers serialize it with ReplicateMu and/or the manager lifecycle lock.
+func (p *Partition) PersistEpoch(epoch int64) error {
+	if epoch < p.Epoch {
+		return fmt.Errorf("epoch regression: %d < %d", epoch, p.Epoch)
+	}
+	data, err := json.Marshal(epoch)
+	if err != nil {
+		return err
+	}
+	if err := utils.AtomicWriteFile(p.DataDir+"/epoch.json", data, 0600); err != nil {
+		return err
+	}
+	p.Epoch = epoch
+	return nil
 }
 
 // GetReplayError returns the last WAL replay error for this partition, if any.
@@ -278,6 +298,7 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 		return fmt.Errorf("create dead-letter queue: %w", err)
 	}
 	dispatcher := delivery.NewDispatcherWithDLQ(dispatcherConfig, dlq)
+	dispatcher.IsCompleted = func(group string, offset int64) bool { return consumerGroup.IsCompleted(group, partitionID, offset) }
 
 	// Create worker. Batch size of 100 amortizes DispatchBatch overhead
 	// (metrics observe, map allocations, in-flight CAS, shard write-lock)
@@ -294,22 +315,30 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 
 	// Create partition
 	partition := &Partition{
-		ID:            partitionID,
-		Topic:         topic,
-		DataDir:       dataDir,
-		Wal:           wal,
-		Scheduler:     sched,
-		ConsumerGroup: consumerGroup,
-		DedupStore:    dedupManager,
-		Dispatcher:    dispatcher,
-		DLQ:           dlq,
-		Worker:        worker,
-		Leader:        false,
-		CreatedTS:     time.Now(),
-		UpdatedTS:     time.Now(),
-		deliveryQuit:  make(chan struct{}),
+		retentionBlocked: pm.config.ClusterEnabled || pm.config.ReplicationFactor > 1,
+		ID:               partitionID,
+		Topic:            topic,
+		DataDir:          dataDir,
+		Wal:              wal,
+		Scheduler:        sched,
+		ConsumerGroup:    consumerGroup,
+		DedupStore:       dedupManager,
+		Dispatcher:       dispatcher,
+		DLQ:              dlq,
+		Worker:           worker,
+		Leader:           false,
+		CreatedTS:        time.Now(),
+		UpdatedTS:        time.Now(),
+		deliveryQuit:     make(chan struct{}),
 	}
 
+	if data, err := os.ReadFile(dataDir + "/epoch.json"); err == nil {
+		if err := json.Unmarshal(data, &partition.Epoch); err != nil {
+			return fmt.Errorf("read partition epoch: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
 	pm.partitions[partitionID] = partition
 
 	// Set up rate limiter for this partition if configured
@@ -573,36 +602,17 @@ func (pm *PartitionManager) startPartitionLocked(partitionID int32) error {
 
 // startPartitionInternal starts a partition's background workers
 func (pm *PartitionManager) startPartitionInternal(partition *Partition) error {
-	// Try to load snapshot for fast recovery
+	if partition.started {
+		return nil
+	}
+	// Snapshots/checkpoints contain metadata, not the pending timer set. Rebuild
+	// from retained WAL records on every start; duplicate delivery is allowed.
 	snapshotMgr := NewSnapshotManager(partition.DataDir, partition.ID)
-	snapshot, err := snapshotMgr.LoadSnapshot()
-	if err != nil {
-		log.Printf("[Partition %d] Failed to load snapshot: %v", partition.ID, err)
+	pm.replayWALTimers(partition)
+	if err := partition.GetReplayError(); err != nil {
+		return err
 	}
-
-	if snapshot != nil {
-		// Fast recovery: skip WAL replay up to snapshot point
-		log.Printf("[Partition %d] Fast recovery from snapshot: HWM=%d, scheduled=%d",
-			partition.ID, snapshot.HighWatermark, snapshot.LastScheduledOffset)
-
-		// Restore consumer offsets
-		for groupID, offset := range snapshot.ConsumerOffsets {
-			if partition.ConsumerGroup != nil {
-				// Create or update consumer group with restored offset
-				_ = partition.ConsumerGroup.CommitOffset(groupID, int64(partition.ID), offset)
-			}
-		}
-
-		// Replay only from snapshot point forward
-		if snapshot.LastScheduledOffset < partition.Wal.GetLastOffset() {
-			pm.replayWALTimersFromOffset(partition, snapshot.LastScheduledOffset+1)
-		} else {
-			log.Printf("[Partition %d] No new events since snapshot, skipping replay", partition.ID)
-		}
-	} else {
-		// Full WAL replay (slow path)
-		pm.replayWALTimers(partition)
-	}
+	partition.started = true
 
 	// Re-seed the dedup store from the WAL tail. The dedup Pebble store runs with
 	// DisableWAL + NoSync for throughput, so claims made just before a crash may be
@@ -617,7 +627,9 @@ func (pm *PartitionManager) startPartitionInternal(partition *Partition) error {
 
 	// Start delivery loop (event-driven): consume scheduler ready signals and
 	// immediately hand over batches to the worker.
+	partition.background.Add(1)
 	utils.GoSafe("partition-delivery-loop", func() {
+		defer partition.background.Done()
 		for {
 			select {
 			case <-partition.Scheduler.ReadySignal():
@@ -636,7 +648,9 @@ func (pm *PartitionManager) startPartitionInternal(partition *Partition) error {
 
 	// Start compaction loop (runs every 10 minutes)
 	compactionInterval := 10 * time.Minute
+	partition.background.Add(1)
 	utils.GoSafe("partition-compaction-loop", func() {
+		defer partition.background.Done()
 		ticker := time.NewTicker(compactionInterval)
 		defer ticker.Stop()
 
@@ -651,7 +665,9 @@ func (pm *PartitionManager) startPartitionInternal(partition *Partition) error {
 	})
 
 	// Start dedup pruning loop (runs every hour)
+	partition.background.Add(1)
 	utils.GoSafe("partition-dedup-prune-loop", func() {
+		defer partition.background.Done()
 		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()
 
@@ -673,7 +689,9 @@ func (pm *PartitionManager) startPartitionInternal(partition *Partition) error {
 	})
 
 	// Start periodic snapshot creation (every 5 minutes)
+	partition.background.Add(1)
 	utils.GoSafe("partition-snapshot-loop", func() {
+		defer partition.background.Done()
 		snapshotMgr.StartPeriodicSnapshots(partition, 5*time.Minute)
 	})
 
@@ -731,7 +749,11 @@ func (pm *PartitionManager) recoverDedupFromWAL(partition *Partition) {
 			if minCreatedTS > 0 && ev.GetCreatedTs() > 0 && ev.GetCreatedTs() < minCreatedTS {
 				continue
 			}
-			if err := partition.DedupStore.Put(mid, ev.Offset, ev.GetCreatedTs()); err != nil {
+			if _, exists, err := partition.DedupStore.GetOffset(mid); err != nil || exists {
+				continue
+			}
+			// WAL presence alone proves no quorum/scheduling result.
+			if err := partition.DedupStore.Put(mid, -1, ev.GetCreatedTs()); err != nil {
 				log.Printf("[Partition %d] Dedup recovery Put failed for %q: %v", partition.ID, mid, err)
 				continue
 			}
@@ -753,19 +775,7 @@ func (pm *PartitionManager) replayWALTimers(partition *Partition) {
 		return // Empty WAL, nothing to replay
 	}
 
-	// Read incremental checkpoint to avoid replaying entire WAL
-	checkpoint := pm.readTimerCheckpoint(partition)
 	startOffset := int64(0)
-	if checkpoint != nil && checkpoint.LastScheduledOffset >= 0 {
-		startOffset = checkpoint.LastScheduledOffset + 1
-		log.Printf("[Partition %d] Using timer checkpoint: resuming from offset %d", partition.ID, startOffset)
-	}
-
-	// If we're already at the end, nothing to replay
-	if startOffset > lastOffset {
-		log.Printf("[Partition %d] Timer replay complete: already up to date at offset %d", partition.ID, lastOffset)
-		return
-	}
 
 	now := time.Now().UnixMilli()
 	scheduledCount := 0
@@ -903,60 +913,22 @@ func (pm *PartitionManager) writeTimerCheckpoint(partition *Partition, lastOffse
 	}
 }
 
-// RunCompaction triggers WAL compaction based on the minimum committed consumer
-// offset across groups assigned to this partition (exported for external callers).
+// RunCompaction prunes segments whose events have durable completion records
+// for every matching group (exported for external callers).
 func (p *Partition) RunCompaction() {
 	p.runCompaction()
 }
 
-// runCompaction calculates the minimum consumed offset across all consumer groups
-// and safely removes obsolete WAL segments.
+// runCompaction uses per-event completion, the same gate as manual retention.
 func (p *Partition) runCompaction() {
-	groups := p.ConsumerGroup.ListGroups()
-
-	hasActiveConsumers := false
-	minConsumedOffset := p.Wal.GetHighWatermark()
-
-	for _, group := range groups {
-		hasPartition := false
-		for _, partID := range group.Partitions {
-			if partID == p.ID {
-				hasPartition = true
-				break
-			}
-		}
-
-		if !hasPartition {
-			continue
-		}
-
-		hasActiveConsumers = true
-
-		offset, ok := group.CommittedOffsets[p.ID]
-		if ok {
-			if offset == -1 {
-				// Consumer hasn't consumed anything, can't discard data
-				minConsumedOffset = 0
-			} else if offset < minConsumedOffset {
-				minConsumedOffset = offset
-			}
-		} else {
-			// Partition is assigned but no offset committed yet
-			minConsumedOffset = 0
-		}
+	if p.retentionBlocked {
+		return
 	}
-
-	if !hasActiveConsumers {
-		return // No active consumers to bound the min offset
-	}
-
-	if minConsumedOffset > 0 {
-		deleted, err := p.Wal.CompactByOffset(minConsumedOffset)
-		if err != nil {
-			log.Printf("[Partition %d] WAL compaction error: %v", p.ID, err)
-		} else if deleted > 0 {
-			log.Printf("[Partition %d] Compacted %d WAL segments up to offset %d", p.ID, deleted, minConsumedOffset)
-		}
+	deleted, err := p.PruneWAL(context.Background(), storage.PruneOptions{AllCompleted: true})
+	if err != nil {
+		log.Printf("[Partition %d] WAL compaction error: %v", p.ID, err)
+	} else if deleted > 0 {
+		log.Printf("[Partition %d] Compacted %d completed WAL segments", p.ID, deleted)
 	}
 }
 
@@ -993,6 +965,7 @@ func (pm *PartitionManager) StopPartition(partitionID int32) error {
 	// Signal delivery goroutines to stop FIRST to avoid circular lock deadlock
 	// Delivery goroutines read from deliveryQuit channel - closing it allows them to exit
 	partition.deliveryQuitOnce.Do(func() { close(partition.deliveryQuit) })
+	partition.background.Wait()
 
 	// Stop scheduler: no new events will be added to the ready queue
 	if partition.Scheduler != nil {
@@ -1179,6 +1152,8 @@ func (pm *PartitionManager) SyncPartitionFromLeader(partitionID int32, leaderAdd
 	// Perform bulk snapshot install.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
+	partition.ReplicateMu.Lock()
+	defer partition.ReplicateMu.Unlock()
 	if err := partition.Follower.InstallSnapshot(ctx, leaderAddr, partitionID, 0); err != nil {
 		return fmt.Errorf("install snapshot from leader %s: %w", leaderAddr, err)
 	}
@@ -1206,6 +1181,12 @@ func (pm *PartitionManager) PromoteToLeader(partitionID int32, epoch int64) erro
 		}
 	}
 
+	if epoch <= 0 {
+		return fmt.Errorf("leadership epoch must be positive")
+	}
+	if err := partition.PersistEpoch(epoch); err != nil {
+		return err
+	}
 	if partition.ReplLeader != nil {
 		partition.Leader = true
 		partition.Epoch = epoch
@@ -1218,6 +1199,17 @@ func (pm *PartitionManager) PromoteToLeader(partitionID int32, epoch int64) erro
 		return nil // Already leader, just update epoch
 	}
 
+	if !partition.started {
+		if err := pm.startPartitionInternal(partition); err != nil {
+			return err
+		}
+	} else if !partition.Leader {
+		pm.replayWALTimers(partition)
+		pm.recoverDedupFromWAL(partition)
+		if err := partition.GetReplayError(); err != nil {
+			return err
+		}
+	}
 	leader := replication.NewLeader(partitionID, int32(pm.config.ReplicationBatchSize), pm.config.ReplicationTimeout, partition.Wal, pm.config.MinInSyncReplicas, pm.nodeID, pm.replicationTLSConfig())
 	leader.SetEpoch(epoch) // advertise the real cluster epoch on the wire, not the default 1
 	leader.Start()

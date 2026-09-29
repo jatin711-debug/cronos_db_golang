@@ -1015,20 +1015,9 @@ func (s *Segment) ReadEventsByTime(startTS, endTS int64) ([]*types.Event, error)
 
 	var result []*types.Event
 
-	if s.lastTS > 0 && s.firstTS > endTS {
-		return result, nil // Segment is completely after the range
-	}
-	if s.lastTS > 0 && s.lastTS < startTS {
-		return result, nil // Segment is completely before the range
-	}
-
-	// Find starting position using index
-	startPos := int64(64) // Default to after header
-	if s.index != nil {
-		if pos, found := s.index.FindByTimestamp(startTS); found {
-			startPos = pos
-		}
-	}
+	// Schedule timestamps need not increase with offsets. The offset index and
+	// first/last appended timestamps cannot safely prune a time-range query.
+	startPos := int64(64)
 
 	// Use ReadAt on existing file handle instead of opening new file
 	lengthBytes := make([]byte, 4)
@@ -1344,8 +1333,7 @@ func (s *Segment) scan() error {
 		// Decrypt if needed, then parse event to get offset and timestamp
 		decrypted, err := s.decryptRecord(recordData, lastGoodPos+4)
 		if err != nil {
-			log.Printf("[SEGMENT] Decrypt failed at position %d: %v, truncating file", lastGoodPos, err)
-			break
+			return fmt.Errorf("decrypt existing record at %d (wrong key or corrupt data): %w", lastGoodPos, err)
 		}
 		event, err := parseEventRecordWithoutLength(decrypted)
 		if err != nil {

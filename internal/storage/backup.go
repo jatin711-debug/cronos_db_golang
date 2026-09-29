@@ -155,7 +155,7 @@ func loadBackupCheckpoint(destDir string) (BackupCheckpoint, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return BackupCheckpoint{}, nil
+			return BackupCheckpoint{LastOffset: -1}, nil
 		}
 		return BackupCheckpoint{}, err
 	}

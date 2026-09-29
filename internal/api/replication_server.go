@@ -1,10 +1,13 @@
 package api
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"hash/crc32"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -55,52 +58,72 @@ func (h *ReplicationServiceHandler) Append(ctx context.Context, req *types.Repli
 		return nil, status.Errorf(codes.Internal, "partition %d WAL not initialized", req.GetPartitionId())
 	}
 
-	// Term validation: reject stale leaders, step up on newer term.
-	if req.GetTerm() != 0 {
-		if req.GetTerm() < p.Epoch {
-			return &types.ReplicationAppendResponse{
-				Success:    false,
-				Error:      fmt.Sprintf("stale term: got %d, current %d", req.GetTerm(), p.Epoch),
-				LastOffset: p.Wal.GetLastOffset(),
-				NextOffset: p.Wal.GetNextOffset(),
-				Term:       p.Epoch,
-			}, nil
+	p.ReplicateMu.Lock()
+	defer p.ReplicateMu.Unlock()
+	reject := func(reason string) (*types.ReplicationAppendResponse, error) {
+		return &types.ReplicationAppendResponse{Success: false, Error: reason, LastOffset: p.Wal.GetLastOffset(), NextOffset: p.Wal.GetNextOffset(), Term: p.Epoch}, nil
+	}
+	if req.GetTerm() <= 0 || req.GetTerm() < p.Epoch {
+		return reject(fmt.Sprintf("invalid or stale term %d; current %d", req.GetTerm(), p.Epoch))
+	}
+	events := req.GetEvents()
+	if len(events) > 0 {
+		h := crc32.NewIEEE()
+		var buf [20]byte
+		for i, e := range events {
+			if e == nil || e.Offset < 0 || (i > 0 && e.Offset != events[i-1].Offset+1) {
+				return reject("batch offsets must be nonnegative and contiguous")
+			}
+			checksum := crc32.ChecksumIEEE(e.Payload)
+			if e.Checksum != 0 && checksum != e.Checksum {
+				return reject("payload checksum mismatch")
+			}
+			binary.BigEndian.PutUint64(buf[0:8], uint64(e.Offset))
+			binary.BigEndian.PutUint64(buf[8:16], uint64(e.Term))
+			binary.BigEndian.PutUint32(buf[16:20], checksum)
+			h.Write(buf[:])
+			h.Write(e.Payload)
 		}
-		if req.GetTerm() > p.Epoch {
-			p.Epoch = req.GetTerm()
+		if req.Checksum != 0 && req.Checksum != h.Sum32() {
+			return reject("batch checksum mismatch")
+		}
+		if req.ExpectedNextOffset != 0 && req.ExpectedNextOffset != events[0].Offset {
+			return reject("expected offset does not match batch")
+		}
+		// A matching retry is harmless. A conflicting prefix requires an explicit
+		// snapshot reconciliation; an Append RPC never deletes accepted history.
+		consumed := 0
+		for _, e := range events {
+			if e.Offset >= p.Wal.GetNextOffset() {
+				break
+			}
+			existing, err := p.Wal.ReadEvent(e.Offset)
+			if err != nil || existing.MessageId != e.MessageId || existing.Topic != e.Topic || existing.ScheduleTs != e.ScheduleTs || !bytes.Equal(existing.Payload, e.Payload) || !maps.Equal(existing.Meta, e.Meta) {
+				return reject("log conflict: snapshot reconciliation required")
+			}
+			consumed++
+		}
+		events = events[consumed:]
+		if len(events) > 0 && events[0].Offset != p.Wal.GetNextOffset() {
+			return reject("log gap: catch-up required")
 		}
 	}
-
-	if len(req.GetEvents()) > 0 {
-		// Follower-ahead reconciliation: if this (valid-term) leader's batch starts
-		// BEFORE our next offset, our tail diverged from the leader's log (e.g. we
-		// were a former leader that accepted un-replicated writes). Discard the
-		// divergent tail back to the leader's start offset, then accept the batch.
-		// This is epoch-fenced: we only reach here after the term check above, so a
-		// stale leader can never force truncation.
-		leaderStart := req.GetEvents()[0].GetOffset()
-		if leaderStart < p.Wal.GetNextOffset() {
-			removed, truncErr := p.Wal.TruncateToOffset(leaderStart)
-			if truncErr != nil {
-				return &types.ReplicationAppendResponse{
-					Success:    false,
-					Error:      fmt.Sprintf("truncate divergent tail to %d: %v", leaderStart, truncErr),
-					LastOffset: p.Wal.GetLastOffset(),
-					NextOffset: p.Wal.GetNextOffset(),
-					Term:       p.Epoch,
-				}, nil
-			}
-			_ = removed // the WAL logs the truncation detail
+	if req.GetTerm() > p.Epoch {
+		if err := p.PersistEpoch(req.GetTerm()); err != nil {
+			return reject(err.Error())
 		}
-
-		if err := p.Wal.AppendReplicatedBatch(req.GetEvents()); err != nil {
-			return &types.ReplicationAppendResponse{
-				Success:    false,
-				Error:      fmt.Sprintf("append replicated batch: %v", err),
-				LastOffset: p.Wal.GetLastOffset(),
-				NextOffset: p.Wal.GetNextOffset(),
-				Term:       p.Epoch,
-			}, nil
+	}
+	if len(events) > 0 {
+		if err := p.Wal.AppendReplicatedBatch(events); err != nil {
+			return reject(err.Error())
+		}
+		for _, event := range events {
+			if durableAckEnabled(event) {
+				if err := p.Wal.Flush(); err != nil {
+					return reject(err.Error())
+				}
+				break
+			}
 		}
 	}
 
@@ -213,23 +236,26 @@ func (h *ReplicationServiceHandler) Snapshot(req *types.ReplicationSnapshotReque
 		return status.Errorf(codes.NotFound, "partition %d not found", req.GetPartitionId())
 	}
 
-	// Flush the active segment so its on-disk view is consistent with memory.
-	if active := p.Wal.GetActiveSegment(); active != nil {
-		if flushErr := active.Flush(); flushErr != nil {
-			return status.Errorf(codes.Internal, "flush active segment: %v", flushErr)
-		}
+	checkpointDir, err := os.MkdirTemp("", "cronos-snapshot-")
+	if err != nil {
+		return err
 	}
-
+	defer os.RemoveAll(checkpointDir)
+	checkpoint, lastOffset, err := p.Wal.Checkpoint(checkpointDir)
+	if err != nil {
+		return status.Errorf(codes.Internal, "checkpoint: %v", err)
+	}
 	maxBytes := req.GetMaxBytes()
 	if maxBytes <= 0 {
-		maxBytes = 1 << 30 // 1GB default soft cap
+		maxBytes = 1<<63 - 1
 	}
-	startOffset := req.GetStartOffset()
-
-	// Build the list of files to transfer.
-	files, err := h.buildSnapshotFileList(p, startOffset)
-	if err != nil {
-		return status.Errorf(codes.Internal, "build snapshot file list: %v", err)
+	var files []snapshotFile
+	for _, file := range checkpoint {
+		checksum, err := fileCRC32(file.Path)
+		if err != nil {
+			return err
+		}
+		files = append(files, snapshotFile{filename: file.Filename, path: file.Path, firstOffset: file.FirstOffset, lastOffset: file.LastOffset, fileSize: file.Size, crc32: checksum, isIndex: file.IsIndex})
 	}
 
 	const chunkSize = 1 << 20 // 1MB
@@ -242,7 +268,7 @@ func (h *ReplicationServiceHandler) Snapshot(req *types.ReplicationSnapshotReque
 					Trailer: &types.ReplicationSnapshotTrailer{
 						Success:    false,
 						Error:      fmt.Sprintf("snapshot exceeded max_bytes limit %d", maxBytes),
-						LastOffset: p.Wal.GetHighWatermark(),
+						LastOffset: lastOffset,
 						Epoch:      p.Epoch,
 					},
 				},
@@ -298,7 +324,7 @@ func (h *ReplicationServiceHandler) Snapshot(req *types.ReplicationSnapshotReque
 		Payload: &types.ReplicationSnapshotChunk_Trailer{
 			Trailer: &types.ReplicationSnapshotTrailer{
 				Success:    true,
-				LastOffset: p.Wal.GetHighWatermark(),
+				LastOffset: lastOffset,
 				Epoch:      p.Epoch,
 			},
 		},

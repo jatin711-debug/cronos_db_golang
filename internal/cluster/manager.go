@@ -98,7 +98,7 @@ func (m *Manager) Start() error {
 	if m.config.RaftAddr != "" {
 		raft, err := NewRaftNode(m.config)
 		if err != nil {
-			log.Printf("[CLUSTER] Warning: Failed to create Raft node: %v (continuing without Raft)", err)
+			return fmt.Errorf("initialize required Raft authority: %w", err)
 		} else {
 			m.raft = raft
 
@@ -106,12 +106,16 @@ func (m *Manager) Start() error {
 			if len(m.config.SeedNodes) == 0 {
 				log.Printf("[CLUSTER] Bootstrapping new Raft cluster")
 				if err := m.raft.Bootstrap(); err != nil {
-					log.Printf("[CLUSTER] Warning: Failed to bootstrap Raft: %v", err)
+					_ = m.raft.Shutdown()
+					m.raft = nil
+					return fmt.Errorf("bootstrap Raft: %w", err)
 				}
 
 				// Wait for leader election
 				if err := m.raft.WaitForLeader(30 * time.Second); err != nil {
-					log.Printf("[CLUSTER] Warning: no leader elected yet: %v", err)
+					_ = m.raft.Shutdown()
+					m.raft = nil
+					return fmt.Errorf("wait for Raft authority: %w", err)
 				}
 			} else {
 				log.Printf("[CLUSTER] Will join existing Raft cluster via membership")

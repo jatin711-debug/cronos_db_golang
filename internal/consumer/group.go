@@ -35,6 +35,7 @@ type GroupManager struct {
 	groups      map[string]*types.ConsumerGroup
 	partitions  map[int32]*types.Partition // partition_id -> partition
 	offsetStore *OffsetStore               // persistent offset storage
+	completed   map[string]bool            // Used only by the in-memory manager.
 }
 
 // NewGroupManager creates an in-memory-only group manager.
@@ -158,6 +159,9 @@ func (g *GroupManager) JoinGroup(groupID, memberID, address, topic string, parti
 		}
 		group.CommittedOffsets[partitionID] = -1
 		g.groups[groupID] = group
+	}
+	if group.Topic != topic {
+		return fmt.Errorf("consumer group belongs to a different topic")
 	}
 
 	// Re-join/update existing member instead of failing hard.
@@ -332,6 +336,9 @@ func (g *GroupManager) CommitOffset(groupID string, partitionID int64, offset in
 		return fmt.Errorf("invalid partition %d", partitionID)
 	}
 
+	if offset < group.CommittedOffsets[int32(partitionID)] {
+		return fmt.Errorf("committed offset cannot move backwards")
+	}
 	group.CommittedOffsets[int32(partitionID)] = offset
 	group.UpdatedTS = time.Now().UnixMilli()
 
@@ -424,6 +431,9 @@ func (g *GroupManager) Subscribe(req *types.SubscribeRequest) (*Subscription, er
 
 // Ack acknowledges event processing by committing the next offset encoded in the delivery ID.
 func (g *GroupManager) Ack(req *types.AckRequest) error {
+	if !req.GetSuccess() {
+		return fmt.Errorf("unsuccessful acknowledgments cannot commit offsets")
+	}
 	if req.DeliveryId == "" {
 		return fmt.Errorf("delivery_id is required")
 	}

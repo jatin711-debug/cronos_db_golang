@@ -564,13 +564,32 @@ func (s *BloomPebbleStore) GetTimestamp(messageID string) (time.Time, bool, erro
 
 // Put inserts or overwrites an entry in Pebble, then publishes the bloom bit.
 func (s *BloomPebbleStore) Put(messageID string, offset int64, createdTS int64) error {
-	// Persist first, then publish the Bloom bit. This preserves the rebuild
-	// lock order (Pebble claim -> Bloom lock) and avoids a Put/rebuild deadlock.
 	if err := s.pebble.Put(messageID, offset, createdTS); err != nil {
 		return err
 	}
 	s.bloomMu.Lock()
 	s.bloom.Add(messageID)
+	s.bloomMu.Unlock()
+	return nil
+}
+
+// PutBatch persists accepted offsets before publishing their Bloom bits.
+func (s *BloomPebbleStore) PutBatch(messageIDs []string, offsets, createdTS []int64) error {
+	if len(messageIDs) != len(offsets) || len(messageIDs) != len(createdTS) {
+		return fmt.Errorf("dedup completion batch lengths differ")
+	}
+	if len(messageIDs) == 0 {
+		return nil
+	}
+	stripes := s.lockClaimStripes(messageIDs)
+	defer s.unlockClaimStripes(stripes)
+	if err := s.pebble.PutBatch(messageIDs, offsets, createdTS); err != nil {
+		return err
+	}
+	s.bloomMu.Lock()
+	for _, id := range messageIDs {
+		s.bloom.Add(id)
+	}
 	s.bloomMu.Unlock()
 	return nil
 }

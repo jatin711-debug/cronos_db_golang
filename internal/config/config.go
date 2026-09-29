@@ -1,7 +1,7 @@
 // Package config loads, validates, and hot-reloads CronosDB node configuration
 // from command-line flags and environment variables (CRONOS_*).
 //
-// LoadConfig applies defaults, parses flags, then applies env overrides.
+// LoadConfig applies defaults, environment values, then explicit flags.
 // Production mode enforces TLS, auth, encryption, and replication safety unless
 // --dev is set. ReloadableConfig supports SIGHUP-driven updates of a safe
 // subset of runtime tunables.
@@ -11,7 +11,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -135,6 +134,7 @@ func LoadConfig() (*types.Config, error) {
 
 	// Security / dev mode
 	flag.BoolVar(&config.DevMode, "dev", false, "Developer mode: disables production security requirements")
+	flag.BoolVar(&config.ExperimentalFeatures, "experimental-features", false, "Enable unverified transactions and online splitting (requires --dev)")
 
 	// Scheduler configuration
 	flag.IntVar(&config.TickMS, "tick-ms", DefaultTickMS, "Scheduler tick duration in milliseconds")
@@ -242,6 +242,24 @@ func LoadConfig() (*types.Config, error) {
 	flag.Float64Var(&config.TracingSampleRatio, "tracing-sample-ratio", DefaultTracingSampleRatio, "Tracing sample ratio from 0.0 to 1.0")
 	flag.BoolVar(&config.TracingInsecure, "tracing-insecure", DefaultTracingInsecure, "Use insecure OTLP connection (no TLS)")
 
+	// All registered flags accept the matching CRONOS_* environment variable.
+	// Parse explicit flags afterward so command-line arguments take precedence.
+	aliases := map[string]string{"dedup-ttl": "CRONOS_DEDUP_TTL_HOURS", "min-insync-replicas": "CRONOS_MIN_IN_SYNC_REPLICAS"}
+	var envErr error
+	flag.VisitAll(func(f *flag.Flag) {
+		key := "CRONOS_" + strings.ToUpper(strings.ReplaceAll(f.Name, "-", "_"))
+		if alias, ok := aliases[f.Name]; ok {
+			key = alias
+		}
+		if value, ok := os.LookupEnv(key); ok && value != "" {
+			if err := flag.Set(f.Name, value); err != nil {
+				envErr = fmt.Errorf("invalid %s: %w", key, err)
+			}
+		}
+	})
+	if envErr != nil {
+		return nil, envErr
+	}
 	flag.Parse()
 	config.FlushIntervalMS = int32(flushInterval)
 
@@ -251,147 +269,6 @@ func LoadConfig() (*types.Config, error) {
 		for i, seed := range config.ClusterSeeds {
 			config.ClusterSeeds[i] = strings.TrimSpace(seed)
 		}
-	}
-
-	// Environment variable overrides
-	if nodeID := os.Getenv("CRONOS_NODE_ID"); nodeID != "" && config.NodeID == DefaultNodeID {
-		config.NodeID = nodeID
-	}
-	if dataDir := os.Getenv("CRONOS_DATA_DIR"); dataDir != "" && config.DataDir == DefaultDataDir {
-		config.DataDir = dataDir
-	}
-	if grpcAddr := os.Getenv("CRONOS_GRPC_ADDR"); grpcAddr != "" && config.GPRCAddress == DefaultGRPCAddress {
-		config.GPRCAddress = grpcAddr
-	}
-	if httpAddr := os.Getenv("CRONOS_HTTP_ADDR"); httpAddr != "" && config.HTTPAddress == DefaultHTTPAddress {
-		config.HTTPAddress = httpAddr
-	}
-	if devMode := os.Getenv("CRONOS_DEV"); devMode != "" {
-		if parsed, err := strconv.ParseBool(devMode); err == nil {
-			config.DevMode = parsed
-		}
-	}
-	if clusterEnabled := os.Getenv("CRONOS_CLUSTER"); clusterEnabled == "true" {
-		config.ClusterEnabled = true
-	}
-	if seeds := os.Getenv("CRONOS_CLUSTER_SEEDS"); seeds != "" && len(config.ClusterSeeds) == 0 {
-		config.ClusterSeeds = strings.Split(seeds, ",")
-		for i, seed := range config.ClusterSeeds {
-			config.ClusterSeeds[i] = strings.TrimSpace(seed)
-		}
-	}
-	if tracingEnabled := os.Getenv("CRONOS_TRACING_ENABLED"); tracingEnabled != "" {
-		if parsed, err := strconv.ParseBool(tracingEnabled); err == nil {
-			config.TracingEnabled = parsed
-		}
-	}
-	if tracingExporter := os.Getenv("CRONOS_TRACING_EXPORTER"); tracingExporter != "" {
-		config.TracingExporter = strings.TrimSpace(tracingExporter)
-	}
-	if tracingEndpoint := os.Getenv("CRONOS_TRACING_OTLP_ENDPOINT"); tracingEndpoint != "" {
-		config.TracingOTLPEndpoint = strings.TrimSpace(tracingEndpoint)
-	}
-	if tracingRatio := os.Getenv("CRONOS_TRACING_SAMPLE_RATIO"); tracingRatio != "" {
-		if parsed, err := strconv.ParseFloat(tracingRatio, 64); err == nil {
-			config.TracingSampleRatio = parsed
-		}
-	}
-	if tracingInsecure := os.Getenv("CRONOS_TRACING_INSECURE"); tracingInsecure != "" {
-		if parsed, err := strconv.ParseBool(tracingInsecure); err == nil {
-			config.TracingInsecure = parsed
-		}
-	}
-
-	// TLS environment overrides
-	if tlsEnabled := os.Getenv("CRONOS_TLS_ENABLED"); tlsEnabled != "" {
-		if parsed, err := strconv.ParseBool(tlsEnabled); err == nil {
-			config.TLSEnabled = parsed
-		}
-	}
-	if caFile := os.Getenv("CRONOS_TLS_CA_FILE"); caFile != "" {
-		config.TLSCAFile = caFile
-	}
-	if certFile := os.Getenv("CRONOS_TLS_CERT_FILE"); certFile != "" {
-		config.TLSCertFile = certFile
-	}
-	if keyFile := os.Getenv("CRONOS_TLS_KEY_FILE"); keyFile != "" {
-		config.TLSKeyFile = keyFile
-	}
-
-	// Internal replication mTLS environment overrides
-	if replicationTLSEnabled := os.Getenv("CRONOS_REPLICATION_TLS_ENABLED"); replicationTLSEnabled != "" {
-		if parsed, err := strconv.ParseBool(replicationTLSEnabled); err == nil {
-			config.ReplicationTLSEnabled = parsed
-		}
-	}
-	if caFile := os.Getenv("CRONOS_REPLICATION_TLS_CA_FILE"); caFile != "" {
-		config.ReplicationTLSCAFile = caFile
-	}
-	if certFile := os.Getenv("CRONOS_REPLICATION_TLS_CERT_FILE"); certFile != "" {
-		config.ReplicationTLSCertFile = certFile
-	}
-	if keyFile := os.Getenv("CRONOS_REPLICATION_TLS_KEY_FILE"); keyFile != "" {
-		config.ReplicationTLSKeyFile = keyFile
-	}
-
-	// Auth environment overrides. We only honor CRONOS_AUTH_ENABLED when the
-	// --auth-enabled flag was not explicitly provided on the command line, so
-	// that flags always take precedence over environment variables.
-	authEnabledExplicit := false
-	flag.Visit(func(f *flag.Flag) {
-		if f.Name == "auth-enabled" {
-			authEnabledExplicit = true
-		}
-	})
-	if !authEnabledExplicit {
-		if authEnabled := os.Getenv("CRONOS_AUTH_ENABLED"); authEnabled != "" {
-			if parsed, err := strconv.ParseBool(authEnabled); err == nil {
-				config.AuthEnabled = parsed
-			}
-		}
-	}
-	if jwtSecret := os.Getenv("CRONOS_AUTH_JWT_SECRET"); jwtSecret != "" {
-		config.AuthJWTSecret = jwtSecret
-	}
-
-	// Replication environment overrides
-	if minISR := os.Getenv("CRONOS_MIN_IN_SYNC_REPLICAS"); minISR != "" {
-		if parsed, err := strconv.Atoi(minISR); err == nil {
-			config.MinInSyncReplicas = parsed
-		}
-	}
-	if snapshotThreshold := os.Getenv("CRONOS_SNAPSHOT_CATCHUP_THRESHOLD"); snapshotThreshold != "" {
-		if parsed, err := strconv.ParseInt(snapshotThreshold, 10, 64); err == nil {
-			config.SnapshotCatchupThreshold = parsed
-		}
-	}
-
-	// Exactly-once commits
-	if eo := os.Getenv("CRONOS_EXACTLY_ONCE_COMMITS"); eo != "" {
-		if parsed, err := strconv.ParseBool(eo); err == nil {
-			config.ExactlyOnceCommits = parsed
-		}
-	}
-
-	// Encryption at rest environment overrides
-	if encEnabled := os.Getenv("CRONOS_ENCRYPTION_ENABLED"); encEnabled != "" {
-		if parsed, err := strconv.ParseBool(encEnabled); err == nil {
-			config.EncryptionEnabled = parsed
-		}
-	}
-	if encKeyFile := os.Getenv("CRONOS_ENCRYPTION_KEY_FILE"); encKeyFile != "" {
-		config.EncryptionKeyFile = encKeyFile
-	}
-
-	// Topology environment overrides
-	if rack := os.Getenv("CRONOS_NODE_RACK"); rack != "" {
-		config.NodeRack = rack
-	}
-	if zone := os.Getenv("CRONOS_NODE_ZONE"); zone != "" {
-		config.NodeZone = zone
-	}
-	if region := os.Getenv("CRONOS_NODE_REGION"); region != "" {
-		config.NodeRegion = region
 	}
 
 	// Validate required configuration
@@ -451,6 +328,12 @@ func ValidateConfig(c *types.Config) error {
 	// Production hardening: require TLS, auth, encryption, and replication safety
 	// unless the operator explicitly opts into developer mode.
 	if !c.DevMode {
+		if c.ExperimentalFeatures {
+			return fmt.Errorf("experimental-features requires --dev; transactions and online splitting are not supported in production")
+		}
+		if c.ExactlyOnceCommits {
+			return fmt.Errorf("exactly-once-commits is not supported in production; use per-event at-least-once completion")
+		}
 		if c.ReplicationFactor < 3 {
 			return fmt.Errorf("production mode requires replication-factor >= 3 (use --dev to bypass)")
 		}

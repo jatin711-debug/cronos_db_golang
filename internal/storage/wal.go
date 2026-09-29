@@ -63,31 +63,28 @@ var walFlushErrorsTotal = promauto.NewCounterVec(
 // Offsets are reserved atomically, then written in strict order via an append
 // sequencer so concurrent producers never interleave records on disk.
 type WAL struct {
-	mu                 sync.RWMutex
-	dataDir            string // root directory for segments/ and index/
-	partitionID        int32  // owning partition ID
-	partitionLabel     string // cached string form of partitionID for metrics
-	segments           []*Segment
-	activeSegment      *Segment
-	nextSegment        *Segment     // pre-created next segment for fast rotation
-	nextSegMu          sync.Mutex   // protects nextSegment
-	preCreateTriggered atomic.Bool  // avoids duplicate pre-creation goroutines
-	nextOffset         atomic.Int64 // next offset to assign; reserved outside w.mu
-	highWatermark      int64        // highest durable offset written (inclusive)
-	appendSeq          atomic.Int64 // next offset that must be appended (in-order writes)
-	appendSeqMu        sync.Mutex
-	appendSeqCond      *sync.Cond
-	config             *WALConfig
-	fsyncMode          FsyncMode   // parsed once at init; avoids per-write string cmp
-	dirty              atomic.Bool // set on write, cleared on flush
-	flushErrors        atomic.Int64
-	quit               chan struct{}
-	quitOnce           sync.Once
-	wg                 sync.WaitGroup
-	cipher             *SegmentCipher           // optional at-rest encryption; nil = plaintext
-	currentTerm        int64                    // Raft term stamped on newly produced records
-	appendHook         func(event *types.Event) // called after successful append (e.g. CDC)
-	coalescer          *FsyncCoalescer          // optional global fsync coalescer
+	mu             sync.RWMutex
+	dataDir        string // root directory for segments/ and index/
+	partitionID    int32  // owning partition ID
+	partitionLabel string // cached string form of partitionID for metrics
+	segments       []*Segment
+	activeSegment  *Segment
+	nextOffset     atomic.Int64 // next offset to assign; reserved outside w.mu
+	highWatermark  int64        // highest durable offset written (inclusive)
+	appendSeq      atomic.Int64 // next offset that must be appended (in-order writes)
+	appendSeqMu    sync.Mutex
+	appendSeqCond  *sync.Cond
+	config         *WALConfig
+	fsyncMode      FsyncMode   // parsed once at init; avoids per-write string cmp
+	dirty          atomic.Bool // set on write, cleared on flush
+	flushErrors    atomic.Int64
+	quit           chan struct{}
+	quitOnce       sync.Once
+	wg             sync.WaitGroup
+	cipher         *SegmentCipher           // optional at-rest encryption; nil = plaintext
+	currentTerm    int64                    // Raft term stamped on newly produced records
+	appendHook     func(event *types.Event) // called after successful append (e.g. CDC)
+	coalescer      *FsyncCoalescer          // optional global fsync coalescer
 
 	// Group-commit coordinator for FsyncBatch mode. When multiple concurrent
 	// writers need to fsync the same segment, the first becomes the leader and
@@ -156,8 +153,14 @@ func newWAL(dataDir string, partitionID int32, config *WALConfig, cipher *Segmen
 	}
 	wal.appendSeqCond = sync.NewCond(&wal.appendSeqMu)
 
+	if err := RecoverSnapshot(dataDir); err != nil {
+		return nil, fmt.Errorf("recover snapshot install: %w", err)
+	}
 	// Load existing segments
 	if err := wal.loadSegments(); err != nil {
+		for _, seg := range wal.segments {
+			_ = seg.Close()
+		}
 		return nil, fmt.Errorf("load segments: %w", err)
 	}
 
@@ -228,9 +231,7 @@ func (w *WAL) loadSegments() error {
 	for _, filename := range segmentFiles {
 		segment, err := OpenSegment(w.dataDir, filename, w.cipher)
 		if err != nil {
-			log.Printf("[WAL-%d] WARNING: Failed to open segment %s: %v", w.partitionID, filename, err)
-			// Try to recover by skipping corrupt segment
-			continue
+			return fmt.Errorf("open existing segment %s: %w", filename, err)
 		}
 
 		// Verify segment integrity by reading all events and checking CRCs
@@ -241,8 +242,7 @@ func (w *WAL) loadSegments() error {
 			} else {
 				log.Printf("[WAL-%d] WARNING: Segment %s verification failed: %v", w.partitionID, filename, err)
 			}
-			// Skip corrupt segment - data before this segment is still valid
-			continue
+			return fmt.Errorf("verify existing segment %s: %w", filename, err)
 		}
 
 		w.segments = append(w.segments, segment)
@@ -589,13 +589,6 @@ func (w *WAL) AppendBatch(events []*types.Event) error {
 			returnBuffersToPool(prepared)
 			return fmt.Errorf("rotate segment: %w", err)
 		}
-	} else {
-		// Trigger background pre-creation at 75% capacity so the next segment is
-		// almost certainly ready before rotation is required.
-		threshold := int64(float64(w.config.SegmentSizeBytes) * 0.75)
-		if w.activeSegment.GetSize() >= threshold && w.preCreateTriggered.CompareAndSwap(false, true) {
-			go w.maybePreCreateNextSegment(w.nextOffset.Load())
-		}
 	}
 
 	// Advance the sequencer while still holding w.mu so the next writer cannot
@@ -739,11 +732,6 @@ func (w *WAL) AppendReplicatedBatch(events []*types.Event) error {
 			returnBuffersToPool(prepared)
 			return fmt.Errorf("rotate segment: %w", err)
 		}
-	} else {
-		threshold := int64(float64(w.config.SegmentSizeBytes) * 0.9)
-		if w.activeSegment.GetSize() >= threshold && w.preCreateTriggered.CompareAndSwap(false, true) {
-			go w.maybePreCreateNextSegment(w.nextOffset.Load())
-		}
 	}
 
 	w.mu.Unlock()
@@ -764,34 +752,6 @@ func (w *WAL) AppendReplicatedBatch(events []*types.Event) error {
 	return nil
 }
 
-// maybePreCreateNextSegment creates the next segment in the background
-// so that rotation can swap it in with minimal lock hold time.
-func (w *WAL) maybePreCreateNextSegment(nextOffset int64) {
-	w.nextSegMu.Lock()
-	if w.nextSegment != nil {
-		w.nextSegMu.Unlock()
-		return
-	}
-	w.nextSegMu.Unlock()
-
-	seg, err := NewSegmentWithSize(w.dataDir, nextOffset, true, w.cipher, w.config.SegmentSizeBytes)
-	if err != nil {
-		log.Printf("[WAL-%d] failed to pre-create next segment: %v", w.partitionID, err)
-		w.preCreateTriggered.Store(false)
-		return
-	}
-
-	w.nextSegMu.Lock()
-	if w.nextSegment == nil {
-		w.nextSegment = seg
-	} else {
-		if err := seg.Close(); err != nil {
-			log.Printf("[WAL-%d] failed to close unused pre-created segment: %v", w.partitionID, err)
-		}
-	}
-	w.nextSegMu.Unlock()
-}
-
 // openActiveSegment opens the last active segment or creates a new one.
 func (w *WAL) openActiveSegment() error {
 	if len(w.segments) > 0 {
@@ -809,7 +769,6 @@ func (w *WAL) openActiveSegment() error {
 	}
 	w.segments = append(w.segments, segment)
 	w.activeSegment = segment
-
 	return nil
 }
 
@@ -903,13 +862,6 @@ func (w *WAL) AppendEvent(event *types.Event) error {
 			}
 			return fmt.Errorf("rotate segment: %w", err)
 		}
-	} else {
-		// Trigger background pre-creation at 75% capacity so the next segment is
-		// almost certainly ready before rotation is required.
-		threshold := int64(float64(w.config.SegmentSizeBytes) * 0.75)
-		if w.activeSegment.GetSize() >= threshold && w.preCreateTriggered.CompareAndSwap(false, true) {
-			go w.maybePreCreateNextSegment(w.nextOffset.Load())
-		}
 	}
 
 	w.advanceAppendTurn(endOffset)
@@ -936,38 +888,27 @@ func (w *WAL) AppendEvent(event *types.Event) error {
 	return nil
 }
 
-// rotateSegment swaps to the pre-created next segment if available,
-// otherwise falls back to synchronous creation.
+// rotateSegment creates a segment at the actual appended offset boundary.
+// The caller must hold w.mu.
 func (w *WAL) rotateSegment() error {
 	start := time.Now()
 	defer func() {
 		metrics.ObserveSegmentRotation(strconv.FormatInt(int64(w.partitionID), 10), time.Since(start))
 	}()
 
-	var nextSeg *Segment
-
-	// Try to use pre-created segment
-	w.nextSegMu.Lock()
-	if w.nextSegment != nil {
-		nextSeg = w.nextSegment
-		w.nextSegment = nil
-	}
-	w.nextSegMu.Unlock()
-
-	if nextSeg == nil {
-		// Fallback: create synchronously
-		var err error
-		nextSeg, err = NewSegmentWithSize(w.dataDir, w.nextOffset.Load(), true, w.cipher, w.config.SegmentSizeBytes)
-		if err != nil {
-			return fmt.Errorf("create new active segment: %w", err)
-		}
+	// nextOffset includes reservations by waiting writers. The new segment's
+	// start must follow the last record actually appended, not those reservations.
+	// Speculatively naming a segment at 75% capacity also gets this boundary wrong.
+	firstOffset := w.activeSegment.GetLastOffset() + 1
+	nextSeg, err := NewSegmentWithSize(w.dataDir, firstOffset, true, w.cipher, w.config.SegmentSizeBytes)
+	if err != nil {
+		return fmt.Errorf("create new active segment: %w", err)
 	}
 
 	// Now we have the new segment ready!
 	oldActive := w.activeSegment
 	w.segments = append(w.segments, nextSeg)
 	w.activeSegment = nextSeg
-	w.preCreateTriggered.Store(false)
 
 	// Deactivate (not Close) the old active segment: release its write-side/mmap
 	// resources but keep its read handle + index open so historical reads of this
@@ -1057,10 +998,6 @@ func (w *WAL) ReadEventsByTime(startTS, endTS int64) ([]*types.Event, error) {
 
 	// Find segments that contain the timestamp range
 	for _, segment := range w.segments {
-		if segment.GetLastTS() < startTS || segment.GetFirstTS() > endTS {
-			continue
-		}
-
 		events, err := segment.ReadEventsByTime(startTS, endTS)
 		if err != nil {
 			return nil, fmt.Errorf("read from segment %s: %w", segment.GetFilename(), err)
@@ -1289,16 +1226,6 @@ func (w *WAL) Close() error {
 		}
 	}
 
-	// Close pre-created next segment if it was prepared but never activated.
-	w.nextSegMu.Lock()
-	if w.nextSegment != nil {
-		if err := w.nextSegment.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("close pre-created segment: %w", err))
-		}
-		w.nextSegment = nil
-	}
-	w.nextSegMu.Unlock()
-
 	return errors.Join(errs...)
 }
 
@@ -1416,15 +1343,6 @@ func (w *WAL) TruncateToOffset(offset int64) (int, error) {
 	kept = append(kept, newActive)
 	w.segments = kept
 	w.activeSegment = newActive
-
-	// Discard any pre-created next segment; its firstOffset is now stale.
-	w.nextSegMu.Lock()
-	if w.nextSegment != nil {
-		_ = w.nextSegment.Close()
-		w.nextSegment = nil
-	}
-	w.nextSegMu.Unlock()
-	w.preCreateTriggered.Store(false)
 
 	// Rewind offset counters so the next append lands exactly at `offset`.
 	w.nextOffset.Store(offset)
