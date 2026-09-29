@@ -7,7 +7,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 [![Status](https://img.shields.io/badge/status-Beta-yellow.svg)](#status)
 
-> **Production Readiness:** The core storage, scheduling, replication, and consumer-group paths are implemented and tested. Production deployments require TLS, auth, encryption at rest, replication mTLS, RF≥3, and minISR≥2. Use `--dev` only for local development/CI. Run production workloads only after configuring all security controls.
+> **Production Readiness:** Production hardening is in progress. Security configuration and passing unit tests do not establish safe failover, recovery, or retention. See the [audit and open findings](docs/PRODUCTION_AUDIT_2026-09-27.md) and [release requirements](docs/PRODUCTION_RELEASE.md). Transactions and online partition splitting are disabled by default and require `--dev --experimental-features`; they are unsupported in production. End-to-end exactly-once delivery is not supported.
 
 CronosDB is a distributed database purpose-built for **timestamp-triggered event processing**. Publish events with a future timestamp — CronosDB stores them durably and delivers them precisely when the time arrives.
 
@@ -38,8 +38,9 @@ All numbers below are from single-machine benchmarks (3 nodes on one host, AMD R
 - **Append-Only WAL v2** — Segmented logs (512MB), per-entry Raft term + CRC32 integrity, sparse indexing. Upgrading from earlier builds requires a clean data directory.
 - **Memory-Mapped Reads** — Zero-copy segment reads on Linux/Windows
 - **Configurable Fsync** — `every_event` | `batch` (default) | `periodic` modes
-- **Automatic Compaction** — Removes segments below min consumer offset
-- **Retention Enforcer** — Time-based and size-based cleanup preserving the active segment per partition
+- **Automatic Compaction** — Removes closed standalone WAL segments only after every relevant consumer group has completed every event
+- **Retention Enforcer** — Age/size policies use the same completion checks and preserve future timers and active segments; clustered/replicated pruning is disabled pending durable cluster-wide completion and handoff watermarks
+- **WAL Backups** — Hourly independent checkpoints of loaded partitions, including active segments; event-log restore is covered for plaintext and encrypted storage (see [maintenance validation](docs/MAINTENANCE_VALIDATION_2026-09-29.md))
 - **Hierarchical Timing Wheel** — O(1) timer add/remove/tick for millions of events
 - **Two-Tier Cold/Hot Scheduler** — PebbleDB cold store for far-future events (>1hr); adaptive hydrator adjusts scan frequency based on load (5s–5min). Keeps hot memory bounded.
 - **Absolute Time Tracking** — No drift across overflow wheel cascades
@@ -71,7 +72,7 @@ All numbers below are from single-machine benchmarks (3 nodes on one host, AMD R
 ### API
 - **gRPC Streaming** — Bidirectional subscribe, streaming replay
 - **Batch Publish** — 100-4000 events per call for maximum throughput
-- **Consumer Groups** — Kafka-style offset tracking with persistent PebbleDB store for offsets, group metadata, and exactly-once commit IDs
+- **Consumer Groups** — Persistent PebbleDB offsets, group metadata, and per-event completion records; progress across failover remains under validation
 - **Replay Engine** — Time-range or offset-based historical replay
 
 ---
@@ -604,7 +605,8 @@ flag-only).
 | `-auth-jwt-secret` | *(empty)* | HMAC secret for JWT verification |
 | `-auth-jwt-public-key` | *(empty)* | Path to Ed25519/RSA public key for JWT verification |
 | `-auth-policy-file` | *(empty)* | Path to RBAC policy JSON file |
-| `-exactly-once-commits` | `false` | Enable exactly-once consumer offset commits (forward-only monotonic) |
+| `-experimental-features` | `false` | Enable unverified transactions and online splitting; requires `--dev` |
+| `-exactly-once-commits` | `false` | Experimental commit-ID storage; rejected in production, does not provide end-to-end exactly-once delivery |
 | `-follower-reads` | `false` | Allow follower nodes to serve replay reads |
 | `-load-shedding-threshold` | `0.0` | Load shedding threshold (0.0-1.0, 0 = disabled) |
 | `-encryption-enabled` | `false` | Enable AES-256-GCM encryption at rest for WAL segments |
@@ -726,7 +728,7 @@ cronos_db/
 | **ReplicationService** | `Append`, `Sync`, `Snapshot` | Internal replication (intra-cluster, internal listener) |
 | **RaftService** | `Join`, `Leave`, `Status` | Internal cluster (intra-cluster, internal listener) |
 | **CrossRegionService** | `ReplicateEvents`, `FetchEvents` | Cross-region replication |
-| **TransactionService** | `BeginTransaction`, `PrepareTransaction`, `CommitTransaction`, `AbortTransaction` | 2PC distributed transactions |
+| **TransactionService** | `BeginTransaction`, `PrepareTransaction`, `CommitTransaction`, `AbortTransaction` | Experimental 2PC; registered only with `--dev --experimental-features` |
 
 ### Key RPCs
 
