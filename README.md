@@ -15,20 +15,18 @@ It combines the durability of a write-ahead log, the precision of a hierarchical
 
 ## Key Numbers
 
-All numbers below are from single-machine benchmarks (3 nodes on one host, AMD Ryzen 7 6800H, NVMe SSD) and depend heavily on fsync mode, payload size, and batch size.
+Recent numbers below are accepted publish rates from three nodes on one AMD
+Ryzen 7 6800H host. See the [measurement settings and baseline comparison](docs/CLUSTER_PERFORMANCE_VALIDATION_2026-09-29.md).
 
 | Metric | Value |
 |--------|-------|
-| **Cluster Throughput (max)** | **~790K events/sec** — `make loadtest-max`: RF=1, `periodic` fsync, 256B, batch=4000, 96 publishers, 19.2M events, 100% success |
-| **Standard batch profile** | **~767K events/sec** — `make loadtest-batch`: RF=1, 24 publishers/node (72 total), batch=4000, 3.6M events |
-| **Replicated durable (RF=3, minISR=2)** | **~200K events/sec** — synchronous quorum: every write blocks until a follower acks (batch=4000 amortizes the round-trip) |
-| **Publish Latency (RF=1, `periodic`, batch)** | **P50 ~150µs · P95 ~400µs · P99 ~540µs** (max observed ~800µs — sub-millisecond tail) |
-| **Publish Latency (RF=3, minISR=2)** | **P50 ~890µs · P99 ~1.3ms** (includes the quorum replication round-trip) |
-| **Success Rate** | **100%** across batch benchmark profiles |
+| **RF=1 raw publish, current branch** | **~612K events/sec median** — Go fallback, dedup bypassed, 32 partitions, 4.8M events; 16.4% below matched v0.5.0 median |
+| **RF=3, minISR=2, current branch** | **~111K events/sec** — native Rust/CGO, dedup enabled, 16 partitions, 960K events; one sample |
+| **Reported publish errors** | **0** in the listed completed profiles; delivery and failover are separate checks |
 | **Timer Precision** | 10ms tick default (`-tick-ms`; configurable) |
 | **Dedup False Positive Rate** | <1% (Rust bloom filter) |
 
-> Benchmarked on a **single machine** running all 3 cluster nodes simultaneously (AMD Ryzen 7 6800H). The ~790K figure is the throughput ceiling — RF=1 with `periodic` fsync (least durable). Replicated durability (RF=3 / minISR=2) runs ~200K with batch=4000 (~4× lower) because each write blocks on quorum replication; that is the honest production-durability number. Real networks and higher-latency storage will lower both.
+> Earlier ~790K RF=1, ~200K RF=3, and 1M+ claims used different conditions or lack preserved evidence. They are not current production capacity targets. The `v0.6.0-rc.1` tag also has an RF=3 quorum acknowledgement defect; the current branch fixes the fail-open path, but release blockers remain.
 
 ---
 
@@ -464,30 +462,19 @@ Use `-addr` to target a different node. Run `make demo` if a node is already up.
 
 ### Benchmarks (3-Node Cluster on Single Machine)
 
-Measured on a 3-node cluster on one host (AMD Ryzen 7 6800H, NVMe SSD):
+Measured on a 3-node cluster on one host (AMD Ryzen 7 6800H, NVMe SSD) with 256-byte payloads and periodic fsync:
 
 | Profile | Throughput | Notes |
 |--------|------------|-------|
-| `make loadtest-max` | **~790K events/sec** | RF=1, `periodic` fsync, batch 4000, 32 publishers/node (96 total), 19.2M events, P99 ~540µs |
-| `make loadtest-batch` | **~767K events/sec** | RF=1, batch 4000, 24 publishers/node (72 total), 3.6M events, P99 ~416µs |
-| Replicated (RF=3, minISR=2) | **~200K events/sec** | Synchronous quorum durability, batch=4000, 16 partitions; P99 ~1.3ms; `replication_lag=0` (followers fully caught up) |
-| Single-event mode | ~10K events/sec | One event per RPC (no batching) |
+| RF=1 raw publish, current branch | **612K events/sec median** | Three runs; dedup bypassed, 32 partitions, 128 MiB segments, batch 4000, 4.8M events each, Go fallback |
+| RF=1 raw publish, v0.5.0 | **733K events/sec median** | Matched three-run baseline; 16.4% faster |
+| RF=3, minISR=2, current branch | **111K events/sec** | Native Rust/CGO, dedup enabled, 16 partitions, batch 4000, 960K events, one run |
 
-Representative latency at the RF=1 ceiling (`periodic` fsync, batch mode): **P50 ~150µs, P95 ~400µs, P99 ~540µs** — sub-millisecond tail across all nodes.
-
-> Throughput varies by CPU, disk, scheduler settings, and payload size. Re-run the provided load tests in your environment for production sizing.
+The [validation record](docs/CLUSTER_PERFORMANCE_VALIDATION_2026-09-29.md) includes the native/CGO baseline pair, additional RF=3 workloads, and measurement limits. Re-run with your storage, network, and durability settings before sizing a deployment.
 
 ### Durability & Fault Tolerance
 
-With replication enabled (`--replication-factor=3 --min-insync-replicas=2`), every publish blocks until a **quorum** of replicas (leader + at least one follower) has the data. Each partition leader streams its WAL to followers over gRPC and only acknowledges the write once `minISR` replicas ack — so an acknowledged write survives a node loss, and a write that *cannot* reach quorum is **rejected rather than silently accepted**.
-
-Measured on a 3-node RF=3 / minISR=2 cluster (16 partitions, batch=4000):
-
-| Cluster state | Result | Behavior |
-|---------------|--------|----------|
-| **All 3 nodes up** | ✅ 100% success, ~200K events/sec, `replication_lag=0` | Every write replicated to both followers |
-| **1 node down** | ✅ **100% success** | Leader + 1 surviving follower still meet minISR=2 — stays available |
-| **2 nodes down** | 🛑 **Writes fail-closed** | Quorum impossible (1 < 2); publishes are **rejected**, not lost |
+With replication enabled (`--replication-factor=3 --min-insync-replicas=2`), the publish path waits for a follower acknowledgement before returning success. The current branch rejects writes when no replication leader is ready. The three-node completed runs reported zero errors and zero follower lag at the end. A fault campaign must still prove accepted-ID survival through node loss, restart, and leader replacement; see the [production audit](docs/PRODUCTION_AUDIT_2026-09-27.md).
 
 The fail-closed rejection is explicit, e.g.:
 
@@ -495,9 +482,9 @@ The fail-closed rejection is explicit, e.g.:
 replication for partition 13: not enough replicas: min-insync-replicas=2 but no connected followers
 ```
 
-This is the intended safety property: the system refuses to acknowledge a write it cannot make durable, avoiding silent data loss or split-brain. Confirm replication health any time via the `cronos_replication_lag` metric (`curl http://<node>:8080/metrics | grep replication_lag`) — `0` means followers are fully caught up.
+Inspect replication health via the `cronos_replication_lag` metric (`curl http://<node>:8080/metrics | grep replication_lag`). A zero gauge alone does not establish failover safety.
 
-> RF=1 (the default in the `make node*` / benchmark profiles) is the fast, **non-replicated** path used for throughput numbers. Enable RF≥3 + minISR≥2 for the durability guarantees above.
+> RF=1 (the default in the `make node*` / benchmark profiles) uses one replica. RF≥3 + minISR≥2 is required for quorum acknowledgements, but production recovery remains under validation.
 
 ### What Makes It Fast
 
@@ -778,8 +765,8 @@ See [proto/events.proto](proto/events.proto) for the complete specification.
 - [x] Bulk segment snapshot install over gRPC for new node bootstrap / far-behind followers
 - [x] Partition leader election on failure
 
-### Performance ✅ Optimized (single-machine)
-- [x] ~790K events/sec (`periodic` fsync, RF=1, batch mode, single machine — measured)
+### Performance 🔄 Under validation (single machine)
+- [ ] Investigate the measured RF=1 regression against v0.5.0 before setting a production target
 - [x] Durable throughput validated with `batch` fsync
 - [x] Lock-free Rust bloom filter via CGO FFI
 - [x] sync.Pool for timers, record buffers, transport buffers
