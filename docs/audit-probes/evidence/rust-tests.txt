@@ -1,0 +1,23 @@
+   Compiling crossbeam-utils v0.8.21
+   Compiling zerocopy v0.8.31
+   Compiling cfg-if v1.0.4
+   Compiling rayon-core v1.13.0
+   Compiling libc v0.2.178
+   Compiling either v1.15.0
+   Compiling static_assertions v1.1.0
+   Compiling getrandom v0.2.16
+   Compiling rand_core v0.6.4
+   Compiling crossbeam-epoch v0.9.18
+   Compiling crossbeam-deque v0.8.6
+   Compiling ppv-lite86 v0.2.21
+   Compiling rayon v1.11.0
+   Compiling rand_chacha v0.3.1
+   Compiling rand v0.8.5
+   Compiling twox-hash v1.6.3
+   Compiling cronos_dedup v0.1.0 (<REPO>\internal\dedup\rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 15.81s
+     Running unittests src\lib.rs (internal\dedup\rust\target\debug\deps\cronos_dedup-d0280094e8eec046.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
