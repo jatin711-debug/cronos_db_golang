@@ -318,6 +318,7 @@ func (m *Manager) reconcileLocalLeadership() {
 		if info == nil || info.LeaderID != nodeID {
 			continue // not led locally
 		}
+		epoch := info.Epoch
 		// Defer to Raft-committed leadership when it names someone else.
 		if committed != nil {
 			if c, ok := committed[partitionID]; ok && c != nil && c.LeaderID != "" && c.LeaderID != nodeID {
@@ -325,10 +326,17 @@ func (m *Manager) reconcileLocalLeadership() {
 					partitionID, c.LeaderID, nodeID)
 				continue
 			}
+			if c, ok := committed[partitionID]; ok && c != nil && c.Epoch > epoch {
+				epoch = c.Epoch
+			}
+		}
+		if epoch <= 0 {
+			log.Printf("[CLUSTER] reconcile: skip partition %d with no positive leadership epoch", partitionID)
+			continue
 		}
 		// Idempotent: PromoteToLeader is a no-op (epoch refresh) once the local
 		// replication leader exists.
-		if err := pa.PromoteToLeader(partitionID, info.Epoch); err != nil {
+		if err := pa.PromoteToLeader(partitionID, epoch); err != nil {
 			log.Printf("[CLUSTER] reconcile: promote partition %d failed: %v", partitionID, err)
 			continue
 		}
@@ -542,7 +550,10 @@ func (m *Manager) syncClusterState() {
 			continue
 		}
 
-		if !partitionAssignmentChanged(existing, info) {
+		// Older clusters may have persisted the bootstrap assignment with epoch
+		// zero. Advance the committed epoch once so a later failover cannot reuse
+		// the live leader's epoch and defeat the follower's stale-term fence.
+		if !partitionAssignmentChanged(existing, info) && existing.Epoch > 0 {
 			continue
 		}
 

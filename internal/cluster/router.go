@@ -110,6 +110,7 @@ func (r *Router) initializePartitions() {
 			LeaderID: leaderID,
 			Replicas: nodes,
 			ISR:      nodes, // Initially all replicas are in-sync
+			Epoch:    1,
 			State:    PartitionStateOnline,
 		}
 	}
@@ -266,6 +267,7 @@ func (r *Router) updateAssignments() {
 				LeaderID: leaderID,
 				Replicas: nodes,
 				ISR:      nodes,
+				Epoch:    1,
 				State:    PartitionStateOnline,
 			}
 		}

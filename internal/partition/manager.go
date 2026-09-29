@@ -1210,6 +1210,11 @@ func (pm *PartitionManager) PromoteToLeader(partitionID int32, epoch int64) erro
 			return err
 		}
 	}
+	if pm.config.ReplicationFactor <= 1 {
+		partition.Leader = true
+		partition.Epoch = epoch
+		return nil
+	}
 	leader := replication.NewLeader(partitionID, int32(pm.config.ReplicationBatchSize), pm.config.ReplicationTimeout, partition.Wal, pm.config.MinInSyncReplicas, pm.nodeID, pm.replicationTLSConfig())
 	leader.SetEpoch(epoch) // advertise the real cluster epoch on the wire, not the default 1
 	leader.Start()
@@ -1272,6 +1277,13 @@ func (pm *PartitionManager) GetPartitionEpoch(partitionID int32) int64 {
 		return partition.Epoch
 	}
 	return 0
+}
+
+// ReplicationRequired reports whether publish acknowledgement needs an active
+// local replication leader. A missing leader must never silently use the RF=1
+// WAL fast path when replication is configured.
+func (pm *PartitionManager) ReplicationRequired() bool {
+	return pm.config.ReplicationFactor > 1 || pm.config.MinInSyncReplicas > 1
 }
 
 // GetPartitionReplicaOffsets returns the latest high-watermark offsets for a partition's

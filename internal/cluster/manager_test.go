@@ -107,6 +107,9 @@ func TestClusterRouter_Assignments(t *testing.T) {
 
 	// Verify partitions are assigned to node-1 (since it is the only alive node in the ring)
 	for i := int32(0); i < 4; i++ {
+		if epoch := router.GetPartitionEpoch(i); epoch != 1 {
+			t.Errorf("partition %d initial epoch = %d, want 1", i, epoch)
+		}
 		leader, err := router.GetPartitionLeader(i)
 		if err != nil {
 			t.Fatalf("GetPartitionLeader failed for partition %d: %v", i, err)
