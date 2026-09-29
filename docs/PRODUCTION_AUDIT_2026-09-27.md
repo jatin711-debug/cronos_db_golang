@@ -33,8 +33,17 @@ existing-test review, not a new fault-injection or deployment campaign.
 | F16: transactions/splits | Contained for first release | Transactions and splitting are disabled by default and require --dev --experimental-features. Production rejects this opt-in and exactly-once commits. Public-RPC tests verify disabled endpoints; underlying experimental state machines remain unsupported. |
 | F17: overload/latency | Partial | Worker event-count and estimated-byte caps added. Byte-bounded queues throughout, quorum latency/deadlines, CDC failure behavior, and sustained overload measurements remain. |
 | F18: accounting/metrics | Partial | SLO interceptor counts semantic failure responses. Full accepted/delivered/expired/dropped accounting and lag/resource signals remain. |
-| F19: dependencies | Partial | Go module/toolchain, gRPC and dashboard lockfile updates present; Docker Go builder aligned. Go/npm security CI added. Release-artifact rescans, Avro exposure disposition, and container/Rust security checks remain. |
+| F19: dependencies | Partial | Go module/toolchain, gRPC and dashboard lockfile updates present; Docker Go builder aligned. The archived Avro codec was replaced with a patched fork and explicit decoder limits after the first CI security scan failed. Release-artifact rescans and container/Rust security checks remain. |
 | F20: release gates | Partial | Linux cgo/race/vet/build/format checks, Rust and dashboard tests, Go/npm scans, chart assertions, and production-mode kind startup workflow added. CI execution and branch-protection enforcement remain unverified; full failure campaigns and independent restore gates remain. |
+
+The first pushed production-checks run found reachable decoder advisories in the
+archived `hamba/avro` module. The follow-up migrates schema validation to
+`iskorotkov/avro/v2` v2.34.0 and freezes the decoder configuration with a
+4 MiB byte-field limit and 65,536-element array/map limits. A regression rejects
+an oversized map block before allocation. A local `govulncheck` rescan found no
+called-symbol vulnerabilities; it reported one imported-package finding without
+a reachable call. The historical F19 findings below describe the original audited
+dependency; the new CI scan must verify closure.
 
 The next release-blocking work should establish the supported feature scope and
 acceptance/loss contract, then finish F03/F06–F09 and F13/F15, wire and exercise
