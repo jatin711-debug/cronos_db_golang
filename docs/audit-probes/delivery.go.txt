@@ -1,0 +1,46 @@
+package delivery
+
+import (
+	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
+	"sync"
+	"testing"
+)
+
+func TestAuditWorkerOwnsDispatchSlice(t *testing.T) {
+	d := NewDispatcher(nil)
+	defer d.Close()
+	w := NewWorker(d, 100)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 20000; i++ {
+			w.AddReadyEvent(&types.Event{MessageId: "audit", PartitionId: 0, Offset: int64(i)})
+		}
+	}()
+	for i := 0; i < 20000; i++ {
+		w.processBatch()
+	}
+	wg.Wait()
+}
+func TestAuditDLQRetainsEntryAfterRestart(t *testing.T) {
+	dir := t.TempDir()
+	d, err := NewDeadLetterQueue(dir, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Add(&types.Event{MessageId: "audit", Payload: []byte("payload")}, "delivery", 3, "failure", "sub"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+	d2, err := NewDeadLetterQueue(dir, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d2.Close()
+	if n := d2.Count(); n != 1 {
+		t.Fatalf("durable DLQ entry missing after reopen: got %d, want 1", n)
+	}
+}
