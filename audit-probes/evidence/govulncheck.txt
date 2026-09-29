@@ -1,0 +1,247 @@
+go: downloading golang.org/x/vuln v1.8.0
+go: downloading golang.org/x/telemetry v0.0.0-20260908163034-4bcc4b2ee518
+go: downloading golang.org/x/tools v0.50.0
+go: downloading golang.org/x/mod v0.41.0
+go: downloading golang.org/x/sync v0.23.0
+go: downloading golang.org/x/sys v0.48.0
+=== Symbol Results ===
+
+Vulnerability #1: GO-2026-6443
+    Server panic via missing authority or Host headers in google.golang.org/grpc
+  More info: https://pkg.go.dev/vuln/GO-2026-6443
+  Module: google.golang.org/grpc
+    Found in: google.golang.org/grpc@v1.81.1
+    Fixed in: google.golang.org/grpc@v1.82.2
+    Example traces found:
+      #1: internal/api/grpc_server.go:266:24: api.Start calls grpc.Server.Serve, which eventually calls transport.http2Server.HandleStreams
+
+Vulnerability #2: GO-2026-6348
+    Heap Memory Exhaustion (OOM) via HTTP/2 DATA Frame Fragmentation in
+    google.golang.org/grpc
+  More info: https://pkg.go.dev/vuln/GO-2026-6348
+  Module: google.golang.org/grpc
+    Found in: google.golang.org/grpc@v1.81.1
+    Fixed in: google.golang.org/grpc@v1.83.1
+    Example traces found:
+      #1: pkg/types/events_grpc.pb.go:1262:34: types.crossRegionServiceClient.FetchEvents calls grpc.clientStream.SendMsg, which eventually calls mem.BufferSlice.MaterializeToBuffer
+      #2: pkg/types/events_grpc.pb.go:1262:34: types.crossRegionServiceClient.FetchEvents calls grpc.clientStream.SendMsg, which eventually calls mem.IsBelowBufferPoolingThreshold
+      #3: pkg/types/events_grpc.pb.go:1262:34: types.crossRegionServiceClient.FetchEvents calls grpc.clientStream.SendMsg, which eventually calls mem.NewBuffer
+      #4: internal/api/handlers.go:836:25: api.EventServiceHandler.Subscribe calls grpc.GenericServerStream[github.com/jatin711-debug/cronos_db_golang/pkg/types.SubscribeRequest, github.com/jatin711-debug/cronos_db_golang/pkg/types.Delivery].Recv, which eventually calls mem.ReadAll
+      #5: internal/delivery/dlq_segment.go:307:15: delivery.DLQSegmentWriter.Compact calls bufio.Writer.Write, which eventually calls mem.writer.Write
+      #6: pkg/types/events_grpc.pb.go:1265:36: types.crossRegionServiceClient.FetchEvents calls grpc.clientStream.CloseSend, which eventually calls transport.ClientStream.Close
+      #7: pkg/types/events_grpc.pb.go:1265:36: types.crossRegionServiceClient.FetchEvents calls grpc.clientStream.CloseSend, which eventually calls transport.ClientStream.Header
+      #8: internal/api/handlers.go:836:25: api.EventServiceHandler.Subscribe calls grpc.GenericServerStream[github.com/jatin711-debug/cronos_db_golang/pkg/types.SubscribeRequest, github.com/jatin711-debug/cronos_db_golang/pkg/types.Delivery].Recv, which eventually calls transport.ClientStream.Read
+      #9: pkg/types/events_grpc.pb.go:1265:36: types.crossRegionServiceClient.FetchEvents calls grpc.clientStream.CloseSend, which eventually calls transport.ClientStream.RecvCompress
+      #10: pkg/types/events_grpc.pb.go:1265:36: types.crossRegionServiceClient.FetchEvents calls grpc.clientStream.CloseSend, which eventually calls transport.ClientStream.TrailersOnly
+      #11: internal/storage/wal.go:1256:15: storage.WAL.Close calls sync.Once.Do, which eventually calls transport.NewHTTP2Client
+      #12: internal/api/grpc_server.go:266:24: api.Start calls grpc.Server.Serve, which eventually calls transport.NewServerTransport
+      #13: internal/api/handlers.go:836:25: api.EventServiceHandler.Subscribe calls grpc.GenericServerStream[github.com/jatin711-debug/cronos_db_golang/pkg/types.SubscribeRequest, github.com/jatin711-debug/cronos_db_golang/pkg/types.Delivery].Recv, which eventually calls transport.ServerStream.Read
+      #14: internal/api/handlers.go:836:25: api.EventServiceHandler.Subscribe calls grpc.GenericServerStream[github.com/jatin711-debug/cronos_db_golang/pkg/types.SubscribeRequest, github.com/jatin711-debug/cronos_db_golang/pkg/types.Delivery].Recv, which eventually calls transport.Stream.ReadMessageHeader
+      #15: internal/replication/leader.go:546:20: replication.Leader.Stop calls grpc.ClientConn.Close, which eventually calls transport.http2Client.Close
+      #16: internal/replication/leader.go:546:20: replication.Leader.Stop calls grpc.ClientConn.Close, which eventually calls transport.http2Client.GracefulClose
+      #17: pkg/types/events_grpc.pb.go:1265:36: types.crossRegionServiceClient.FetchEvents calls grpc.clientStream.CloseSend, which eventually calls transport.http2Client.NewStream
+      #18: internal/api/grpc_server.go:304:24: api.GRPCServer.GracefulStop calls grpc.Server.GracefulStop, which eventually calls transport.http2Server.Close
+      #19: internal/api/grpc_server.go:266:24: api.Start calls grpc.Server.Serve, which eventually calls transport.http2Server.HandleStreams
+
+Vulnerability #3: GO-2026-6218
+    Avoid quadratic complexity in resolvePath in net/url
+  More info: https://pkg.go.dev/vuln/GO-2026-6218
+  Standard library
+    Found in: net/url@go1.26.4
+    Fixed in: net/url@go1.26.6
+    Example traces found:
+      #1: internal/cdc/webhook_sink.go:44:30: cdc.WebhookSink.Write calls http.Client.Do, which eventually calls url.URL.Parse
+
+Vulnerability #4: GO-2026-6091
+    Fix Javascript regexp context tracking in html/template
+  More info: https://pkg.go.dev/vuln/GO-2026-6091
+  Standard library
+    Found in: html/template@go1.26.4
+    Fixed in: html/template@go1.26.6
+    Example traces found:
+      #1: cmd/api/main.go:544:40: api.main calls http.Server.ListenAndServe, which eventually calls template.Template.Execute
+      #2: cmd/api/main.go:544:40: api.main calls http.Server.ListenAndServe, which eventually calls template.Template.ExecuteTemplate
+
+Vulnerability #5: GO-2026-6090
+    Limit handshake messages we are willing to accept post-handshake in
+    crypto/tls
+  More info: https://pkg.go.dev/vuln/GO-2026-6090
+  Standard library
+    Found in: crypto/tls@go1.26.4
+    Fixed in: crypto/tls@go1.26.6
+    Example traces found:
+      #1: internal/api/grpc_server.go:266:24: api.Start calls grpc.Server.Serve, which eventually calls tls.Conn.Handshake
+      #2: cmd/api/main.go:544:40: api.main calls http.Server.ListenAndServe, which eventually calls tls.Conn.HandshakeContext
+      #3: internal/storage/crypto.go:156:26: storage.SegmentCipher.EncryptRecord calls io.ReadFull, which eventually calls tls.Conn.Read
+      #4: internal/delivery/dlq_segment.go:307:15: delivery.DLQSegmentWriter.Compact calls bufio.Writer.Write, which calls tls.Conn.Write
+      #5: internal/cluster/memberlist_adapter.go:85:22: cluster.MemberlistMembership.Start calls memberlist.Memberlist.Join, which eventually calls tls.Dialer.DialContext
+
+Vulnerability #6: GO-2026-6089
+    Apply ReadHeaderTimeout when doing unencrypted HTTP/2 check in net/http
+  More info: https://pkg.go.dev/vuln/GO-2026-6089
+  Standard library
+    Found in: net/http@go1.26.4
+    Fixed in: net/http@go1.26.6
+    Example traces found:
+      #1: cmd/api/main.go:544:40: api.main calls http.Server.ListenAndServe
+
+Vulnerability #7: GO-2026-6061
+    Vulnerabilities in the xDS RBAC authorization engine and the HTTP/2
+    transport server implementation in google.golang.org/grpc
+  More info: https://pkg.go.dev/vuln/GO-2026-6061
+  Module: google.golang.org/grpc
+    Found in: google.golang.org/grpc@v1.81.1
+    Fixed in: google.golang.org/grpc@v1.82.1
+    Example traces found:
+      #1: pkg/types/events_grpc.pb.go:1265:36: types.crossRegionServiceClient.FetchEvents calls grpc.clientStream.CloseSend, which eventually calls transport.ClientStream.Close
+      #2: pkg/types/events_grpc.pb.go:1265:36: types.crossRegionServiceClient.FetchEvents calls grpc.clientStream.CloseSend, which eventually calls transport.ClientStream.Header
+      #3: internal/api/handlers.go:836:25: api.EventServiceHandler.Subscribe calls grpc.GenericServerStream[github.com/jatin711-debug/cronos_db_golang/pkg/types.SubscribeRequest, github.com/jatin711-debug/cronos_db_golang/pkg/types.Delivery].Recv, which eventually calls transport.ClientStream.Read
+      #4: pkg/types/events_grpc.pb.go:1265:36: types.crossRegionServiceClient.FetchEvents calls grpc.clientStream.CloseSend, which eventually calls transport.ClientStream.RecvCompress
+      #5: pkg/types/events_grpc.pb.go:1265:36: types.crossRegionServiceClient.FetchEvents calls grpc.clientStream.CloseSend, which eventually calls transport.ClientStream.TrailersOnly
+      #6: pkg/types/events_grpc.pb.go:1265:36: types.crossRegionServiceClient.FetchEvents calls grpc.clientStream.CloseSend, which eventually calls transport.ClientStream.Write
+      #7: internal/storage/wal.go:1256:15: storage.WAL.Close calls sync.Once.Do, which eventually calls transport.NewHTTP2Client
+      #8: internal/api/grpc_server.go:266:24: api.Start calls grpc.Server.Serve, which eventually calls transport.NewServerTransport
+      #9: internal/api/handlers.go:836:25: api.EventServiceHandler.Subscribe calls grpc.GenericServerStream[github.com/jatin711-debug/cronos_db_golang/pkg/types.SubscribeRequest, github.com/jatin711-debug/cronos_db_golang/pkg/types.Delivery].Recv, which eventually calls transport.ServerStream.Read
+      #10: internal/api/handlers.go:102:22: api.GRPCStream.Send calls grpc.GenericServerStream[github.com/jatin711-debug/cronos_db_golang/pkg/types.SubscribeRequest, github.com/jatin711-debug/cronos_db_golang/pkg/types.Delivery].Send, which eventually calls transport.ServerStream.Write
+      #11: internal/api/handlers.go:836:25: api.EventServiceHandler.Subscribe calls grpc.GenericServerStream[github.com/jatin711-debug/cronos_db_golang/pkg/types.SubscribeRequest, github.com/jatin711-debug/cronos_db_golang/pkg/types.Delivery].Recv, which eventually calls transport.ServerStream.WriteStatus
+      #12: internal/api/handlers.go:836:25: api.EventServiceHandler.Subscribe calls grpc.GenericServerStream[github.com/jatin711-debug/cronos_db_golang/pkg/types.SubscribeRequest, github.com/jatin711-debug/cronos_db_golang/pkg/types.Delivery].Recv, which eventually calls transport.Stream.ReadMessageHeader
+      #13: internal/replication/leader.go:546:20: replication.Leader.Stop calls grpc.ClientConn.Close, which eventually calls transport.http2Client.Close
+      #14: internal/replication/leader.go:546:20: replication.Leader.Stop calls grpc.ClientConn.Close, which eventually calls transport.http2Client.GracefulClose
+      #15: pkg/types/events_grpc.pb.go:1265:36: types.crossRegionServiceClient.FetchEvents calls grpc.clientStream.CloseSend, which eventually calls transport.http2Client.NewStream
+      #16: internal/api/grpc_server.go:304:24: api.GRPCServer.GracefulStop calls grpc.Server.GracefulStop, which eventually calls transport.http2Server.Drain
+      #17: internal/api/grpc_server.go:266:24: api.Start calls grpc.Server.Serve, which eventually calls transport.http2Server.HandleStreams
+
+Vulnerability #8: GO-2026-5972
+    Enforce maximum recursion depth in encoding/asn1
+  More info: https://pkg.go.dev/vuln/GO-2026-5972
+  Standard library
+    Found in: encoding/asn1@go1.26.4
+    Fixed in: encoding/asn1@go1.26.6
+    Example traces found:
+      #1: internal/auth/auth.go:121:34: auth.LoadPublicKey calls x509.ParsePKCS1PublicKey, which calls asn1.Unmarshal
+
+Vulnerability #9: GO-2026-5856
+    Invoking Encrypted Client Hello privacy leak in crypto/tls
+  More info: https://pkg.go.dev/vuln/GO-2026-5856
+  Standard library
+    Found in: crypto/tls@go1.26.4
+    Fixed in: crypto/tls@go1.26.5
+    Example traces found:
+      #1: internal/api/grpc_server.go:266:24: api.Start calls grpc.Server.Serve, which eventually calls tls.Conn.Handshake
+      #2: cmd/api/main.go:544:40: api.main calls http.Server.ListenAndServe, which eventually calls tls.Conn.HandshakeContext
+      #3: internal/storage/crypto.go:156:26: storage.SegmentCipher.EncryptRecord calls io.ReadFull, which eventually calls tls.Conn.Read
+      #4: internal/delivery/dlq_segment.go:307:15: delivery.DLQSegmentWriter.Compact calls bufio.Writer.Write, which calls tls.Conn.Write
+      #5: internal/cluster/memberlist_adapter.go:85:22: cluster.MemberlistMembership.Start calls memberlist.Memberlist.Join, which eventually calls tls.Dialer.DialContext
+
+Vulnerability #10: GO-2026-5048
+    Denial of service via unbounded map allocations in
+    github.com/iskorotkov/avro/v2 and github.com/hamba/avro/v2
+  More info: https://pkg.go.dev/vuln/GO-2026-5048
+  Module: github.com/hamba/avro/v2
+    Found in: github.com/hamba/avro/v2@v2.31.0
+    Fixed in: N/A
+    Example traces found:
+      #1: internal/api/ratelimit.go:62:18: api.rateLimiter.cleanup calls sync.Map.Range, which eventually calls avro.AddAll
+      #2: internal/schema/compatibility.go:88:32: schema.extractAvroFields calls avro.ArraySchema.String
+      #3: internal/schema/compatibility.go:88:32: schema.extractAvroFields calls avro.EnumSchema.String
+      #4: internal/schema/compatibility.go:89:29: schema.extractAvroFields calls avro.Field.HasDefault
+      #5: internal/schema/compatibility.go:86:17: schema.extractAvroFields calls avro.Field.Name
+      #6: internal/schema/compatibility.go:88:23: schema.extractAvroFields calls avro.Field.Type
+      #7: internal/schema/compatibility.go:88:32: schema.extractAvroFields calls avro.FixedSchema.String
+      #8: internal/scheduler/timing_wheel.go:520:27: scheduler.TimingWheel.GetTimerFast calls sync.Pool.Get, which calls avro.Freeze
+      #9: internal/scheduler/timing_wheel.go:520:27: scheduler.TimingWheel.GetTimerFast calls sync.Pool.Get, which calls avro.Freeze
+      #10: internal/schema/compatibility.go:88:32: schema.extractAvroFields calls avro.MapSchema.String
+      #11: internal/schema/compatibility.go:88:32: schema.extractAvroFields calls avro.NullSchema.String
+      #12: internal/schema/avro.go:11:27: schema.validateAvro calls avro.Parse
+      #13: internal/schema/compatibility.go:88:32: schema.extractAvroFields calls avro.PrimitiveSchema.String
+      #14: internal/schema/compatibility.go:85:31: schema.extractAvroFields calls avro.RecordSchema.Fields
+      #15: internal/schema/compatibility.go:88:32: schema.extractAvroFields calls avro.RecordSchema.String
+      #16: internal/schema/compatibility.go:88:32: schema.extractAvroFields calls avro.RefSchema.String
+      #17: internal/schema/compatibility.go:88:32: schema.extractAvroFields calls avro.UnionSchema.String
+      #18: internal/schema/avro.go:18:22: schema.validateAvro calls avro.Unmarshal
+      #19: internal/schema/avro.go:6:2: schema.init calls avro.init
+      #20: pkg/client/internal/connpool/pool.go:143:26: connpool.Pool.AddNode calls strings.TrimSpace, which eventually calls avro.invalidNameFirstChar
+      #21: pkg/client/internal/connpool/pool.go:143:26: connpool.Pool.AddNode calls strings.TrimSpace, which eventually calls avro.invalidNameOtherChar
+      #22: api.main calls strings.splitSeq, which calls avro.newName
+      #23: api.main calls strings.splitSeq, which calls avro.newName
+
+Vulnerability #11: GO-2026-5047
+    Integer overflow in Avro decoder in github.com/iskorotkov/avro/v2 and
+    github.com/hamba/avro/v2
+  More info: https://pkg.go.dev/vuln/GO-2026-5047
+  Module: github.com/hamba/avro/v2
+    Found in: github.com/hamba/avro/v2@v2.31.0
+    Fixed in: N/A
+    Example traces found:
+      #1: internal/api/ratelimit.go:62:18: api.rateLimiter.cleanup calls sync.Map.Range, which eventually calls avro.AddAll
+      #2: internal/schema/compatibility.go:88:32: schema.extractAvroFields calls avro.ArraySchema.String
+      #3: internal/schema/compatibility.go:88:32: schema.extractAvroFields calls avro.EnumSchema.String
+      #4: internal/schema/compatibility.go:89:29: schema.extractAvroFields calls avro.Field.HasDefault
+      #5: internal/schema/compatibility.go:86:17: schema.extractAvroFields calls avro.Field.Name
+      #6: internal/schema/compatibility.go:88:23: schema.extractAvroFields calls avro.Field.Type
+      #7: internal/schema/compatibility.go:88:32: schema.extractAvroFields calls avro.FixedSchema.String
+      #8: internal/scheduler/timing_wheel.go:520:27: scheduler.TimingWheel.GetTimerFast calls sync.Pool.Get, which calls avro.Freeze
+      #9: internal/scheduler/timing_wheel.go:520:27: scheduler.TimingWheel.GetTimerFast calls sync.Pool.Get, which calls avro.Freeze
+      #10: internal/schema/compatibility.go:88:32: schema.extractAvroFields calls avro.MapSchema.String
+      #11: internal/schema/compatibility.go:88:32: schema.extractAvroFields calls avro.NullSchema.String
+      #12: internal/schema/avro.go:11:27: schema.validateAvro calls avro.Parse
+      #13: internal/schema/compatibility.go:88:32: schema.extractAvroFields calls avro.PrimitiveSchema.String
+      #14: internal/schema/compatibility.go:85:31: schema.extractAvroFields calls avro.RecordSchema.Fields
+      #15: internal/schema/compatibility.go:88:32: schema.extractAvroFields calls avro.RecordSchema.String
+      #16: internal/schema/compatibility.go:88:32: schema.extractAvroFields calls avro.RefSchema.String
+      #17: internal/schema/compatibility.go:88:32: schema.extractAvroFields calls avro.UnionSchema.String
+      #18: internal/schema/avro.go:18:22: schema.validateAvro calls avro.Unmarshal
+      #19: internal/schema/avro.go:6:2: schema.init calls avro.init
+      #20: pkg/client/internal/connpool/pool.go:143:26: connpool.Pool.AddNode calls strings.TrimSpace, which eventually calls avro.invalidNameFirstChar
+      #21: pkg/client/internal/connpool/pool.go:143:26: connpool.Pool.AddNode calls strings.TrimSpace, which eventually calls avro.invalidNameOtherChar
+      #22: api.main calls strings.splitSeq, which calls avro.newName
+      #23: api.main calls strings.splitSeq, which calls avro.newName
+
+Vulnerability #12: GO-2026-5046
+    CPU exhaustion in Avro decoder in github.com/iskorotkov/avro/v2 and
+    github.com/hamba/avro/v2
+  More info: https://pkg.go.dev/vuln/GO-2026-5046
+  Module: github.com/hamba/avro/v2
+    Found in: github.com/hamba/avro/v2@v2.31.0
+    Fixed in: N/A
+    Example traces found:
+      #1: internal/api/ratelimit.go:62:18: api.rateLimiter.cleanup calls sync.Map.Range, which eventually calls avro.AddAll
+      #2: internal/schema/compatibility.go:88:32: schema.extractAvroFields calls avro.ArraySchema.String
+      #3: internal/schema/compatibility.go:88:32: schema.extractAvroFields calls avro.EnumSchema.String
+      #4: internal/schema/compatibility.go:89:29: schema.extractAvroFields calls avro.Field.HasDefault
+      #5: internal/schema/compatibility.go:86:17: schema.extractAvroFields calls avro.Field.Name
+      #6: internal/schema/compatibility.go:88:23: schema.extractAvroFields calls avro.Field.Type
+      #7: internal/schema/compatibility.go:88:32: schema.extractAvroFields calls avro.FixedSchema.String
+      #8: internal/scheduler/timing_wheel.go:520:27: scheduler.TimingWheel.GetTimerFast calls sync.Pool.Get, which calls avro.Freeze
+      #9: internal/scheduler/timing_wheel.go:520:27: scheduler.TimingWheel.GetTimerFast calls sync.Pool.Get, which calls avro.Freeze
+      #10: internal/schema/compatibility.go:88:32: schema.extractAvroFields calls avro.MapSchema.String
+      #11: internal/schema/compatibility.go:88:32: schema.extractAvroFields calls avro.NullSchema.String
+      #12: internal/schema/avro.go:11:27: schema.validateAvro calls avro.Parse
+      #13: internal/schema/compatibility.go:88:32: schema.extractAvroFields calls avro.PrimitiveSchema.String
+      #14: internal/schema/compatibility.go:85:31: schema.extractAvroFields calls avro.RecordSchema.Fields
+      #15: internal/schema/compatibility.go:88:32: schema.extractAvroFields calls avro.RecordSchema.String
+      #16: internal/schema/compatibility.go:88:32: schema.extractAvroFields calls avro.RefSchema.String
+      #17: internal/schema/compatibility.go:88:32: schema.extractAvroFields calls avro.UnionSchema.String
+      #18: internal/schema/avro.go:18:22: schema.validateAvro calls avro.Unmarshal
+      #19: internal/schema/avro.go:6:2: schema.init calls avro.init
+      #20: pkg/client/internal/connpool/pool.go:143:26: connpool.Pool.AddNode calls strings.TrimSpace, which eventually calls avro.invalidNameFirstChar
+      #21: pkg/client/internal/connpool/pool.go:143:26: connpool.Pool.AddNode calls strings.TrimSpace, which eventually calls avro.invalidNameOtherChar
+      #22: api.main calls strings.splitSeq, which calls avro.newName
+      #23: api.main calls strings.splitSeq, which calls avro.newName
+
+Vulnerability #13: GO-2026-5026
+    Invoking failure to reject ASCII-only Punycode-encoded labels in
+    golang.org/x/net/idna
+  More info: https://pkg.go.dev/vuln/GO-2026-5026
+  Standard library
+    Found in: net/http@go1.26.4
+    Fixed in: net/http@go1.26.6
+    Example traces found:
+      #1: internal/cdc/webhook_sink.go:44:30: cdc.WebhookSink.Write calls http.Client.Do
+
+Your code is affected by 13 vulnerabilities from 2 modules and the Go standard library.
+This scan also found 4 vulnerabilities in packages you import and 2
+vulnerabilities in modules you require, but your code doesn't appear to call
+these vulnerabilities.
+Use '-show verbose' for more details.
+exit status 3

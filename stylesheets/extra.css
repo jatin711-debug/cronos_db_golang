@@ -1,0 +1,29 @@
+/* CronosDB docs custom styles */
+
+/* Mermaid diagrams: centered, generous canvas, grab cursor for pan/zoom */
+.mermaid {
+  text-align: center;
+  cursor: grab;
+  margin: 1em 0;
+}
+
+.mermaid:active {
+  cursor: grabbing;
+}
+
+.mermaid svg {
+  max-width: 100%;
+  border-radius: 8px;
+  background: var(--md-code-bg-color);
+  padding: 0.75em;
+}
+
+/* Keep wide tables readable */
+.md-typeset table:not([class]) {
+  font-size: 0.72rem;
+}
+
+/* Nicer rendering for the flag/config tables */
+.md-typeset table:not([class]) th {
+  white-space: nowrap;
+}

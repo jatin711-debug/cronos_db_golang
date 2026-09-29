@@ -1,0 +1,2316 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Documentation for CronosDB — a distributed, timestamp-triggered event database">
+      
+      
+      
+        <link rel="canonical" href="https://jatin711-debug.github.io/cronos_db_golang/PRODUCTION_AUDIT_2026-09-27/">
+      
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>CronosDB production readiness audit - CronosDB Docs</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="blue-grey" data-md-color-accent="deep-orange">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#cronosdb-production-readiness-audit" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="CronosDB Docs" class="md-header__button md-logo" aria-label="CronosDB Docs" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m16.5 16.25 2.86 1.69-.75 1.22L15 17v-5h1.5zM23 16c0 3.87-3.13 7-7 7a7 7 0 0 1-5.75-3C6.18 19.79 3 18.08 3 16v-3c0 1.88 2.58 3.44 6.06 3.88C9.03 16.59 9 16.3 9 16c0-.38.04-.75.1-1.12-3.5-.43-6.1-2-6.1-3.88V8c0 2.09 3.2 3.8 7.27 4 .6-.86 1.37-1.56 2.26-2.07-.49.04-1.03.07-1.53.07-4.42 0-8-1.79-8-4s3.58-4 8-4 8 1.79 8 4c0 1.2-1.07 2.28-2.75 3 .75.04 1.5.19 2.19.45C18.79 9 19 8.5 19 8v1.68c2.36 1.13 4 3.53 4 6.32m-2 0c0-2.76-2.24-5-5-5s-5 2.24-5 5 2.24 5 5 5 5-2.24 5-5"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            CronosDB Docs
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              CronosDB production readiness audit
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="blue-grey" data-md-color-accent="deep-orange"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="blue-grey" data-md-color-accent="deep-orange"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+          <a href="javascript:void(0)" class="md-search__icon md-icon" title="Share" aria-label="Share" data-clipboard data-clipboard-text="" data-md-component="search-share" tabindex="-1">
+            
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9a3 3 0 0 0-3 3 3 3 0 0 0 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.15c-.05.21-.08.43-.08.66 0 1.61 1.31 2.91 2.92 2.91s2.92-1.3 2.92-2.91A2.92 2.92 0 0 0 18 16.08"/></svg>
+          </a>
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/jatin711-debug/cronos_db_golang" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    jatin711-debug/cronos_db_golang
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="CronosDB Docs" class="md-nav__button md-logo" aria-label="CronosDB Docs" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m16.5 16.25 2.86 1.69-.75 1.22L15 17v-5h1.5zM23 16c0 3.87-3.13 7-7 7a7 7 0 0 1-5.75-3C6.18 19.79 3 18.08 3 16v-3c0 1.88 2.58 3.44 6.06 3.88C9.03 16.59 9 16.3 9 16c0-.38.04-.75.1-1.12-3.5-.43-6.1-2-6.1-3.88V8c0 2.09 3.2 3.8 7.27 4 .6-.86 1.37-1.56 2.26-2.07-.49.04-1.03.07-1.53.07-4.42 0-8-1.79-8-4s3.58-4 8-4 8 1.79 8 4c0 1.2-1.07 2.28-2.75 3 .75.04 1.5.19 2.19.45C18.79 9 19 8.5 19 8v1.68c2.36 1.13 4 3.53 4 6.32m-2 0c0-2.76-2.24-5-5-5s-5 2.24-5 5 2.24 5 5 5 5-2.24 5-5"/></svg>
+
+    </a>
+    CronosDB Docs
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/jatin711-debug/cronos_db_golang" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    jatin711-debug/cronos_db_golang
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Architecture
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ARCHITECTURE/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../TECHNICAL_DEEP_DIVE/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Technical Deep Dive
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../DEVELOPER_ARCHITECTURE_GUIDE/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Developer Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_4" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../architecture/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    By Feature
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_2_4" id="__nav_2_4_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    By Feature
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Layer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/audit/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Audit
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/auth/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Auth
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/cdc/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CDC
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/cluster/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cluster Control Plane
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/compliance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Compliance & Retention
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Config & Reload
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/consumer/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Consumer Groups
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/dashboard/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Dashboard
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/dedup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deduplication
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/delivery/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Delivery Pipeline
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/partition/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Partition Runtime
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/replay/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Replay Engine
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/replication/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Replication
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/scheduler/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Scheduler & Timing Wheel
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/schema/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Schema Registry
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/slo/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SLO & Metrics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/storage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Storage & WAL
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/tenant/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tenant Accounting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tracing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/tx/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Transactions (2PC)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Operations
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Operations
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../DOCKER/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Docker
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../PERFORMANCE/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Performance & Benchmarks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Project
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Project
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../plan/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Remediation Plan
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../CONTRIBUTING/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../CODE_OF_CONDUCT/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Code of Conduct
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#working-tree-follow-up-2026-09-28" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Working-tree follow-up — 2026-09-28
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Working-tree follow-up — 2026-09-28">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#finding-closure-review" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Finding closure review
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#second-hardening-batch" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Second hardening batch
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#verdict" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Verdict
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#scope-and-evidence" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Scope and evidence
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#findings" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Findings
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Findings">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#f01-critical-topic-authorization-does-not-constrain-returned-events" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        F01 — Critical: topic authorization does not constrain returned events
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#f02-critical-a-policy-loading-failure-leaves-allow-all-permissions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        F02 — Critical: a policy loading failure leaves allow-all permissions
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#f03-high-acks-can-commit-fabricated-or-unsuccessful-deliveries" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        F03 — High: ACKs can commit fabricated or unsuccessful deliveries
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#f04-high-delivery-backpressure-loses-work-the-worker-also-races-on-its-batch" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        F04 — High: delivery backpressure loses work; the worker also races on its batch
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#f05-high-snapshot-restart-cold-hydration-and-follower-promotion-strand-scheduled-events" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        F05 — High: snapshot restart, cold hydration and follower promotion strand scheduled events
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#f06-high-repeating-a-replication-append-truncates-accepted-history" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        F06 — High: repeating a replication append truncates accepted history
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#f07-high-a-failed-quorum-write-can-become-a-successful-duplicate-without-recovery" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        F07 — High: a failed quorum write can become a successful duplicate without recovery
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#f08-high-routing-handoff-and-epoch-authority-are-inconsistent" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        F08 — High: routing, handoff and epoch authority are inconsistent
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#f09-high-snapshot-transfer-is-not-a-verified-recoverable-generation-swap" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        F09 — High: snapshot transfer is not a verified, recoverable generation swap
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#f10-high-the-wrong-encryption-key-opens-existing-data-as-an-empty-writable-wal" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        F10 — High: the wrong encryption key opens existing data as an empty writable WAL
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#f11-high-when-dlq-is-enabled-entries-disappear-on-reopen-and-batches-lose-payloads" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        F11 — High when DLQ is enabled: entries disappear on reopen and batches lose payloads
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#f12-high-for-telemetry-replay-time-range-queries-assume-ordered-schedule-timestamps" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        F12 — High for telemetry replay: time-range queries assume ordered schedule timestamps
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#f13-high-sdk-consumers-can-hang-after-stream-failure-and-default-routing-misses-partitions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        F13 — High: SDK consumers can hang after stream failure and default routing misses partitions
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#f14-high-the-supplied-production-deployment-is-not-wired-to-runtime-configuration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        F14 — High: the supplied production deployment is not wired to runtime configuration
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#f15-high-when-enabled-backups-and-retention-do-not-match-the-live-partition-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        F15 — High when enabled: backups and retention do not match the live partition model
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#f16-high-if-exposed-transactions-and-partition-splitting-are-not-safe-production-features" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        F16 — High if exposed: transactions and partition splitting are not safe production features
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#f17-high-under-load-several-paths-defeat-latency-and-memory-limits" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        F17 — High under load: several paths defeat latency and memory limits
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#f18-medium-release-gate-metrics-cannot-explain-accepted-event-outcomes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        F18 — Medium, release gate: metrics cannot explain accepted-event outcomes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#f19-highmedium-by-exposure-dependency-security-updates-are-overdue" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        F19 — High/Medium by exposure: dependency security updates are overdue
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#f20-medium-release-gate-existing-tests-and-release-automation-miss-the-failure-boundaries" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        F20 — Medium, release gate: existing tests and release automation miss the failure boundaries
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#hardening-order" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Hardening order
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#suggested-release-acceptance-contract" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Suggested release acceptance contract
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="cronosdb-production-readiness-audit">CronosDB production readiness audit<a class="headerlink" href="#cronosdb-production-readiness-audit" title="Permanent link">&para;</a></h1>
+<p>Date: 2026-09-27. Audited commit: <code>1de04d6575a810c79f716dfe48b54e1744b42a33</code>.</p>
+<h2 id="working-tree-follow-up-2026-09-28">Working-tree follow-up — 2026-09-28<a class="headerlink" href="#working-tree-follow-up-2026-09-28" title="Permanent link">&para;</a></h2>
+<h3 id="finding-closure-review">Finding closure review<a class="headerlink" href="#finding-closure-review" title="Permanent link">&para;</a></h3>
+<p><strong>The remediation program is incomplete. Do not treat the passing local suite as
+production approval.</strong> This table compares the current working tree with each
+finding's full required outcome. "Core fix implemented" means the specific code
+defect has been addressed; it does not mean its production release validation is
+complete. "Partial" means material requirements remain. This is a source and
+existing-test review, not a new fault-injection or deployment campaign.</p>
+<table>
+<thead>
+<tr>
+<th>Finding</th>
+<th>Status</th>
+<th>Implemented work and remaining requirement</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>F01: topic isolation</td>
+<td>Partial</td>
+<td>Replay and recipient topic filters, group topic checks, and ACK principal validation added. Public-RPC tests with two principals and concurrent subscribe/ACK paths, plus explicit tenant/group scope, remain.</td>
+</tr>
+<tr>
+<td>F02: policy loading</td>
+<td>Fixed with startup regressions</td>
+<td>Invalid/missing policy and public-key loading fail before data stores/listeners are initialized. Subprocess tests cover missing, empty, malformed, empty-subject, and null-subject policies.</td>
+</tr>
+<tr>
+<td>F03: ACK correctness</td>
+<td>Partial</td>
+<td>Tracked-delivery validation, per-event completion, and partition-local manager use added. Durable progress across failover, completion-state lifecycle, and end-to-end ACK concurrency remain.</td>
+</tr>
+<tr>
+<td>F04: delivery/backpressure</td>
+<td>Partial</td>
+<td>Worker and scheduler ready-slice ownership, worker count/64 MiB estimated-byte budget, WAL redrive, and unsent-group reservation cleanup added. Bounds on all other queues and disconnect/slow-consumer/reconnect conservation tests remain.</td>
+</tr>
+<tr>
+<td>F05: timer recovery</td>
+<td>Partial</td>
+<td>WAL reconstruction, overdue cold hydration, and promotion scheduling added. Pending-timer preservation now tested through three consecutive snapshot/restart cycles; complete recovery/completion behavior remains to be validated.</td>
+</tr>
+<tr>
+<td>F06: replication retries</td>
+<td>Partial</td>
+<td>Matching retries no longer truncate the tail; invalid/stale terms rejected and epochs persisted. Cluster-wide append authority and concurrent leader-change tests remain.</td>
+</tr>
+<tr>
+<td>F07: quorum/idempotency</td>
+<td>Partial</td>
+<td>Pending claims no longer prove acceptance; failed replication releases claims. Retries can still append duplicates; durable pending/accepted/completed outcomes remain unimplemented.</td>
+</tr>
+<tr>
+<td>F08: leadership/handoff</td>
+<td>Partial</td>
+<td>Local epoch persistence and fail-closed Raft initialization added. Committed write ownership, staged handoff, and demotion remain unresolved.</td>
+</tr>
+<tr>
+<td>F09: snapshot transfer</td>
+<td>Partial</td>
+<td>Stable checkpoint copy, per-file validation, filename checks, and install journal added. Crash-transition tests, transfer resume, large-partition bootstrap, and non-WAL state recovery remain.</td>
+</tr>
+<tr>
+<td>F10: key mismatch/corruption</td>
+<td>Partial</td>
+<td>Wrong-key recovery and unreadable-segment skipping now fail closed; wrong-key regression passes. Interior corruption versus torn-tail policy and explicit repair/lost-offset procedure remain.</td>
+</tr>
+<tr>
+<td>F11: DLQ</td>
+<td>Partial</td>
+<td>Record-length/reopen defect and batch payload handling addressed. Format compatibility, corruption/tail repair, encryption, retention, and final-disposition validation remain.</td>
+</tr>
+<tr>
+<td>F12: unordered time queries</td>
+<td>Fixed with regressions</td>
+<td>Correct full scans replace invalid timestamp pruning/index assumptions. Tests cover shuffled records across segment rotation and reopening. Full-scan cost remains a performance consideration under F17.</td>
+</tr>
+<tr>
+<td>F13: SDK consumption</td>
+<td>Partial</td>
+<td>Stream infrastructure is canceled before waiting; cancellation cause also preserved for producer RPCs. Default consumption across all relevant partitions and retained-data reconnect tests remain.</td>
+</tr>
+<tr>
+<td>F14: deployment</td>
+<td>Partial</td>
+<td>CLI precedence fixed; chart now wires bootstrap seeds, routable addresses, persistent Raft path, auth policy, private key staging, probes, placement, and shutdown grace. Image builds dashboard and uses Go 1.26.7/locked Rust dependencies. Render assertions pass; actual Linux image/chart startup still requires the new CI smoke job.</td>
+</tr>
+<tr>
+<td>F15: backup/retention</td>
+<td>Partial</td>
+<td>Standalone WAL checkpoints, independent event-log restore, and completion-aware live pruning now have regressions. Backups omit consumer/dedup/Raft state and keys; replica-safe deletion, cross-partition consistency, and production restore exercises remain. See the <a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/MAINTENANCE_VALIDATION_2026-09-29.md">maintenance validation</a>.</td>
+</tr>
+<tr>
+<td>F16: transactions/splits</td>
+<td>Contained for first release</td>
+<td>Transactions and splitting are disabled by default and require --dev --experimental-features. Production rejects this opt-in and exactly-once commits. Public-RPC tests verify disabled endpoints; underlying experimental state machines remain unsupported.</td>
+</tr>
+<tr>
+<td>F17: overload/latency</td>
+<td>Partial</td>
+<td>Worker event-count and estimated-byte caps added. Byte-bounded queues throughout, quorum latency/deadlines, CDC failure behavior, and sustained overload measurements remain.</td>
+</tr>
+<tr>
+<td>F18: accounting/metrics</td>
+<td>Partial</td>
+<td>SLO interceptor counts semantic failure responses. Full accepted/delivered/expired/dropped accounting and lag/resource signals remain.</td>
+</tr>
+<tr>
+<td>F19: dependencies</td>
+<td>Partial</td>
+<td>Go module/toolchain, gRPC and dashboard lockfile updates present; Docker Go builder aligned. The archived Avro codec was replaced with a patched fork and explicit decoder limits after the first CI security scan failed. Release-artifact rescans and container/Rust security checks remain.</td>
+</tr>
+<tr>
+<td>F20: release gates</td>
+<td>Partial</td>
+<td>Linux cgo/race/vet/build/format checks, Rust and dashboard tests, Go/npm scans, chart assertions, and production-mode kind startup workflow added. CI execution and branch-protection enforcement remain unverified; full failure campaigns and independent restore gates remain.</td>
+</tr>
+</tbody>
+</table>
+<p>The first pushed production-checks run found reachable decoder advisories in the
+archived <code>hamba/avro</code> module. The follow-up migrates schema validation to
+<code>iskorotkov/avro/v2</code> v2.34.0 and freezes the decoder configuration with a
+4 MiB byte-field limit and 65,536-element array/map limits. A regression rejects
+an oversized map block before allocation. A local <code>govulncheck</code> rescan found no
+called-symbol vulnerabilities; it reported one imported-package finding without
+a reachable call. The historical F19 findings below describe the original audited
+dependency; the new CI scan must verify closure.</p>
+<p>The next release-blocking work should establish the supported feature scope and
+acceptance/loss contract, then finish F03/F06–F09 and F13/F15, wire and exercise
+F14/F20, and measure F04/F17/F18 with a ledger of accepted event IDs. F01's public
+authorization tests and F19's release scans also remain release gates.</p>
+<h3 id="second-hardening-batch">Second hardening batch<a class="headerlink" href="#second-hardening-batch" title="Permanent link">&para;</a></h3>
+<p>The deployment/feature-scope changes and their operating requirements are in
+<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/PRODUCTION_RELEASE.md">production release requirements</a>. There is no local Docker
+or Kubernetes runtime in this session, so image builds and the production-mode
+chart smoke test have <strong>not</strong> been executed here. CI configuration is reviewable
+code, not evidence of a completed CI run.</p>
+<p>This batch also reproduced scheduler ready-slice reuse overwriting an already
+drained event, then fixed the ownership handoff. Worker byte accounting includes
+payload backing capacity and metadata; it bounds that worker queue's estimated
+retention only, not process RSS or dispatcher/scheduler/CDC queues.</p>
+<p>The findings below describe the audited commit. The working tree now contains
+remediation changes and regression tests; it is not the original audited revision.
+This follow-up does not change the production-readiness verdict.</p>
+<p>Validation of the pending changes found and fixed two additional dispatcher
+defects: exhausting the in-flight limit left later unsent groups' credits and
+pending markers reserved, and topic filtering checked only the first group
+member before selecting a recipient. Regression tests now cover recovery for
+all unsent groups and per-recipient topic isolation. The capacity test failed
+before its fix. The existing client cancellation test also failed; publish now
+preserves the request context error when gRPC returns a cancellation status.</p>
+<p>The dashboard's 6 test files / 21 tests and production build passed. Go checks
+use <code>GOARCH=amd64</code>; this shell defaults to <code>386</code>, whose storage build fails on
+integer constants. The final amd64 validation passed:</p>
+<ul>
+<li><code>CGO_ENABLED=0 go test ./internal/... ./pkg/... -timeout 120s</code></li>
+<li><code>CGO_ENABLED=0 go vet ./internal/... ./pkg/...</code></li>
+<li><code>CGO_ENABLED=1 go test -race ./internal/delivery -run TestAudit -count=1 -timeout 60s</code></li>
+</ul>
+<p>The race check covers the delivery audit regressions, not the full repository.</p>
+<p>Remaining release work includes public-RPC isolation/concurrency coverage,
+durable acceptance outcomes across quorum failures and retries, completion-state
+retention and replication, byte-bounded backpressure, and production-like
+failover/restore tests. In particular, releasing a dedup claim after replication
+failure permits retry but can append another copy of a retained event; it does
+not establish stable idempotent acceptance. Passing local tests does not close
+these findings or establish throughput and recovery guarantees.</p>
+<p>Workload: high-throughput telemetry, with some loss and delay acceptable. This is a code and targeted runtime audit, not a production certification or capacity benchmark.</p>
+<h2 id="verdict">Verdict<a class="headerlink" href="#verdict" title="Permanent link">&para;</a></h2>
+<p><strong>Do not deploy the current revision as a production telemetry database.</strong> The implementation has useful foundations: separate WAL, scheduler, delivery, replication and client packages; checksummed storage; configurable durability; substantial unit coverage; and an operational dashboard. However, several essential guarantees fail in ordinary retry, restart, reconnect and authorization paths.</p>
+<p>The principal problem is uncontrolled loss and misleading success. A telemetry service may deliberately discard data under a documented overload or retention policy. It still needs isolation, bounded memory, accurate acceptance responses, recoverable retained data and measurable loss. The current implementation does not consistently provide those properties.</p>
+<p>Fifteen focused functional probes reproduced defects, and one additional probe triggered the Go race detector. Normal Go tests passed; those tests do not establish the advertised production guarantees. Reproduction sources, runner and captured evidence are under <a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/audit-probes/README.md">audit-probes</a>. Application code was not changed during this audit.</p>
+<h2 id="scope-and-evidence">Scope and evidence<a class="headerlink" href="#scope-and-evidence" title="Permanent link">&para;</a></h2>
+<p>Reviewed the public gRPC and HTTP services, authorization, WAL and encryption, scheduler recovery, delivery and offsets, SDK, replication, membership and Raft integration, snapshots, backups, retention, transactions, partition splitting, CDC, metrics, dashboard, Docker and Helm packaging, and test/release setup. The checkout contains approximately 209 Go files, including 85 existing Go test files.</p>
+<p>Evidence labels used below:</p>
+<ul>
+<li><strong>Reproduced:</strong> a focused executable check demonstrated the stated behavior.</li>
+<li><strong>Code trace:</strong> identified directly in the implementation; broader operational consequences remain to be exercised in an integration environment.</li>
+<li><strong>Scanner:</strong> tool-reported dependency findings, with exposure qualifications where inspected.</li>
+</ul>
+<p>Severity is relative to this workload. <strong>Critical</strong> means an access boundary can be bypassed. <strong>High</strong> means likely silent loss, corruption, prolonged unavailability or failure to deploy an advertised production path. <strong>Medium</strong> covers hardening and operational gaps. Optional features can be excluded from an initial release, but must actually be disabled if their findings remain open.</p>
+<table>
+<thead>
+<tr>
+<th>Check</th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GOARCH=amd64 CGO_ENABLED=0 go test ./internal/... ./pkg/... -timeout 120s</code></td>
+<td>Passed</td>
+</tr>
+<tr>
+<td><code>go vet ./internal/... ./pkg/...</code>, pure Go</td>
+<td>Passed</td>
+</tr>
+<tr>
+<td>Existing full Go suite with cgo and <code>-race -count=1</code></td>
+<td>Two test failures; no race report in existing tests</td>
+</tr>
+<tr>
+<td>Focused functional audit probes</td>
+<td>All 15 failed their desired-behavior assertions</td>
+</tr>
+<tr>
+<td>Focused delivery ownership probe with <code>-race</code></td>
+<td>Data race detected</td>
+</tr>
+<tr>
+<td>Dashboard tests</td>
+<td>6 files, 21 tests passed</td>
+</tr>
+<tr>
+<td>Dashboard TypeScript/Vite build</td>
+<td>Passed</td>
+</tr>
+<tr>
+<td>Helm lint with production values and template rendering</td>
+<td>Passed syntax/template checks</td>
+</tr>
+<tr>
+<td>Rust <code>cargo test --locked</code></td>
+<td>Passed, but contained zero tests</td>
+</tr>
+<tr>
+<td>Go vulnerability scan</td>
+<td>13 symbol-level vulnerability reports; see F19</td>
+</tr>
+<tr>
+<td>npm audit</td>
+<td>9 affected packages: 5 high, 4 moderate; see F19</td>
+</tr>
+</tbody>
+</table>
+<p>The race-suite failures were <code>TestHealthChecker_Deep_ReadOnlyWALCheck</code> (temporary directory cleanup failed while partition background work was active) and <code>TestSendAsyncContextCancellation</code> (gRPC cancellation wrapped/classified as transport error instead of the expected context error). These failures should be fixed, but they are distinct from the race reproduced by the new probe.</p>
+<p>Execution was on Windows with Go 1.26.4 targeting amd64. The module declares Go 1.25.12. The cgo/race runs used an available GCC and the existing Rust dedup DLL. Docker was unavailable. No Linux container, real Kubernetes cluster, multi-node network fault, disk-full/power-cut campaign, sustained capacity test, or restore into a fresh production-like environment was run. No throughput or RPO/RTO guarantee is established by this audit.</p>
+<h2 id="findings">Findings<a class="headerlink" href="#findings" title="Permanent link">&para;</a></h2>
+<h3 id="f01-critical-topic-authorization-does-not-constrain-returned-events">F01 — Critical: topic authorization does not constrain returned events<a class="headerlink" href="#f01-critical-topic-authorization-does-not-constrain-returned-events" title="Permanent link">&para;</a></h3>
+<p><strong>Evidence: reproduced replay leak; code trace of subscribe exposure.</strong></p>
+<p>Publish routes by message ID or partition key, so one partition contains multiple topics. <code>Subscribe</code> checks permission for the requested topic, but constructs a delivery subscription without a topic filter. The dispatcher routes by partition and consumer group. Replay likewise authorizes the requested topic and then streams partition records without filtering by it. <code>ReplayRequest.Topic</code> is treated as informational.</p>
+<p>The probe inserted an event for <code>secret</code>, requested replay for <code>allowed</code>, and received the secret event. A caller authorized for one topic can select a shared partition and receive another topic's data. Authentication alone does not prevent this.</p>
+<p>Sources: <a href="../internal/api/handlers.go#L842">handlers.go:842</a>, <a href="../internal/api/handlers.go#L890">handlers.go:890</a>, <a href="../internal/api/handlers.go#L1015">handlers.go:1015</a>, <a href="../internal/delivery/dispatcher.go#L135">dispatcher.go:135</a>, <a href="../internal/delivery/dispatcher.go#L650">dispatcher.go:650</a>, <a href="../internal/replay/engine.go#L125">replay/engine.go:125</a>.</p>
+<p><strong>Required:</strong> carry an authorized topic/tenant scope through replay, subscription, dispatch and group state. Apply it before returning each record. Add public-RPC tests using two principals and two topics that share a partition. Define whether group IDs are scoped by tenant/topic; an arbitrary global group name must not confer access.</p>
+<h3 id="f02-critical-a-policy-loading-failure-leaves-allow-all-permissions">F02 — Critical: a policy loading failure leaves allow-all permissions<a class="headerlink" href="#f02-critical-a-policy-loading-failure-leaves-allow-all-permissions" title="Permanent link">&para;</a></h3>
+<p><strong>Evidence: code trace.</strong></p>
+<p>Startup initializes auth with <code>AllowAllPolicy()</code>. Failure to read or parse the configured policy logs a warning and continues with that policy. An empty file or <code>{}</code> also creates the same empty-subject policy that permission checks interpret as allow-all. Production validation checks that a filename was supplied, not that a restrictive policy was loaded.</p>
+<p>An invalid mount or malformed policy can grant every authenticated subject all topic and administrative permissions. This is an authorization failure; it does not by itself bypass JWT authentication.</p>
+<p>Sources: <a href="../cmd/api/main.go#L318">main.go:318</a>, <a href="../cmd/api/main.go#L331">main.go:331</a>, <a href="../internal/auth/auth.go#L79">auth.go:79</a>, <a href="../internal/auth/auth.go#L281">auth.go:281</a>, <a href="../internal/auth/auth.go#L340">auth.go:340</a>, <a href="../internal/config/config.go#L472">config.go:472</a>.</p>
+<p><strong>Required:</strong> fail startup on missing, invalid or unintended empty production policies. Make permissive development mode a separate explicit state. Validate the policy before binding listeners.</p>
+<h3 id="f03-high-acks-can-commit-fabricated-or-unsuccessful-deliveries">F03 — High: ACKs can commit fabricated or unsuccessful deliveries<a class="headerlink" href="#f03-high-acks-can-commit-fabricated-or-unsuccessful-deliveries" title="Permanent link">&para;</a></h3>
+<p><strong>Evidence: reproduced manager behavior; code trace of public ACK path and offset persistence.</strong></p>
+<p>The ACK handler ignores the dispatcher's validation error and then calls the consumer manager. The manager parses group and partition from the caller-supplied delivery ID and commits <code>NextOffset</code>; it does not check <code>Success</code>, subscription ownership, membership or an actual in-flight delivery. The probe sent an unsuccessful ACK for a never-delivered ID and advanced an existing group's offset to 1,000,000.</p>
+<p>The public path has no corresponding per-delivery topic/owner authorization. This allows a principal to interfere with another known group, and ordinary negative acknowledgments can also advance its offset. <code>CommitOffset</code> permits regressions. Simply replacing it with <code>max()</code> would not solve holes caused by out-of-order scheduled delivery.</p>
+<p>There is also a state ownership mismatch: main injects partition 0's group manager into the shared API, while other partitions have separate managers used by snapshots, compaction and metrics. Consumer offsets are not transferred by the WAL replication/snapshot protocol. The exactly-once storage helper is not called by the public commit path. Pending offset flush failures are logged after the pending map has been cleared; failed updates are not restored to the retry queue.</p>
+<p>Sources: <a href="../internal/api/handlers.go#L931">handlers.go:931</a>, <a href="../internal/consumer/group.go#L321">group.go:321</a>, <a href="../internal/consumer/group.go#L426">group.go:426</a>, <a href="../internal/consumer/offset_store.go#L298">offset_store.go:298</a>, <a href="../cmd/api/main.go#L380">main.go:380</a>, <a href="../cmd/api/main.go#L412">main.go:412</a>.</p>
+<p><strong>Required:</strong> bind ACKs to authenticated delivery ownership, validate successful processing and offset bounds, track contiguous progress or explicit holes, and give each partition a consistent state owner. Specify the tolerated offset rollback/duplicate window and replicate durable group progress if failover must preserve it. Remove exactly-once claims until the complete path is proven.</p>
+<h3 id="f04-high-delivery-backpressure-loses-work-the-worker-also-races-on-its-batch">F04 — High: delivery backpressure loses work; the worker also races on its batch<a class="headerlink" href="#f04-high-delivery-backpressure-loses-work-the-worker-also-races-on-its-batch" title="Permanent link">&para;</a></h3>
+<p><strong>Evidence: code trace of loss paths; reproduced data race.</strong></p>
+<p>The worker removes a ready batch before dispatch and only logs a dispatch failure. The dispatcher returns successfully when no subscribers exist, skips events when credits run out, and continues after a stream send failure. Those events remain in the WAL, but there is no automatic read path to deliver them later: <code>Subscribe</code> stores <code>StartOffset</code>/<code>NextOffset</code> without replaying the retained history. The comment promising replay on reconnect is not implemented by that path.</p>
+<p>This can lose all delivery during a consumer outage, not just a small fsync window. Some no-credit skips are counted, but an event's eventual outcome is not accounted for. The worker's queue is unbounded; the scheduler queue limit does not include events already drained into the worker. Slow stream sends can therefore move backlog into memory outside the checked limit.</p>
+<p>Separately, <code>processBatch</code> takes the queue slice and resets its length to zero without giving dispatch separate backing storage. <code>AddReadyEvent</code> can overwrite elements while the dispatcher reads them. The race probe reports precisely this concurrent access.</p>
+<p>Sources: <a href="../internal/delivery/worker.go#L50">worker.go:50</a>, <a href="../internal/delivery/worker.go#L95">worker.go:95</a>, <a href="../internal/delivery/dispatcher.go#L650">dispatcher.go:650</a>, <a href="../internal/api/handlers.go#L890">handlers.go:890</a>, <a href="../internal/partition/manager.go#L489">manager.go:489</a>.</p>
+<p><strong>Required:</strong> separate queue ownership, bound every queue by bytes and events, and use durable per-group progress to redrive failed/unsent work. If telemetry is intentionally dropped, make the policy explicit and count the affected records. Test exhausted credits, no subscribers, disconnect during send, slow consumers and recovery without republishing.</p>
+<h3 id="f05-high-snapshot-restart-cold-hydration-and-follower-promotion-strand-scheduled-events">F05 — High: snapshot restart, cold hydration and follower promotion strand scheduled events<a class="headerlink" href="#f05-high-snapshot-restart-cold-hydration-and-follower-promotion-strand-scheduled-events" title="Permanent link">&para;</a></h3>
+<p><strong>Evidence: three reproduced defects.</strong></p>
+<ol>
+<li>A partition snapshot records the WAL tail as <code>LastScheduledOffset</code>, but does not persist the corresponding pending hot timers. Restart skips replay through that offset. A future event present in both WAL and scheduler before snapshot/restart returned with zero timers afterward.</li>
+<li>The cold hydrator scans starting at <code>now + hotWindow</code>. A cold entry already inside that window after downtime or a delayed scan is outside the scan range and can remain stranded. The targeted probe hydrated zero matching entries.</li>
+<li>Replication append writes the follower WAL without scheduling the events. Promotion of an already-existing follower creates its replication leader but does not replay those records into its scheduler. A replicated future event remained unscheduled after promotion.</li>
+</ol>
+<p>The WAL record can survive while the scheduling contract is lost. Timer recovery checkpoints have the same general requirement: a replay frontier is safe only if all earlier pending work is durably represented elsewhere.</p>
+<p>Sources: <a href="../internal/partition/snapshot.go#L62">snapshot.go:62</a>, <a href="../internal/partition/manager.go#L597">manager.go:597</a>, <a href="../internal/scheduler/scheduler.go#L555">scheduler.go:555</a>, <a href="../internal/scheduler/scheduler.go#L651">scheduler.go:651</a>, <a href="../internal/partition/manager.go#L1191">manager.go:1191</a>.</p>
+<p><strong>Required:</strong> choose one coherent recovery model: a durable pending-timer index with a proven replay frontier, or WAL reconstruction with safe completion filtering. Scan overdue/eligible cold entries from a persisted frontier. Rebuild scheduling and dedup state before making a promoted replica writable. Verify multiple consecutive restarts, not only the first replay.</p>
+<h3 id="f06-high-repeating-a-replication-append-truncates-accepted-history">F06 — High: repeating a replication append truncates accepted history<a class="headerlink" href="#f06-high-repeating-a-replication-append-truncates-accepted-history" title="Permanent link">&para;</a></h3>
+<p><strong>Evidence: two reproduced RPC-handler defects.</strong></p>
+<p>When a batch begins before the follower's next offset, the handler unconditionally truncates to that start. It does not distinguish an identical retry from a conflicting log. The probe appended offsets 0 and 1 at term 2, then repeated only offset 0 at term 2; next offset became 1 and the previously accepted offset 1 disappeared.</p>
+<p>Term zero bypasses fencing entirely. The second probe accepted term 0 at local epoch 10. The handler does not validate the provided previous-log/expected-offset/checksum fields, and epoch changes plus truncation plus append are not one serialized partition operation. There is no committed-prefix protection in this reconciliation path.</p>
+<p>Source: <a href="../internal/api/replication_server.go#L59">replication_server.go:59</a>.</p>
+<p><strong>Required:</strong> make identical retries idempotent, compare the existing prefix before reconciliation, never truncate a committed prefix, persist and serialize fencing state, reject invalid/obsolete epochs, and enforce one append authority per partition. Test delayed duplicates, overlapping batches, concurrent appends and leader changes.</p>
+<h3 id="f07-high-a-failed-quorum-write-can-become-a-successful-duplicate-without-recovery">F07 — High: a failed quorum write can become a successful duplicate without recovery<a class="headerlink" href="#f07-high-a-failed-quorum-write-can-become-a-successful-duplicate-without-recovery" title="Permanent link">&para;</a></h3>
+<p><strong>Evidence: reproduced batch publish behavior.</strong></p>
+<p>Publish claims dedup state and appends locally before waiting for replicas. Quorum failure returns before scheduling, but leaves the dedup claim. Retrying the same batch can then filter out the event as a duplicate and return success without retrying replication or scheduling.</p>
+<p>With minimum ISR 2 and no follower, the first publish failed; its retry reported success with zero published events, one duplicate and zero scheduled timers. A client can stop retrying even though its requested operation never completed.</p>
+<p>CDC hooks run on local append, before the publish path has completed quorum and scheduling. A downstream observer can consequently see an event whose producer received failure. Also, a requested durable ACK forces the leader's flush but does not independently prove that periodic-mode followers durably flushed the same batch.</p>
+<p>Sources: <a href="../internal/api/handlers.go#L735">handlers.go:735</a>, <a href="../internal/api/handlers.go#L819">handlers.go:819</a>, <a href="../internal/api/handlers.go#L422">handlers.go:422</a>, <a href="../internal/api/replication_server.go#L96">replication_server.go:96</a>.</p>
+<p><strong>Required:</strong> distinguish pending, accepted and completed idempotency states; a retry must finish or accurately report the prior operation. Define local-buffered, local-durable and replicated-durable acceptance separately. Give CDC a documented committed frontier if it is intended to observe accepted events only.</p>
+<h3 id="f08-high-routing-handoff-and-epoch-authority-are-inconsistent">F08 — High: routing, handoff and epoch authority are inconsistent<a class="headerlink" href="#f08-high-routing-handoff-and-epoch-authority-are-inconsistent" title="Permanent link">&para;</a></h3>
+<p><strong>Evidence: code trace; a multi-node split-brain/data-loss scenario was not executed.</strong></p>
+<p>Membership changes update live router assignments before asynchronous transfer completes. The destination then asks that already-updated router for the current leader, which can identify the destination itself as the source for its first copy. Failed transfer does not roll the routing update back or reliably gate the new owner from serving.</p>
+<p>Other inconsistencies compound this: syncing changed leaders into Raft retains the existing epoch; election updates the router without passing the new epoch; reconciliation checks committed leader identity but promotes using the router epoch; and reconciliation does not demote an existing leader merely because its assignment changed. Public write ownership checks use the router view. Raft initialization failure can continue into fallback behavior rather than failing closed.</p>
+<p>Replica-offset refreshing runs from <code>performLeaderTasks</code>, called only by the Raft leader, yet inspects locally led partitions. The comment that all remote partition leaders report through this path does not match that call structure. This weakens the evidence used for lag-aware elections.</p>
+<p>Sources: <a href="../internal/cluster/router.go#L185">router.go:185</a>, <a href="../internal/cluster/router.go#L276">router.go:276</a>, <a href="../internal/cluster/manager.go#L282">manager.go:282</a>, <a href="../internal/cluster/manager.go#L456">manager.go:456</a>, <a href="../internal/cluster/manager.go#L551">manager.go:551</a>, <a href="../internal/partition/manager.go#L817">manager.go:817</a>.</p>
+<p><strong>Required:</strong> use committed assignment plus a monotonic persisted epoch as the authority for every write and replication request. Make handoff a state machine: prepare destination, copy/catch up, commit ownership, fence old owner, enable new owner. Fail closed when that authority is unavailable. For telemetry, allowing an out-of-sync election can be a deliberate availability choice, but its possible loss must be measured and configured explicitly.</p>
+<h3 id="f09-high-snapshot-transfer-is-not-a-verified-recoverable-generation-swap">F09 — High: snapshot transfer is not a verified, recoverable generation swap<a class="headerlink" href="#f09-high-snapshot-transfer-is-not-a-verified-recoverable-generation-swap" title="Permanent link">&para;</a></h3>
+<p><strong>Evidence: code trace.</strong></p>
+<p>The follower resets its running checksum at every file header but verifies only the last file. Earlier WAL payload files can therefore be installed without checksum validation. It also accepts a peer-supplied filename directly into <code>filepath.Join</code>, without confinement validation; a malicious or compromised peer can use traversal components.</p>
+<p>Snapshot generation flushes the WAL but does not pin a consistent generation across hashing, streaming and compaction. Installation closes the old WAL, renames segment and index directories separately, deletes the old directories, and then reloads. There is no durable installation manifest/recovery procedure for a crash or failure between those operations. A sequence of renames is not an atomic replacement of the whole partition state.</p>
+<p>The server's default transfer limit is 1 GiB; the follower requests that default for a whole-partition snapshot. A partition beyond that size cannot complete this bootstrap path as currently requested. Consumer progress, dedup and scheduler state are not included in the transferred segment/index pair.</p>
+<p>Sources: <a href="../internal/replication/follower.go#L139">follower.go:139</a>, <a href="../internal/replication/follower.go#L189">follower.go:189</a>, <a href="../internal/replication/follower.go#L221">follower.go:221</a>, <a href="../internal/api/replication_server.go#L203">replication_server.go:203</a>.</p>
+<p><strong>Required:</strong> pin a generation, manifest every file and its size/hash, confine filenames, fsync staged data, and atomically publish a durable generation pointer with restart recovery. Support bounded chunks/resume for large partitions. Test corruption of a non-final file, interrupted install at each transition and bootstrap beyond 1 GiB.</p>
+<h3 id="f10-high-the-wrong-encryption-key-opens-existing-data-as-an-empty-writable-wal">F10 — High: the wrong encryption key opens existing data as an empty writable WAL<a class="headerlink" href="#f10-high-the-wrong-encryption-key-opens-existing-data-as-an-empty-writable-wal" title="Permanent link">&para;</a></h3>
+<p><strong>Evidence: reproduced.</strong></p>
+<p>Segment recovery treats decryption failure as an invalid tail, resets its logical write position to the last good position and succeeds. With the wrong key, the first encrypted record fails and the populated WAL opens at next offset 0. Subsequent writes can overwrite the old record area. The probe verified the writable empty state; it did not intentionally overwrite the retained ciphertext.</p>
+<p>WAL segment loading also skips some unreadable segments rather than failing startup. Tail repair needs to distinguish an incomplete final append from a wrong key or corruption inside previously valid history.</p>
+<p>Sources: <a href="../internal/storage/segment.go#L1281">segment.go:1281</a>, <a href="../internal/storage/segment.go#L1347">segment.go:1347</a>, <a href="../internal/storage/wal.go#L231">wal.go:231</a>.</p>
+<p><strong>Required:</strong> fail closed on key mismatch and interior corruption, preserve/quarantine original files, and expose a repair procedure with an explicit lost-offset range. Verify key identity before any writable recovery. This is essential even when telemetry loss is allowed: a configuration mistake must not silently reset the database.</p>
+<h3 id="f11-high-when-dlq-is-enabled-entries-disappear-on-reopen-and-batches-lose-payloads">F11 — High when DLQ is enabled: entries disappear on reopen and batches lose payloads<a class="headerlink" href="#f11-high-when-dlq-is-enabled-entries-disappear-on-reopen-and-batches-lose-payloads" title="Permanent link">&para;</a></h3>
+<p><strong>Evidence: reproduced persistence failure; code trace of batch handling.</strong></p>
+<p>The DLQ writer's record length/allocation includes four extra bytes compared with its CRC payload. The reader includes those trailing bytes in the checksum calculation and rejects the record. Adding one entry, closing and reopening produced zero entries.</p>
+<p>Separately, the retry-exhaustion path passes <code>Delivery.Event</code> to the DLQ. For a multi-event delivery, that field is nil and records live in <code>Delivery.Batch</code>, so the full failed payload is not preserved. The completion callback has a related single-event assumption.</p>
+<p>Sources: <a href="../internal/delivery/dlq_segment.go#L123">dlq_segment.go:123</a>, <a href="../internal/delivery/dlq_segment.go#L223">dlq_segment.go:223</a>, <a href="../internal/delivery/dispatcher.go#L1103">dispatcher.go:1103</a>.</p>
+<p><strong>Required:</strong> correct and version the record format; test close/reopen, CRC corruption and tail repair; preserve every event from failed batches. Include DLQ in any promised payload encryption and retention policy. Current WAL encryption does not by itself encrypt DLQ JSON.</p>
+<h3 id="f12-high-for-telemetry-replay-time-range-queries-assume-ordered-schedule-timestamps">F12 — High for telemetry replay: time-range queries assume ordered schedule timestamps<a class="headerlink" href="#f12-high-for-telemetry-replay-time-range-queries-assume-ordered-schedule-timestamps" title="Permanent link">&para;</a></h3>
+<p><strong>Evidence: reproduced.</strong></p>
+<p>Segment pruning uses the timestamps of the first and last appended events as if they were minimum and maximum values. The sparse time index also binary-searches timestamps accumulated in append order. Valid out-of-order data can be omitted.</p>
+<p>The probe appended timestamps <code>[5000, 1000, 4000]</code>; a query for <code>[1000, 2000]</code> returned zero events instead of one. Different future scheduling times and late-arriving telemetry naturally exercise this condition.</p>
+<p>Sources: <a href="../internal/storage/wal.go#L1059">wal.go:1059</a>, <a href="../internal/storage/segment.go#L1018">segment.go:1018</a>, <a href="../internal/storage/index.go#L190">index.go:190</a>.</p>
+<p><strong>Required:</strong> track actual segment time bounds and use an index that supports unsorted ingestion, or fall back to a correct scan. Test shuffled timestamps across segment boundaries and clarify that current replay indexes schedule time, not an arbitrary timestamp inside a telemetry payload.</p>
+<h3 id="f13-high-sdk-consumers-can-hang-after-stream-failure-and-default-routing-misses-partitions">F13 — High: SDK consumers can hang after stream failure and default routing misses partitions<a class="headerlink" href="#f13-high-sdk-consumers-can-hang-after-stream-failure-and-default-routing-misses-partitions" title="Permanent link">&para;</a></h3>
+<p><strong>Evidence: reproduced reconnect blocker; code trace of routing.</strong></p>
+<p>After <code>recvLoop</code> exits, <code>consumeFromNode</code> waits for infrastructure goroutines before cancelling their context. Heartbeat/drain loops need that cancellation to exit. The deferred cancel cannot execute until after the wait, so normal reconnect logic is blocked. The probe returned only after cancelling the outer context.</p>
+<p>The SDK's default partition <code>-1</code> resolves subscription by topic to one partition. Producers distribute by message ID/partition key across partitions. There is no complete default assignment loop subscribing this consumer to every relevant partition of a topic. Single-partition tests hide the mismatch.</p>
+<p>Sources: <a href="../pkg/client/consumer.go#L562">consumer.go:562</a>, <a href="../pkg/client/consumer.go#L640">consumer.go:640</a>, <a href="../pkg/client/consumer.go#L198">consumer.go:198</a>, <a href="../internal/api/handlers.go#L283">handlers.go:283</a>, <a href="../internal/api/handlers.go#L850">handlers.go:850</a>.</p>
+<p><strong>Required:</strong> cancel failed stream infrastructure before waiting, define how pending ACKs drain, and test automatic reconnection with retained data. Unify producer/consumer partition semantics; use real group assignments and subscriptions across partitions for scalable telemetry consumption.</p>
+<h3 id="f14-high-the-supplied-production-deployment-is-not-wired-to-runtime-configuration">F14 — High: the supplied production deployment is not wired to runtime configuration<a class="headerlink" href="#f14-high-the-supplied-production-deployment-is-not-wired-to-runtime-configuration" title="Permanent link">&para;</a></h3>
+<p><strong>Evidence: reproduced ignored configuration; rendered chart and code trace.</strong></p>
+<p>The chart sets <code>CRONOS_PARTITION_COUNT</code>, <code>CRONOS_REPLICATION_FACTOR</code>, <code>CRONOS_FSYNC_MODE</code> and cluster address variables, but <code>LoadConfig</code> does not read those variables. The probe requested 32 partitions, replication factor 3, periodic fsync and a specific cluster address; it got 1, 1, batch and <code>:7947</code>.</p>
+<p>Production values set minimum ISR 2 through a supported variable while replication factor stays at its default 1, violating configuration validation. The chart mounts an auth secret but does not provide the required policy filename. Fixing only one of these startup failures will not make the deployment correct.</p>
+<p>Additional deployment gaps:</p>
+<ul>
+<li>All pods receive seed addresses, while Raft bootstrap is selected when the seed list is empty; the first-cluster bootstrap procedure is not correctly expressed by these manifests.</li>
+<li>Bind addresses such as wildcard/port-only values flow into advertised peer addresses; the manifests need explicit routable per-pod addresses.</li>
+<li>The encryption secret has no restricted file mode, while Unix master-key loading rejects group/world permissions. Ownership must also permit the non-root process to read it.</li>
+<li>The chart lacks a startup probe and an explicit termination grace period matching the application's 60-second shutdown window. Scheduling-affinity/node-selector/toleration values are not rendered into the pod specification.</li>
+<li>The HTTP admin listener uses plain <code>ListenAndServe</code>; enabling gRPC TLS does not protect that listener. Raft and the custom membership transport also require their own network trust controls; replication mTLS is not universal transport encryption.</li>
+<li>The Dockerfile does not build dashboard assets; a clean build depends on what embedded assets have been staged beforehand.</li>
+</ul>
+<p>Sources: <a href="../internal/config/config.go#L257">config.go:257</a>, <a href="../charts/cronos-db/templates/statefulset.yaml">statefulset.yaml</a>, <a href="../charts/cronos-db/templates/configmap.yaml">configmap.yaml</a>, <a href="../internal/cluster/manager.go#L99">manager.go:99</a>, <a href="../internal/storage/crypto.go">crypto.go</a>, <a href="../cmd/api/main.go#L544">main.go:544</a>, <a href="../internal/cluster/raft.go">raft.go</a>, <a href="../Dockerfile">Dockerfile</a>.</p>
+<p><strong>Required:</strong> one validated configuration schema, a startup dump of effective nonsecret settings, and an installation test that boots the actual production chart on Linux. Make bootstrap, advertised addresses, key permissions, transport boundaries, probes and shutdown budgets explicit. Helm lint alone cannot validate these behaviors.</p>
+<h3 id="f15-high-when-enabled-backups-and-retention-do-not-match-the-live-partition-model">F15 — High when enabled: backups and retention do not match the live partition model<a class="headerlink" href="#f15-high-when-enabled-backups-and-retention-do-not-match-the-live-partition-model" title="Permanent link">&para;</a></h3>
+<p><strong>Evidence: code trace.</strong></p>
+<p>The backup scheduler is initialized with <code>DataDir/wal</code>, while live WALs are under <code>DataDir/partitions/&lt;id&gt;/segments</code>. Its source does not match <code>BackupWAL</code>'s expected partition layout. Every scheduled backup also creates a new destination directory, so destination-local incremental state does not carry between runs. Active segments are excluded, leaving low-volume data outside backups until rotation. The configured local backup location does not by itself protect against disk/node loss.</p>
+<p>Retention deletes segment files directly instead of through the live WAL manager. This leaves stale in-memory segment/index references and platform-dependent deletion behavior. The index deletion path appends <code>.index</code> to the full log filename rather than using the actual index filename. Retention/compaction do not consistently protect the earliest pending scheduled event or replica catch-up requirement. A later-offset ACK is not proof that all earlier scheduled events are dispensable. Size accounting excludes active segment bytes from its retained-segment calculation.</p>
+<p>Sources: <a href="../cmd/api/main.go#L165">main.go:165</a>, <a href="../internal/storage/backup.go#L31">backup.go:31</a>, <a href="../internal/storage/backup_scheduler.go">backup_scheduler.go</a>, <a href="../internal/compliance/retention.go#L165">retention.go:165</a>, <a href="../internal/compliance/retention.go#L197">retention.go:197</a>, <a href="../internal/partition/manager.go#L914">manager.go:914</a>.</p>
+<p><strong>Required:</strong> back up consistent partition generations to an independent failure domain and prove restoration. Route deletion through WAL ownership and explicit retention watermarks. Define whether retention deliberately expires undelivered telemetry; expose that loss separately from successful processing.</p>
+<h3 id="f16-high-if-exposed-transactions-and-partition-splitting-are-not-safe-production-features">F16 — High if exposed: transactions and partition splitting are not safe production features<a class="headerlink" href="#f16-high-if-exposed-transactions-and-partition-splitting-are-not-safe-production-features" title="Permanent link">&para;</a></h3>
+<p><strong>Evidence: two reproduced transaction defects; code trace of split behavior.</strong></p>
+<p><code>Prepare</code> holds participant locks and calls abort handling on failure; that handling reacquires the same non-reentrant locks. The probe remained blocked beyond its context deadline. Duplicate participant IDs can also attempt to acquire the same lock twice. <code>Commit</code> accepts an already-aborted transaction in the second probe. Recovery treats prepared state as grounds to commit without an independently durable coordinator decision. The API does not establish a complete transactional relationship between user publishes, replicated decisions and participant state.</p>
+<p>Splitting copies records and schedules them on the new partition while source records/timers remain active. Updating key bounds does not replace the hash-modulo routing scheme with a persistent range map. Moved keys can still route to the old partition and fail bounds checks; timers can exist in both places. Split bounds/ownership need a recoverable consensus transition, not just local field updates.</p>
+<p>Sources: <a href="../internal/tx/coordinator.go#L415">coordinator.go:415</a>, <a href="../internal/tx/coordinator.go#L467">coordinator.go:467</a>, <a href="../internal/tx/coordinator.go#L562">coordinator.go:562</a>, <a href="../internal/tx/coordinator.go#L667">coordinator.go:667</a>, <a href="../internal/partition/split.go#L36">split.go:36</a>.</p>
+<p><strong>Required for the first telemetry release:</strong> disable these endpoints/features and remove their production guarantees. Fixed partitions and explicit at-least-once/best-effort semantics are a smaller supportable surface. If retained later, implement and fault-test their full state machines before exposing them.</p>
+<h3 id="f17-high-under-load-several-paths-defeat-latency-and-memory-limits">F17 — High under load: several paths defeat latency and memory limits<a class="headerlink" href="#f17-high-under-load-several-paths-defeat-latency-and-memory-limits" title="Permanent link">&para;</a></h3>
+<p><strong>Evidence: code trace; magnitude not benchmarked.</strong></p>
+<p>Replication waits for all follower goroutines before evaluating results, while publishes are serialized per partition. A lagging follower can hold a healthy quorum's response until its timeout. <code>ReplicationTimeout</code> is passed as the leader constructor's flush interval, while the actual replicate timeout remains separately hard-coded. Catch-up work is also invoked in the foreground replication path.</p>
+<p>CDC emits sequentially through append hooks and can block for up to five seconds per event/sink on a full queue. Large batches can therefore tie up ingestion far beyond one bounded batch timeout. Failed asynchronous sink retries have no durable replay cursor. Hooks are installed by iterating startup partitions, leaving lazily created partitions outside that initial wiring.</p>
+<p>Combined with F04's unbounded worker queue, this prevents a credible high-throughput overload story. The memory monitor uses host virtual-memory information rather than a demonstrated process/cgroup budget. Several dispatcher settings are created from defaults instead of the exposed application configuration.</p>
+<p>Sources: <a href="../internal/replication/leader.go">leader.go</a>, <a href="../internal/partition/manager.go#L1191">manager.go:1191</a>, <a href="../internal/cdc">cdc</a>, <a href="../cmd/api/main.go#L265">main.go:265</a>, <a href="../internal/delivery/worker.go#L50">worker.go:50</a>, <a href="../internal/partition/manager.go">partition manager</a>.</p>
+<p><strong>Required:</strong> make quorum completion independent of the slowest unnecessary replica while retaining safe async catch-up; wire real deadlines; put byte-bounded queues and explicit shedding at every boundary. Give CDC a durable cursor if delivery is promised, or a clearly measured best-effort contract. Measure container RSS, retained bytes, queue age and ingress rejection under burst and sink failure.</p>
+<h3 id="f18-medium-release-gate-metrics-cannot-explain-accepted-event-outcomes">F18 — Medium, release gate: metrics cannot explain accepted-event outcomes<a class="headerlink" href="#f18-medium-release-gate-metrics-cannot-explain-accepted-event-outcomes" title="Permanent link">&para;</a></h3>
+<p><strong>Evidence: code trace.</strong></p>
+<p>The worker counts a dispatched batch even when the dispatcher skipped unsent records. Ready-queue metrics do not include all worker backlog. SLO interceptors classify success using the returned Go error, while many API failures return <code>Success:false</code> and a nil error. This can report healthy request success during quota, storage or replication failures.</p>
+<p>Replication offsets, consumer state, scheduler depth and WAL acceptance must be connected to one accounting model. An operator currently cannot reliably distinguish intentionally expired telemetry, delivery lag, scheduling loss, quorum failure and permanent loss from the visible counters alone.</p>
+<p>Sources: <a href="../internal/delivery/worker.go#L114">worker.go:114</a>, <a href="../internal/slo">slo</a>, <a href="../internal/api">API interceptors</a>, <a href="../internal/api/handlers.go#L735">handlers.go:735</a>, <a href="../cmd/api/main.go#L637">main.go:637</a>.</p>
+<p><strong>Required:</strong> count offered, rejected, accepted, delivered, expired and dropped records at clear boundaries, with bounded reason labels. Expose oldest pending age, consumer lag, replica lag, fsync latency, disk headroom, scheduler recovery failures and queue bytes. Make semantic API failures visible in availability metrics and client error handling.</p>
+<h3 id="f19-highmedium-by-exposure-dependency-security-updates-are-overdue">F19 — High/Medium by exposure: dependency security updates are overdue<a class="headerlink" href="#f19-highmedium-by-exposure-dependency-security-updates-are-overdue" title="Permanent link">&para;</a></h3>
+<p><strong>Evidence: scanner results dated 2026-09-27, with selected upstream advisories checked.</strong></p>
+<p><code>govulncheck</code> reported 13 vulnerabilities at called-symbol level across <code>google.golang.org/grpc@v1.81.1</code>, <code>github.com/hamba/avro/v2@v2.31.0</code> and the local Go 1.26.4 standard library. It additionally reported four imported-package and two required-module findings without called-symbol matches. Static call reachability is not proof of exploitability; some generated traces through interfaces are broad.</p>
+<p>The highest-priority verified advisory is gRPC HTTP/2 fragmentation memory exhaustion, affecting the server transport in use and fixed upstream in 1.83.1. Another gRPC finding has an xDS-routing prerequisite, so it should not be presented as a demonstrated exploit of this ordinary server. Choose a supported patched version covering all findings, then rescan. See the <a href="https://github.com/grpc/grpc-go/security/advisories/GHSA-vp52-pcj8-j9qc">gRPC fragmentation advisory</a> and <a href="https://pkg.go.dev/vuln/GO-2026-6443">Go database entry for the xDS-dependent panic</a>.</p>
+<p>The local toolchain has relevant standard-library reports, including TLS post-handshake CPU exhaustion; that advisory lists fixes in Go 1.25.13 and 1.26.6. The actual release image toolchain must be inspected separately because Docker uses a floating Go 1.25 tag. See <a href="https://pkg.go.dev/vuln/GO-2026-6090">GO-2026-6090</a>.</p>
+<p>The Avro scanner reports unbounded allocation, integer overflow and CPU exhaustion, with no fixed version in the scan's database entries (GO-2026-5048, GO-2026-5047, GO-2026-5046). Validation calls <code>avro.Unmarshal</code> on event data. Bound untrusted decoding and consider disabling this format until a reviewed patched path is available; validate actual triggerability in a separate controlled test.</p>
+<p><code>npm audit</code> reported nine affected packages: five high and four moderate, with fixes available. These counts include transitive and development dependencies and are not nine demonstrated browser/server exploits. In particular, the React Router advisory requires unstable RSC APIs, which were not found in the inspected static SPA. See the <a href="https://github.com/remix-run/react-router/security/advisories/GHSA-qwww-vcr4-c8h2">upstream React Router advisory</a>.</p>
+<p>Full local scan output is saved under <a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/audit-probes/evidence">audit evidence</a>. <strong>Required:</strong> patch and rescan the actual release artifacts; record affected surface, mitigation and expiry for accepted findings; add Go/npm/container/Rust dependency scanning to release checks. A Rust advisory audit and container scan were not performed here.</p>
+<h3 id="f20-medium-release-gate-existing-tests-and-release-automation-miss-the-failure-boundaries">F20 — Medium, release gate: existing tests and release automation miss the failure boundaries<a class="headerlink" href="#f20-medium-release-gate-existing-tests-and-release-automation-miss-the-failure-boundaries" title="Permanent link">&para;</a></h3>
+<p><strong>Evidence: repository inspection and test results.</strong></p>
+<p>Only documentation publishing is configured under <code>.github/workflows</code>. A local Makefile target is not an enforced release gate. Existing tests frequently check individual components without verifying accepted-event conservation through restart or failover. A DLQ test expecting an empty result after removal can pass even if all entries fail to load. Snapshot metadata tests do not establish restoration of pending timers. Rust currently has no executed tests.</p>
+<p>The chaos material does not establish an end-to-end ledger of accepted IDs and consumed/expired/dropped IDs. Applying a fake clock to a helper command does not demonstrate skew in the running database process. Existing performance results cannot substitute for throughput measured with the intended auth, encryption, replication, consumers and recovery behavior enabled.</p>
+<p>Sources: <a href="../.github/workflows">.github/workflows</a>, <a href="../Makefile">Makefile</a>, <a href="../tests">tests</a>, <a href="../internal/dedup/rust">dedup Rust</a>, <a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/audit-probes/README.md">audit probe results</a>.</p>
+<p><strong>Required:</strong> CI for Go checks, cgo/race on Linux, dashboard tests/build, actual chart startup, dependency scans, and deterministic failure tests. Gate releases on recovery of identified accepted records, bounded resource use and a successful independent restore.</p>
+<h2 id="hardening-order">Hardening order<a class="headerlink" href="#hardening-order" title="Permanent link">&para;</a></h2>
+<ol>
+<li><strong>Constrain the first supported product.</strong> Fixed partitions, one defined telemetry delivery policy, explicit loss/retention limits. Keep transactions, online split, and optional CDC/cross-region paths disabled until separately verified. Decide whether scheduled delivery is essential; if enabled, all F05 paths are mandatory fixes.</li>
+<li><strong>Fix isolation and local correctness.</strong> F01–F05, F10–F13, and F02's startup behavior. This includes ACK ownership, queue ownership, consumer replay/reconnect, timer recovery, DLQ persistence and unordered time queries. Convert each reproduction into a normal regression test as its fix lands.</li>
+<li><strong>Establish a coherent replication protocol.</strong> Address F06–F09 together: durable terms, idempotent append, truthful retry results, authoritative leadership, staged handoff and verified snapshot generations. Do not optimize replication before these invariants have executable tests.</li>
+<li><strong>Make the shipped deployment and operations real.</strong> F14–F15, dependency updates, CI, backup/restore and the accounting metrics in F18. Exercise the actual image/chart, not an alternative developer invocation.</li>
+<li><strong>Measure and optimize the complete telemetry path.</strong> Address F17 using profiles and controlled saturation only after correctness tests pass. Compare configurations by accepted-and-accounted-for events per second, not just append calls per second.</li>
+</ol>
+<p>This is a hardening program across several subsystems, not a configuration-only production promotion. It does not require implementing financial-grade exactly-once transactions for the selected workload.</p>
+<h2 id="suggested-release-acceptance-contract">Suggested release acceptance contract<a class="headerlink" href="#suggested-release-acceptance-contract" title="Permanent link">&para;</a></h2>
+<p>Numerical targets cannot be chosen from the current prompt alone. Set an explicit sustained rate, burst rate/duration, payload distribution, partition count, retention period, maximum tolerable delay, and crash-loss window before capacity testing. The following behaviors should hold regardless of those numbers:</p>
+<table>
+<thead>
+<tr>
+<th>Scenario</th>
+<th>Required observable result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Two tenants/topics share a partition</td>
+<td>Neither principal can read or ACK the other's records</td>
+</tr>
+<tr>
+<td>Policy/key configuration is wrong</td>
+<td>Startup fails without granting permissions or rewriting data</td>
+</tr>
+<tr>
+<td>Consumers disconnect or run out of credits</td>
+<td>Retained work resumes, or an explicit configured drop counter accounts for it</td>
+</tr>
+<tr>
+<td>Quorum times out and producer retries</td>
+<td>Stable idempotent result; no success for an unfinished operation</td>
+</tr>
+<tr>
+<td>Process restarts twice with pending timers</td>
+<td>Retained pending work is reconstructed both times</td>
+</tr>
+<tr>
+<td>Leader fails / old leader returns</td>
+<td>One valid append authority per epoch; no truncation from duplicate RPCs</td>
+</tr>
+<tr>
+<td>Snapshot is interrupted or exceeds 1 GiB</td>
+<td>Resume/retry safely; last good generation stays recoverable</td>
+</tr>
+<tr>
+<td>Disk fills or a segment is corrupt</td>
+<td>Bounded failure, truthful API response, preserved evidence and an explicit repair path</td>
+</tr>
+<tr>
+<td>Out-of-order timestamps are ingested</td>
+<td>Replay returns every retained matching record</td>
+</tr>
+<tr>
+<td>Retention runs with delayed events and slow replicas</td>
+<td>Documented expiry policy; no unexplained deletion</td>
+</tr>
+<tr>
+<td>Sustained overload / slow CDC sink</td>
+<td>Memory and disk stay bounded; backpressure or measured shedding occurs</td>
+</tr>
+<tr>
+<td>Production pod rolls or node is replaced</td>
+<td>Correct effective configuration, catch-up and readiness before serving</td>
+</tr>
+<tr>
+<td>Backup is restored into a fresh environment</td>
+<td>Event inventory and group/scheduling state meet the documented RPO/RTO</td>
+</tr>
+</tbody>
+</table>
+<p>For a first performance campaign, use realistic payload percentiles, skewed keys, multiple consumer groups, a slow consumer, delayed/out-of-order events and one lagging replica. Run long enough to include segment rotation, retention, snapshots and resource steady state; include a separate burst phase. Collect p50/p95/p99 publish and delivery latency, unique accepted IDs, unique delivered IDs, duplicates, explicit drops/expiry, queue bytes, RSS/cgroup usage, disk growth and recovery time.</p>
+<p>For each bounded test run after pending work has settled, reconcile accepted IDs against delivered, intentionally expired/dropped and still-retained pending IDs. Loss within a stated crash window can be accepted for telemetry; unexplained missing IDs outside that contract remain release blockers.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/jatin711-debug/cronos_db_golang" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+      <div class="md-progress" data-md-component="progress" role="progressbar"></div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.instant", "navigation.instant.progress", "navigation.tracking", "navigation.top", "navigation.sections", "navigation.indexes", "search.highlight", "search.suggest", "search.share", "content.tooltips", "toc.follow"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+        <script src="https://cdn.jsdelivr.net/npm/svg-pan-zoom@3.6.1/dist/svg-pan-zoom.min.js"></script>
+      
+        <script src="../javascripts/mermaid-zoom.js"></script>
+      
+    
+  </body>
+</html>
