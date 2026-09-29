@@ -388,8 +388,17 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 	// On a replication leader, append and replication must occur together in
 	// strict offset order; serialize them under the partition's ReplicateMu.
 	// RF=1 / non-leader partitions keep the fast path with no extra locking.
-	if repl := partitionInternal.ReplLeader; repl != nil {
+	if h.partitionManager.ReplicationRequired() || partitionInternal.ReplLeader != nil {
 		partitionInternal.ReplicateMu.Lock()
+		repl := partitionInternal.ReplLeader
+		if repl == nil {
+			partitionInternal.ReplicateMu.Unlock()
+			rollbackDedup()
+			return &types.PublishResponse{
+				Success: false,
+				Error:   fmt.Sprintf("replication leader for partition %d is not ready", partitionID),
+			}, nil
+		}
 		if err := partitionInternal.Wal.AppendEvent(event); err != nil {
 			partitionInternal.ReplicateMu.Unlock()
 			rollbackDedup()
@@ -739,8 +748,15 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 			// order. ReplicateMu serializes the two for replicated partitions only;
 			// RF=1 / non-leader partitions (ReplLeader == nil) keep the fully
 			// pipelined fast path with no extra locking.
-			if repl := partitionInternal.ReplLeader; repl != nil {
+			if h.partitionManager.ReplicationRequired() || partitionInternal.ReplLeader != nil {
 				partitionInternal.ReplicateMu.Lock()
+				repl := partitionInternal.ReplLeader
+				if repl == nil {
+					partitionInternal.ReplicateMu.Unlock()
+					rollbackDedup()
+					setError(int32(len(evts)), fmt.Sprintf("replication leader for partition %d is not ready", pid))
+					return
+				}
 				if err := partitionInternal.Wal.AppendBatch(evts); err != nil {
 					partitionInternal.ReplicateMu.Unlock()
 					rollbackDedup()

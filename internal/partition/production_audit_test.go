@@ -55,7 +55,7 @@ func TestAuditSnapshotRestoresPendingTimer(t *testing.T) {
 }
 
 func TestAuditPromotionSchedulesReplicatedEvents(t *testing.T) {
-	cfg := &types.Config{DataDir: t.TempDir(), PartitionCount: 1, TickMS: 10, WheelSize: 100, SegmentSizeBytes: 1 << 20, IndexInterval: 1, FsyncMode: "batch", FlushIntervalMS: 100, BloomCapacity: 1000, MinInSyncReplicas: 1}
+	cfg := &types.Config{DataDir: t.TempDir(), PartitionCount: 1, ReplicationFactor: 2, TickMS: 10, WheelSize: 100, SegmentSizeBytes: 1 << 20, IndexInterval: 1, FsyncMode: "batch", FlushIntervalMS: 100, BloomCapacity: 1000, MinInSyncReplicas: 1}
 	pm := NewPartitionManager("audit", cfg)
 	defer pm.Close()
 	if err := pm.CreatePartition(0, "audit"); err != nil {
@@ -72,5 +72,24 @@ func TestAuditPromotionSchedulesReplicatedEvents(t *testing.T) {
 	defer p.ReplLeader.Stop()
 	if n := p.Scheduler.GetTimingWheelDepth(); n != 1 {
 		t.Fatalf("promotion left replicated event unscheduled: got %d timers, want 1", n)
+	}
+}
+
+func TestAuditSingleReplicaPromotionKeepsFastPath(t *testing.T) {
+	cfg := &types.Config{DataDir: t.TempDir(), PartitionCount: 1, ReplicationFactor: 1, TickMS: 10, WheelSize: 100, SegmentSizeBytes: 1 << 20, IndexInterval: 1, FsyncMode: "batch", FlushIntervalMS: 100, BloomCapacity: 1000}
+	pm := NewPartitionManager("audit", cfg)
+	defer pm.Close()
+	if err := pm.CreatePartition(0, "audit"); err != nil {
+		t.Fatal(err)
+	}
+	if err := pm.PromoteToLeader(0, 1); err != nil {
+		t.Fatal(err)
+	}
+	p, err := pm.GetInternalPartition(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.ReplLeader != nil || !p.Leader || p.Epoch != 1 {
+		t.Fatalf("RF=1 promotion created replication leader or wrong epoch: leader=%v epoch=%d repl=%v", p.Leader, p.Epoch, p.ReplLeader)
 	}
 }
