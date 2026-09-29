@@ -74,9 +74,10 @@ Cluster seeds based on StatefulSet pod names and headless service.
 {{- $headless := include "cronos-db.headlessServiceName" . }}
 {{- $namespace := .Release.Namespace }}
 {{- $count := int .Values.replicaCount }}
+{{- $port := int .Values.headlessService.gossipPort }}
 {{- $seeds := list }}
 {{- range $i := until $count }}
-{{- $seeds = append $seeds (printf "%s-%d.%s.%s.svc.cluster.local:7946" $fullname $i $headless $namespace) }}
+{{- $seeds = append $seeds (printf "%s-%d.%s.%s.svc:%d" $fullname $i $headless $namespace $port) }}
 {{- end }}
 {{- join "," $seeds }}
 {{- end }}

@@ -6,6 +6,7 @@ metadata:
     {{- include "cronos-db.labels" . | nindent 4 }}
 data:
   CRONOS_DATA_DIR: {{ .Values.config.dataDir | quote }}
+  CRONOS_RAFT_DIR: {{ printf "%s/raft" .Values.config.dataDir | quote }}
   CRONOS_GRPC_ADDR: "0.0.0.0:{{ .Values.service.grpcPort }}"
   CRONOS_HTTP_ADDR: "0.0.0.0:{{ .Values.service.httpPort }}"
   CRONOS_CLUSTER: "true"

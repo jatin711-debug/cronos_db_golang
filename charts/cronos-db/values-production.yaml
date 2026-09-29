@@ -27,7 +27,8 @@ config:
   partitionCount: 32
   # 7 days dedup TTL to tolerate backfills and replays.
   dedupTTLHours: 168
-  exactlyOnceCommits: true
+  # End-to-end exactly-once delivery is not supported.
+  exactlyOnceCommits: false
 
 metrics:
   enabled: true
