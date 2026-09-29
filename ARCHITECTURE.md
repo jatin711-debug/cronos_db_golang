@@ -1430,19 +1430,11 @@ flowchart TD
 
 ### Benchmarks
 
-| Metric | Single Node | 3-Node Cluster | Notes |
-|--------|-------------|----------------|-------|
-| **Throughput (batch)** | ~180K ev/sec | **1,010,933 ev/sec** | Batch 4000, 32 pub/node, single machine |
-| **Throughput (single)** | ~10K ev/sec | ~30K ev/sec | One event per RPC |
-| **Latency P50** | ~60us | **105us** | Batch publish |
-| **Latency P95** | ~180us | **337us** | Batch publish |
-| **Latency P99** | ~250us | **468us** | Batch publish |
-| **Latency Min** | - | **5us** | Best case |
-| **Latency Max** | - | **900us** | Worst case under sustained load |
-| **Success Rate** | 100% | **100%** | Zero errors across 96M events |
-| **Total Events** | - | **96,000,000** | Completed in 1 min 35 sec |
-
-> All 3 nodes running on the **same physical machine** sharing CPU, memory, and disk I/O.
+The historical claim of 1,010,933 events/s across 96 million events has no
+preserved benchmark artifact or durability verification. The current
+[three-node validation](docs/CLUSTER_PERFORMANCE_VALIDATION_2026-09-29.md)
+reports the exact workloads, accepted-event rates, baseline comparison, and
+remaining correctness limits. All three nodes ran on one physical machine.
 
 ### Optimization Techniques
 
