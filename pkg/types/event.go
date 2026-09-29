@@ -172,6 +172,8 @@ type Config struct {
 
 	// DevMode disables production security requirements for local development and CI.
 	DevMode bool
+	// ExperimentalFeatures exposes transactions and online splitting only in dev mode.
+	ExperimentalFeatures bool
 
 	// RetentionMaxAgeHours deletes WAL segments older than this many hours (0 = disabled).
 	RetentionMaxAgeHours int

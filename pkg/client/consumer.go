@@ -638,6 +638,9 @@ func (c *Consumer) consumeFromNode(ctx context.Context, addr string) error {
 	}
 
 	recvErr := c.recvLoop(subCtx, addr, subscribeStream, assignmentState, deliveries)
+	// A broken stream cannot drain ACKs. Stop its infrastructure before joining it;
+	// the outer reconnect loop will resume from the last confirmed checkpoint.
+	cancel()
 
 	close(deliveries)
 	workerWG.Wait()

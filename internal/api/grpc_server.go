@@ -61,6 +61,8 @@ type Config struct {
 	VersionGate *VersionGate
 	// SLORecorder optionally records per-RPC latency and error samples.
 	SLORecorder SLORecorder
+	// ExperimentalFeatures allows registration of the unverified transaction API.
+	ExperimentalFeatures bool
 }
 
 // SLORecorder is the minimal interface for SLO latency tracking.
@@ -189,7 +191,11 @@ func SLOUnaryInterceptor(recorder SLORecorder) grpc.UnaryServerInterceptor {
 		}
 		start := time.Now()
 		resp, err = handler(ctx, req)
-		recorder.Record(time.Since(start), err != nil)
+		failed := err != nil
+		if result, ok := resp.(interface{ GetSuccess() bool }); ok && !result.GetSuccess() {
+			failed = true
+		}
+		recorder.Record(time.Since(start), failed)
 		return resp, err
 	}
 }
@@ -218,7 +224,7 @@ func (g *GRPCServer) RegisterServices(
 	if partitionHandler != nil {
 		types.RegisterPartitionServiceServer(g.server, partitionHandler)
 	}
-	if g.txHandler != nil {
+	if g.txHandler != nil && g.config.ExperimentalFeatures {
 		types.RegisterTransactionServiceServer(g.server, g.txHandler)
 	}
 	if adminHandler != nil {

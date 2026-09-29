@@ -58,7 +58,49 @@ func main() {
 		"auth_jwt_secret_set", cfg.AuthJWTSecret != "",
 		"auth_policy_file", cfg.AuthPolicyFile,
 		"auth_explicitly_disabled_by_flag", !cfg.AuthEnabled,
+		"dev", cfg.DevMode,
+		"experimental_features", cfg.ExperimentalFeatures,
+		"partition_count", cfg.PartitionCount,
+		"replication_factor", cfg.ReplicationFactor,
+		"min_in_sync_replicas", cfg.MinInSyncReplicas,
+		"fsync_mode", cfg.FsyncMode,
+		"cluster_enabled", cfg.ClusterEnabled,
+		"cluster_gossip_addr", cfg.ClusterGossipAddr,
+		"cluster_grpc_addr", cfg.ClusterGRPCAddr,
+		"cluster_raft_addr", cfg.ClusterRaftAddr,
 	)
+
+	// Validate authorization before opening data stores or network listeners.
+	var authConfig *auth.Config
+	if cfg.AuthEnabled {
+		authConfig = &auth.Config{
+			Enabled: cfg.AuthEnabled,
+		}
+		if cfg.AuthJWTSecret != "" {
+			authConfig.JWTSecret = []byte(cfg.AuthJWTSecret)
+		}
+		if cfg.AuthJWTPublicKey != "" {
+			pubKey, err := auth.LoadPublicKey(cfg.AuthJWTPublicKey)
+			if err != nil {
+				slog.Error("Failed to load JWT public key", "error", err)
+				os.Exit(1)
+			} else {
+				authConfig.JWTPublicKey = pubKey
+			}
+		}
+		if cfg.AuthPolicyFile != "" {
+			policy, err := auth.NewPolicyFromFile(cfg.AuthPolicyFile)
+			if err != nil {
+				slog.Error("Failed to load auth policy", "error", err)
+				os.Exit(1)
+			} else {
+				authConfig.Policy = policy
+			}
+		} else {
+			slog.Error("Authentication requires an explicit authorization policy")
+			os.Exit(1)
+		}
+	}
 
 	// Wrap config for hot reload
 	reloadableCfg := config.NewReloadableConfig(cfg)
@@ -162,26 +204,35 @@ func main() {
 	defer diskMonitor.Stop()
 
 	// Start WAL backup scheduler
-	backupScheduler := storage.NewBackupScheduler(
-		cfg.DataDir+"/wal",
+	backupScheduler := storage.NewCheckpointBackupScheduler(
 		cfg.DataDir+"/backups",
 		1*time.Hour,
 		7*24*time.Hour,
+		pm.BackupWALs,
 	)
 	backupScheduler.Start()
 	defer backupScheduler.Stop()
 
 	// Start compliance retention enforcer
-	retentionEnforcer := compliance.NewEnforcer(cfg.DataDir, compliance.RetentionPolicy{
+	retentionEnforcer := compliance.NewManagedEnforcer(cfg.DataDir, compliance.RetentionPolicy{
 		MaxAge:       time.Duration(cfg.RetentionMaxAgeHours) * time.Hour,
 		MaxSizeBytes: cfg.RetentionMaxSizeGB << 30,
-	})
+	}, pm.RemoveRetainedSegment)
+	retentionCtx, stopRetention := context.WithCancel(context.Background())
+	retentionDone := make(chan struct{})
+	defer stopRetention()
 	utils.GoSafe("retention-enforcer", func() {
+		defer close(retentionDone)
 		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()
-		for range ticker.C {
-			if err := retentionEnforcer.Run(context.Background()); err != nil {
-				slog.Warn("Retention enforcement failed", "error", err)
+		for {
+			select {
+			case <-retentionCtx.Done():
+				return
+			case <-ticker.C:
+				if err := retentionEnforcer.Run(retentionCtx); err != nil {
+					slog.Warn("Retention enforcement failed", "error", err)
+				}
 			}
 		}
 	})
@@ -310,34 +361,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Build auth config if enabled
-	var authConfig *auth.Config
-	if cfg.AuthEnabled {
-		authConfig = &auth.Config{
-			Enabled: cfg.AuthEnabled,
-			Policy:  auth.AllowAllPolicy(),
-		}
-		if cfg.AuthJWTSecret != "" {
-			authConfig.JWTSecret = []byte(cfg.AuthJWTSecret)
-		}
-		if cfg.AuthJWTPublicKey != "" {
-			pubKey, err := auth.LoadPublicKey(cfg.AuthJWTPublicKey)
-			if err != nil {
-				slog.Warn("Failed to load JWT public key", "error", err)
-			} else {
-				authConfig.JWTPublicKey = pubKey
-			}
-		}
-		if cfg.AuthPolicyFile != "" {
-			policy, err := auth.NewPolicyFromFile(cfg.AuthPolicyFile)
-			if err != nil {
-				slog.Warn("Failed to load auth policy", "error", err)
-			} else {
-				authConfig.Policy = policy
-			}
-		}
-	}
-
 	// Create version gate for zero-downtime upgrades
 	versionGate := api.NewVersionGate()
 
@@ -350,6 +373,7 @@ func main() {
 	// Create gRPC server
 	grpcConfig := api.DefaultConfig()
 	grpcConfig.Address = cfg.GPRCAddress
+	grpcConfig.ExperimentalFeatures = cfg.ExperimentalFeatures
 	if cfg.TLSEnabled {
 		grpcConfig.TLS = &api.TLSConfig{
 			Enabled:    cfg.TLSEnabled,
@@ -414,15 +438,17 @@ func main() {
 
 	// Create partition metadata service handler
 	partitionHandler := api.NewPartitionServiceHandler(pm, clusterMgr, cfg.NodeID)
+	partitionHandler.SetExperimentalFeatures(cfg.ExperimentalFeatures)
 	// Enforce admin authorization on destructive partition RPCs (Compact,
 	// RunRetention, SplitPartition) when auth is enabled.
 	if authConfig != nil {
 		partitionHandler.SetAuthPolicy(authConfig.Policy)
 	}
 
-	// Create transaction service handler (2PC)
-	transactionHandler := tx.NewHandler(pm)
-	grpcServer.SetTransactionHandler(transactionHandler)
+	if cfg.ExperimentalFeatures {
+		slog.Warn("Experimental transactions and online splitting enabled; development use only")
+		grpcServer.SetTransactionHandler(tx.NewHandler(pm))
+	}
 
 	// Cross-region replication is registered on the INTERNAL listener below, not
 	// the public client port: it can inject/read arbitrary partition data, so it
@@ -704,6 +730,9 @@ func main() {
 		}
 
 		// 3. Stop all partitions gracefully (drains in-flight deliveries, flushes WAL)
+		stopRetention()
+		<-retentionDone
+		backupScheduler.Stop() // wait for checkpoint readers before closing WALs
 		slog.Info("Shutdown phase 2: Stopping partitions (draining deliveries, flushing WAL)...")
 		if err := pm.Close(); err != nil {
 			slog.Error("Failed to cleanly stop all partitions", "error", err)

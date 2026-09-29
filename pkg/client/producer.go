@@ -373,6 +373,11 @@ func (p *Producer) tryPublish(ctx context.Context, addr string, event *types.Eve
 		Event:          event,
 		AllowDuplicate: allowDuplicate,
 	})
+	// Preserve the standard context cause when gRPC encodes cancellation as
+	// a status error, so callers and the circuit breaker can recognize it.
+	if err != nil && reqCtx.Err() != nil {
+		err = reqCtx.Err()
+	}
 	p.client.observeRequest("event.publish", addr, start, err)
 	return resp, err
 }

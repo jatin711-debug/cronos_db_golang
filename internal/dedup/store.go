@@ -6,6 +6,7 @@
 package dedup
 
 import (
+	"fmt"
 	"sync"
 	"time"
 )
@@ -236,6 +237,25 @@ func (m *Manager) Put(messageID string, offset int64, createdTS int64) error {
 	return m.store.Put(messageID, offset, createdTS)
 }
 
+// PutBatch marks claimed IDs as accepted after their WAL batch is scheduled.
+// Stores without batch support retain the single-entry behavior.
+func (m *Manager) PutBatch(messageIDs []string, offsets, createdTS []int64) error {
+	if batchStore, ok := m.store.(interface {
+		PutBatch([]string, []int64, []int64) error
+	}); ok {
+		return batchStore.PutBatch(messageIDs, offsets, createdTS)
+	}
+	if len(messageIDs) != len(offsets) || len(messageIDs) != len(createdTS) {
+		return fmt.Errorf("dedup completion batch lengths differ")
+	}
+	for i, id := range messageIDs {
+		if err := m.store.Put(id, offsets[i], createdTS[i]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // IsDuplicateBatch checks multiple messages for duplicates in a single pass.
 // Returns a slice of booleans where true means the message is a duplicate.
 func (m *Manager) IsDuplicateBatch(messageIDs []string, offsets []int64) ([]bool, error) {
@@ -304,4 +324,9 @@ func (m *Manager) Checkpoint(destDir string) error {
 		return cp.Checkpoint(destDir)
 	}
 	return nil
+}
+
+// GetOffset distinguishes pending claims (-1) from completed publishes (>=0).
+func (m *Manager) GetOffset(messageID string) (int64, bool, error) {
+	return m.store.GetOffset(messageID)
 }

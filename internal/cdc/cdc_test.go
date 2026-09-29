@@ -100,10 +100,11 @@ func TestManager_Emit_SinkError(t *testing.T) {
 		Offset:      1,
 	})
 
-	time.Sleep(100 * time.Millisecond)
-	// Should not panic even if sink errors
-	if sink.writeCount.Load() != 1 {
-		t.Errorf("expected 1 write attempt, got %d", sink.writeCount.Load())
+	// Close drains the worker and its three retries; a fixed 100 ms sleep
+	// races the first retry and can observe either one or two attempts.
+	_ = m.Close()
+	if got := sink.writeCount.Load(); got != 4 {
+		t.Errorf("expected initial write plus three retries, got %d", got)
 	}
 }
 

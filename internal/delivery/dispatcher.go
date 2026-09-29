@@ -119,6 +119,9 @@ type Dispatcher struct {
 	// OnDeliveryComplete is called when a delivery reaches final disposition
 	// (successful ack or DLQ). The tenantID is extracted from Event.Meta.
 	OnDeliveryComplete func(tenantID string)
+	IsCompleted        func(group string, offset int64) bool
+	dispatchMu         sync.Mutex
+	pending            sync.Map
 }
 
 // DispatcherShard holds a subset of subscriptions and their in-flight deliveries.
@@ -139,6 +142,9 @@ type Subscription struct {
 	ID string
 	// ConsumerGroup is the logical group used for round-robin fan-out.
 	ConsumerGroup string
+	// Topic and Subject are bound by the authenticated subscription handler.
+	Topic   string
+	Subject string
 	// Partition is the partition this subscriber consumes from.
 	Partition *types.Partition
 	// NextOffset is the next expected offset after the last successful ack.
@@ -402,6 +408,7 @@ func (d *Dispatcher) Unsubscribe(subscriptionID string) error {
 			if err := d.decInFlight(1); err != nil {
 				log.Printf("[DISPATCHER] in-flight underflow: %v", err)
 			}
+			d.releasePending(sub.ConsumerGroup, deliveryEvents(active.Delivery))
 			delete(shard.activeDeliveries, deliveryID)
 			shard.expiry.remove(deliveryID)
 		}
@@ -515,64 +522,7 @@ func (d *Dispatcher) pickSubscriber(groupSubs []*Subscription, startIdx int) *Su
 // Dispatch fans out a single event to one subscriber per consumer group on the
 // event's partition, subject to credits, circuit breakers, and in-flight limits.
 func (d *Dispatcher) Dispatch(event *types.Event) error {
-	start := time.Now()
-	defer func() {
-		metrics.ObserveDispatch(strconv.FormatInt(int64(event.GetPartitionId()), 10), time.Since(start))
-	}()
-
-	d.partitionsMu.RLock()
-	allSubs := d.partitionSubs[event.GetPartitionId()]
-	d.partitionsMu.RUnlock()
-
-	if len(allSubs) == 0 {
-		return nil
-	}
-
-	// Fast path: single subscriber (very common case)
-	// Avoids map allocation from groupSubscriptionsByConsumer entirely.
-	if len(allSubs) == 1 {
-		return d.dispatchToSub(allSubs[0], event)
-	}
-
-	consumerGroupSubs := groupSubscriptionsByConsumer(allSubs)
-
-	for groupID, groupSubs := range consumerGroupSubs {
-		startIdx := d.nextGroupStart(groupID, len(groupSubs))
-		selectedSub := d.pickSubscriber(groupSubs, startIdx)
-		if selectedSub == nil {
-			log.Printf("[DISPATCHER] No subscriber with credits in group %s for event %s",
-				groupID, event.GetMessageId())
-			continue
-		}
-
-		delivery := deliveryMessagePool.Get().(*DeliveryMessage)
-		delivery.Event = event
-		delivery.DeliveryID = makeDeliveryID(selectedSub.ID, event.Offset)
-		delivery.Attempt = 1
-		delivery.AckTimeout = int32(d.config.DefaultAckTimeout / time.Millisecond)
-		delivery.Batch = nil
-
-		if !d.tryReserveInFlight(1) {
-			deliveryMessagePool.Put(delivery)
-			d.releaseCredit(selectedSub)
-			metrics.IncDispatcherBackpressureSkip(strconv.FormatInt(int64(event.GetPartitionId()), 10), "in_flight_cap", 1)
-			return fmt.Errorf("in-flight limit exceeded")
-		}
-
-		if err := selectedSub.Stream.Send(delivery); err != nil {
-			if err := d.decInFlight(1); err != nil {
-				log.Printf("[DISPATCHER] in-flight underflow: %v", err)
-			}
-			d.releaseCredit(selectedSub)
-			deliveryMessagePool.Put(delivery)
-			log.Printf("[DISPATCHER] Failed to send to subscriber %s: %v", selectedSub.ID, err)
-			continue
-		}
-
-		d.trackDelivery(delivery, selectedSub)
-	}
-
-	return nil
+	return d.DispatchBatch([]*types.Event{event})
 }
 
 // dispatchToSub handles the fast path for a single subscriber.
@@ -648,13 +598,30 @@ func (d *Dispatcher) DispatchBatch(events []*types.Event) error {
 }
 
 func (d *Dispatcher) dispatchPartitionBatch(partitionID int32, events []*types.Event) error {
+	return d.dispatchGroupBatch(partitionID, events, "")
+}
+
+func (d *Dispatcher) DispatchGroup(group string, events []*types.Event) error {
+	if len(events) == 0 {
+		return nil
+	}
+	return d.dispatchGroupBatch(events[0].PartitionId, events, group)
+}
+
+func pendingKey(group string, offset int64) string {
+	return fmt.Sprintf("%d:%s:%d", len(group), group, offset)
+}
+
+func (d *Dispatcher) dispatchGroupBatch(partitionID int32, events []*types.Event, onlyGroup string) error {
+	d.dispatchMu.Lock()
+	defer d.dispatchMu.Unlock()
 	start := time.Now()
 	defer func() {
 		metrics.ObserveDispatch(strconv.FormatInt(int64(partitionID), 10), time.Since(start))
 	}()
 
 	d.partitionsMu.RLock()
-	allSubs := d.partitionSubs[partitionID]
+	allSubs := append([]*Subscription(nil), d.partitionSubs[partitionID]...)
 	d.partitionsMu.RUnlock()
 
 	if len(allSubs) == 0 {
@@ -685,6 +652,25 @@ func (d *Dispatcher) dispatchPartitionBatch(partitionID int32, events []*types.E
 
 	for _, event := range events {
 		for groupID, groupSubs := range consumerGroupSubs {
+			if onlyGroup != "" && groupID != onlyGroup {
+				continue
+			}
+			// Validate every recipient: concurrent subscription registration may
+			// briefly expose different topic scopes under the same group name.
+			eligible := make([]*Subscription, 0, len(groupSubs))
+			for _, sub := range groupSubs {
+				if sub.Topic == "" || sub.Topic == event.Topic {
+					eligible = append(eligible, sub)
+				}
+			}
+			groupSubs = eligible
+			if d.IsCompleted != nil && d.IsCompleted(groupID, event.Offset) {
+				continue
+			}
+			if _, exists := d.pending.Load(pendingKey(groupID, event.Offset)); exists {
+				continue
+			}
+
 			if len(groupSubs) == 0 {
 				continue
 			}
@@ -703,6 +689,7 @@ func (d *Dispatcher) dispatchPartitionBatch(partitionID int32, events []*types.E
 				continue
 			}
 
+			d.pending.Store(pendingKey(groupID, event.Offset), struct{}{})
 			batchesBySub[selectedSub] = append(batchesBySub[selectedSub], event)
 		}
 	}
@@ -711,6 +698,7 @@ func (d *Dispatcher) dispatchPartitionBatch(partitionID int32, events []*types.E
 	// so the next batch continues round-robin from where this one left off.
 	d.advanceGroupCursors(localCursors, numSubsByGroup)
 
+	var dispatchErr error
 	for sub, batchEvents := range batchesBySub {
 		if len(batchEvents) == 0 {
 			continue
@@ -730,14 +718,27 @@ func (d *Dispatcher) dispatchPartitionBatch(partitionID int32, events []*types.E
 		delivery.AckTimeout = int32(d.config.DefaultAckTimeout / time.Millisecond)
 
 		if !d.tryReserveInFlight(1) {
+			d.releasePending(sub.ConsumerGroup, batchEvents)
 			deliveryMessagePool.Put(delivery)
 			// Credits were consumed per event while assigning.
 			d.releaseCredits(sub, int32(len(batchEvents)))
 			metrics.IncDispatcherBackpressureSkip(strconv.FormatInt(int64(partitionID), 10), "in_flight_cap", len(batchEvents))
-			return fmt.Errorf("in-flight limit exceeded")
+			dispatchErr = fmt.Errorf("in-flight limit exceeded")
+			continue
 		}
 
+		d.trackDelivery(delivery, sub)
 		if err := sub.Stream.Send(delivery); err != nil {
+			d.releasePending(sub.ConsumerGroup, batchEvents)
+			shard := d.getShard(sub.ID)
+			shard.mu.Lock()
+			_, tracked := shard.activeDeliveries[delivery.DeliveryID]
+			delete(shard.activeDeliveries, delivery.DeliveryID)
+			shard.expiry.remove(delivery.DeliveryID)
+			shard.mu.Unlock()
+			if !tracked {
+				continue
+			}
 			if err := d.decInFlight(1); err != nil {
 				log.Printf("[DISPATCHER] in-flight underflow: %v", err)
 			}
@@ -757,10 +758,9 @@ func (d *Dispatcher) dispatchPartitionBatch(partitionID int32, events []*types.E
 		if sub.circuitBreaker != nil {
 			sub.circuitBreaker.RecordSuccess()
 		}
-		d.trackDelivery(delivery, sub)
 	}
 
-	return nil
+	return dispatchErr
 }
 
 // trackDelivery tracks an active delivery.
@@ -1058,7 +1058,8 @@ func (d *Dispatcher) HandleAck(deliveryID string, success bool, nextOffset int64
 	}
 
 	if success {
-		active.Subscription.NextOffset = nextOffset
+		d.releasePending(active.Subscription.ConsumerGroup, deliveryEvents(active.Delivery))
+		atomic.StoreInt64(&active.Subscription.NextOffset, nextOffset)
 		d.releaseCredits(active.Subscription, active.CreditsConsumed)
 		if active.Subscription.circuitBreaker != nil {
 			active.Subscription.circuitBreaker.RecordSuccess()
@@ -1090,41 +1091,53 @@ func (d *Dispatcher) HandleAck(deliveryID string, success bool, nextOffset int64
 }
 
 // notifyDeliveryComplete invokes the OnDeliveryComplete callback with the tenant ID.
-func (d *Dispatcher) notifyDeliveryComplete(active *ActiveDelivery) {
-	if d.OnDeliveryComplete == nil || active == nil || active.Delivery == nil || active.Delivery.Event == nil {
-		return
+func deliveryEvents(msg *DeliveryMessage) []*types.Event {
+	if msg.Event != nil {
+		return []*types.Event{msg.Event}
 	}
-	if tenantID, ok := active.Delivery.Event.Meta["tenant_id"]; ok && tenantID != "" {
-		d.OnDeliveryComplete(tenantID)
+	return msg.Batch
+}
+
+func (d *Dispatcher) releasePending(group string, events []*types.Event) {
+	for _, event := range events {
+		d.pending.Delete(pendingKey(group, event.Offset))
 	}
 }
 
-// sendToDLQ sends a failed delivery to the dead-letter queue.
-func (d *Dispatcher) sendToDLQ(active *ActiveDelivery, reason string) {
-	d.notifyDeliveryComplete(active)
-	if d.dlq == nil {
-		log.Printf("[DISPATCHER] DLQ not configured, dropping failed delivery %s: %s",
-			active.Delivery.DeliveryID, reason)
+func (d *Dispatcher) notifyDeliveryComplete(active *ActiveDelivery) {
+	if d.OnDeliveryComplete == nil || active == nil || active.Delivery == nil {
 		return
 	}
+	for _, event := range deliveryEvents(active.Delivery) {
+		if id := event.Meta["tenant_id"]; id != "" {
+			d.OnDeliveryComplete(id)
+		}
+	}
+}
 
-	subscriberID := ""
+func (d *Dispatcher) sendToDLQ(active *ActiveDelivery, reason string) {
+	if active == nil || active.Delivery == nil {
+		return
+	}
+	events := deliveryEvents(active.Delivery)
 	if active.Subscription != nil {
-		subscriberID = active.Subscription.ID
+		d.releasePending(active.Subscription.ConsumerGroup, events)
 	}
-
-	if err := d.dlq.Add(
-		active.Delivery.Event,
-		active.Delivery.DeliveryID,
-		active.Attempt,
-		reason,
-		subscriberID,
-	); err != nil {
-		log.Printf("[DISPATCHER] Failed to add to DLQ: %v", err)
-	} else {
-		log.Printf("[DISPATCHER] Added to DLQ: delivery=%s, reason=%s",
-			active.Delivery.DeliveryID, reason)
+	if d.dlq == nil {
+		log.Printf("[DISPATCHER] DLQ unavailable: %s", reason)
+		return
 	}
+	subscriber := ""
+	if active.Subscription != nil {
+		subscriber = active.Subscription.ID
+	}
+	for _, event := range events {
+		if err := d.dlq.Add(event, active.Delivery.DeliveryID, active.Attempt, reason, subscriber); err != nil {
+			log.Printf("[DISPATCHER] DLQ write failed: %v", err)
+			return
+		}
+	}
+	d.notifyDeliveryComplete(active)
 }
 
 // retryDelivery retries a failed delivery.

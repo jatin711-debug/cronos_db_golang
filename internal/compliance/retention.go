@@ -39,9 +39,11 @@ type segmentInfo struct {
 type Enforcer struct {
 	dataDir string
 	policy  RetentionPolicy
+	remove  func(context.Context, string) (bool, error)
 }
 
-// NewEnforcer creates a retention enforcer for the given data directory and policy.
+// NewEnforcer is for offline directories only. Live WALs must use
+// NewManagedEnforcer to synchronize deletion with readers and completion state.
 func NewEnforcer(dataDir string, policy RetentionPolicy) *Enforcer {
 	return &Enforcer{
 		dataDir: dataDir,
@@ -49,75 +51,86 @@ func NewEnforcer(dataDir string, policy RetentionPolicy) *Enforcer {
 	}
 }
 
-// Run executes retention policy once: collect segments, preserve the active
-// segment per partition, then delete by MaxAge and/or MaxSizeBytes.
-// It honors ctx cancellation between phases.
+// NewManagedEnforcer delegates deletion to the owning live WAL. The callback
+// must verify completion and return false when a segment must be retained.
+func NewManagedEnforcer(dataDir string, policy RetentionPolicy, remove func(context.Context, string) (bool, error)) *Enforcer {
+	if remove == nil {
+		remove = func(context.Context, string) (bool, error) {
+			return false, fmt.Errorf("retention requires a WAL owner")
+		}
+	}
+	return &Enforcer{dataDir: dataDir, policy: policy, remove: remove}
+}
+
+type RetentionStats struct {
+	SegmentsDeleted int64
+	BytesFreed      int64
+}
+
 func (e *Enforcer) Run(ctx context.Context) error {
+	_, err := e.RunWithStats(ctx)
+	return err
+}
+
+// RunWithStats counts active and protected segments toward the size budget,
+// and subtracts each successfully deleted segment exactly once across policies.
+func (e *Enforcer) RunWithStats(ctx context.Context) (RetentionStats, error) {
+	var stats RetentionStats
+	if err := ctx.Err(); err != nil {
+		return stats, err
+	}
+	if e.policy.MaxAge <= 0 && e.policy.MaxSizeBytes <= 0 {
+		return stats, nil
+	}
 	segments, err := e.collectSegments()
 	if err != nil {
-		return fmt.Errorf("collect segments: %w", err)
+		return stats, fmt.Errorf("collect segments: %w", err)
 	}
-
-	if len(segments) == 0 {
-		return nil
-	}
-
-	// Group by partition data directory (parent of "segments").
-	byPartition := make(map[string][]segmentInfo)
+	active := make(map[string]int64)
+	var total int64
 	for _, s := range segments {
-		partDir := filepath.Dir(filepath.Dir(s.path))
-		byPartition[partDir] = append(byPartition[partDir], s)
+		dir := filepath.Dir(s.path)
+		if offset, ok := active[dir]; !ok || s.firstOffset > offset {
+			active[dir] = s.firstOffset
+		}
+		total += s.size
 	}
-
-	var remaining []segmentInfo
-	for _, partSegments := range byPartition {
-		// Mark the segment with the highest first offset as active per partition.
-		activeIdx := 0
-		for i := 1; i < len(partSegments); i++ {
-			if partSegments[i].firstOffset > partSegments[activeIdx].firstOffset {
-				activeIdx = i
-			}
+	sort.Slice(segments, func(i, j int) bool {
+		if segments[i].createdTS != segments[j].createdTS {
+			return segments[i].createdTS < segments[j].createdTS
 		}
-		for i, s := range partSegments {
-			if i == activeIdx {
-				slog.Debug("Retention: preserving active segment", "path", s.path)
-				continue
-			}
-			remaining = append(remaining, s)
+		return segments[i].path < segments[j].path
+	})
+	cutoff := time.Now().Add(-e.policy.MaxAge).UnixMilli()
+	for _, s := range segments {
+		if err := ctx.Err(); err != nil {
+			return stats, err
 		}
-	}
-
-	if e.policy.MaxAge > 0 {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
+		if s.firstOffset == active[filepath.Dir(s.path)] {
+			continue
 		}
-		cutoff := time.Now().Add(-e.policy.MaxAge)
-		for _, s := range remaining {
-			created := time.UnixMilli(s.createdTS)
-			if created.Before(cutoff) {
-				if err := e.removeSegment(s); err != nil {
-					slog.Warn("Retention age delete failed", "path", s.path, "error", err)
-				} else {
-					slog.Info("Retention: deleted aged segment", "path", s.path, "age", time.Since(created))
-				}
-			}
+		aged := e.policy.MaxAge > 0 && s.createdTS < cutoff
+		oversized := e.policy.MaxSizeBytes > 0 && total > e.policy.MaxSizeBytes
+		if !aged && !oversized {
+			continue
 		}
-	}
-
-	if e.policy.MaxSizeBytes > 0 {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
+		removed := false
+		if e.remove != nil {
+			removed, err = e.remove(ctx, s.path)
+		} else {
+			err = e.removeSegment(s)
+			removed = err == nil
 		}
-		if err := e.enforceSize(remaining); err != nil {
-			return fmt.Errorf("size enforcement: %w", err)
+		if err != nil {
+			return stats, fmt.Errorf("retain %s: %w", s.path, err)
+		}
+		if removed {
+			total -= s.size
+			stats.SegmentsDeleted++
+			stats.BytesFreed += s.size
 		}
 	}
-
-	return nil
+	return stats, nil
 }
 
 // collectSegments walks the data directory and returns all valid WAL segment files.
@@ -126,7 +139,7 @@ func (e *Enforcer) collectSegments() ([]segmentInfo, error) {
 
 	err := filepath.Walk(e.dataDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
-			return nil
+			return err
 		}
 		if info.IsDir() {
 			if isProtectedDir(info.Name()) {
@@ -161,44 +174,12 @@ func (e *Enforcer) collectSegments() ([]segmentInfo, error) {
 	return segments, err
 }
 
-// enforceSize deletes the oldest non-active segments until total size is within the limit.
-func (e *Enforcer) enforceSize(segments []segmentInfo) error {
-	var total int64
-	for _, s := range segments {
-		total += s.size
-	}
-	if total <= e.policy.MaxSizeBytes {
-		return nil
-	}
-
-	// Oldest first by creation timestamp; tie-break by first offset for determinism.
-	sort.Slice(segments, func(i, j int) bool {
-		if segments[i].createdTS != segments[j].createdTS {
-			return segments[i].createdTS < segments[j].createdTS
-		}
-		return segments[i].firstOffset < segments[j].firstOffset
-	})
-
-	for _, s := range segments {
-		if total <= e.policy.MaxSizeBytes {
-			break
-		}
-		if err := e.removeSegment(s); err != nil {
-			slog.Warn("Retention size delete failed", "path", s.path, "error", err)
-		} else {
-			total -= s.size
-			slog.Info("Retention: deleted segment for size limit", "path", s.path)
-		}
-	}
-	return nil
-}
-
 // removeSegment deletes a segment file and its matching sparse index file.
 func (e *Enforcer) removeSegment(s segmentInfo) error {
 	if err := os.Remove(s.path); err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	indexPath := filepath.Join(filepath.Dir(s.path), "..", "index", filepath.Base(s.path)+".index")
+	indexPath := filepath.Join(filepath.Dir(s.path), "..", "index", strings.TrimSuffix(filepath.Base(s.path), ".log")+".index")
 	indexPath = filepath.Clean(indexPath)
 	if err := os.Remove(indexPath); err != nil && !os.IsNotExist(err) {
 		slog.Warn("Retention: failed to delete index file", "path", indexPath, "error", err)
@@ -208,7 +189,7 @@ func (e *Enforcer) removeSegment(s segmentInfo) error {
 
 func fallbackSegmentMeta(path string, info os.FileInfo) (int64, int64, bool) {
 	base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
-	firstOffset, err := strconv.ParseInt(base, 16, 64)
+	firstOffset, err := strconv.ParseInt(base, 10, 64)
 	if err != nil {
 		return 0, 0, false
 	}
@@ -216,7 +197,7 @@ func fallbackSegmentMeta(path string, info os.FileInfo) (int64, int64, bool) {
 }
 
 func isProtectedDir(name string) bool {
-	return name == "raft" || name == "pebble" || name == "dedup" || name == "offsets" || name == "scheduler" || name == "cold_store" || name == "index" || name == "backups" || name == "consumer_offsets" || name == "consumer_groups"
+	return name == "raft" || name == "pebble" || name == "dedup" || name == "offsets" || name == "scheduler" || name == "cold_store" || name == "index" || name == "backups" || name == "consumer_offsets" || name == "consumer_groups" || name == "snapshot-staging" || name == "segments.old"
 }
 
 func isWALSegment(path string) bool {

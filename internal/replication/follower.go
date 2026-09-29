@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -95,7 +96,7 @@ func (f *Follower) InstallSnapshot(ctx context.Context, leaderAddr string, parti
 	stream, err := client.Snapshot(ctx, &types.ReplicationSnapshotRequest{
 		PartitionId: partitionID,
 		StartOffset: startOffset,
-		MaxBytes:    0,
+		MaxBytes:    1<<63 - 1,
 	})
 	if err != nil {
 		return fmt.Errorf("snapshot RPC: %w", err)
@@ -121,6 +122,21 @@ func (f *Follower) InstallSnapshot(ctx context.Context, leaderAddr string, parti
 	var currentHash hash.Hash32
 	var currentHeader *types.ReplicationSnapshotHeader
 	var trailer *types.ReplicationSnapshotTrailer
+	var received int64
+	finishFile := func() error {
+		if currentFile == nil {
+			return nil
+		}
+		defer func() { currentFile.Close(); currentFile = nil }()
+		if received != currentHeader.FileSize {
+			return fmt.Errorf("snapshot file size mismatch: %s", currentHeader.Filename)
+		}
+		if currentHash.Sum32() != currentHeader.Crc32 {
+			return fmt.Errorf("snapshot checksum mismatch: %s", currentHeader.Filename)
+		}
+		return currentFile.Sync()
+	}
+	seen := make(map[string]bool)
 
 	for {
 		chunk, recvErr := stream.Recv()
@@ -133,9 +149,19 @@ func (f *Follower) InstallSnapshot(ctx context.Context, leaderAddr string, parti
 		}
 
 		if header := chunk.GetHeader(); header != nil {
-			cleanupFile(currentFile)
-			currentFile = nil
-			currentHash = nil
+			if err := finishFile(); err != nil {
+				return err
+			}
+			name := header.GetFilename()
+			if name == "" || name == "." || name == ".." || filepath.Base(name) != name || strings.ContainsAny(name, "/\\:") || header.FileSize < 0 {
+				return fmt.Errorf("invalid snapshot filename or size")
+			}
+			key := fmt.Sprintf("%t:%s", header.IsIndex, name)
+			if seen[key] {
+				return fmt.Errorf("duplicate snapshot file")
+			}
+			seen[key] = true
+			received = 0
 			currentHeader = header
 
 			currentPath = stagingSegments
@@ -158,6 +184,11 @@ func (f *Follower) InstallSnapshot(ctx context.Context, leaderAddr string, parti
 			if currentFile == nil {
 				return fmt.Errorf("received data before header")
 			}
+			if int64(len(data)) > currentHeader.FileSize-received {
+				cleanupFile(currentFile)
+				return fmt.Errorf("snapshot exceeds declared file size")
+			}
+			received += int64(len(data))
 			if _, writeErr := currentFile.Write(data); writeErr != nil {
 				cleanupFile(currentFile)
 				return fmt.Errorf("write staged file %s: %w", currentHeader.GetFilename(), writeErr)
@@ -174,71 +205,21 @@ func (f *Follower) InstallSnapshot(ctx context.Context, leaderAddr string, parti
 		}
 	}
 
-	cleanupFile(currentFile)
-	currentFile = nil
-
-	if trailer == nil {
-		_ = os.RemoveAll(stagingDir)
-		return fmt.Errorf("snapshot stream closed without trailer")
+	if err := finishFile(); err != nil {
+		return err
 	}
-	if !trailer.GetSuccess() {
-		_ = os.RemoveAll(stagingDir)
-		return fmt.Errorf("leader snapshot failed: %s", trailer.GetError())
+	if trailer == nil || !trailer.GetSuccess() {
+		return fmt.Errorf("snapshot did not complete successfully")
 	}
-
-	// Verify the last received file's checksum if we were mid-file.
-	if currentHeader != nil && currentHeader.GetCrc32() != 0 && currentHash != nil {
-		if got := currentHash.Sum32(); got != currentHeader.GetCrc32() {
-			_ = os.RemoveAll(stagingDir)
-			return fmt.Errorf("snapshot checksum mismatch for %s: computed %08x, expected %08x", currentHeader.GetFilename(), got, currentHeader.GetCrc32())
-		}
+	if len(seen) == 0 {
+		return fmt.Errorf("empty snapshot manifest")
 	}
-
-	// Close the local WAL before replacing segment files. This releases file
-	// handles on Windows so the directory swap can succeed.
 	f.mu.Lock()
-	wal := f.wal
-	f.mu.Unlock()
-	if wal != nil {
-		if closeErr := wal.Close(); closeErr != nil {
-			_ = os.RemoveAll(stagingDir)
-			return fmt.Errorf("close local WAL before snapshot install: %w", closeErr)
-		}
-	}
-
-	// Atomically swap staged directories into place.
-	segmentsDir := filepath.Join(walDataDir, "segments")
-	indexDir := filepath.Join(walDataDir, "index")
-	oldSegmentsDir := filepath.Join(walDataDir, "segments.old")
-	oldIndexDir := filepath.Join(walDataDir, "index.old")
-
-	if err := os.RemoveAll(oldSegmentsDir); err != nil {
-		return fmt.Errorf("remove old segments dir: %w", err)
-	}
-	if err := os.RemoveAll(oldIndexDir); err != nil {
-		return fmt.Errorf("remove old index dir: %w", err)
-	}
-	if err := os.Rename(segmentsDir, oldSegmentsDir); err != nil {
-		return fmt.Errorf("rename segments dir: %w", err)
-	}
-	if err := os.Rename(indexDir, oldIndexDir); err != nil {
-		return fmt.Errorf("rename index dir: %w", err)
-	}
-	if err := os.Rename(stagingSegments, segmentsDir); err != nil {
-		return fmt.Errorf("move staged segments: %w", err)
-	}
-	if err := os.Rename(stagingIndex, indexDir); err != nil {
-		return fmt.Errorf("move staged index: %w", err)
-	}
-	_ = os.RemoveAll(oldSegmentsDir)
-	_ = os.RemoveAll(oldIndexDir)
-
-	// Reload WAL to pick up the new segments.
-	f.mu.Lock()
-	if reloadErr := f.wal.ReloadSegments(); reloadErr != nil {
+	if err := f.wal.InstallCheckpoint(stagingDir, trailer.LastOffset); err != nil {
 		f.mu.Unlock()
-		return fmt.Errorf("reload WAL after snapshot install: %w", reloadErr)
+		return err
 	}
+
 	f.nextOffset = f.wal.GetNextOffset()
 	if trailer.GetEpoch() > f.epoch {
 		f.epoch = trailer.GetEpoch()

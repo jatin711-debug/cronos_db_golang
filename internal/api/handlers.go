@@ -340,7 +340,7 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 			return nil, status.Error(codes.Unavailable, "dedup manager not initialized on this node")
 		}
 
-		isDuplicate, err := dedupMgr.IsDuplicate(event.GetMessageId(), 0) // offset will be assigned
+		isDuplicate, err := dedupMgr.IsDuplicate(event.GetMessageId(), -1) // offset will be assigned
 		if err != nil {
 			return &types.PublishResponse{
 				Success: false,
@@ -401,8 +401,10 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 		replErr := repl.Replicate([]*types.Event{event})
 		partitionInternal.ReplicateMu.Unlock()
 		if replErr != nil {
+			rollbackDedup()
 			// Durable locally but not replicated to the required in-sync replicas.
-			// Report failure; keep the dedup claim (event is in the WAL).
+			// Release the claim so retries can attempt replication again.
+			// The retained WAL record can still cause duplicate delivery.
 			return &types.PublishResponse{
 				Success: false,
 				Error:   fmt.Sprintf("replication: %v", replErr),
@@ -432,6 +434,11 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 		}, nil
 	}
 
+	if !req.AllowDuplicate {
+		if err := partitionInternal.DedupStore.Put(event.MessageId, event.Offset, event.CreatedTs); err != nil {
+			return nil, status.Errorf(codes.Internal, "record publish completion: %v", err)
+		}
+	}
 	return &types.PublishResponse{
 		Success:     true,
 		Error:       "",
@@ -651,7 +658,7 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 			offsets := make([]int64, len(evts))
 			for i, e := range evts {
 				messageIDs[i] = e.GetMessageId()
-				offsets[i] = 0
+				offsets[i] = -1
 			}
 			dedupMgr := partitionInternals[pid].DedupStore
 			if dedupMgr == nil {
@@ -674,6 +681,12 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 			kept := evts[:0]
 			for i, e := range evts {
 				if duplicates[i] {
+					// A dedup claim alone does not prove the previous publish
+					// reached quorum or scheduling. Never turn it into success.
+					offset, found, lookupErr := dedupMgr.GetOffset(e.MessageId)
+					if lookupErr != nil || !found || offset < 0 {
+						setError(1, "duplicate message_id: previous acceptance is pending or unknown")
+					}
 					atomic.AddInt32(&duplicateCount, 1)
 					continue
 				}
@@ -737,10 +750,11 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 				replErr := repl.Replicate(evts)
 				partitionInternal.ReplicateMu.Unlock()
 				if replErr != nil {
+					rollbackDedup()
 					// The batch is durable in the local WAL but did not reach the
 					// required in-sync replicas. Surface the failure so the client can
-					// retry; do NOT roll back dedup — the event is in the WAL, will be
-					// delivered/recovered locally, and a retry is correctly deduped.
+					// retry replication. Releasing claims permits another append;
+					// retained WAL records can therefore cause duplicate delivery.
 					setError(int32(len(evts)), fmt.Sprintf("replication for partition %d: %v", pid, replErr))
 					return
 				}
@@ -768,6 +782,18 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 				return
 			}
 
+			if !req.AllowDuplicate {
+				ids := make([]string, len(evts))
+				offsets := make([]int64, len(evts))
+				createdTS := make([]int64, len(evts))
+				for i, event := range evts {
+					ids[i], offsets[i], createdTS[i] = event.MessageId, event.Offset, event.CreatedTs
+				}
+				if err := partitionInternal.DedupStore.PutBatch(ids, offsets, createdTS); err != nil {
+					setError(int32(len(evts)), fmt.Sprintf("record publish completion: %v", err))
+					return
+				}
+			}
 			// Update stats
 			localPublished := int32(len(evts))
 			atomic.AddInt32(&publishedCount, localPublished)
@@ -838,6 +864,9 @@ func (h *EventServiceHandler) Subscribe(stream grpc.BidiStreamingServer[types.Su
 		return err
 	}
 
+	if req.GetTopic() == "" {
+		return status.Error(codes.InvalidArgument, "topic is required")
+	}
 	// Topic-level authorization
 	if err := h.checkTopicAuth(ctx, req.GetTopic(), "subscribe"); err != nil {
 		return err
@@ -869,8 +898,9 @@ func (h *EventServiceHandler) Subscribe(stream grpc.BidiStreamingServer[types.Su
 		return fmt.Errorf("get partition %d: %w", partitionID, err)
 	}
 
+	cm := partitionInternal.ConsumerGroup
 	// Get consumer group offset
-	startOffset, err := h.consumerManager.GetCommittedOffset(req.GetConsumerGroup(), partitionID)
+	startOffset, err := cm.GetCommittedOffset(req.GetConsumerGroup(), partitionID)
 	if err != nil {
 		startOffset = -1 // Start from beginning if no offset
 	}
@@ -892,7 +922,9 @@ func (h *EventServiceHandler) Subscribe(stream grpc.BidiStreamingServer[types.Su
 		ID:            subID,
 		ConsumerGroup: req.GetConsumerGroup(),
 		Partition:     &types.Partition{ID: int32(partitionID)},
-		NextOffset:    startOffset + 1,
+		NextOffset:    max(0, startOffset),
+		Topic:         req.GetTopic(),
+		Subject:       principal(ctx),
 		MaxCredits:    maxCredits,
 		CreatedTS:     time.Now().UnixMilli(),
 		Stream:        &GRPCStream{stream: stream},
@@ -913,18 +945,51 @@ func (h *EventServiceHandler) Subscribe(stream grpc.BidiStreamingServer[types.Su
 	}
 
 	// Create consumer group subscription
-	if _, err := h.consumerManager.Subscribe(req); err != nil {
+	if _, err := cm.Subscribe(req); err != nil {
 		return fmt.Errorf("create consumer group: %w", err)
 	}
 	defer func() {
-		if err := h.consumerManager.LeaveGroup(req.GetConsumerGroup(), req.GetSubscriptionId()); err != nil {
+		if err := cm.LeaveGroup(req.GetConsumerGroup(), req.GetSubscriptionId()); err != nil {
 			slog.Warn("Failed to leave consumer group", "group", req.GetConsumerGroup(), "member", req.GetSubscriptionId(), "error", err)
 		}
 	}()
 
-	// Wait for context cancellation (client disconnect)
-	<-stream.Context().Done()
-	return nil
+	// A bounded WAL scan redrives records skipped by flow control or disconnects.
+	// Only due records for this group are eligible; completion is per event.
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	cursor := max(int64(0), startOffset)
+	if req.GetStartOffset() >= 0 {
+		cursor = max(cursor, req.GetStartOffset())
+	}
+	origin := cursor
+	for {
+		end := partitionInternal.Wal.GetLastOffset()
+		if cursor <= end {
+			batchEnd := min(cursor+255, end)
+			events, err := partitionInternal.Wal.ReadEvents(cursor, batchEnd)
+			if err != nil {
+				return status.Errorf(codes.Internal, "replay retained events: %v", err)
+			}
+			due := events[:0]
+			for _, event := range events {
+				if event.Topic == req.Topic && event.ScheduleTs <= time.Now().UnixMilli() {
+					due = append(due, event)
+				}
+			}
+			if err := partitionInternal.Dispatcher.DispatchGroup(req.ConsumerGroup, due); err != nil && stream.Context().Err() != nil {
+				return stream.Context().Err()
+			}
+			cursor = batchEnd + 1
+		} else {
+			cursor = origin
+		}
+		select {
+		case <-stream.Context().Done():
+			return stream.Context().Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 // Ack handles streaming ack requests
@@ -945,53 +1010,39 @@ func (h *EventServiceHandler) Ack(stream types.EventService_AckServer) error {
 			return err
 		}
 
-		// Parse partition ID from delivery ID to route to the correct dispatcher.
-		// Delivery ID format: "consumerGroup:partitionID:memberID-offset"
-		// or batch format: "consumerGroup:partitionID:memberID-batch-offset-count"
-		var targetPartitionID int32 = -1
-		deliveryID := req.GetDeliveryId()
-		parts := strings.SplitN(deliveryID, ":", 3)
-		groupID := ""
-		if len(parts) >= 2 {
-			groupID = parts[0]
-			if pid, err := strconv.ParseInt(parts[1], 10, 32); err == nil {
-				targetPartitionID = int32(pid)
-			}
-		}
-
-		if targetPartitionID >= 0 {
-			// Fast path: route directly to the target partition's dispatcher
-			p, err := h.partitionManager.GetInternalPartition(targetPartitionID)
-			if err == nil && p.Dispatcher != nil {
-				p.Dispatcher.HandleAck(deliveryID, req.GetSuccess(), req.GetNextOffset())
-			}
+		parts := strings.SplitN(req.GetDeliveryId(), ":", 3)
+		var ackErr error
+		var committed int64
+		if len(parts) != 3 {
+			ackErr = fmt.Errorf("invalid delivery ID")
 		} else {
-			// Skip dispatcher routing for malformed/legacy IDs to avoid O(partitions)
-			// scans on the ack hot path. Consumer offset commit below will validate
-			// delivery_id format and return a proper error when invalid.
-		}
-
-		if h.partitionManager.ExactlyOnceCommitsEnabled() && targetPartitionID >= 0 && groupID != "" {
-			committedOffset, commitErr := h.consumerManager.GetCommittedOffset(groupID, targetPartitionID)
-			if commitErr == nil && req.GetNextOffset() <= committedOffset {
-				resp := &types.AckResponse{
-					Success: false,
-					Error:   fmt.Sprintf("next_offset %d must be greater than committed offset %d", req.GetNextOffset(), committedOffset),
+			pid, err := strconv.ParseInt(parts[1], 10, 32)
+			if err != nil {
+				ackErr = err
+			} else {
+				p, err := h.partitionManager.GetInternalPartition(int32(pid))
+				if err != nil {
+					ackErr = err
+				} else {
+					group, topic, events, err := p.Dispatcher.ValidateAck(req.DeliveryId, principal(ctx), req.NextOffset, req.Success)
+					if err == nil {
+						err = h.checkTopicAuth(ctx, topic, "subscribe")
+					}
+					if err == nil && req.Success {
+						err = p.ConsumerGroup.CommitDelivery(group, int32(pid), events)
+					}
+					if err == nil {
+						err = p.Dispatcher.HandleAck(req.DeliveryId, req.Success, req.NextOffset)
+					}
+					if err == nil {
+						committed, _ = p.ConsumerGroup.GetCommittedOffset(group, int32(pid))
+					}
+					ackErr = err
 				}
-				if err := stream.Send(resp); err != nil {
-					return err
-				}
-				continue
 			}
 		}
-
-		err = h.consumerManager.Ack(req)
-		if err != nil {
-			resp := &types.AckResponse{
-				Success: false,
-				Error:   err.Error(),
-			}
-			if err := stream.Send(resp); err != nil {
+		if ackErr != nil {
+			if err := stream.Send(&types.AckResponse{Success: false, Error: ackErr.Error()}); err != nil {
 				return err
 			}
 			continue
@@ -999,7 +1050,7 @@ func (h *EventServiceHandler) Ack(stream types.EventService_AckServer) error {
 
 		resp := &types.AckResponse{
 			Success:         true,
-			CommittedOffset: req.NextOffset,
+			CommittedOffset: committed,
 		}
 		if err := stream.Send(resp); err != nil {
 			return err
@@ -1009,6 +1060,9 @@ func (h *EventServiceHandler) Ack(stream types.EventService_AckServer) error {
 
 // Replay handles replay requests
 func (h *EventServiceHandler) Replay(req *types.ReplayRequest, stream types.EventService_ReplayServer) error {
+	if req.GetTopic() == "" {
+		return status.Error(codes.InvalidArgument, "topic is required")
+	}
 	// Topic-level authorization: Replay reads full partition history, so it
 	// requires at least subscribe permission on the topic. Skipped when auth is
 	// disabled (checkTopicAuth is a no-op then).
@@ -1085,4 +1139,11 @@ func (h *EventServiceHandler) Replay(req *types.ReplayRequest, stream types.Even
 	}
 
 	return nil
+}
+
+func principal(ctx context.Context) string {
+	if claims, ok := auth.ClaimsFromContext(ctx); ok {
+		return claims.Subject
+	}
+	return ""
 }

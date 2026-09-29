@@ -120,7 +120,7 @@ func (sw *DLQSegmentWriter) WriteEntry(data []byte) error {
 	}
 
 	// Record format: [length:4][crc32:4][data:N]
-	length := 8 + len(data)
+	length := 4 + len(data) // Bytes after the length field: CRC plus payload.
 	record := make([]byte, 4+length)
 	binary.BigEndian.PutUint32(record[0:4], uint32(length))
 	binary.BigEndian.PutUint32(record[4:8], crc32.ChecksumIEEE(data))
@@ -215,12 +215,17 @@ func scanEntries(dataDir string) ([][]byte, error) {
 				break
 			}
 			length := int(binary.BigEndian.Uint32(data[offset : offset+4]))
-			if length < 8 || offset+4+length > len(data) {
+			if length < 4 || length > len(data)-offset-4 {
 				break // Truncated or corrupt
 			}
 
 			storedCRC := binary.BigEndian.Uint32(data[offset+4 : offset+8])
 			entryData := data[offset+8 : offset+4+length]
+			// Version 1 writers included four zero padding bytes in length but
+			// not in the CRC. Recover those records without accepting bad CRCs.
+			if len(entryData) >= 4 && string(entryData[len(entryData)-4:]) == "\x00\x00\x00\x00" && crc32.ChecksumIEEE(entryData[:len(entryData)-4]) == storedCRC {
+				entryData = entryData[:len(entryData)-4]
+			}
 			if crc32.ChecksumIEEE(entryData) == storedCRC {
 				results = append(results, entryData)
 			}
@@ -299,7 +304,7 @@ func (sw *DLQSegmentWriter) Compact(keep func(data []byte) bool) error {
 		if keep != nil && !keep(data) {
 			continue
 		}
-		length := 8 + len(data)
+		length := 4 + len(data)
 		record := make([]byte, 4+length)
 		binary.BigEndian.PutUint32(record[0:4], uint32(length))
 		binary.BigEndian.PutUint32(record[4:8], crc32.ChecksumIEEE(data))

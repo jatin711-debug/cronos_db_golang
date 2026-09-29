@@ -1,7 +1,9 @@
 package delivery
 
 import (
+	"github.com/jatin711-debug/cronos_db_golang/internal/metrics"
 	"log"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -14,13 +16,15 @@ import (
 // The ready queue is protected by mu; dispatch stats are atomic so GetStats
 // does not contend with the hot path.
 type Worker struct {
-	mu         sync.Mutex // protects readyQueue and processing flag
-	dispatcher *Dispatcher
-	readyQueue []*types.Event
-	notify     chan struct{} // buffered wake-up for the loop
-	batchSize  int32
-	processing bool
-	quit       chan struct{}
+	mu            sync.Mutex // protects readyQueue and processing flag
+	dispatcher    *Dispatcher
+	readyQueue    []*types.Event
+	queuedBytes   int64
+	maxQueueBytes int64
+	notify        chan struct{} // buffered wake-up for the loop
+	batchSize     int32
+	processing    bool
+	quit          chan struct{}
 
 	// Atomic stats — no lock needed for read/write
 	statsDispatched atomic.Int64
@@ -31,11 +35,12 @@ type Worker struct {
 // NewWorker creates a delivery worker that batches up to batchSize events per dispatch.
 func NewWorker(dispatcher *Dispatcher, batchSize int32) *Worker {
 	return &Worker{
-		dispatcher: dispatcher,
-		readyQueue: make([]*types.Event, 0),
-		notify:     make(chan struct{}, 1),
-		batchSize:  batchSize,
-		quit:       make(chan struct{}),
+		dispatcher:    dispatcher,
+		readyQueue:    make([]*types.Event, 0),
+		maxQueueBytes: 64 << 20,
+		notify:        make(chan struct{}, 1),
+		batchSize:     batchSize,
+		quit:          make(chan struct{}),
 	}
 }
 
@@ -47,20 +52,41 @@ func (w *Worker) signal() {
 }
 
 // AddReadyEvent appends a single ready event and wakes the worker loop.
-func (w *Worker) AddReadyEvent(event *types.Event) {
+func (w *Worker) AddReadyEvent(event *types.Event) { w.AddReadyEvents([]*types.Event{event}) }
+
+// Excess ready notifications can be discarded: retained records are redriven by
+// subscription WAL scans. Count that fallback and never grow this queue forever.
+func (w *Worker) AddReadyEvents(events []*types.Event) {
+	const maxQueued = 10000
 	w.mu.Lock()
-	w.readyQueue = append(w.readyQueue, event)
+	accepted := 0
+	for _, event := range events {
+		if event == nil {
+			continue
+		}
+		size := retainedEventBytes(event)
+		if len(w.readyQueue) >= maxQueued || size > w.maxQueueBytes-w.queuedBytes {
+			continue // WAL subscription scans retain responsibility for redelivery.
+		}
+		w.readyQueue = append(w.readyQueue, event)
+		w.queuedBytes += size
+		accepted++
+	}
 	w.mu.Unlock()
+	if accepted < len(events) && len(events) > 0 {
+		metrics.IncDispatcherBackpressureSkip(strconv.FormatInt(int64(events[0].GetPartitionId()), 10), "worker_capacity", len(events)-accepted)
+	}
 	w.signal()
 }
 
-// AddReadyEvents adds multiple ready events in a single lock acquisition.
-// Use this when draining the scheduler to reduce lock contention.
-func (w *Worker) AddReadyEvents(events []*types.Event) {
-	w.mu.Lock()
-	w.readyQueue = append(w.readyQueue, events...)
-	w.mu.Unlock()
-	w.signal()
+// Account for payload backing capacity and metadata, not only wire size.
+// This is a per-worker retention budget, not a bound on whole-process RSS.
+func retainedEventBytes(event *types.Event) int64 {
+	size := int64(256) + int64(cap(event.Payload)) + int64(len(event.MessageId)) + int64(len(event.Topic)) + int64(cap(event.ProtoReflect().GetUnknown()))
+	for key, value := range event.Meta {
+		size += 64 + int64(len(key)) + int64(len(value))
+	}
+	return size
 }
 
 // Start launches the background processing loop if not already running.
@@ -105,7 +131,11 @@ func (w *Worker) processBatch() bool {
 		batch = batch[:w.batchSize]
 		w.readyQueue = w.readyQueue[w.batchSize:]
 	} else {
-		w.readyQueue = w.readyQueue[:0] // Reuse backing array
+		// Dispatch owns this backing array until it finishes reading the batch.
+		w.readyQueue = nil
+	}
+	for _, event := range batch {
+		w.queuedBytes -= retainedEventBytes(event)
 	}
 	w.mu.Unlock()
 
@@ -117,6 +147,9 @@ func (w *Worker) processBatch() bool {
 	} else {
 		w.statsDispatched.Add(int64(len(batch)))
 	}
+	// Release consumed references even when the queue still owns the tail of
+	// the same backing array. Dispatch stores its own slices of event pointers.
+	clear(batch)
 
 	// Atomic store — no lock needed
 	w.statsLastDispTS.Store(time.Now().UnixMilli())
@@ -141,6 +174,7 @@ func (w *Worker) Stop() {
 func (w *Worker) GetStats() *WorkerStats {
 	w.mu.Lock()
 	queueLen := int64(len(w.readyQueue))
+	queueBytes := w.queuedBytes
 	isProcessing := w.processing
 	w.mu.Unlock()
 
@@ -148,6 +182,7 @@ func (w *Worker) GetStats() *WorkerStats {
 		EventsDispatched: w.statsDispatched.Load(),
 		EventsFailed:     w.statsFailed.Load(),
 		QueueLength:      queueLen,
+		QueueBytes:       queueBytes,
 		LastDispatchTS:   w.statsLastDispTS.Load(),
 		Processing:       isProcessing,
 	}
@@ -161,6 +196,8 @@ type WorkerStats struct {
 	EventsFailed int64
 	// QueueLength is the current ready-queue depth.
 	QueueLength int64
+	// QueueBytes estimates bytes retained by queued events, excluding in-flight batches.
+	QueueBytes int64
 	// LastDispatchTS is the last successful or failed batch dispatch time (Unix ms).
 	LastDispatchTS int64
 	// Processing is true while the background loop is running.

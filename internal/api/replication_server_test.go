@@ -71,6 +71,7 @@ func TestReplicationServiceHandler_AppendAndSync(t *testing.T) {
 
 	now := time.Now().UnixMilli()
 	appendResp, err := h.Append(ctx, &types.ReplicationAppendRequest{
+		Term:        1,
 		PartitionId: 0,
 		Events: []*types.Event{
 			{MessageId: "rep-1", Topic: "topic-test", Offset: 0, ScheduleTs: now, Payload: []byte("a")},
@@ -99,11 +100,11 @@ func TestReplicationServiceHandler_AppendAndSync(t *testing.T) {
 	}
 }
 
-// TestReplicationServiceHandler_FollowerAheadTruncates verifies that when a
+// TestReplicationServiceHandler_ConflictingPrefixIsPreserved verifies that when a
 // valid-term leader's batch starts before the follower's next offset (the
 // follower's tail diverged), the follower discards the divergent tail and accepts
 // the leader's entries — instead of rejecting forever with "batch gap".
-func TestReplicationServiceHandler_FollowerAheadTruncates(t *testing.T) {
+func TestReplicationServiceHandler_ConflictingPrefixIsPreserved(t *testing.T) {
 	cfg := &types.Config{
 		DataDir:          t.TempDir(),
 		PartitionCount:   1,
@@ -146,25 +147,18 @@ func TestReplicationServiceHandler_FollowerAheadTruncates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reconciling append gRPC error: %v", err)
 	}
-	if !resp.GetSuccess() {
-		t.Fatalf("follower-ahead append rejected: %s", resp.GetError())
+	if resp.GetSuccess() {
+		t.Fatal("conflicting append must be rejected")
 	}
-	if resp.GetNextOffset() != 6 {
-		t.Fatalf("expected next offset 6 after reconcile, got %d", resp.GetNextOffset())
+	if resp.GetNextOffset() != 5 {
+		t.Fatalf("accepted tail changed: %d", resp.GetNextOffset())
+	}
+	p, _ := pm.GetInternalPartition(0)
+	ev, err := p.Wal.ReadEvent(3)
+	if err != nil || ev.GetMessageId() != "old-d" {
+		t.Fatalf("existing record changed: %v %v", ev, err)
 	}
 
-	// Offset 3 must now hold the leader's value, not the follower's old one.
-	p, err := pm.GetInternalPartition(0)
-	if err != nil {
-		t.Fatalf("GetInternalPartition: %v", err)
-	}
-	ev, err := p.Wal.ReadEvent(3)
-	if err != nil {
-		t.Fatalf("ReadEvent(3): %v", err)
-	}
-	if ev.GetMessageId() != "new-3" {
-		t.Fatalf("offset 3 = %q, want new-3 (tail not reconciled)", ev.GetMessageId())
-	}
 }
 
 func TestReplicationServiceHandler_AppendOffsetMismatch(t *testing.T) {
@@ -193,6 +187,7 @@ func TestReplicationServiceHandler_AppendOffsetMismatch(t *testing.T) {
 	now := time.Now().UnixMilli()
 
 	_, _ = h.Append(ctx, &types.ReplicationAppendRequest{
+		Term:        1,
 		PartitionId: 0,
 		Events: []*types.Event{
 			{MessageId: "rep-seed", Topic: "topic-test", Offset: 0, ScheduleTs: now, Payload: []byte("seed")},
@@ -200,6 +195,7 @@ func TestReplicationServiceHandler_AppendOffsetMismatch(t *testing.T) {
 	})
 
 	resp, err := h.Append(ctx, &types.ReplicationAppendRequest{
+		Term:        1,
 		PartitionId: 0,
 		Events: []*types.Event{
 			{MessageId: "rep-mismatch", Topic: "topic-test", Offset: 999, ScheduleTs: now, Payload: []byte("x")},
@@ -211,7 +207,7 @@ func TestReplicationServiceHandler_AppendOffsetMismatch(t *testing.T) {
 	if resp.GetSuccess() {
 		t.Fatal("expected append to fail on offset mismatch")
 	}
-	if !strings.Contains(resp.GetError(), "gap") && !strings.Contains(resp.GetError(), "offset mismatch") {
+	if !strings.Contains(resp.GetError(), "gap") && !strings.Contains(resp.GetError(), "log gap") {
 		t.Fatalf("expected offset mismatch error, got: %s", resp.GetError())
 	}
 }
@@ -242,6 +238,7 @@ func TestReplicationServiceHandler_Snapshot(t *testing.T) {
 	now := time.Now().UnixMilli()
 
 	appendResp, err := h.Append(ctx, &types.ReplicationAppendRequest{
+		Term:        1,
 		PartitionId: 0,
 		Events: []*types.Event{
 			{MessageId: "snap-1", Topic: "topic-test", Offset: 0, ScheduleTs: now, Payload: []byte("a")},
