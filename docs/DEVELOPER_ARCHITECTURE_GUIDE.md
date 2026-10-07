@@ -58,7 +58,7 @@ GitHub). In brief:
   public gRPC `:9000`, HTTP `:8080` (health/metrics/UI), internal gRPC `:7947`.
 - The **data plane** (handlers → partition manager → per-partition WAL, scheduler,
   worker, dispatcher, consumer groups, DLQ, dedup) serves event traffic.
-- The **control plane** (cluster manager, hash-ring router, gossip/Memberlist, Raft
+- The **control plane** (cluster manager, hash-ring router, gossip membership, Raft
   metadata, leader-follower replication, cross-region) manages placement and consistency.
 - **Guardrails** (JWT+RBAC, audit, schema registry, tenant accounting, SLO/metrics/tracing,
   retention/backup) and **production security** (public TLS, encryption at rest v2,
@@ -353,7 +353,8 @@ This section is organized by feature area and tells you where to read first, wha
   - `internal/cluster/manager.go`
   - `internal/cluster/router.go`
   - `internal/cluster/membership.go`
-  - `internal/cluster/memberlist_adapter.go`
+  - `internal/cluster/transport.go` — mutual TLS for the membership and Raft ports
+  - `internal/cluster/memberlist_adapter.go` — not connected: the server refuses `--use-memberlist`
   - `internal/cluster/raft.go`
   - `internal/cluster/hashring.go`
 - Main flow:
@@ -413,7 +414,7 @@ flowchart LR
   - **Gap rejection** — `WAL.AppendReplicatedBatch` rejects non-contiguous batches ("replicated batch gap"), which drives leader-side catch-up. (The `ExpectedNextOffset` proto field is set by the leader but unused server-side.)
   - **Quorum durability** — `min-insync-replicas` enforced before client ack. With RF=3 / minISR=2 the leader + at least one follower must ack; cluster degradation below minISR fails closed rather than silently succeeding on leader-only.
   - **Atomic swap** during snapshot install — WAL closed before rename, matching `StopPartition`'s ordering; avoids Windows file-lock contention.
-  - **mTLS optional** — `--replication-tls-enabled` plus `--replication-tls-{ca,cert,key}-file`. Server enforces `tls.RequireAndVerifyClientCert`; both sides pin against the cluster CA. `Follower.dialCredentials` falls back to insecure credentials when the flag is off (intentional for `--dev`, refused by `config.ValidateConfig` in production).
+  - **mTLS between nodes** — `--replication-tls-enabled` plus `--replication-tls-{ca,cert,key}-file`, all three required. The same certificates secure the membership and Raft ports (`internal/cluster/transport.go`). Server enforces `tls.RequireAndVerifyClientCert`; both sides pin against the cluster CA. `Follower.dialCredentials` falls back to insecure credentials when the flag is off (intentional for `--dev`, refused by `config.ValidateConfig` in production).
   - **Cross-region** is intentionally separate from intra-cluster — no ISR, last-write-wins conflict handling, fire-and-forget.
   - **Trigger caveat** — `--snapshot-catchup-threshold` (default `10000`) is a **dead config key** (parsed, never read). Automatic mid-flight lag-driven InstallSnapshot is **not** wired; a far-behind connected follower still uses incremental `Sync`/`Append` catch-up.
 

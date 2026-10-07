@@ -82,7 +82,7 @@ graph TB
 
     subgraph "Cluster Layer"
         RAFT[Raft Consensus<br/>HashiCorp Raft]
-        GOSSIP[Gossip Protocol<br/>TCP Heartbeats or Memberlist/SWIM]
+        GOSSIP[Membership<br/>TCP Heartbeats]
         REPL[Replication<br/>gRPC Internal :7947]
     end
 
@@ -961,23 +961,27 @@ graph TB
     N1R <-->|Raft consensus| N3R
 ```
 
-### Pluggable Gossip Layer
+### Membership
 
-CronosDB supports two gossip implementations behind a common `MembershipService` interface:
+Every node sends a heartbeat to every other node it knows over TCP
+(`internal/cluster/membership.go`). A node that is not heard from is suspected
+and then counted as dead; it keeps being sent heartbeats, less often, and is
+taken back as soon as it answers or announces itself. Membership decides who
+is alive. It does not decide who leads: that is committed through Raft.
 
-| Implementation | Protocol | Best For |
-|---------------|----------|----------|
-| **Custom TCP Gossip** | TCP heartbeats, custom wire format | Simple deployments, minimal dependencies |
-| **HashiCorp Memberlist** | SWIM protocol over UDP | Production clusters, faster failure detection, encryption support |
+**Traffic between nodes.** Nodes talk to each other on three ports:
+replication (gRPC), membership and Raft. With `--replication-tls-enabled` all
+three speak mutual TLS with one set of certificates
+(`internal/cluster/transport.go`, `internal/replication/mtls.go`). A caller
+must present a certificate signed by the CA in `--replication-tls-ca-file`
+before anything it sends is read, and a node checks that the certificate of
+the node it calls is valid for the address it called. Production mode
+requires this. Without it the membership and Raft ports are plain TCP, and
+whoever can reach them can join the cluster as a node and vote.
 
-Toggle via config: `UseMemberlist: true`.
-
-**Memberlist features:**
-- UDP-based SWIM gossip with indirect pings
-- Configurable gossip interval, suspicion multiplier, probe timeout
-- Metadata delegates carry gRPC/HTTP/Raft addresses
-- Event delegates for join/leave/update callbacks
-- Merge delegates for cluster merge conflict resolution
+`internal/cluster/memberlist_adapter.go` implements the same interface on
+HashiCorp Memberlist (SWIM over UDP). The server does not use it, and refuses
+to start with `--use-memberlist`.
 
 ### Consistent Hashing Ring
 
@@ -1543,7 +1547,7 @@ remaining correctness limits. All three nodes ran on one physical machine.
 | Cluster | `-cluster` | `false` | Enable cluster mode |
 | Cluster | `-cluster-seeds` | empty | Comma-separated seed nodes |
 | Cluster | `-virtual-nodes` | `2048` | Virtual nodes per physical node on the placement ring |
-| Cluster | `-use-memberlist` | `false` | Use HashiCorp Memberlist (SWIM) instead of custom TCP gossip |
+| Cluster | `-use-memberlist` | `false` | Not supported; the server refuses to start with it |
 | Cluster | `-heartbeat-interval` | `1s` | Gossip heartbeat interval |
 | Cluster | `-failure-timeout` | `5s` | Node failure detection timeout |
 
@@ -1574,7 +1578,7 @@ graph TB
 
     subgraph Consensus
         HRAFT[HashiCorp Raft]
-        GOSSIP[Custom Gossip TCP or Memberlist/SWIM]
+        GOSSIP[Membership over TCP]
     end
 
     subgraph Observability

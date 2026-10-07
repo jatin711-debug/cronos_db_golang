@@ -260,7 +260,9 @@ retry is published as new.
   crash point recovers to one complete generation, never a mix
   (`internal/storage/checkpoint_test.go`).
 - **mTLS**: `--replication-tls-enabled` plus
-  `--replication-tls-{ca,cert,key}-file` enable cluster-only mTLS via
+  `--replication-tls-{ca,cert,key}-file` (all three are required, and the
+  same certificates secure the membership and Raft ports; see
+  [cluster.md](cluster.md)) enable cluster-only mTLS via
   `replication.BuildClientTLSConfig` / `BuildServerTLSConfig`. Server
   uses `tls.RequireAndVerifyClientCert`; both sides pin against
   `--replication-tls-ca-file`. In dev mode the follower falls back to
