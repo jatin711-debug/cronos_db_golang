@@ -1354,6 +1354,55 @@ func (w *WAL) GetNextOffset() int64 {
 	return w.nextOffset.Load()
 }
 
+// GetFirstOffset returns the offset of the first entry still in the log. For
+// a log that holds none it is the offset the next entry will get.
+func (w *WAL) GetFirstOffset() int64 {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	if len(w.segments) == 0 {
+		return w.nextOffset.Load()
+	}
+	return w.segments[0].GetFirstOffset()
+}
+
+// FirstOffsetOfTerm returns the lowest offset whose entry was written in term,
+// given that the entry at upTo was. The term never decreases along a log, so
+// the start of a term's run is found by bisection.
+func (w *WAL) FirstOffsetOfTerm(term, upTo int64) int64 {
+	lo, hi := w.GetFirstOffset(), upTo
+	for lo < hi {
+		mid := lo + (hi-lo)/2
+		if got, err := w.GetTermForOffset(mid); err == nil && got >= term {
+			hi = mid
+		} else {
+			lo = mid + 1
+		}
+	}
+	return lo
+}
+
+// LastOffsetOfTerm returns the highest offset whose entry was written in term,
+// or -1 when the log holds no entry of that term.
+func (w *WAL) LastOffsetOfTerm(term int64) int64 {
+	lo, hi := w.GetFirstOffset(), w.GetLastOffset()
+	if hi < lo {
+		return -1
+	}
+	// Find the last entry whose term is at most term.
+	for lo < hi {
+		mid := lo + (hi-lo+1)/2
+		if got, err := w.GetTermForOffset(mid); err == nil && got <= term {
+			lo = mid
+		} else {
+			hi = mid - 1
+		}
+	}
+	if got, err := w.GetTermForOffset(lo); err != nil || got != term {
+		return -1
+	}
+	return lo
+}
+
 // GetTermForOffset returns the Raft term stored for the entry at the given offset.
 func (w *WAL) GetTermForOffset(offset int64) (int64, error) {
 	event, err := w.ReadEvent(offset)

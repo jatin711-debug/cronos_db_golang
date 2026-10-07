@@ -1363,7 +1363,15 @@ type ReplicationAppendRequest struct {
 	// Batch checksum for end-to-end replication integrity
 	Checksum uint32 `protobuf:"varint,6,opt,name=checksum,proto3" json:"checksum,omitempty"`
 	// Node ID of the sending leader. A follower accepts one leader per term.
-	LeaderId      string `protobuf:"bytes,7,opt,name=leader_id,json=leaderId,proto3" json:"leader_id,omitempty"`
+	LeaderId string `protobuf:"bytes,7,opt,name=leader_id,json=leaderId,proto3" json:"leader_id,omitempty"`
+	// The log entry the new entries follow, as the leader holds it: its offset
+	// and, in prev_log_term, its term (0 when the leader cannot say). A follower
+	// that holds a different entry there has a log that departs from the
+	// leader's at or before that point, and answers with log_mismatch instead
+	// of appending after it. A request without events and with these set only
+	// asks whether the follower's log matches there.
+	HasPrevLog    bool  `protobuf:"varint,8,opt,name=has_prev_log,json=hasPrevLog,proto3" json:"has_prev_log,omitempty"`
+	PrevLogOffset int64 `protobuf:"varint,9,opt,name=prev_log_offset,json=prevLogOffset,proto3" json:"prev_log_offset,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1447,6 +1455,20 @@ func (x *ReplicationAppendRequest) GetLeaderId() string {
 	return ""
 }
 
+func (x *ReplicationAppendRequest) GetHasPrevLog() bool {
+	if x != nil {
+		return x.HasPrevLog
+	}
+	return false
+}
+
+func (x *ReplicationAppendRequest) GetPrevLogOffset() int64 {
+	if x != nil {
+		return x.PrevLogOffset
+	}
+	return 0
+}
+
 type ReplicationAppendResponse struct {
 	state   protoimpl.MessageState `protogen:"open.v1"`
 	Success bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
@@ -1456,9 +1478,16 @@ type ReplicationAppendResponse struct {
 	// Next expected offset
 	NextOffset int64 `protobuf:"varint,4,opt,name=next_offset,json=nextOffset,proto3" json:"next_offset,omitempty"`
 	// Term of the follower/acknowledger
-	Term          int64 `protobuf:"varint,5,opt,name=term,proto3" json:"term,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Term int64 `protobuf:"varint,5,opt,name=term,proto3" json:"term,omitempty"`
+	// Set when the follower holds an entry at prev_log_offset written in a
+	// different term than the leader's. conflict_term is the term of the
+	// follower's entry and conflict_first_offset the first offset it holds in
+	// that term; the leader resends from the point where the logs still agree.
+	LogMismatch         bool  `protobuf:"varint,6,opt,name=log_mismatch,json=logMismatch,proto3" json:"log_mismatch,omitempty"`
+	ConflictTerm        int64 `protobuf:"varint,7,opt,name=conflict_term,json=conflictTerm,proto3" json:"conflict_term,omitempty"`
+	ConflictFirstOffset int64 `protobuf:"varint,8,opt,name=conflict_first_offset,json=conflictFirstOffset,proto3" json:"conflict_first_offset,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *ReplicationAppendResponse) Reset() {
@@ -1522,6 +1551,27 @@ func (x *ReplicationAppendResponse) GetNextOffset() int64 {
 func (x *ReplicationAppendResponse) GetTerm() int64 {
 	if x != nil {
 		return x.Term
+	}
+	return 0
+}
+
+func (x *ReplicationAppendResponse) GetLogMismatch() bool {
+	if x != nil {
+		return x.LogMismatch
+	}
+	return false
+}
+
+func (x *ReplicationAppendResponse) GetConflictTerm() int64 {
+	if x != nil {
+		return x.ConflictTerm
+	}
+	return 0
+}
+
+func (x *ReplicationAppendResponse) GetConflictFirstOffset() int64 {
+	if x != nil {
+		return x.ConflictFirstOffset
 	}
 	return 0
 }
@@ -4405,7 +4455,7 @@ const file_proto_events_proto_rawDesc = "" +
 	"\x15partition_assignments\x18\x03 \x03(\v2C.cronos_db.RebalanceConsumerGroupResponse.PartitionAssignmentsEntryR\x14partitionAssignments\x1aG\n" +
 	"\x19PartitionAssignmentsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\x05R\x05value:\x028\x01\"\x8a\x02\n" +
+	"\x05value\x18\x02 \x01(\x05R\x05value:\x028\x01\"\xd4\x02\n" +
 	"\x18ReplicationAppendRequest\x12!\n" +
 	"\fpartition_id\x18\x01 \x01(\x05R\vpartitionId\x12(\n" +
 	"\x06events\x18\x02 \x03(\v2\x10.cronos_db.EventR\x06events\x120\n" +
@@ -4413,7 +4463,10 @@ const file_proto_events_proto_rawDesc = "" +
 	"\x04term\x18\x04 \x01(\x03R\x04term\x12\"\n" +
 	"\rprev_log_term\x18\x05 \x01(\x03R\vprevLogTerm\x12\x1a\n" +
 	"\bchecksum\x18\x06 \x01(\rR\bchecksum\x12\x1b\n" +
-	"\tleader_id\x18\a \x01(\tR\bleaderId\"\xa1\x01\n" +
+	"\tleader_id\x18\a \x01(\tR\bleaderId\x12 \n" +
+	"\fhas_prev_log\x18\b \x01(\bR\n" +
+	"hasPrevLog\x12&\n" +
+	"\x0fprev_log_offset\x18\t \x01(\x03R\rprevLogOffset\"\x9d\x02\n" +
 	"\x19ReplicationAppendResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x14\n" +
 	"\x05error\x18\x02 \x01(\tR\x05error\x12\x1f\n" +
@@ -4421,7 +4474,10 @@ const file_proto_events_proto_rawDesc = "" +
 	"lastOffset\x12\x1f\n" +
 	"\vnext_offset\x18\x04 \x01(\x03R\n" +
 	"nextOffset\x12\x12\n" +
-	"\x04term\x18\x05 \x01(\x03R\x04term\"?\n" +
+	"\x04term\x18\x05 \x01(\x03R\x04term\x12!\n" +
+	"\flog_mismatch\x18\x06 \x01(\bR\vlogMismatch\x12#\n" +
+	"\rconflict_term\x18\a \x01(\x03R\fconflictTerm\x122\n" +
+	"\x15conflict_first_offset\x18\b \x01(\x03R\x13conflictFirstOffset\"?\n" +
 	"\x1aReplicationPositionRequest\x12!\n" +
 	"\fpartition_id\x18\x01 \x01(\x05R\vpartitionId\"\xb2\x01\n" +
 	"\x1bReplicationPositionResponse\x12\x14\n" +

@@ -114,6 +114,9 @@ func (h *ReplicationServiceHandler) Append(ctx context.Context, req *types.Repli
 	if err := h.acceptLeader(p, req.GetTerm(), req.GetLeaderId()); err != nil {
 		return reject(err.Error())
 	}
+	if mismatch := logMismatch(p, req); mismatch != nil {
+		return mismatch, nil
+	}
 	if len(events) > 0 && events[0].Offset > p.Wal.GetNextOffset() {
 		return reject("log gap: catch-up required")
 	}
@@ -170,6 +173,39 @@ func (h *ReplicationServiceHandler) Append(ctx context.Context, req *types.Repli
 		NextOffset: p.Wal.GetNextOffset(),
 		Term:       p.Epoch(),
 	}, nil
+}
+
+// logMismatch checks that this replica's log agrees with the leader's at the
+// entry the request follows. Entries are compared one by one only where the
+// leader sends them, and it sends from where it believes this replica's log
+// ends. A replica that kept entries of an older leader there, an old leader
+// returning with a tail it never replicated for instance, would otherwise have
+// the new entries appended after them and keep a log that differs from the
+// leader's in the middle.
+//
+// Two logs that hold an entry of the same term at the same offset agree on
+// everything before it, because each term has one writer and every append is
+// checked this way. A different term at prev therefore means the logs part at
+// or before prev, and the leader is told where this replica's run of that
+// term starts so that it can resend from the point where they still agree.
+func logMismatch(p *partition.Partition, req *types.ReplicationAppendRequest) *types.ReplicationAppendResponse {
+	prev := req.GetPrevLogOffset()
+	if !req.GetHasPrevLog() || req.GetPrevLogTerm() <= 0 || prev < 0 || prev >= p.Wal.GetNextOffset() {
+		return nil
+	}
+	local, err := p.Wal.ReadEvent(prev)
+	if err != nil || local.GetTerm() <= 0 || local.GetTerm() == req.GetPrevLogTerm() {
+		return nil // not held any more, written before terms were kept, or the same entry
+	}
+	return &types.ReplicationAppendResponse{
+		Error:               fmt.Sprintf("log mismatch at offset %d: written in term %d here, term %d on the leader", prev, local.GetTerm(), req.GetPrevLogTerm()),
+		LastOffset:          p.Wal.GetLastOffset(),
+		NextOffset:          p.Wal.GetNextOffset(),
+		Term:                p.Epoch(),
+		LogMismatch:         true,
+		ConflictTerm:        local.GetTerm(),
+		ConflictFirstOffset: p.Wal.FirstOffsetOfTerm(local.GetTerm(), prev),
+	}
 }
 
 // Position reports where this replica's log ends, for elections and for
