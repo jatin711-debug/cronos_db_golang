@@ -63,7 +63,20 @@ type Membership struct {
 
 	// droppedEvents counts membership events dropped due to a full event channel.
 	droppedEvents atomic.Uint64
+
+	// heartbeatRound counts heartbeat rounds, to pace how often nodes counted
+	// as dead are tried.
+	heartbeatRound atomic.Uint64
+	// unreachable names the nodes the last heartbeat could not be sent to, so
+	// that the failure is logged once. Guarded by connMu.
+	unreachable map[string]bool
+	// lastDetect is when the failure detector last ran. Guarded by mu.
+	lastDetect time.Time
 }
+
+// deadProbeRounds is how many heartbeat rounds pass between attempts to reach
+// a node that is counted as dead.
+const deadProbeRounds = 5
 
 // MemberEvent represents a membership change event delivered on Events().
 type MemberEvent struct {
@@ -128,6 +141,7 @@ func NewMembership(config *ClusterConfig) (*Membership, error) {
 		localNode:   localNode,
 		nodes:       make(map[string]*Node),
 		gossipConns: make(map[string]net.Conn),
+		unreachable: make(map[string]bool),
 		state: &ClusterState{
 			ClusterID:  config.ClusterID,
 			Nodes:      make(map[string]*Node),
@@ -317,14 +331,58 @@ func (m *Membership) handleJoinRequest(conn net.Conn, msg *GossipMessage) {
 	json.NewEncoder(conn).Encode(response)
 }
 
-// handleHeartbeatMessage handles a heartbeat
+// handleHeartbeatMessage handles a heartbeat.
+//
+// A heartbeat is also how two nodes that lost each other meet again. Nodes
+// keep sending them to the nodes they count as failed, and each one says where
+// its sender is found, so a node is taken back as soon as it is heard from,
+// and a node that restarted with nothing on its list learns who is there from
+// the heartbeats the others still send it.
 func (m *Membership) handleHeartbeatMessage(msg *GossipMessage) {
+	if msg.NodeID == "" || msg.NodeID == m.localNode.ID {
+		return
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if node, exists := m.nodes[msg.NodeID]; exists {
+	node, exists := m.nodes[msg.NodeID]
+	switch {
+	case exists && movedTo(node, msg):
+		// It restarted somewhere else. The record is replaced, not changed:
+		// others may be reading the old one.
+		moved := *node
+		moved.Address, moved.GossipAddr, moved.RaftAddr = orElse(msg.Address, node.Address), orElse(msg.GossipAddr, node.GossipAddr), orElse(msg.RaftAddr, node.RaftAddr)
+		moved.State, moved.UpdatedAt = NodeStateAlive, time.Now()
+		m.nodes[msg.NodeID] = &moved
+		m.state.Nodes[msg.NodeID] = &moved
+		log.Printf("[MEMBERSHIP] Node %s is now at gossip=%s", msg.NodeID, moved.GossipAddr)
+		m.emitEvent(EventTypeJoin, &moved)
+	case exists:
 		node.UpdatedAt = time.Now()
-		node.State = NodeStateAlive
+		if node.State != NodeStateAlive {
+			node.State = NodeStateAlive
+			log.Printf("[MEMBERSHIP] Node %s is heard from again", msg.NodeID)
+			m.emitEvent(EventTypeJoin, node)
+		}
+	case msg.GossipAddr != "":
+		node = &Node{
+			ID:         msg.NodeID,
+			Address:    msg.Address,
+			GossipAddr: msg.GossipAddr,
+			RaftAddr:   msg.RaftAddr,
+			State:      NodeStateAlive,
+			Role:       NodeRoleFollower,
+			JoinedAt:   time.Now(),
+			UpdatedAt:  time.Now(),
+		}
+		m.nodes[node.ID] = node
+		m.state.Nodes[node.ID] = node
+		m.state.UpdatedAt = time.Now()
+		log.Printf("[MEMBERSHIP] Learned about node %s at gossip=%s from its heartbeat", node.ID, node.GossipAddr)
+		m.emitEvent(EventTypeJoin, node)
+		if m.onJoin != nil {
+			go m.onJoin(node)
+		}
 	}
 
 	// Clock skew detection
@@ -337,6 +395,21 @@ func (m *Membership) handleHeartbeatMessage(msg *GossipMessage) {
 			log.Printf("[MEMBERSHIP] WARNING: Clock skew detected with node %s: %d ms", msg.NodeID, skew)
 		}
 	}
+}
+
+// movedTo reports whether a heartbeat names another address for a node than
+// the one on record.
+func movedTo(node *Node, msg *GossipMessage) bool {
+	return (msg.Address != "" && msg.Address != node.Address) ||
+		(msg.GossipAddr != "" && msg.GossipAddr != node.GossipAddr) ||
+		(msg.RaftAddr != "" && msg.RaftAddr != node.RaftAddr)
+}
+
+func orElse(value, fallback string) string {
+	if value != "" {
+		return value
+	}
+	return fallback
 }
 
 // handleNodeJoinedBroadcast handles notification that a new node joined
@@ -634,14 +707,25 @@ func (m *Membership) heartbeatLoop(ctx context.Context) {
 	}
 }
 
-// sendHeartbeats sends heartbeats to all known nodes
+// sendHeartbeats sends heartbeats to all known nodes.
+//
+// That includes the nodes counted as failed. Two nodes that cannot reach each
+// other for a few seconds each stop hearing from the other, and if they also
+// stopped sending, neither would ever learn that the other is back: the two
+// would stay apart until one of them was restarted, and a node restarted
+// without seeds would stay alone. A node counted as dead is tried less often.
 func (m *Membership) sendHeartbeats() {
+	round := m.heartbeatRound.Add(1)
 	m.mu.RLock()
 	nodes := make([]*Node, 0, len(m.nodes))
 	for _, node := range m.nodes {
-		if node.ID != m.localNode.ID && node.State == NodeStateAlive {
-			nodes = append(nodes, node)
+		if node.ID == m.localNode.ID {
+			continue
 		}
+		if node.State == NodeStateDead && round%deadProbeRounds != 0 {
+			continue
+		}
+		nodes = append(nodes, node)
 	}
 	m.mu.RUnlock()
 
@@ -654,10 +738,12 @@ func (m *Membership) sendHeartbeats() {
 func (m *Membership) sendHeartbeat(node *Node) {
 	// Create heartbeat message
 	hb := &GossipMessage{
-		Type:      "heartbeat",
-		NodeID:    m.localNode.ID,
-		Address:   m.localNode.Address,
-		Timestamp: time.Now().UnixMilli(),
+		Type:       "heartbeat",
+		NodeID:     m.localNode.ID,
+		Address:    m.localNode.Address,
+		GossipAddr: m.localNode.GossipAddr,
+		RaftAddr:   m.localNode.RaftAddr,
+		Timestamp:  time.Now().UnixMilli(),
 	}
 
 	// Use gossip address if available, otherwise fall back to gRPC address
@@ -690,23 +776,33 @@ func (m *Membership) sendHeartbeat(node *Node) {
 
 	// Establish new connection
 	newConn, err := net.DialTimeout("tcp", targetAddr, 2*time.Second)
-	if err != nil {
-		log.Printf("[MEMBERSHIP] Heartbeat to %s failed: %v", node.ID, err)
-		return
+	if err == nil {
+		// Send heartbeat on new connection
+		newConn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+		if _, err = newConn.Write(append(data, '\n')); err != nil {
+			newConn.Close()
+		}
 	}
 
-	// Send heartbeat on new connection
-	newConn.SetWriteDeadline(time.Now().Add(2 * time.Second))
-	if _, err := newConn.Write(append(data, '\n')); err != nil {
-		newConn.Close()
-		log.Printf("[MEMBERSHIP] Heartbeat write to %s failed: %v", node.ID, err)
-		return
-	}
-
-	// Cache the connection for future heartbeats
 	m.connMu.Lock()
+	defer m.connMu.Unlock()
+	if err != nil {
+		// The node keeps being tried, so only the change is logged.
+		if !m.unreachable[node.ID] {
+			m.unreachable[node.ID] = true
+			log.Printf("[MEMBERSHIP] Heartbeat to %s failed; it will keep being tried: %v", node.ID, err)
+		}
+		return
+	}
+	if m.unreachable[node.ID] {
+		delete(m.unreachable, node.ID)
+		log.Printf("[MEMBERSHIP] Heartbeat to %s is delivered again", node.ID)
+	}
+	// Cache the connection for future heartbeats
+	if old := m.gossipConns[targetAddr]; old != nil {
+		old.Close()
+	}
 	m.gossipConns[targetAddr] = newConn
-	m.connMu.Unlock()
 }
 
 // failureDetectorLoop detects failed nodes
@@ -734,8 +830,24 @@ func (m *Membership) detectFailures() {
 	timeout := m.config.HeartbeatInterval * 5
 	now := time.Now()
 
+	// This check runs every three heartbeat intervals. When far more time
+	// than that has passed since the last one, this process was not running:
+	// frozen, suspended or starved. What it has on record about when it last
+	// heard from the others is then as old as the pause and says nothing about
+	// them, so they get a full timeout to be heard from before they are
+	// suspected.
+	paused := !m.lastDetect.IsZero() && now.Sub(m.lastDetect) > timeout
+	if paused {
+		log.Printf("[MEMBERSHIP] This node did not run for %v; waiting to hear from the other nodes before judging them", now.Sub(m.lastDetect).Round(time.Millisecond))
+	}
+	m.lastDetect = now
+
 	for _, node := range m.nodes {
 		if node.ID == m.localNode.ID {
+			continue
+		}
+		if paused && node.State == NodeStateAlive {
+			node.UpdatedAt = now
 			continue
 		}
 
