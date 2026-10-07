@@ -659,6 +659,10 @@ func main() {
 							activeSegmentSize = activeSegment.GetSize()
 						}
 						metrics.SetWALMetrics(partitionLabel, len(p.Wal.GetSegments()), activeSegmentSize, p.Wal.GetHighWatermark())
+						metrics.SetLogStart(partitionLabel, p.Wal.GetFirstOffset())
+						if exported, feeding := p.ChangeFeedPosition(); feeding {
+							metrics.SetChangeFeedOffset(partitionLabel, exported)
+						}
 					}
 
 					if p.DedupStore != nil {

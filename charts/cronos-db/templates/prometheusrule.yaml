@@ -38,15 +38,55 @@ spec:
           annotations:
             summary: "CronosDB WAL flush errors on {{`{{ $labels.instance }}`}}"
 
-        - alert: CronosDBUnderReplicated
+        # Every partition is led by exactly one node, so the leader counts of
+        # all nodes add up to the partition count when all is well. (Comparing
+        # one node's count with the total, as this rule once did, fires on
+        # every node of a healthy cluster: no node leads everything.)
+        - alert: CronosDBPartitionsWithoutLeader
           expr: |
-            (
-              cronos_cluster_partitions_total{job=~".*cronos-db.*"}
-              - cronos_cluster_partitions_leader{job=~".*cronos-db.*"}
-            ) > 0
+            sum(cronos_cluster_partitions_leader{job=~".*cronos-db.*"})
+              < max(cronos_cluster_partitions_total{job=~".*cronos-db.*"})
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "CronosDB has partitions that no node leads; publishes to them are refused"
+
+        - alert: CronosDBNodeMissing
+          expr: |
+            cronos_cluster_nodes_alive{job=~".*cronos-db.*"}
+              < cronos_cluster_nodes_total{job=~".*cronos-db.*"}
           for: 5m
           labels:
             severity: warning
           annotations:
-            summary: "CronosDB has under-replicated partitions"
+            summary: "CronosDB node {{`{{ $labels.instance }}`}} does not hear from every node of its cluster"
+
+        - alert: CronosDBDeliveriesLate
+          expr: |
+            histogram_quantile(0.99, sum by (le) (
+              rate(cronos_delivery_lateness_seconds_bucket{job=~".*cronos-db.*"}[5m])
+            )) > {{ .Values.alerts.deliveryLatenessSeconds | default 30 }}
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "CronosDB hands events to consumers more than {{ .Values.alerts.deliveryLatenessSeconds | default 30 }}s after their scheduled time"
+
+        - alert: CronosDBDeliveriesNotAcknowledged
+          expr: |
+            sum(rate(cronos_events_delivery_timeouts_total{job=~".*cronos-db.*"}[10m]))
+              > 0.05 * sum(rate(cronos_events_delivered_total{job=~".*cronos-db.*"}[10m]))
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "More than 5% of the events CronosDB delivers are not acknowledged within the ack timeout"
+
+        - alert: CronosDBEventsDeadLettered
+          expr: sum(increase(cronos_events_dead_lettered_total{job=~".*cronos-db.*"}[15m])) > 0
+          labels:
+            severity: warning
+          annotations:
+            summary: "CronosDB moved events to the dead-letter queue: their deliveries ran out of retries"
 {{- end }}
