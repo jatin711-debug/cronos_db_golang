@@ -166,25 +166,25 @@ func TestReplication_SupersededLeaderStepsDown(t *testing.T) {
 	if err := r.pm.PromoteToLeader(0, 1); err != nil {
 		t.Fatal(err)
 	}
-	if !r.p.Leader || r.p.ReplLeader == nil {
+	if !r.p.IsLeader() || r.p.ReplLeader == nil {
 		t.Fatal("setup: node is not leading")
 	}
 
 	if resp := r.send("node-b", 1, entries("b", 1, 0, 0)); resp.GetSuccess() {
 		t.Fatal("a leader accepted a rival's write at its own term")
 	}
-	if !r.p.Leader {
+	if !r.p.IsLeader() {
 		t.Fatal("a rival at the same term made the leader step down")
 	}
 
 	if resp := r.send("node-b", 2, entries("b", 2, 0, 0)); !resp.GetSuccess() {
 		t.Fatalf("newer leader rejected: %s", resp.GetError())
 	}
-	if r.p.Leader || r.p.ReplLeader != nil {
+	if r.p.IsLeader() || r.p.ReplLeader != nil {
 		t.Fatal("the superseded leader kept leading after accepting a newer term")
 	}
-	if r.p.Epoch != 2 || r.p.EpochLeader != "node-b" {
-		t.Fatalf("leadership = (%d, %q), want (2, node-b)", r.p.Epoch, r.p.EpochLeader)
+	if r.p.Epoch() != 2 || r.p.EpochLeader() != "node-b" {
+		t.Fatalf("leadership = (%d, %q), want (2, node-b)", r.p.Epoch(), r.p.EpochLeader())
 	}
 }
 
@@ -262,8 +262,8 @@ func TestReplication_ConcurrentLeaderChangeKeepsLogConsistent(t *testing.T) {
 	if newCount != newEntries {
 		t.Fatalf("log holds %d entries of the new term, want all %d", newCount, newEntries)
 	}
-	if r.p.Epoch != 2 || r.p.EpochLeader != "node-b" {
-		t.Fatalf("leadership = (%d, %q), want (2, node-b)", r.p.Epoch, r.p.EpochLeader)
+	if r.p.Epoch() != 2 || r.p.EpochLeader() != "node-b" {
+		t.Fatalf("leadership = (%d, %q), want (2, node-b)", r.p.Epoch(), r.p.EpochLeader())
 	}
 	if rejectedOld == 0 {
 		t.Log("the old leader finished before the new one started; ordering was not exercised this run")

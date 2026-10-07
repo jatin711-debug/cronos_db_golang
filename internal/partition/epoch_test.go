@@ -89,8 +89,8 @@ func TestPersistEpochSurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.Epoch != 3 {
-		t.Fatalf("epoch after restart = %d, want 3", p.Epoch)
+	if p.Epoch() != 3 {
+		t.Fatalf("epoch after restart = %d, want 3", p.Epoch())
 	}
 	before, err := os.Stat(epochFile)
 	if err != nil {
@@ -138,16 +138,15 @@ func TestAcceptLeadershipAllowsOneHolderPerEpoch(t *testing.T) {
 	// The holder is remembered across a restart.
 	restarted := &Partition{DataDir: dir}
 	record := storedEpoch(t, filepath.Join(dir, "epoch.json"))
-	restarted.Epoch, restarted.EpochLeader = record.Epoch, record.LeaderID
-	restarted.persistedEpoch, restarted.persistedLeader = record.Epoch, record.LeaderID
+	restarted.restoreLeadership(record)
 	if err := restarted.AcceptLeadership(3, "node-b"); err == nil {
 		t.Fatal("after a restart a second node was accepted for the same epoch")
 	}
 	if err := restarted.AcceptLeadership(4, "node-b"); err != nil {
 		t.Fatalf("a newer epoch must move leadership: %v", err)
 	}
-	if restarted.Epoch != 4 || restarted.EpochLeader != "node-b" {
-		t.Fatalf("leadership = (%d, %q), want (4, node-b)", restarted.Epoch, restarted.EpochLeader)
+	if restarted.Epoch() != 4 || restarted.EpochLeader() != "node-b" {
+		t.Fatalf("leadership = (%d, %q), want (4, node-b)", restarted.Epoch(), restarted.EpochLeader())
 	}
 }
 
@@ -164,7 +163,8 @@ func TestAcceptLeadershipUpgradesUnattributedEpoch(t *testing.T) {
 		t.Fatalf("legacy epoch file read as %+v, want epoch 7 with no holder", record)
 	}
 
-	p := &Partition{DataDir: dir, Epoch: record.Epoch, persistedEpoch: record.Epoch}
+	p := &Partition{DataDir: dir}
+	p.restoreLeadership(record)
 	if err := p.AcceptLeadership(7, "node-a"); err != nil {
 		t.Fatal(err)
 	}

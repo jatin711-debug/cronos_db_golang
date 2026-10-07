@@ -39,7 +39,9 @@ func TestAuditDelayedAppendMustNotTruncateAcknowledgedTail(t *testing.T) {
 func TestAuditZeroTermCannotBypassFence(t *testing.T) {
 	pm := auditManager(t)
 	p, _ := pm.GetInternalPartition(0)
-	p.Epoch = 10
+	if err := p.PersistEpoch(10); err != nil {
+		t.Fatal(err)
+	}
 	r, err := NewReplicationServiceHandler(pm).Append(context.Background(), &types.ReplicationAppendRequest{PartitionId: 0, Term: 0, Events: []*types.Event{{MessageId: "stale", Offset: 0, Payload: []byte("x"), ScheduleTs: 1}}})
 	if err == nil && r.GetSuccess() {
 		t.Fatal("term 0 append accepted despite current epoch 10")
