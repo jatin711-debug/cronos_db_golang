@@ -79,6 +79,8 @@ type Config struct {
 	TracingSampleRatio float64
 	// TracingInsecure disables TLS when exporting OTLP traces (dev only).
 	TracingInsecure bool
+	// PprofAddr serves net/http/pprof on a dedicated listener when non-empty.
+	PprofAddr string
 
 	// HotWindowMinutes is the scheduler hot window: events further in the future
 	// than this many minutes go to the cold store. 0 disables the cold path.
@@ -115,6 +117,14 @@ type Config struct {
 	ClusterGRPCAddr string
 	// ClusterSeeds is the list of seed nodes used to join an existing cluster.
 	ClusterSeeds []string
+	// ClusterExpectedNodes is how many nodes a new cluster starts with. Its
+	// partitions get their first leaders as soon as that many are up. Zero
+	// means unknown: wait for ClusterFormationWait instead.
+	ClusterExpectedNodes int
+	// ClusterFormationWait is how long membership must be unchanged before a
+	// new cluster assigns first leaders when the expected nodes are not all
+	// present. Zero assigns at once.
+	ClusterFormationWait time.Duration
 	// ClusterRaftAddr is the Raft transport bind address.
 	ClusterRaftAddr string
 	// VirtualNodes is the number of virtual nodes per physical node on the hash ring.
