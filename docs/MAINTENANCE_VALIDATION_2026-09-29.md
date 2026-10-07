@@ -49,9 +49,13 @@ hardening changes were preserved.
   matching assigned consumer group. No matching group means keep the event.
   Cursor overrides and `Force` do not override this protection. Corrupt or
   incomplete segments fail verification; the active segment is always retained.
-- Clustered/replicated pruning returns an explicit error because durable
-  completion replication and safe handoff watermarks are still unresolved.
-  Size limits are consequently best-effort: protected data can exceed them;
+- Clustered/replicated pruning was refused when this was written. Since
+  2026-10-07 the leader of a replicated partition removes finished segments
+  from the start of its log and the other replicas follow it; see the
+  [storage](architecture/features/storage.md) and
+  [replication](architecture/features/replication.md#log-start) notes. A
+  replica that does not lead still refuses to prune by its own decision.
+  Size limits remain best-effort: protected data can exceed them;
   admission/disk-pressure controls remain responsible for rejecting more writes.
 - WAL rotation now derives the next segment's first offset from the last record
   actually written. Reservations by concurrent writers and speculative creation

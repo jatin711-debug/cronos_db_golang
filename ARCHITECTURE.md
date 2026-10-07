@@ -426,13 +426,16 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    A[Compaction Timer - every 10 min] --> B{Active consumers?}
-    B -->|No| Z[Skip]
-    B -->|Yes| C[Find min committed offset across all groups]
-    C --> D{min_offset > 0?}
-    D -->|No| Z
-    D -->|Yes| E[Delete segments where last_offset less than min_offset]
-    E --> F[Never delete active segment]
+    A[Compaction timer - every --compaction-interval] --> B{Replicated partition?}
+    B -->|Yes, not the leader| Z[Skip: follow the leader's log start]
+    B -->|Yes, leader| P[Oldest closed segment first, stop at the first that stays]
+    B -->|No| Q[Every closed segment]
+    P --> C{Every event due, taken by a group, finished by every group that takes it, exported by the change feed?}
+    Q --> C
+    C -->|No| K[Keep]
+    C -->|Yes| E[Delete segment and index]
+    E --> F[Raise consumer floors to the new log start]
+    F --> G[Leader: next append tells followers where the log starts]
 ```
 
 ---
@@ -1301,9 +1304,22 @@ flowchart TD
 | **WAL** | `cronos_wal_append_latency_seconds{partition}`, `cronos_wal_segment_count{partition}`, `cronos_wal_high_watermark{partition}` |
 | **Scheduler** | `cronos_scheduler_ready_events{partition}`, `cronos_scheduler_active_timers{partition}`, `cronos_timing_wheel_overflow_level{partition}`, `cronos_scheduler_cold_store_entries{partition}`, `cronos_scheduler_hydrated_events_total{partition}`, `cronos_scheduler_hydrator_interval_ms{partition}`, `cronos_scheduler_hydrator_scan_duration_seconds{partition}` |
 | **Dedup** | `cronos_dedup_check_latency_seconds{partition, path}`, `cronos_dedup_bloom_memory_bytes{partition}`, `cronos_dedup_bloom_false_positive_rate{partition}` |
-| **Delivery** | `cronos_dispatch_latency_seconds{partition}`, `cronos_consumer_group_lag{group, partition}` |
+| **Delivery** | `cronos_dispatch_latency_seconds{partition}`, `cronos_consumer_group_lag{group, partition}`, `cronos_delivery_lateness_seconds{partition}` (time between an event's scheduled time and its first delivery) |
+| **Accounting** | `cronos_events_accepted_total{partition}`, `cronos_events_duplicate_total{partition}`, `cronos_events_delivered_total{partition, attempt}` (`first` or `retry`), `cronos_events_acknowledged_total{partition, result}`, `cronos_events_delivery_timeouts_total{partition}`, `cronos_events_dead_lettered_total{partition}` |
+| **Log** | `cronos_wal_log_start_offset{partition}`, `cronos_wal_segments_removed_total{partition}`, `cronos_change_feed_offset{partition}` |
 | **Admission** | `cronos_admission_rejected_total{partition}` |
 | **Cluster** | `cronos_cluster_nodes_alive`, `cronos_cluster_partitions_leader`, `cronos_replication_lag{partition, follower}` (in events), `cronos_clock_skew_ms{source_node, target_node}` |
+
+The accounting counters follow an event from the acknowledged publish to the
+acknowledged delivery, on the partition's leader. Rates that do not add up
+show where events are: accepted faster than delivered means events are waiting
+for their time or for a consumer; delivered faster than acknowledged, with
+timeouts, means consumers are not keeping up; `attempt="retry"` and dead
+letters mean deliveries are failing. The counters start at zero when a node
+starts and move with leadership, so compare rates summed over the nodes, not
+totals. `cronos_wal_high_watermark - cronos_wal_log_start_offset` is how many
+events a partition's log holds; `cronos_wal_high_watermark -
+cronos_change_feed_offset` is the change feed's lag.
 
 ### Metrics Architecture
 
