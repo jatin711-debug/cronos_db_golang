@@ -28,6 +28,7 @@ type Segment struct {
 	mmapData        []byte // memory-mapped file view; nil when encrypted or unmapped
 	mmapWritePos    int64  // current write cursor within mmapData (bytes)
 	mmapSize        int64  // mapped length in bytes (tracks len(mmapData))
+	mmapFlushedPos  int64  // mmap prefix already handed to the OS by syncMmap; guarded by flushMu
 	firstOffset     int64  // first event offset stored in this segment
 	lastOffset      int64  // last event offset; -1 when empty
 	firstTS         int64  // schedule timestamp of first event (ms); 0 if unknown
@@ -1019,40 +1020,16 @@ func (s *Segment) ReadEventsByTime(startTS, endTS int64) ([]*types.Event, error)
 	// first/last appended timestamps cannot safely prune a time-range query.
 	startPos := int64(64)
 
-	// Use ReadAt on existing file handle instead of opening new file
-	lengthBytes := make([]byte, 4)
-	recordBuf := make([]byte, 0, 4096)
-	currentPos := startPos
+	scanner := newRecordScanner(s.segmentFile, startPos)
 
 	for {
-		// Read record length using ReadAt
-		if _, err := s.segmentFile.ReadAt(lengthBytes, currentPos); err != nil {
-			if err == io.EOF {
-				break
-			}
-			return nil, fmt.Errorf("read length: %w", err)
-		}
-		currentPos += 4
-
-		length := int64(binary.BigEndian.Uint32(lengthBytes))
-		if length <= 0 || length > 10*1024*1024 {
-			break
-		}
-
-		// Read full record
-		recordLen := int(length - 4)
-		if cap(recordBuf) < recordLen {
-			recordBuf = make([]byte, recordLen)
-		}
-		record := recordBuf[:recordLen]
-		ciphertextPos := currentPos
-		if _, err := s.segmentFile.ReadAt(record, currentPos); err != nil {
-			if err == io.EOF {
-				break
-			}
+		record, ciphertextPos, ok, err := scanner.record()
+		if err != nil {
 			return nil, fmt.Errorf("read record: %w", err)
 		}
-		currentPos += int64(recordLen)
+		if !ok {
+			break
+		}
 
 		decrypted, err := s.decryptRecord(record, ciphertextPos)
 		if err != nil {
@@ -1084,6 +1061,9 @@ func (s *Segment) ReadEventsByOffsetRange(startOffset, endOffset int64) ([]*type
 	defer s.mu.RUnlock()
 
 	var result []*types.Event
+	if s.closed {
+		return result, nil // removed (retention, truncation) after the caller listed it
+	}
 
 	// Find starting position using index
 	startPos := int64(64) // Default to after header
@@ -1093,40 +1073,17 @@ func (s *Segment) ReadEventsByOffsetRange(startOffset, endOffset int64) ([]*type
 		}
 	}
 
-	// Use ReadAt on existing file handle (pread is thread-safe)
-	lengthBytes := make([]byte, 4)
-	recordBuf := make([]byte, 0, 4096)
-	currentPos := startPos
+	// ReadAt on the existing file handle is safe alongside appends.
+	scanner := newRecordScanner(s.segmentFile, startPos)
 
 	for {
-		// Read record length using ReadAt
-		if _, err := s.segmentFile.ReadAt(lengthBytes, currentPos); err != nil {
-			if err == io.EOF {
-				break
-			}
-			return nil, fmt.Errorf("read length: %w", err)
-		}
-		currentPos += 4
-
-		length := int64(binary.BigEndian.Uint32(lengthBytes))
-		if length <= 0 || length > 10*1024*1024 {
-			break
-		}
-
-		// Read full record
-		recordLen := int(length - 4)
-		if cap(recordBuf) < recordLen {
-			recordBuf = make([]byte, recordLen)
-		}
-		record := recordBuf[:recordLen]
-		ciphertextPos := currentPos
-		if _, err := s.segmentFile.ReadAt(record, currentPos); err != nil {
-			if err == io.EOF {
-				break
-			}
+		record, ciphertextPos, ok, err := scanner.record()
+		if err != nil {
 			return nil, fmt.Errorf("read record: %w", err)
 		}
-		currentPos += int64(recordLen)
+		if !ok {
+			break
+		}
 
 		decrypted, err := s.decryptRecord(record, ciphertextPos)
 		if err != nil {
@@ -1290,13 +1247,16 @@ func (s *Segment) scan() error {
 	var recordStartPos int64 = 64
 	lengthBytes := make([]byte, 4)
 	recordBuf := make([]byte, 0, 4096)
+	// Positions are tracked in lastGoodPos, and OpenSegment repositions the file
+	// handle after the scan, so reading ahead here is safe.
+	reader := bufio.NewReaderSize(file, 1<<20)
 
 	// Read through all records
 	for {
 		recordStartPos = lastGoodPos
 
 		// Read record length
-		if _, err := io.ReadFull(file, lengthBytes); err != nil {
+		if _, err := io.ReadFull(reader, lengthBytes); err != nil {
 			if err == io.EOF {
 				// Clean end of file
 				break
@@ -1321,7 +1281,7 @@ func (s *Segment) scan() error {
 			recordBuf = make([]byte, recordLen)
 		}
 		recordData := recordBuf[:recordLen]
-		if _, err := io.ReadFull(file, recordData); err != nil {
+		if _, err := io.ReadFull(reader, recordData); err != nil {
 			if err == io.EOF || err == io.ErrUnexpectedEOF {
 				// Truncated or incomplete file - corrupt tail detected
 				log.Printf("[SEGMENT] Incomplete record at position %d (expected %d bytes), truncating", lastGoodPos, length)
@@ -1435,6 +1395,9 @@ func (s *Segment) truncateToPosition(pos int64) error {
 		s.mmapSize = pos
 		s.mmapWritePos = pos
 	}
+	if s.mmapFlushedPos > pos {
+		s.mmapFlushedPos = pos
+	}
 
 	// Sync again to ensure truncation is persisted
 	if err := s.segmentFile.Sync(); err != nil {
@@ -1451,24 +1414,25 @@ func (s *Segment) truncateToPosition(pos int64) error {
 func (s *Segment) FlushBuffer() error {
 	s.mu.RLock()
 	closed := s.closed
-	data := s.mmapData
+	mapped := s.mmapData != nil
 	pos := s.mmapWritePos
+	s.mu.RUnlock()
 	if closed {
-		s.mu.RUnlock()
 		return nil
 	}
-	// If using mmap, sync mmap to disk. The expensive msync is performed
-	// outside the segment lock so appends are not blocked by disk I/O.
-	if data != nil {
+	// If using mmap, sync mmap to disk. s.mu is released before waiting for
+	// flushMu: a flush queued behind an in-flight sync while still holding the
+	// read lock would park the next appender (a writer on s.mu) for the rest of
+	// that sync. mmapData and closed only change with flushMu held, so they are
+	// re-read under it.
+	if mapped {
 		s.flushMu.Lock()
-		s.mu.RUnlock()
 		defer s.flushMu.Unlock()
-		if pos > int64(len(data)) {
-			pos = int64(len(data))
+		if s.closed || s.mmapData == nil {
+			return nil // closed or deactivated meanwhile; both flush before unmapping
 		}
-		return syncMmap(data[:pos])
+		return s.syncMmapTailLocked(pos)
 	}
-	s.mu.RUnlock()
 	// Buffered writer is not thread-safe, so flush it under the exclusive lock.
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1486,31 +1450,47 @@ func (s *Segment) FlushBuffer() error {
 func (s *Segment) Sync() error {
 	s.mu.RLock()
 	closed := s.closed
-	data := s.mmapData
 	pos := s.mmapWritePos
-	file := s.segmentFile
+	s.mu.RUnlock()
 	if closed {
-		s.mu.RUnlock()
 		return nil
 	}
-	// If using mmap, sync mmap to disk outside the lock so appends can
-	// continue while the fsync is in flight.
-	if data != nil {
-		s.flushMu.Lock()
-		s.mu.RUnlock()
-		defer s.flushMu.Unlock()
-		if pos > int64(len(data)) {
-			pos = int64(len(data))
-		}
-		if err := syncMmap(data[:pos]); err != nil {
-			return err
-		}
-		return file.Sync() // Also sync the file descriptor
-	}
-	s.mu.RUnlock()
+	// As in FlushBuffer, wait for flushMu without holding s.mu so appends can
+	// continue while another sync is in flight, then re-read the state that
+	// only changes under flushMu.
 	s.flushMu.Lock()
 	defer s.flushMu.Unlock()
-	return file.Sync()
+	if s.closed {
+		return nil
+	}
+	if s.mmapData != nil {
+		if err := s.syncMmapTailLocked(pos); err != nil {
+			return err
+		}
+	}
+	return s.segmentFile.Sync()
+}
+
+// mmapPageSize aligns partial flushes: msync rejects unaligned addresses.
+var mmapPageSize = int64(os.Getpagesize())
+
+// syncMmapTailLocked flushes the mapped bytes written since the last flush, up
+// to pos. Records are append-only, so the already-flushed prefix cannot have
+// changed; re-walking it on every flush costs time proportional to the whole
+// segment. The caller must hold flushMu and have checked mmapData != nil.
+func (s *Segment) syncMmapTailLocked(pos int64) error {
+	if pos > int64(len(s.mmapData)) {
+		pos = int64(len(s.mmapData))
+	}
+	if pos <= s.mmapFlushedPos {
+		return nil
+	}
+	start := s.mmapFlushedPos - s.mmapFlushedPos%mmapPageSize
+	if err := syncMmap(s.mmapData[start:pos]); err != nil {
+		return err
+	}
+	s.mmapFlushedPos = pos
+	return nil
 }
 
 // Flush flushes pending writes and syncs to disk.

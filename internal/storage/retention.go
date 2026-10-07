@@ -23,6 +23,8 @@ type PruneOptions struct {
 // checkpoint and rotation. Memory during verification is bounded by one record.
 // eligible must not call back into this WAL. A nil predicate fails closed.
 func (w *WAL) Prune(ctx context.Context, opts PruneOptions, eligible func(*types.Event) bool) (int, error) {
+	w.checkpointMu.Lock()
+	defer w.checkpointMu.Unlock()
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if err := ctx.Err(); err != nil {
