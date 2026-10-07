@@ -226,6 +226,9 @@ type Config struct {
 	MaxMemoryUsagePercent float64
 	// MemoryCheckIntervalMs is how often memory usage is sampled in ms.
 	MemoryCheckIntervalMs int64
+	// MemoryLimitBytes is the memory this process may use. Zero means the
+	// container's limit, or the machine's memory when there is none.
+	MemoryLimitBytes int64
 
 	// MaxIngestRatePerPartition caps events/sec accepted per partition (0 = unlimited).
 	MaxIngestRatePerPartition int64

@@ -153,10 +153,11 @@ const (
 	// DefaultTopicRateLimitBurst is the token-bucket burst for topic rate limits; 0 disables.
 	DefaultTopicRateLimitBurst = 0.0
 
-	// DefaultMaxMemoryUsagePercent rejects publishes above this process RSS ratio; 0 disables.
-	DefaultMaxMemoryUsagePercent = 0.0 // Disabled by default
+	// DefaultMaxMemoryUsagePercent refuses publishes while the process holds
+	// this share of its memory limit or more; 0 disables.
+	DefaultMaxMemoryUsagePercent = 80.0
 	// DefaultMemoryCheckIntervalMs is how often memory usage is sampled.
-	DefaultMemoryCheckIntervalMs = 5000 // 5 seconds
+	DefaultMemoryCheckIntervalMs = 1000
 
 	// DefaultMaxIngestRatePerPartition is max events/sec per partition; 0 is unlimited.
 	DefaultMaxIngestRatePerPartition = 0 // Unlimited by default

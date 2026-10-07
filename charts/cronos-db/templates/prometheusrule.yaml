@@ -89,4 +89,17 @@ spec:
             severity: warning
           annotations:
             summary: "CronosDB moved events to the dead-letter queue: their deliveries ran out of retries"
+
+        # A node refuses publishes while it holds --max-memory-percent (80 by
+        # default) of its memory limit. Consumers are behind, or the node is
+        # too small for what is due within the hot window.
+        - alert: CronosDBRefusingPublishesForMemory
+          expr: |
+            cronos_memory_held_bytes{job=~".*cronos-db.*"}
+              >= 0.8 * cronos_memory_limit_bytes{job=~".*cronos-db.*"}
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: "CronosDB node {{`{{ $labels.instance }}`}} holds 80% of its memory limit and refuses publishes"
 {{- end }}

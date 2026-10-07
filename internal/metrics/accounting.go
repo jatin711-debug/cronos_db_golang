@@ -3,8 +3,10 @@ package metrics
 import (
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/jatin711-debug/cronos_db_golang/internal/sysmem"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
@@ -98,6 +100,20 @@ var (
 		Name: "cronos_change_feed_offset",
 		Help: "Offset of the last event the partition's change feed has exported; compare with cronos_wal_high_watermark for its lag",
 	}, []string{"partition"})
+
+	// Memory is measured when it is asked for: it moves faster than the
+	// other gauges are refreshed.
+	_ = promauto.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "cronos_memory_held_bytes",
+		Help: "Memory the process holds and cannot hand back: anonymous resident memory, less what the Go runtime keeps for reuse",
+	}, func() float64 { return float64(sysmem.Used()) })
+
+	_ = promauto.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "cronos_memory_limit_bytes",
+		Help: "Memory the process may use: the container's limit, the configured one, or the machine's memory. Publishes are refused at --max-memory-percent of it",
+	}, func() float64 { return float64(memoryLimit.Load()) })
+
+	memoryLimit atomic.Uint64
 )
 
 // AddEventsAccepted counts events whose publish was acknowledged.
@@ -146,6 +162,9 @@ func ObserveDeliveryLateness(partitionID int32, scheduleTS int64, sent time.Time
 	late := float64(sent.UnixMilli()-scheduleTS) / 1000
 	observer.(prometheus.Observer).Observe(max(late, 0))
 }
+
+// SetMemoryLimit sets how much memory the process may use.
+func SetMemoryLimit(limit uint64) { memoryLimit.Store(limit) }
 
 // SetLogStart sets where a partition's log starts.
 func SetLogStart(partitionID string, logStart int64) {

@@ -21,6 +21,10 @@ const (
 	ErrorKindLeaderChange ErrorKind = "leader_change"
 	// ErrorKindMetadataStale indicates cached routing metadata is out of date.
 	ErrorKindMetadataStale ErrorKind = "metadata_stale"
+	// ErrorKindOverloaded indicates the server refused the request because it
+	// is at capacity or a quota is used up. Send less; the request was not
+	// stored.
+	ErrorKindOverloaded ErrorKind = "overloaded"
 	// ErrorKindTransport indicates a low-level gRPC/network failure.
 	ErrorKindTransport ErrorKind = "transport"
 	// ErrorKindInternal indicates an unexpected client or server internal error.

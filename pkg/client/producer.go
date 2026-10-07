@@ -315,6 +315,12 @@ func (p *Producer) Send(ctx context.Context, msg Message) (*SendResult, error) {
 			}
 			if err != nil {
 				lastErr = err
+				if errs.IsOverloaded(err) {
+					// The node that leads the partition has no room. No other
+					// node can take the publish, and the caller has to know
+					// that this is why.
+					return nil, p.wrapErr("producer.send", ErrorKindOverloaded, err)
+				}
 				p.client.noteRefused(partitionID, addr)
 				// A node that does not lead the partition says so, and the
 				// next candidate may be the one that does.
@@ -401,8 +407,10 @@ func (p *Producer) tryPublishWithBreaker(ctx context.Context, addr string, event
 	if err != nil {
 		// A node that answers that it does not lead the partition is healthy.
 		// Counting that against it would close it off for the moment it takes
-		// the partition over.
-		if cb != nil && !errors.Is(err, context.Canceled) && !errs.IsLeaderRelated(err) {
+		// the partition over. A node that answers that it has no room is
+		// healthy too; with its breaker open the publishes that follow went
+		// to the other nodes and came back as "not the leader".
+		if cb != nil && !errors.Is(err, context.Canceled) && !errs.IsLeaderRelated(err) && !errs.IsOverloaded(err) {
 			cb.RecordFailure()
 		}
 		return resp, err, false
