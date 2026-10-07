@@ -200,7 +200,17 @@ func main() {
 	// feed of every partition: accepted events only, in log order, from the
 	// partition's leader. Set before any partition exists, so that partitions
 	// created later, which in a cluster is nearly all of them, have one too.
-	crossRegion := cfg.NodeRegion != ""
+	//
+	// Replication to other regions is experimental: it is asynchronous, drops
+	// events when a region stays unreachable, and settles conflicts by last
+	// write. It is refused outside --dev --experimental-features, not silently
+	// left off, so that nobody believes a second region is being fed.
+	remoteRegions := os.Getenv("CRONOS_REGIONS")
+	if remoteRegions != "" && !cfg.ExperimentalFeatures {
+		slog.Error("CRONOS_REGIONS is set, but replication to other regions is experimental; start with --dev --experimental-features or unset it")
+		os.Exit(1)
+	}
+	crossRegion := remoteRegions != ""
 	if cdcManager.HasSinks() || crossRegion {
 		pm.SetChangeFeed(func(ctx context.Context, partitionID int32, events []*types.Event) error {
 			if err := cdcManager.Deliver(ctx, partitionID, events); err != nil {
@@ -455,7 +465,7 @@ func main() {
 	}
 
 	if cfg.ExperimentalFeatures {
-		slog.Warn("Experimental transactions and online splitting enabled; development use only")
+		slog.Warn("Experimental transactions, online splitting and cross-region replication enabled; development use only")
 		grpcServer.SetTransactionHandler(tx.NewHandler(pm))
 	}
 
@@ -486,7 +496,9 @@ func main() {
 	// Register internal replication and raft metadata services on the internal listener.
 	replicationServer := api.NewReplicationServiceHandler(pm)
 	internalServer.RegisterReplicationServer(replicationServer)
-	internalServer.RegisterCrossRegionServer(crossRegionServer)
+	if cfg.ExperimentalFeatures {
+		internalServer.RegisterCrossRegionServer(crossRegionServer)
+	}
 	if clusterMgr != nil {
 		raftServer := api.NewRaftServiceHandler(clusterMgr, cfg.NodeID)
 		internalServer.RegisterRaftServer(raftServer)
@@ -503,8 +515,8 @@ func main() {
 	grpcServer.RegisterServices(eventHandler, consumerHandler, partitionHandler, adminHandler)
 
 	// Load remote regions from environment
-	if regions := os.Getenv("CRONOS_REGIONS"); regions != "" {
-		for r := range strings.SplitSeq(regions, ",") {
+	if remoteRegions != "" {
+		for r := range strings.SplitSeq(remoteRegions, ",") {
 			parts := strings.SplitN(strings.TrimSpace(r), "=", 2)
 			if len(parts) == 2 {
 				crossRegionReplicator.AddRegion(&replication.RegionConnection{

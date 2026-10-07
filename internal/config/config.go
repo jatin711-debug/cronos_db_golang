@@ -136,7 +136,7 @@ func LoadConfig() (*types.Config, error) {
 
 	// Security / dev mode
 	flag.BoolVar(&config.DevMode, "dev", false, "Developer mode: disables production security requirements")
-	flag.BoolVar(&config.ExperimentalFeatures, "experimental-features", false, "Enable unverified transactions and online splitting (requires --dev)")
+	flag.BoolVar(&config.ExperimentalFeatures, "experimental-features", false, "Enable unverified transactions, online splitting and cross-region replication (requires --dev)")
 
 	// Scheduler configuration
 	flag.IntVar(&config.TickMS, "tick-ms", DefaultTickMS, "Scheduler tick duration in milliseconds")
@@ -340,7 +340,7 @@ func ValidateConfig(c *types.Config) error {
 	// unless the operator explicitly opts into developer mode.
 	if !c.DevMode {
 		if c.ExperimentalFeatures {
-			return fmt.Errorf("experimental-features requires --dev; transactions and online splitting are not supported in production")
+			return fmt.Errorf("experimental-features requires --dev; transactions, online splitting and cross-region replication are not supported in production")
 		}
 		if c.ExactlyOnceCommits {
 			return fmt.Errorf("exactly-once-commits is not supported in production; use per-event at-least-once completion")
@@ -375,6 +375,12 @@ func ValidateConfig(c *types.Config) error {
 		}
 		if !c.EncryptionEnabled {
 			return fmt.Errorf("production mode requires encryption at rest to be enabled (use --dev to bypass)")
+		}
+		if c.FsyncMode != "batch" && c.FsyncMode != "every_event" {
+			// A replica acknowledges after syncing in these two modes, so an
+			// acknowledged publish is on disk on min-insync replicas. In
+			// periodic mode it is only in memory there until the next flush.
+			return fmt.Errorf("production mode requires fsync-mode batch or every_event; with %q a power loss can lose acknowledged events (use --dev to bypass)", c.FsyncMode)
 		}
 		if c.EncryptionKeyFile == "" {
 			return fmt.Errorf("production mode requires encryption-key-file")
