@@ -163,7 +163,50 @@ bounded by event count (`--max-ready-queue`, `--max-timing-wheel-size`,
 `--max-in-flight`), not by bytes. Sustained load at production sizes has not
 been measured.
 
-Before release, also require
-a scan of the image that is actually published: CI scans the
-image it builds from the same Dockerfile, not the published one. Set and measure explicit throughput, payload,
-retention, delay, and crash-loss targets. See the audit acceptance contract.
+## What a release promises, and what that rests on
+
+Each promise below is checked on every push by the test named with it. The
+tests run three server processes on one machine at about 60 small events a
+second; the last column says what they do not show.
+
+| Promise | Checked by | Not shown |
+|---|---|---|
+| A publish that was acknowledged survives the loss of any one node (replication factor 3, two in-sync replicas, fsync `batch` or `every_event`) | `TestFaultCampaign`: a leader killed, a follower killed, a leader frozen and released, every node restarted, a node replaced with an empty one and killed while it is refilled, the whole cluster killed | Two nodes' disks lost together; network partitions; loss of power on a real machine (the tests kill processes) |
+| Every acknowledged event is delivered at least once, and never before its time | The ledger of the same test, and of the restore and overload tests | Exactly once: after a failover some events are delivered again |
+| The replicas of a partition hold the same log | `TestFaultCampaign` compares them entry for entry | |
+| A partition takes publishes again within 90 seconds of its leader's death | The bound the campaign enforces | Typical times; behavior under load |
+| Any node, the first included, can be replaced with an empty one | `TestFaultCampaign`, `TestFirstNodeReplaced`, the kind job on the chart | Two at once |
+| A cluster that is lost entirely comes back from its nodes' backups with everything acknowledged before the earliest of them | `TestClusterRestoredFromBackups` | Restore to a point between backups; getting backups off the node, which is the operator's to arrange |
+| Producers that outrun the cluster are refused, and no node dies of it | `TestOverloadIsRefusedAndSurvived` | A backlog larger than a node's memory at restart; load at production sizes |
+| Traffic between nodes is encrypted and only nodes that hold the cluster's certificate take part | `TestTransportTLS_*`, the kind job | The HTTP port; replacing certificates without a restart |
+| One tenant cannot read, replay or acknowledge another's events | `TestIsolation_*` | |
+
+No throughput, payload-size or latency figure is promised. None has been
+measured on production hardware.
+
+## Before a final release
+
+Release candidates are cut from the development branch when CI is green on
+the commit. The next is `v0.6.0-rc.3`. A final `v0.6.0` still needs:
+
+- The five CI jobs made required in branch protection. Today a red run does
+  not stop a merge:
+  `gh api -X PUT repos/<owner>/<repo>/branches/main/protection` with
+  `required_status_checks.contexts` set to `go`, `fault-campaign`,
+  `dashboard-and-chart`, `go-security` and `production-chart-startup`.
+- A run on more than one machine, with links cut between them. Everything
+  above was shown with processes on one host.
+- A replica refilled from a partition larger than 1 GiB. The transfer has no
+  size limit and resumes file by file, and has a ten minute deadline; it has
+  only been run on megabytes.
+- Throughput and latency measured on the hardware a deployment will use, with
+  the memory that the backlog it allows needs.
+- A scan of the image that is published. CI scans the image it builds from
+  the same Dockerfile, not the published one.
+
+Known limits of what is released are in the
+[audit](PRODUCTION_AUDIT_2026-09-27.md): log entries are removed from the
+start of a log only, so one event that cannot go yet keeps every later
+segment; a restart reads the undelivered backlog into memory; a consumer
+group's finished work in a partition shared by several topics is carried over
+a failover only in part, and may be delivered again.
