@@ -539,6 +539,7 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 						Error:   err.Error(),
 					}, nil
 				}
+				metrics.AddEventsAccepted(partitionInternal.ID, 1)
 				return &types.PublishResponse{
 					Success:     true,
 					Offset:      logged.Offset,
@@ -647,6 +648,7 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 			return nil, status.Errorf(codes.Internal, "record publish completion: %v", err)
 		}
 	}
+	metrics.AddEventsAccepted(partitionInternal.ID, 1)
 	return &types.PublishResponse{
 		Success:     true,
 		Error:       "",
@@ -904,6 +906,7 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 					continue
 				}
 				atomic.AddInt32(&duplicateCount, 1)
+				metrics.AddEventsDuplicate(pid, 1)
 				switch {
 				case err != nil:
 					setError(1, fmt.Sprintf("duplicate message_id: previous outcome unknown: %v", err))
@@ -1057,6 +1060,7 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 			// Update stats
 			localPublished := int32(len(evts))
 			atomic.AddInt32(&publishedCount, localPublished)
+			metrics.AddEventsAccepted(partitionInternal.ID, len(evts))
 
 			resultMu.Lock()
 			for _, event := range evts {

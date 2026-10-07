@@ -587,8 +587,36 @@ func (d *Dispatcher) dispatchToSub(sub *Subscription, event *types.Event) error 
 	if sub.circuitBreaker != nil {
 		sub.circuitBreaker.RecordSuccess()
 	}
+	countDelivered(delivery, false)
 	d.trackDelivery(delivery, sub)
 	return nil
+}
+
+// countDelivered records that a delivery was sent to its consumer: how many
+// events it carried and, for a first attempt, how late each of them is.
+func countDelivered(delivery *DeliveryMessage, retry bool) {
+	events := deliveryEvents(delivery)
+	if len(events) == 0 {
+		return
+	}
+	partitionID := events[0].PartitionId
+	metrics.AddEventsDelivered(partitionID, len(events), retry)
+	if retry {
+		return
+	}
+	now := time.Now()
+	for _, event := range events {
+		metrics.ObserveDeliveryLateness(partitionID, event.ScheduleTs, now)
+	}
+}
+
+// partitionOf returns the partition a delivery's events belong to.
+func partitionOf(delivery *DeliveryMessage) (int32, int) {
+	events := deliveryEvents(delivery)
+	if len(events) == 0 {
+		return 0, 0
+	}
+	return events[0].PartitionId, len(events)
 }
 
 // DispatchBatch fans out a batch of events, grouping by partition and building
@@ -811,6 +839,11 @@ func (d *Dispatcher) dispatchGroupBatch(partitionID int32, events []*types.Event
 		if sub.circuitBreaker != nil {
 			sub.circuitBreaker.RecordSuccess()
 		}
+		metrics.AddEventsDelivered(partitionID, len(batchEvents), false)
+		sent := time.Now()
+		for _, event := range batchEvents {
+			metrics.ObserveDeliveryLateness(partitionID, event.ScheduleTs, sent)
+		}
 		dispatched += len(batchEvents)
 	}
 
@@ -942,6 +975,7 @@ func (d *Dispatcher) scanExpiredDeliveries(now time.Time) {
 			if err := d.decInFlight(1); err != nil {
 				log.Printf("[DISPATCHER] in-flight underflow: %v", err)
 			}
+			metrics.AddEventsTimedOut(partitionOf(active.Delivery))
 
 			if active.Attempt < d.config.MaxRetries {
 				// Non-blocking: push to retry heap instead of sleeping inline
@@ -1018,6 +1052,7 @@ func (d *Dispatcher) processRetries(now time.Time) {
 		if active.Subscription.circuitBreaker != nil {
 			active.Subscription.circuitBreaker.RecordSuccess()
 		}
+		countDelivered(retryDelivery, true)
 		d.trackDelivery(retryDelivery, active.Subscription)
 	}
 }
@@ -1110,6 +1145,8 @@ func (d *Dispatcher) HandleAck(deliveryID string, success bool, nextOffset int64
 	if err := d.decInFlight(1); err != nil {
 		log.Printf("[DISPATCHER] in-flight underflow: %v", err)
 	}
+	ackedPartition, ackedEvents := partitionOf(active.Delivery)
+	metrics.AddEventsAcknowledged(ackedPartition, ackedEvents, success)
 
 	if success {
 		d.releasePending(active.Subscription.ConsumerGroup, deliveryEvents(active.Delivery))
@@ -1202,6 +1239,7 @@ func (d *Dispatcher) sendToDLQ(active *ActiveDelivery, reason string) {
 	if d.OnDeadLettered != nil && active.Subscription != nil {
 		d.OnDeadLettered(group, events)
 	}
+	metrics.AddEventsDeadLettered(partitionOf(active.Delivery))
 	release(false)
 	d.notifyDeliveryComplete(active)
 }
@@ -1244,6 +1282,7 @@ func (d *Dispatcher) retryDelivery(active *ActiveDelivery) error {
 		return fmt.Errorf("resend failed: %w", err)
 	}
 
+	countDelivered(retryDelivery, true)
 	d.trackDelivery(retryDelivery, active.Subscription)
 	return nil
 }

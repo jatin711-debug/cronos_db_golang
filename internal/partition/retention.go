@@ -6,6 +6,7 @@ import (
 	"log"
 	"path/filepath"
 
+	"github.com/jatin711-debug/cronos_db_golang/internal/metrics"
 	"github.com/jatin711-debug/cronos_db_golang/internal/storage"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 )
@@ -84,6 +85,7 @@ func (p *Partition) PruneWAL(ctx context.Context, opts storage.PruneOptions) (in
 		})
 	})
 	if deleted > 0 {
+		metrics.AddSegmentsRemoved(p.ID, deleted)
 		if startErr := p.ConsumerGroup.SetLogStart(p.ID, p.Wal.GetFirstOffset()); startErr != nil && err == nil {
 			err = startErr
 		}
@@ -115,6 +117,7 @@ func (p *Partition) FollowLogStart(start int64) error {
 	} else if dropped, err := p.Wal.DropBelow(start); err != nil {
 		return err
 	} else if dropped > 0 {
+		metrics.AddSegmentsRemoved(p.ID, dropped)
 		log.Printf("[Partition %d] Removed %d log segments below offset %d, which the leader has released", p.ID, dropped, start)
 	}
 	if p.ConsumerGroup != nil {

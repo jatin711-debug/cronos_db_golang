@@ -123,3 +123,7 @@ metrics:
 
 alerts:
   enabled: false
+  # Warn when the 99th percentile of delivery lateness, the time between an
+  # event's scheduled time and its first delivery to a consumer, stays above
+  # this many seconds.
+  deliveryLatenessSeconds: 30
