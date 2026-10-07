@@ -154,6 +154,18 @@ func (m *MemoryStore) RollbackBatch(messageIDs []string) error {
 	return nil
 }
 
+// DeleteIf removes messageID only while its stored offset is still stored.
+func (m *MemoryStore) DeleteIf(messageID string, stored int64) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	entry, exists := m.entries[messageID]
+	if !exists || entry.Offset != stored {
+		return false, nil
+	}
+	delete(m.entries, messageID)
+	return true, nil
+}
+
 // PruneExpired removes TTL-expired entries and returns the delete count.
 func (m *MemoryStore) PruneExpired() (int, error) {
 	m.mu.Lock()
@@ -326,7 +338,9 @@ func (m *Manager) Checkpoint(destDir string) error {
 	return nil
 }
 
-// GetOffset distinguishes pending claims (-1) from completed publishes (>=0).
+// GetOffset returns the value stored for messageID. Use Outcome, or
+// DecodeOffset, to tell a claim, an appended event and an accepted publish
+// apart.
 func (m *Manager) GetOffset(messageID string) (int64, bool, error) {
 	return m.store.GetOffset(messageID)
 }

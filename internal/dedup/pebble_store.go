@@ -25,6 +25,9 @@ type PebbleStore struct {
 	dataDir     string
 	partitionID int32
 	ttlHours    int32 // entry TTL applied at flush time
+	// openedAt is when this process opened the store (Unix nanoseconds). A
+	// claim written before it belongs to a publish that can no longer finish.
+	openedAt int64
 
 	pendingMu sync.RWMutex
 	pending   map[string]int64 // messageID -> offset (not yet durable)
@@ -70,6 +73,7 @@ func NewPebbleStore(dataDir string, partitionID int32, ttlHours int32, cache *pe
 		dataDir:     dir,
 		partitionID: partitionID,
 		ttlHours:    ttlHours,
+		openedAt:    time.Now().UnixNano(),
 		pending:     make(map[string]int64),
 		quit:        make(chan struct{}),
 	}
@@ -219,6 +223,51 @@ func (p *PebbleStore) RollbackClaim(messageIDs []string) error {
 		return fmt.Errorf("rollback commit: %w", err)
 	}
 	return nil
+}
+
+// DeleteIf removes messageID only while its stored offset is still stored, the
+// value the caller read earlier. It reports whether the entry was removed.
+func (p *PebbleStore) DeleteIf(messageID string, stored int64) (bool, error) {
+	p.claimMu.Lock()
+	defer p.claimMu.Unlock()
+
+	key := []byte(messageID)
+	p.pendingMu.Lock()
+	buffered, isBuffered := p.pending[messageID]
+	if isBuffered && buffered == stored {
+		delete(p.pending, messageID)
+	}
+	p.pendingMu.Unlock()
+	if isBuffered && buffered != stored {
+		return false, nil
+	}
+	if !isBuffered {
+		value, closer, err := p.db.Get(key)
+		if err == pebble.ErrNotFound {
+			return false, nil
+		}
+		if err != nil {
+			return false, fmt.Errorf("get key: %w", err)
+		}
+		offset, _, _, err := p.parseValue(value)
+		closer.Close()
+		if err != nil || offset != stored {
+			return false, err
+		}
+	}
+	if err := p.db.Delete(key, pebble.NoSync); err != nil {
+		return false, fmt.Errorf("delete key: %w", err)
+	}
+	return true, nil
+}
+
+// isAbandonedClaim reports whether a stored value is a claim left by an
+// earlier run of this process: one with no log position, written before the
+// store was opened. The publish that made it is gone, so nothing will ever
+// complete or release it.
+func (p *PebbleStore) isAbandonedClaim(value []byte) bool {
+	offset, _, createdTS, err := p.parseValue(value)
+	return err == nil && offset == ClaimedOffset && createdTS < p.openedAt
 }
 
 // GetOffset returns the stored WAL offset for messageID, checking pending first.
@@ -504,6 +553,12 @@ func (p *PebbleStore) Close() error {
 func (p *PebbleStore) Checkpoint(destDir string) error {
 	if err := p.flushPending(); err != nil {
 		return fmt.Errorf("flush pending before checkpoint: %w", err)
+	}
+	// This store runs without Pebble's own WAL, so a checkpoint holds only
+	// what has reached an sstable. Flush the memtable first, or every ID
+	// recorded since the last flush would be missing from it.
+	if err := p.db.Flush(); err != nil {
+		return fmt.Errorf("flush memtable before checkpoint: %w", err)
 	}
 	if err := p.db.Checkpoint(destDir); err != nil {
 		return fmt.Errorf("dedup checkpoint: %w", err)
