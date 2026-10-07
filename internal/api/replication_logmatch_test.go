@@ -69,6 +69,45 @@ func TestReplication_AppendChecksTheEntryItFollows(t *testing.T) {
 	}
 }
 
+// A request can arrive late, after requests the leader built later. What it
+// says about the end of the leader's log is then out of date, and the entries
+// the replica has beyond that point are the leader's own. They stay.
+func TestReplication_LateRequestDoesNotRemoveItsOwnLeadersEntries(t *testing.T) {
+	r := newReplicaLog(t, "node-c")
+	if resp := r.send("node-a", 1, entries("a", 1, 0, 4)); !resp.GetSuccess() {
+		t.Fatalf("setup: %s", resp.GetError())
+	}
+	if resp := r.sendAfter("node-b", 2, 1, entries("b", 2, 5, 9)); !resp.GetSuccess() {
+		t.Fatalf("setup: %s", resp.GetError())
+	}
+	want := describe(r.log())
+
+	// A probe node-b built when its log ended at offset 4, delivered now.
+	resp, err := r.h.Append(context.Background(), &types.ReplicationAppendRequest{
+		PartitionId: 0, Term: 2, LeaderId: "node-b",
+		HasPrevLog: true, PrevLogOffset: 4, PrevLogTerm: 1, LeaderLogEnd: 5,
+	})
+	if err != nil || !resp.GetSuccess() {
+		t.Fatalf("late probe: %+v %v", resp, err)
+	}
+	if got := describe(r.log()); got != want {
+		t.Fatalf("a late request removed entries of the leader that sent it:\n got %s\nwant %s", got, want)
+	}
+
+	// The same probe from a leader of a later term, whose log does end there,
+	// removes them: they were written under another leader.
+	resp, err = r.h.Append(context.Background(), &types.ReplicationAppendRequest{
+		PartitionId: 0, Term: 3, LeaderId: "node-a",
+		HasPrevLog: true, PrevLogOffset: 4, PrevLogTerm: 1, LeaderLogEnd: 5,
+	})
+	if err != nil || !resp.GetSuccess() || resp.GetNextOffset() != 5 {
+		t.Fatalf("probe from the leader of a later term: %+v %v", resp, err)
+	}
+	if got, want := describe(r.log()), describe(entries("a", 1, 0, 4)); got != want {
+		t.Fatalf("log after the probe:\n got %s\nwant %s", got, want)
+	}
+}
+
 // An old leader that comes back with entries it never replicated ends up with
 // the new leader's log, whether its unreplicated tail is shorter or longer
 // than what the new leader has written since. Nothing has to be published for
@@ -81,6 +120,8 @@ func TestReplication_ReturningLeaderIsBroughtInLine(t *testing.T) {
 	}{
 		{"shorter tail than the new leader's log", 3, 6},
 		{"longer tail than the new leader's log", 9, 4},
+		// The new leader has nothing to send that would replace the tail.
+		{"a tail beyond the end of a leader that has accepted nothing", 3, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a, b, c := newReplicaLog(t, "node-a"), newReplicaLog(t, "node-b"), newReplicaLog(t, "node-c")
@@ -126,8 +167,10 @@ func TestReplication_ReturningLeaderIsBroughtInLine(t *testing.T) {
 			if err := b.pm.AddFollower(0, "node-c", c.serveReplication()); err != nil {
 				t.Fatal(err)
 			}
-			if resp := publishOn(b)(orders("kept", tc.sinceTakeover)); !resp.GetSuccess() {
-				t.Fatalf("publish on the new leader: %+v", resp)
+			if tc.sinceTakeover > 0 {
+				if resp := publishOn(b)(orders("kept", tc.sinceTakeover)); !resp.GetSuccess() {
+					t.Fatalf("publish on the new leader: %+v", resp)
+				}
 			}
 			want := describe(b.log())
 
@@ -145,8 +188,12 @@ func TestReplication_ReturningLeaderIsBroughtInLine(t *testing.T) {
 			if a.p.IsLeader() {
 				t.Fatal("the old leader still leads")
 			}
-			if got := describe(c.log()); got != want {
-				t.Fatalf("the third replica's log:\n got %s\nwant %s", got, want)
+			// The third replica is filled without a publish too.
+			for describe(c.log()) != want {
+				if time.Now().After(deadline) {
+					t.Fatalf("the third replica's log:\n got %s\nwant %s", describe(c.log()), want)
+				}
+				time.Sleep(20 * time.Millisecond)
 			}
 		})
 	}

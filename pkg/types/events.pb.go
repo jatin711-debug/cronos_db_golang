@@ -1378,8 +1378,14 @@ type ReplicationAppendRequest struct {
 	// removes what lies below this offset, and if its own log ends before it,
 	// it restarts its log there.
 	LogStartOffset int64 `protobuf:"varint,10,opt,name=log_start_offset,json=logStartOffset,proto3" json:"log_start_offset,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// Offset after the last entry of the leader's log when it built this
+	// request; 0 when the leader does not say. A follower that holds an entry
+	// there which was written in another term holds a tail that is not part of
+	// this leader's log, and removes it. An entry of this leader's own term at
+	// or after this offset came with a later request and stays.
+	LeaderLogEnd  int64 `protobuf:"varint,11,opt,name=leader_log_end,json=leaderLogEnd,proto3" json:"leader_log_end,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ReplicationAppendRequest) Reset() {
@@ -1478,6 +1484,13 @@ func (x *ReplicationAppendRequest) GetPrevLogOffset() int64 {
 func (x *ReplicationAppendRequest) GetLogStartOffset() int64 {
 	if x != nil {
 		return x.LogStartOffset
+	}
+	return 0
+}
+
+func (x *ReplicationAppendRequest) GetLeaderLogEnd() int64 {
+	if x != nil {
+		return x.LeaderLogEnd
 	}
 	return 0
 }
@@ -4468,7 +4481,7 @@ const file_proto_events_proto_rawDesc = "" +
 	"\x15partition_assignments\x18\x03 \x03(\v2C.cronos_db.RebalanceConsumerGroupResponse.PartitionAssignmentsEntryR\x14partitionAssignments\x1aG\n" +
 	"\x19PartitionAssignmentsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\x05R\x05value:\x028\x01\"\xfe\x02\n" +
+	"\x05value\x18\x02 \x01(\x05R\x05value:\x028\x01\"\xa4\x03\n" +
 	"\x18ReplicationAppendRequest\x12!\n" +
 	"\fpartition_id\x18\x01 \x01(\x05R\vpartitionId\x12(\n" +
 	"\x06events\x18\x02 \x03(\v2\x10.cronos_db.EventR\x06events\x120\n" +
@@ -4481,7 +4494,8 @@ const file_proto_events_proto_rawDesc = "" +
 	"hasPrevLog\x12&\n" +
 	"\x0fprev_log_offset\x18\t \x01(\x03R\rprevLogOffset\x12(\n" +
 	"\x10log_start_offset\x18\n" +
-	" \x01(\x03R\x0elogStartOffset\"\x9d\x02\n" +
+	" \x01(\x03R\x0elogStartOffset\x12$\n" +
+	"\x0eleader_log_end\x18\v \x01(\x03R\fleaderLogEnd\"\x9d\x02\n" +
 	"\x19ReplicationAppendResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x14\n" +
 	"\x05error\x18\x02 \x01(\tR\x05error\x12\x1f\n" +

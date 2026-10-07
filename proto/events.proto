@@ -271,6 +271,13 @@ message ReplicationAppendRequest {
   // removes what lies below this offset, and if its own log ends before it,
   // it restarts its log there.
   int64 log_start_offset = 10;
+
+  // Offset after the last entry of the leader's log when it built this
+  // request; 0 when the leader does not say. A follower that holds an entry
+  // there which was written in another term holds a tail that is not part of
+  // this leader's log, and removes it. An entry of this leader's own term at
+  // or after this offset came with a later request and stays.
+  int64 leader_log_end = 11;
 }
 
 message ReplicationAppendResponse {
