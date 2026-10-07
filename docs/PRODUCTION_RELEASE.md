@@ -124,7 +124,16 @@ about 500 MB of memory. It stops and kills processes. It does not cut network
 links, and it publishes about 60 events a second, so it says nothing about
 network partitions or behavior under load.
 
-Before release, also require independent backup restoration, bounded overload
+The same job restores a whole cluster from backups
+(`TestClusterRestoredFromBackups`): three nodes back up while publishes
+arrive, all three are destroyed, each is restored from its own backup, and
+what was acknowledged before the backups is there and is delivered at its
+time. Backups go to `backups` under the data directory unless `--backup-dir`
+names another place. A backup on the volume it copies does not survive the
+loss of that volume, and the chart mounts no other: copy backups off the
+node, or mount a second volume and point `--backup-dir` at it.
+
+Before release, also require bounded overload
 behavior, and a scan of the image that is actually published: CI scans the
 image it builds from the same Dockerfile, not the published one. Set and measure explicit throughput, payload,
 retention, delay, and crash-loss targets. See the audit acceptance contract.

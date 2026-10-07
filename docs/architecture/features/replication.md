@@ -140,6 +140,15 @@ paused only while it notes where each file ends.
   never replicated is brought in line without waiting for a publish. What a
   follower holds counts as replicated only up to the entry the leader has
   checked.
+- **Beyond the end of the leader's log.** Every request also says where the
+  leader's log ends (`leader_log_end`). A follower that holds an entry there
+  which was written in another term holds a tail the leader never had, and
+  removes it. The checks above did not reach such a tail when the leader had
+  nothing to send: the follower's log stayed longer than the leader's until
+  somebody published, and a handoff of leadership, which waits for the two
+  logs to be equal and refuses publishes while it waits, could not finish.
+  An entry of the leader's own term at that offset stays: it came with a
+  later request, and the one that says the log ends there arrived late.
 - **Failover.** When the committed leader is dead, the Raft leader asks the
   remaining replicas where their logs end (`ReplicationService.Position`) and
   elects the most complete one. It needs `replicas - minISR + 1` answers to be
