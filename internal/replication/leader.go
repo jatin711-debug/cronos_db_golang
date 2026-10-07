@@ -63,6 +63,15 @@ type Leader struct {
 	// changeFeedSource returns how far the partition's change feed has got;
 	// known is false when it has none. Nil sends nothing about it.
 	changeFeedSource func() (offset int64, known bool)
+
+	// newerTerm is the term of a newer leader that a follower has named, 0
+	// while none has. See noteNewerTerm.
+	newerTerm atomic.Int64
+	// replicatedNext is one past the highest offset QuorumOffset has
+	// returned, 0 while it has returned none. See ReplicatedThrough.
+	replicatedNext atomic.Int64
+	// supersededObserver is told once when newerTerm is first set.
+	supersededObserver func(term int64)
 }
 
 // FollowerInfo tracks a follower replica and its gRPC replication client state.
@@ -99,6 +108,9 @@ type FollowerInfo struct {
 	progressSent    uint64
 	progressSentAt  time.Time
 	progressSending bool
+	// progressSentLogEnd is where this follower's log ended, as far as the
+	// leader knew, when that progress was sent. Guarded by mu.
+	progressSentLogEnd int64
 	// feedSent is the change feed position sent with it, feedSentKnown whether
 	// there was one. Guarded by mu.
 	feedSent      int64
@@ -281,6 +293,9 @@ func (l *Leader) Replicate(events []*types.Event) error {
 	if len(events) == 0 {
 		return nil
 	}
+	if term := l.newerTerm.Load(); term > 0 {
+		return fmt.Errorf("partition %d has a leader of term %d; this one, of term %d, takes no more publishes", l.partitionID, term, l.GetEpoch())
+	}
 
 	l.mu.RLock()
 	followers := make([]*FollowerInfo, 0, len(l.followers))
@@ -407,6 +422,7 @@ func (l *Leader) sendToFollower(f *FollowerInfo, events []*types.Event, checksum
 	f.mu.Lock()
 	known := f.LastAckTS > 0 && f.NextOffset >= 0
 	next := f.NextOffset
+	held := f.HighWatermark
 	f.mu.Unlock()
 	switch {
 	case !known:
@@ -416,14 +432,20 @@ func (l *Leader) sendToFollower(f *FollowerInfo, events []*types.Event, checksum
 		if err := l.catchUpFollower(f, next, startOffset); err != nil {
 			return err
 		}
-	case next > startOffset:
+	case held >= startOffset:
 		// A catch-up read from the WAL already delivered the start of this
 		// batch, and the follower acknowledged it. Send only what is missing.
-		if next > events[len(events)-1].Offset {
+		//
+		// What decides is how far the follower has acknowledged this log, not
+		// where its own log ends. A follower that has gone over to a newer
+		// leader reports, with its refusal, a log that may reach past this
+		// batch and holds other entries there; taking that for this batch
+		// counted a publish as replicated that the follower never had.
+		if held >= events[len(events)-1].Offset {
 			return nil
 		}
-		events = events[next-startOffset:]
-		startOffset = next
+		events = events[held+1-startOffset:]
+		startOffset = held + 1
 		checksum = computeBatchChecksum(events)
 	}
 
@@ -582,10 +604,17 @@ func (l *Leader) appendToFollower(f *FollowerInfo, events []*types.Event, checks
 			// only believed together with last offset -1, an explicitly empty log;
 			// on its own it is indistinguishable from a reply that carries nothing.
 			f.NextOffset = resp.GetNextOffset()
+			// That is where sending resumes, and no more: it says nothing of
+			// what the follower's log holds. A log that now ends earlier than
+			// was acknowledged does say that less of this one is held.
+			f.HighWatermark = min(f.HighWatermark, resp.GetNextOffset()-1)
 		}
 		f.InSync = false
 		f.LastError = fmt.Errorf("%s", resp.GetError())
 		f.mu.Unlock()
+		if resp.GetTerm() > req.GetTerm() {
+			l.noteNewerTerm(resp.GetTerm())
+		}
 		return fmt.Errorf("follower %s rejected append: %s", f.ID, resp.GetError())
 	}
 
@@ -693,6 +722,9 @@ func (l *Leader) getHighWatermarkLocked() int64 {
 // min-insync-replicas replicas, counting the leader, or -1 when no offset is.
 // A follower holds everything up to the last offset it acknowledged.
 func (l *Leader) QuorumOffset() int64 {
+	if l.newerTerm.Load() > 0 {
+		return -1 // what the followers hold now is another leader's log
+	}
 	last := int64(-1)
 	if l.wal != nil {
 		last = l.wal.GetLastOffset()
@@ -719,6 +751,31 @@ func (l *Leader) QuorumOffset() int64 {
 	return min(acked[need-1], last)
 }
 
+// ReplicatedThrough returns the highest offset this leader has found, at any
+// time since it began to lead, on min-insync-replicas replicas, or -1.
+//
+// QuorumOffset says what the followers it knows of hold now, and goes back
+// when one of them is removed or has to be asked again. What the required
+// replicas held once does not stop being part of the partition's log for
+// that: whichever replica leads next has it. So this is what decides whether
+// an entry may be delivered, and a leader that loses its followers goes on
+// delivering what was replicated before it lost them.
+func (l *Leader) ReplicatedThrough() int64 {
+	if l.newerTerm.Load() > 0 {
+		return -1
+	}
+	now := l.QuorumOffset() + 1
+	for {
+		known := l.replicatedNext.Load()
+		if now <= known {
+			return known - 1
+		}
+		if l.replicatedNext.CompareAndSwap(known, now) {
+			return now - 1
+		}
+	}
+}
+
 // SetQuorumObserver registers a function the maintenance loop calls with
 // QuorumOffset. The partition uses it to finish publishes whose replication
 // failed at first and was completed later by catch-up.
@@ -726,6 +783,53 @@ func (l *Leader) SetQuorumObserver(observe func(offset int64)) {
 	l.mu.Lock()
 	l.quorumObserver = observe
 	l.mu.Unlock()
+}
+
+// SetSupersededObserver registers a function that is called, once, when a
+// follower names a term newer than this leader's. It is called on a
+// goroutine of this leader and must not wait for one.
+func (l *Leader) SetSupersededObserver(observe func(term int64)) {
+	l.mu.Lock()
+	l.supersededObserver = observe
+	l.mu.Unlock()
+}
+
+// NewerTerm returns the term of a newer leader that a follower has named, or
+// 0 when none has.
+func (l *Leader) NewerTerm() int64 { return l.newerTerm.Load() }
+
+// noteNewerTerm records that a follower follows a leader of term, which is
+// newer than this one's.
+//
+// A term is given to one leader, and a follower takes a newer term only from
+// the node that holds it. So this leader has been replaced, whatever this
+// node has heard from the cluster so far: after a network failure that news
+// arrives seconds later than the followers' answers do. Until it stopped on
+// its own, a replaced leader went on taking publishes for that long, and went
+// on handing its consumers entries that only it held.
+func (l *Leader) noteNewerTerm(term int64) {
+	if term <= l.GetEpoch() {
+		return
+	}
+	for {
+		known := l.newerTerm.Load()
+		if known >= term {
+			return
+		}
+		if l.newerTerm.CompareAndSwap(known, term) {
+			if known > 0 {
+				return // already reported
+			}
+			break
+		}
+	}
+	log.Printf("[LEADER] Partition %d has a leader of term %d; this one, of term %d, stops", l.partitionID, term, l.GetEpoch())
+	l.mu.RLock()
+	observe := l.supersededObserver
+	l.mu.RUnlock()
+	if observe != nil {
+		observe(term)
+	}
 }
 
 func (l *Leader) reportQuorumOffset() {
@@ -783,6 +887,11 @@ func (l *Leader) SetEpoch(epoch int64) {
 	atomic.StoreInt64(&l.epoch, epoch)
 	if l.wal != nil {
 		l.wal.SetCurrentTerm(epoch)
+	}
+	// Given a term at least as new as the one a follower named, this is the
+	// leader again.
+	if newer := l.newerTerm.Load(); newer > 0 && epoch >= newer {
+		l.newerTerm.CompareAndSwap(newer, 0)
 	}
 }
 
@@ -970,10 +1079,27 @@ func (l *Leader) SetProgressSource(source func() (uint64, []*types.ConsumerGroup
 	l.mu.Unlock()
 }
 
+// progressReach returns the offset just past the last one that groups say
+// anything about.
+func progressReach(groups []*types.ConsumerGroupProgress) int64 {
+	reach := int64(0)
+	for _, group := range groups {
+		reach = max(reach, group.GetCommittedOffset())
+		if completed := group.GetCompletedOffsets(); len(completed) > 0 {
+			reach = max(reach, completed[len(completed)-1]+1)
+		}
+	}
+	return reach
+}
+
 // shipConsumerProgress sends the partition's consumer progress to every
 // follower that does not have the current version yet. The whole state is
 // sent each time, so a follower that missed rounds, restarted, or was just
 // added converges on the next one.
+//
+// A follower takes progress only as far as its own log reaches. One that was
+// behind when it was sent the current version is sent it again once its log
+// has caught up with what the progress is about.
 func (l *Leader) shipConsumerProgress() {
 	l.mu.RLock()
 	source := l.progressSource
@@ -988,6 +1114,10 @@ func (l *Leader) shipConsumerProgress() {
 	}
 
 	version, groups := source()
+	reach := progressReach(groups)
+	if l.wal != nil {
+		reach = min(reach, l.wal.GetNextOffset())
+	}
 	var feedOffset int64
 	var feedKnown bool
 	if feedSource != nil {
@@ -996,7 +1126,13 @@ func (l *Leader) shipConsumerProgress() {
 	for _, f := range followers {
 		f.mu.Lock()
 		client := f.client
-		current := f.progressSent == version && time.Since(f.progressSentAt) < progressResendInterval &&
+		// Until a follower has answered, where its log ends is a guess.
+		logEnd := int64(-1)
+		if f.LastAckTS > 0 {
+			logEnd = f.NextOffset
+		}
+		tookAll := f.progressSentLogEnd >= reach || logEnd < reach
+		current := f.progressSent == version && time.Since(f.progressSentAt) < progressResendInterval && tookAll &&
 			f.feedSentKnown == feedKnown && (!feedKnown || f.feedSent == feedOffset)
 		if client == nil || current || f.progressSending {
 			f.mu.Unlock()
@@ -1022,7 +1158,7 @@ func (l *Leader) shipConsumerProgress() {
 			f.mu.Lock()
 			f.progressSending = false
 			if err == nil {
-				f.progressSent, f.progressSentAt = version, time.Now()
+				f.progressSent, f.progressSentAt, f.progressSentLogEnd = version, time.Now(), logEnd
 				f.feedSent, f.feedSentKnown = feedOffset, feedKnown
 			}
 			firstFailure := err != nil && !f.progressFailing
