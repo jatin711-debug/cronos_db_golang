@@ -12,8 +12,8 @@ const (
 	defaultConnectionsPerNode = 2
 	defaultDialTimeout        = 5 * time.Second
 	defaultRequestTimeout     = 10 * time.Second
-	defaultKeepaliveTime      = 30 * time.Second
-	defaultKeepaliveTimeout   = 10 * time.Second
+	defaultKeepaliveTime      = 10 * time.Second
+	defaultKeepaliveTimeout   = 5 * time.Second
 	defaultMaxRecvMsgSize     = 16 * 1024 * 1024
 	defaultMaxSendMsgSize     = 16 * 1024 * 1024
 	defaultReadBufferSize     = 4 * 1024 * 1024
@@ -64,7 +64,8 @@ type Config struct {
 	BootstrapAddresses []string
 
 	// NodeIDToAddress is an optional explicit mapping for leader_id → address.
-	// Useful until server metadata includes leader addresses.
+	// Without it the client finds a partition's leader by asking the nodes it
+	// knows and remembers the one that served it.
 	NodeIDToAddress map[string]string
 
 	// PartitionCount is an optional fallback for key hashing when metadata is
@@ -81,9 +82,12 @@ type Config struct {
 	// ResolveDNS enables DNS resolution of bootstrap addresses when true.
 	ResolveDNS bool
 
-	// KeepaliveTime is the gRPC keepalive ping interval.
+	// KeepaliveTime is the gRPC keepalive ping interval. The server refuses
+	// pings more often than every five seconds.
 	KeepaliveTime time.Duration
 	// KeepaliveTimeout is how long to wait for a keepalive ack before closing.
+	// A node that stops answering without closing its connections, a frozen
+	// process or a dead network path, is noticed after KeepaliveTime plus this.
 	KeepaliveTimeout time.Duration
 	// MaxRecvMsgSize is the max inbound message size in bytes.
 	MaxRecvMsgSize int
