@@ -913,6 +913,11 @@ func (w *WAL) ReadEvents(startOffset, endOffset int64) ([]*types.Event, error) {
 
 		events, err := segment.ReadEventsByOffsetRange(readOffset, endForSegment)
 		if err != nil {
+			if segment.deleted.Load() {
+				// Pruned since the list was taken: its entries are no longer
+				// in the log, which is what the caller gets to see.
+				continue
+			}
 			return nil, fmt.Errorf("read offset range from segment %s: %w", segment.GetFilename(), err)
 		}
 

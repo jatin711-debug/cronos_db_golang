@@ -94,8 +94,18 @@ type Partition struct {
 	// deliveryQuitOnce ensures deliveryQuit is closed at most once.
 	deliveryQuitOnce sync.Once
 	// replayErr holds the last WAL timer-replay error, if any.
-	replayErr        atomic.Pointer[error]
-	retentionBlocked bool // immutable: clustered/replicated completion is not yet safely prunable
+	replayErr atomic.Pointer[error]
+	// replicated is true for a partition of a cluster or with more than one
+	// replica. Its log is pruned from the start only, by its leader, and the
+	// other replicas follow (see retention.go). Immutable.
+	replicated bool
+	// logStartSeen is the highest log start a leader has told this replica.
+	logStartSeen atomic.Int64
+	// pruneMu lets one pruning pass run at a time. pruneWaitsAt, which it
+	// guards, is the offset of the entry that stopped the last attempt to prune
+	// from the start of the log, or -1.
+	pruneMu      sync.Mutex
+	pruneWaitsAt int64
 	// persistedEpoch and persistedLeader mirror epoch.json (0 = nothing stored).
 	// Guarded by epochMu.
 	persistedEpoch  int64
@@ -488,20 +498,25 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 
 	// Create partition
 	partition := &Partition{
-		retentionBlocked: pm.config.ClusterEnabled || pm.config.ReplicationFactor > 1,
-		ID:               partitionID,
-		Topic:            topic,
-		DataDir:          dataDir,
-		Wal:              wal,
-		Scheduler:        sched,
-		ConsumerGroup:    consumerGroup,
-		DedupStore:       dedupManager,
-		Dispatcher:       dispatcher,
-		DLQ:              dlq,
-		Worker:           worker,
-		CreatedTS:        time.Now(),
-		UpdatedTS:        time.Now(),
-		deliveryQuit:     make(chan struct{}),
+		replicated:    pm.config.ClusterEnabled || pm.config.ReplicationFactor > 1,
+		pruneWaitsAt:  -1,
+		ID:            partitionID,
+		Topic:         topic,
+		DataDir:       dataDir,
+		Wal:           wal,
+		Scheduler:     sched,
+		ConsumerGroup: consumerGroup,
+		DedupStore:    dedupManager,
+		Dispatcher:    dispatcher,
+		DLQ:           dlq,
+		Worker:        worker,
+		CreatedTS:     time.Now(),
+		UpdatedTS:     time.Now(),
+		deliveryQuit:  make(chan struct{}),
+	}
+	// What lies below the start of the log was finished before it was removed.
+	if err = consumerGroup.SetLogStart(partitionID, wal.GetFirstOffset()); err != nil {
+		return fmt.Errorf("apply log start to consumer progress: %w", err)
 	}
 
 	if data, err := os.ReadFile(dataDir + "/epoch.json"); err == nil {
@@ -833,8 +848,11 @@ func (pm *PartitionManager) startPartitionInternal(partition *Partition) error {
 		})
 	}
 
-	// Start compaction loop (runs every 10 minutes)
-	compactionInterval := 10 * time.Minute
+	// Start compaction loop (every ten minutes unless configured otherwise)
+	compactionInterval := pm.config.CompactionInterval
+	if compactionInterval <= 0 {
+		compactionInterval = 10 * time.Minute
+	}
 	partition.background.Add(1)
 	utils.GoSafe("partition-compaction-loop", func() {
 		defer partition.background.Done()
@@ -1116,8 +1134,8 @@ func (p *Partition) RunCompaction() {
 
 // runCompaction uses per-event completion, the same gate as manual retention.
 func (p *Partition) runCompaction() {
-	if p.retentionBlocked {
-		return
+	if p.replicated && !p.IsLeader() {
+		return // a replica follows its leader's log start
 	}
 	deleted, err := p.PruneWAL(context.Background(), storage.PruneOptions{AllCompleted: true})
 	if err != nil {
@@ -1420,6 +1438,13 @@ func (pm *PartitionManager) SyncPartitionFromLeader(partitionID int32, leaderAdd
 	if epoch := partition.Follower.GetEpoch(); epoch > partition.Epoch() {
 		if err := partition.PersistEpoch(epoch); err != nil {
 			return fmt.Errorf("record epoch %d of installed snapshot: %w", epoch, err)
+		}
+	}
+	// The installed log starts where the source's does; what the source had
+	// removed before that was finished.
+	if partition.ConsumerGroup != nil {
+		if err := partition.ConsumerGroup.SetLogStart(partitionID, partition.Wal.GetFirstOffset()); err != nil {
+			return fmt.Errorf("apply log start of installed snapshot: %w", err)
 		}
 	}
 

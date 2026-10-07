@@ -1372,8 +1372,14 @@ type ReplicationAppendRequest struct {
 	// asks whether the follower's log matches there.
 	HasPrevLog    bool  `protobuf:"varint,8,opt,name=has_prev_log,json=hasPrevLog,proto3" json:"has_prev_log,omitempty"`
 	PrevLogOffset int64 `protobuf:"varint,9,opt,name=prev_log_offset,json=prevLogOffset,proto3" json:"prev_log_offset,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// Offset of the first entry the leader's log still holds; 0 when nothing
+	// has been removed from it. The leader removes entries from the start of
+	// its log once they are no longer needed, and a follower follows: it
+	// removes what lies below this offset, and if its own log ends before it,
+	// it restarts its log there.
+	LogStartOffset int64 `protobuf:"varint,10,opt,name=log_start_offset,json=logStartOffset,proto3" json:"log_start_offset,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *ReplicationAppendRequest) Reset() {
@@ -1465,6 +1471,13 @@ func (x *ReplicationAppendRequest) GetHasPrevLog() bool {
 func (x *ReplicationAppendRequest) GetPrevLogOffset() int64 {
 	if x != nil {
 		return x.PrevLogOffset
+	}
+	return 0
+}
+
+func (x *ReplicationAppendRequest) GetLogStartOffset() int64 {
+	if x != nil {
+		return x.LogStartOffset
 	}
 	return 0
 }
@@ -4455,7 +4468,7 @@ const file_proto_events_proto_rawDesc = "" +
 	"\x15partition_assignments\x18\x03 \x03(\v2C.cronos_db.RebalanceConsumerGroupResponse.PartitionAssignmentsEntryR\x14partitionAssignments\x1aG\n" +
 	"\x19PartitionAssignmentsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\x05R\x05value:\x028\x01\"\xd4\x02\n" +
+	"\x05value\x18\x02 \x01(\x05R\x05value:\x028\x01\"\xfe\x02\n" +
 	"\x18ReplicationAppendRequest\x12!\n" +
 	"\fpartition_id\x18\x01 \x01(\x05R\vpartitionId\x12(\n" +
 	"\x06events\x18\x02 \x03(\v2\x10.cronos_db.EventR\x06events\x120\n" +
@@ -4466,7 +4479,9 @@ const file_proto_events_proto_rawDesc = "" +
 	"\tleader_id\x18\a \x01(\tR\bleaderId\x12 \n" +
 	"\fhas_prev_log\x18\b \x01(\bR\n" +
 	"hasPrevLog\x12&\n" +
-	"\x0fprev_log_offset\x18\t \x01(\x03R\rprevLogOffset\"\x9d\x02\n" +
+	"\x0fprev_log_offset\x18\t \x01(\x03R\rprevLogOffset\x12(\n" +
+	"\x10log_start_offset\x18\n" +
+	" \x01(\x03R\x0elogStartOffset\"\x9d\x02\n" +
 	"\x19ReplicationAppendResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x14\n" +
 	"\x05error\x18\x02 \x01(\tR\x05error\x12\x1f\n" +

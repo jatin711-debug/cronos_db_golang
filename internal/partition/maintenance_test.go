@@ -154,13 +154,86 @@ func TestMaintenanceRetentionProtectsPendingUnownedAndFutureEvents(t *testing.T)
 	}
 }
 
-func TestMaintenanceReplicatedPruningFailsClosed(t *testing.T) {
+// A replica that does not lead removes nothing from a replicated log by its
+// own decision, however complete its records say the entries are: its copy of
+// the consumer progress trails the leader's. It follows the leader's log
+// start instead (see the replication tests).
+func TestMaintenanceReplicaLeavesPruningToItsLeader(t *testing.T) {
 	pm := maintenanceManager(t, false)
 	p, _ := pm.GetInternalPartition(0)
-	p.retentionBlocked = true
-	appendMaintenanceEvent(t, p, "replicated", "a", time.Now(), 2048)
+	p.replicated = true
+	if err := p.ConsumerGroup.CreateGroup("g", "a", []int32{0}); err != nil {
+		t.Fatal(err)
+	}
+	done := appendMaintenanceEvent(t, p, "done", "a", time.Now().Add(-time.Minute), 2048)
+	if err := p.ConsumerGroup.CommitDelivery("g", 0, []*types.Event{done}); err != nil {
+		t.Fatal(err)
+	}
 	if n, err := p.PruneWAL(context.Background(), storage.PruneOptions{AllCompleted: true}); err == nil || n != 0 {
-		t.Fatalf("replicated pruning: %d %v", n, err)
+		t.Fatalf("a replica that does not lead pruned its log: %d segments, err %v", n, err)
+	}
+	if removed, err := pm.RemoveRetainedSegment(context.Background(), filepath.Join(p.DataDir, "segments", p.Wal.GetSegments()[0].GetFilename())); err != nil || removed {
+		t.Fatalf("the retention policy removed a segment on a replica that does not lead: %v %v", removed, err)
+	}
+	if first := p.Wal.GetFirstOffset(); first != 0 {
+		t.Fatalf("log starts at offset %d, want 0", first)
+	}
+}
+
+// The leader of a replicated partition removes finished segments from the
+// start of the log only, so that the log stays one unbroken range. A finished
+// segment behind an unfinished one waits for it.
+func TestMaintenanceReplicatedLogIsPrunedFromItsStart(t *testing.T) {
+	pm := maintenanceManager(t, false)
+	p, _ := pm.GetInternalPartition(0)
+	p.replicated = true
+	p.leader.Store(true)
+	if err := p.ConsumerGroup.CreateGroup("g", "a", []int32{0}); err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().Add(-time.Minute)
+	first := appendMaintenanceEvent(t, p, "first", "a", past, 2048)
+	pending := appendMaintenanceEvent(t, p, "pending", "a", past, 2048)
+	later := appendMaintenanceEvent(t, p, "later", "a", past, 2048)
+	appendMaintenanceEvent(t, p, "tail", "a", past, 32)
+	if err := p.ConsumerGroup.CommitDelivery("g", 0, []*types.Event{first, later}); err != nil {
+		t.Fatal(err)
+	}
+	prune := func() int {
+		t.Helper()
+		n, err := p.PruneWAL(context.Background(), storage.PruneOptions{AllCompleted: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+
+	if n := prune(); n != 1 {
+		t.Fatalf("removed %d segments, want only the one before the unfinished entry", n)
+	}
+	if start := p.Wal.GetFirstOffset(); start != pending.Offset {
+		t.Fatalf("log starts at offset %d, want %d", start, pending.Offset)
+	}
+	if got, err := p.Wal.ReadEvents(later.Offset, later.Offset); err != nil || len(got) != 1 {
+		t.Fatalf("a finished entry behind an unfinished one was removed: %v %v", got, err)
+	}
+	// Nothing has changed, so nothing goes, and the entry in the way is known.
+	if n := prune(); n != 0 || p.pruneWaitsAt != pending.Offset {
+		t.Fatalf("second pass removed %d segments and waits at offset %d, want 0 and %d", n, p.pruneWaitsAt, pending.Offset)
+	}
+
+	if err := p.ConsumerGroup.CommitDelivery("g", 0, []*types.Event{pending}); err != nil {
+		t.Fatal(err)
+	}
+	if n := prune(); n != 2 {
+		t.Fatalf("removed %d segments after the entry in the way was finished, want 2", n)
+	}
+	if start := p.Wal.GetFirstOffset(); start != later.Offset+1 {
+		t.Fatalf("log starts at offset %d, want %d", start, later.Offset+1)
+	}
+	// Consumer progress follows the log: nothing below its start is left to do.
+	if _, groups := p.ConsumerGroup.ExportProgress(0); len(groups) != 1 || groups[0].GetCommittedOffset() != later.Offset+1 {
+		t.Fatalf("consumer progress after pruning: %+v, want a floor of %d", groups, later.Offset+1)
 	}
 }
 

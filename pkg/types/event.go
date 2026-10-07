@@ -47,6 +47,9 @@ type Config struct {
 	DeliveryPollMS int
 	// DedupTTLHours is how long message IDs are retained in the dedup store.
 	DedupTTLHours int
+	// CompactionInterval is how often a partition looks for log segments that
+	// can be removed. Zero means the default of ten minutes.
+	CompactionInterval time.Duration
 	// BloomCapacity is the expected item capacity for the per-partition bloom filter.
 	BloomCapacity uint64
 	// ReplicationBatchSize is the max events per replication Append batch to followers.

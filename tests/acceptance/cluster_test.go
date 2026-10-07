@@ -198,7 +198,10 @@ func (c *cluster) args(n *node) []string {
 		"--min-insync-replicas=2",
 		"--cluster-expected-nodes=3",
 		"--fsync-mode=batch",
-		"--segment-size=1048576",
+		// Small segments and frequent passes, so that the nodes remove
+		// finished log entries during a run of a few thousand events.
+		"--segment-size=16384",
+		"--compaction-interval=2s",
 		"--bloom-capacity=200000",
 		"--follower-reads=true",
 		"--ack-timeout=5s",

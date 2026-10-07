@@ -36,9 +36,94 @@ func floorKey(group string, partition int32) string {
 }
 
 // floorLocked returns the group's completion floor on a partition. The caller
-// holds g.mu.
+// holds g.mu. Nothing below the start of the log is left to do, for a group
+// created after the log was cut as for any other.
 func (g *GroupManager) floorLocked(group string, partition int32) int64 {
-	return g.floors[completionPrefix(group, partition)]
+	return max(g.floors[completionPrefix(group, partition)], g.logStart[partition])
+}
+
+// SetLogStart records where a partition's log now starts. The entries below
+// were released because every group that takes them had finished them, so from
+// here on they count as complete for every group, and each group's completion
+// floor is raised to the new start: a floor left below it would wait for
+// entries that no longer exist. The start only moves forward.
+func (g *GroupManager) SetLogStart(partitionID int32, offset int64) error {
+	if offset <= 0 {
+		return nil
+	}
+	g.commitMu.Lock()
+	defer g.commitMu.Unlock()
+
+	type raise struct {
+		group string
+		from  int64
+	}
+	g.mu.RLock()
+	if g.logStart[partitionID] >= offset {
+		g.mu.RUnlock()
+		return nil
+	}
+	var raises []raise
+	for id, group := range g.groups {
+		if _, tracked := group.CommittedOffsets[partitionID]; !tracked {
+			continue
+		}
+		if floor := g.floors[completionPrefix(id, partitionID)]; floor < offset {
+			raises = append(raises, raise{id, floor})
+		}
+	}
+	store := g.offsetStore
+	g.mu.RUnlock()
+
+	if store != nil && len(raises) > 0 {
+		// Not synced: the log start is read from the log again at startup.
+		err := store.withDB(func(db *pebble.DB) error {
+			batch := db.NewBatch()
+			defer batch.Close()
+			for _, r := range raises {
+				if err := setFloorInBatch(batch, r.group, partitionID, r.from, offset); err != nil {
+					return err
+				}
+			}
+			return batch.Commit(pebble.NoSync)
+		})
+		if err != nil {
+			return fmt.Errorf("raise completion floors to log start %d: %w", offset, err)
+		}
+	}
+
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.logStart == nil {
+		g.logStart = make(map[int32]int64)
+	}
+	g.logStart[partitionID] = offset
+	for _, r := range raises {
+		group := g.groups[r.group]
+		if group == nil {
+			continue
+		}
+		prefix := completionPrefix(r.group, partitionID)
+		if store == nil {
+			for key := range g.completed {
+				if strings.HasPrefix(key, prefix) {
+					if done, ok := parseCompletionOffset(key, prefix); ok && done < offset {
+						delete(g.completed, key)
+					}
+				}
+			}
+		}
+		g.setFloorLocked(r.group, partitionID, offset)
+		if offset > group.CommittedOffsets[partitionID] {
+			group.CommittedOffsets[partitionID] = offset
+			if store != nil {
+				_ = store.CommitOffset(r.group, partitionID, offset)
+			}
+		}
+		g.raiseHighestCompleted(prefix, offset-1)
+	}
+	g.progressVersion.Add(1)
+	return nil
 }
 
 func (g *GroupManager) setFloorLocked(group string, partition int32, floor int64) {
@@ -148,14 +233,21 @@ func (g *GroupManager) loadHighestCompleted(prefix string) int64 {
 	return highest
 }
 
-// WithRetentionCheck holds membership stable while a caller verifies and prunes
-// WAL segments. At least one group must own the event, and every matching group
-// must have completed it: the event is below the group's completion floor or
-// has its own completion record. A committed offset alone is not enough.
+// WithRetentionCheck gives a caller that verifies and prunes WAL segments the
+// test an event has to pass. At least one group must own the event, and every
+// matching group must have completed it: the event is below the group's
+// completion floor or has its own completion record. A committed offset alone
+// is not enough.
+//
+// The lock is taken for each event, not for the whole pass. A pass reads
+// whole segments, and held throughout it stopped every acknowledgement to the
+// partition, and with them deliveries, until the pass was over. A group that
+// is created during a pass may find that the entries the pass removes are
+// gone; it would have found the same had it been created a moment later.
 func (g *GroupManager) WithRetentionCheck(fn func(func(*types.Event) bool) (int, error)) (int, error) {
-	g.mu.RLock()
-	defer g.mu.RUnlock()
 	return fn(func(event *types.Event) bool {
+		g.mu.RLock()
+		defer g.mu.RUnlock()
 		matched := false
 		for _, group := range g.groups {
 			if group.Topic != event.Topic {
