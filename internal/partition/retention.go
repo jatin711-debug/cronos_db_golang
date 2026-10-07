@@ -21,8 +21,15 @@ func (p *Partition) PruneWAL(ctx context.Context, opts storage.PruneOptions) (in
 	if p.ConsumerGroup == nil || p.Wal == nil {
 		return 0, nil
 	}
+	// The change feed is one more reader that has to be done with an event
+	// before it may go. Compaction removes a segment as soon as every consumer
+	// group has finished it, which can be minutes after it was written; a sink
+	// that was down for that long would otherwise never see those events.
+	exported, feeding := p.ChangeFeedPosition()
 	return p.ConsumerGroup.WithRetentionCheck(func(eligible func(*types.Event) bool) (int, error) {
-		return p.Wal.Prune(ctx, opts, eligible)
+		return p.Wal.Prune(ctx, opts, func(event *types.Event) bool {
+			return (!feeding || event.Offset <= exported) && eligible(event)
+		})
 	})
 }
 
