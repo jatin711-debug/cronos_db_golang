@@ -10,6 +10,7 @@ package config
 import (
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -114,6 +115,7 @@ func LoadConfig() (*types.Config, error) {
 	config.HeartbeatInterval = DefaultHeartbeatInterval
 	config.FailureTimeout = DefaultFailureTimeout
 	config.SuspectTimeout = DefaultSuspectTimeout
+	config.ClusterFormationWait = DefaultClusterFormationWait
 
 	// Node configuration
 	flag.StringVar(&config.NodeID, "node-id", DefaultNodeID, "Unique node ID")
@@ -180,6 +182,8 @@ func LoadConfig() (*types.Config, error) {
 	flag.DurationVar(&config.HeartbeatInterval, "heartbeat-interval", DefaultHeartbeatInterval, "Cluster heartbeat interval")
 	flag.DurationVar(&config.FailureTimeout, "failure-timeout", DefaultFailureTimeout, "Node failure detection timeout")
 	flag.DurationVar(&config.SuspectTimeout, "suspect-timeout", DefaultSuspectTimeout, "Node suspect timeout")
+	flag.IntVar(&config.ClusterExpectedNodes, "cluster-expected-nodes", 0, "Nodes a new cluster starts with; first partition leaders are assigned as soon as that many are up (0 = unknown, use --cluster-formation-wait)")
+	flag.DurationVar(&config.ClusterFormationWait, "cluster-formation-wait", DefaultClusterFormationWait, "How long membership must be unchanged before a new cluster assigns first partition leaders when --cluster-expected-nodes is unset or not reached (0 = assign at once)")
 	flag.BoolVar(&config.UseMemberlist, "use-memberlist", DefaultUseMemberlist, "Use HashiCorp Memberlist (SWIM) instead of custom TCP gossip")
 	flag.Int64Var(&config.ClockSkewThresholdMs, "clock-skew-threshold-ms", DefaultClockSkewThresholdMs, "Max allowed clock skew from leader in ms (0 = disabled)")
 
@@ -241,6 +245,7 @@ func LoadConfig() (*types.Config, error) {
 	flag.StringVar(&config.TracingOTLPEndpoint, "tracing-otlp-endpoint", DefaultTracingOTLPEndpoint, "OTLP gRPC endpoint (host:port)")
 	flag.Float64Var(&config.TracingSampleRatio, "tracing-sample-ratio", DefaultTracingSampleRatio, "Tracing sample ratio from 0.0 to 1.0")
 	flag.BoolVar(&config.TracingInsecure, "tracing-insecure", DefaultTracingInsecure, "Use insecure OTLP connection (no TLS)")
+	flag.StringVar(&config.PprofAddr, "pprof-addr", "", "Serve runtime profiles (net/http/pprof) on this address; empty disables")
 
 	// All registered flags accept the matching CRONOS_* environment variable.
 	// Parse explicit flags afterward so command-line arguments take precedence.
@@ -309,6 +314,12 @@ func ValidateConfig(c *types.Config) error {
 	if c.MinInSyncReplicas < 0 {
 		return fmt.Errorf("min-insync-replicas must be >= 0")
 	}
+	if c.ClusterExpectedNodes < 0 {
+		return fmt.Errorf("cluster-expected-nodes must be >= 0")
+	}
+	if c.ClusterFormationWait < 0 {
+		return fmt.Errorf("cluster-formation-wait must be >= 0")
+	}
 	if c.MinInSyncReplicas > c.ReplicationFactor {
 		return fmt.Errorf("min-insync-replicas (%d) cannot exceed replication-factor (%d)", c.MinInSyncReplicas, c.ReplicationFactor)
 	}
@@ -333,6 +344,9 @@ func ValidateConfig(c *types.Config) error {
 		}
 		if c.ExactlyOnceCommits {
 			return fmt.Errorf("exactly-once-commits is not supported in production; use per-event at-least-once completion")
+		}
+		if c.PprofAddr != "" && !isLoopbackAddr(c.PprofAddr) {
+			return fmt.Errorf("pprof-addr must be a loopback address in production (use --dev to bypass)")
 		}
 		if c.ReplicationFactor < 3 {
 			return fmt.Errorf("production mode requires replication-factor >= 3 (use --dev to bypass)")
@@ -371,4 +385,18 @@ func ValidateConfig(c *types.Config) error {
 	}
 
 	return nil
+}
+
+// isLoopbackAddr reports whether a host:port listen address binds only the
+// local machine. An empty host (":6060") binds every interface.
+func isLoopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil || host == "" {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

@@ -128,6 +128,10 @@ const (
 	// DefaultSuspectTimeout is how long a node stays suspect before failure.
 	DefaultSuspectTimeout = 3 * time.Second
 
+	// DefaultClusterFormationWait is how long membership must be unchanged
+	// before a new cluster gives its partitions their first leaders, unless
+	// the expected number of nodes is known and present sooner.
+	DefaultClusterFormationWait = 5 * time.Second
 	// DefaultUseMemberlist uses custom TCP gossip unless HashiCorp Memberlist is enabled.
 	DefaultUseMemberlist = false // Default to custom gossip for backward compatibility
 
