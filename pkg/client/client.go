@@ -30,6 +30,13 @@ type Client struct {
 	metadata   *metadata.Manager       // partition/leader metadata cache
 	breakerMgr *circuitbreaker.Manager // optional per-address circuit breakers
 
+	// served holds, per partition, the address that last served a request for
+	// it. Partition metadata names the leader by node ID, which the client can
+	// turn into an address only with Config.NodeIDToAddress; without that, the
+	// address that just worked is the best lead to where the leader is.
+	servedMu sync.RWMutex
+	served   map[int32]string
+
 	bgCancel  context.CancelFunc // stops background metadata refresh
 	closeOnce sync.Once          // ensures Close is idempotent
 }
@@ -78,6 +85,7 @@ func Dial(ctx context.Context, cfg Config) (*Client, error) {
 		pool:       pool,
 		metadata:   metaManager,
 		breakerMgr: circuitbreaker.NewManager(cfg.CircuitBreaker),
+		served:     make(map[int32]string),
 		bgCancel:   cancel,
 	}, nil
 }
@@ -135,12 +143,56 @@ func (c *Client) RouteForPartition(partitionID int32) (*Route, error) {
 	}
 
 	preferred, _ := c.metadata.ResolveLeaderAddress(partitionID)
+	candidates := c.metadata.CandidateAddresses(partitionID)
+	if served := c.servedBy(partitionID); served != "" {
+		// What worked last goes first: it is newer than the metadata, which
+		// is refreshed on a timer and names a leader that may since have
+		// been replaced.
+		ordered := make([]string, 0, len(candidates)+1)
+		ordered = append(ordered, served)
+		for _, addr := range candidates {
+			if addr != served {
+				ordered = append(ordered, addr)
+			}
+		}
+		candidates, preferred = ordered, served
+	}
 	return &Route{
 		PartitionID:        partitionID,
 		LeaderID:           info.GetLeaderId(),
 		PreferredAddress:   preferred,
-		CandidateAddresses: c.metadata.CandidateAddresses(partitionID),
+		CandidateAddresses: candidates,
 	}, nil
+}
+
+func (c *Client) servedBy(partitionID int32) string {
+	c.servedMu.RLock()
+	defer c.servedMu.RUnlock()
+	return c.served[partitionID]
+}
+
+// noteServed records that the node at addr served a request for the
+// partition, so that the next one goes there first.
+func (c *Client) noteServed(partitionID int32, addr string) {
+	if addr == "" || c.servedBy(partitionID) == addr {
+		return
+	}
+	c.servedMu.Lock()
+	c.served[partitionID] = addr
+	c.servedMu.Unlock()
+}
+
+// noteRefused forgets addr as the place to go for the partition, after it
+// failed or refused a request for it.
+func (c *Client) noteRefused(partitionID int32, addr string) {
+	if c.servedBy(partitionID) != addr {
+		return
+	}
+	c.servedMu.Lock()
+	if c.served[partitionID] == addr {
+		delete(c.served, partitionID)
+	}
+	c.servedMu.Unlock()
 }
 
 // RouteForKey resolves partition and route using a partition key.

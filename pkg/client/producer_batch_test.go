@@ -125,7 +125,9 @@ func TestSendBatchReturnsOffsetsAndPartition(t *testing.T) {
 
 func TestCircuitBreakerRecordsRetryableErrors(t *testing.T) {
 	partitionSrv := &testPartitionServer{firstOffset: 0, lastOffset: 100}
-	eventSrv := &testEventServer{publishErr: status.Error(codes.Unavailable, "not leader")}
+	// Not "not leader": a node that says it does not lead is healthy, and
+	// that answer is not counted against it.
+	eventSrv := &testEventServer{publishErr: status.Error(codes.Unavailable, "storage is not available")}
 	addr := startTestEventServer(t, eventSrv, partitionSrv)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

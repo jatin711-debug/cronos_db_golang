@@ -63,6 +63,10 @@ func IsLeaderRelatedMessage(message string) bool {
 		"not current leader",
 		"leader id mismatch",
 		"leader election",
+		// What a node that does not serve the partition answers.
+		"not owned by this node",
+		"changing leader",
+		"retry against the partition leader",
 	}
 	for _, p := range phrases {
 		if strings.Contains(m, p) {
