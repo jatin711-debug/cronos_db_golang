@@ -137,6 +137,10 @@ names another place. A backup on the volume it copies does not survive the
 loss of that volume, and the chart mounts no other: copy backups off the
 node, or mount a second volume and point `--backup-dir` at it.
 
+`cronos-admin` is in the image at `/app/cronos-admin`. `restore` and
+`check-log` work on the files of a stopped node: scale the StatefulSet down
+and run them from a pod of the same image that mounts the node's volume.
+
 ## Memory and overload
 
 A node keeps in memory, payload included, every event that is due within the

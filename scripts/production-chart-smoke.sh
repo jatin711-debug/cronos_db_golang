@@ -47,6 +47,8 @@ for ordinal in 0 1 2; do
     test -s "$CRONOS_AUTH_POLICY_FILE"
     curl -fsS http://localhost:8080/health/ready >/dev/null
     curl -fsS http://localhost:8080/ui/ | grep -q "<html"
+    /app/cronos-admin check-log --help >/dev/null
+    /app/cronos-admin restore --help >/dev/null
     test "$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/api/admin/topology)" = 401
   '
 done
