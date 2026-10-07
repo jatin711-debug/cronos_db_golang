@@ -843,9 +843,11 @@ var ConsumerGroupService_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	ReplicationService_Append_FullMethodName   = "/cronos_db.ReplicationService/Append"
-	ReplicationService_Sync_FullMethodName     = "/cronos_db.ReplicationService/Sync"
-	ReplicationService_Snapshot_FullMethodName = "/cronos_db.ReplicationService/Snapshot"
+	ReplicationService_Append_FullMethodName               = "/cronos_db.ReplicationService/Append"
+	ReplicationService_Sync_FullMethodName                 = "/cronos_db.ReplicationService/Sync"
+	ReplicationService_Snapshot_FullMethodName             = "/cronos_db.ReplicationService/Snapshot"
+	ReplicationService_Position_FullMethodName             = "/cronos_db.ReplicationService/Position"
+	ReplicationService_SyncConsumerProgress_FullMethodName = "/cronos_db.ReplicationService/SyncConsumerProgress"
 )
 
 // ReplicationServiceClient is the client API for ReplicationService service.
@@ -858,6 +860,10 @@ type ReplicationServiceClient interface {
 	Sync(ctx context.Context, in *ReplicationSyncRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ReplicationSyncResponse], error)
 	// Internal: Bulk snapshot install from leader
 	Snapshot(ctx context.Context, in *ReplicationSnapshotRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ReplicationSnapshotChunk], error)
+	// Internal: Report the end of this replica's log
+	Position(ctx context.Context, in *ReplicationPositionRequest, opts ...grpc.CallOption) (*ReplicationPositionResponse, error)
+	// Internal: Apply the leader's consumer progress
+	SyncConsumerProgress(ctx context.Context, in *ReplicationProgressRequest, opts ...grpc.CallOption) (*ReplicationProgressResponse, error)
 }
 
 type replicationServiceClient struct {
@@ -916,6 +922,26 @@ func (c *replicationServiceClient) Snapshot(ctx context.Context, in *Replication
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type ReplicationService_SnapshotClient = grpc.ServerStreamingClient[ReplicationSnapshotChunk]
 
+func (c *replicationServiceClient) Position(ctx context.Context, in *ReplicationPositionRequest, opts ...grpc.CallOption) (*ReplicationPositionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReplicationPositionResponse)
+	err := c.cc.Invoke(ctx, ReplicationService_Position_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *replicationServiceClient) SyncConsumerProgress(ctx context.Context, in *ReplicationProgressRequest, opts ...grpc.CallOption) (*ReplicationProgressResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReplicationProgressResponse)
+	err := c.cc.Invoke(ctx, ReplicationService_SyncConsumerProgress_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ReplicationServiceServer is the server API for ReplicationService service.
 // All implementations must embed UnimplementedReplicationServiceServer
 // for forward compatibility.
@@ -926,6 +952,10 @@ type ReplicationServiceServer interface {
 	Sync(*ReplicationSyncRequest, grpc.ServerStreamingServer[ReplicationSyncResponse]) error
 	// Internal: Bulk snapshot install from leader
 	Snapshot(*ReplicationSnapshotRequest, grpc.ServerStreamingServer[ReplicationSnapshotChunk]) error
+	// Internal: Report the end of this replica's log
+	Position(context.Context, *ReplicationPositionRequest) (*ReplicationPositionResponse, error)
+	// Internal: Apply the leader's consumer progress
+	SyncConsumerProgress(context.Context, *ReplicationProgressRequest) (*ReplicationProgressResponse, error)
 	mustEmbedUnimplementedReplicationServiceServer()
 }
 
@@ -944,6 +974,12 @@ func (UnimplementedReplicationServiceServer) Sync(*ReplicationSyncRequest, grpc.
 }
 func (UnimplementedReplicationServiceServer) Snapshot(*ReplicationSnapshotRequest, grpc.ServerStreamingServer[ReplicationSnapshotChunk]) error {
 	return status.Errorf(codes.Unimplemented, "method Snapshot not implemented")
+}
+func (UnimplementedReplicationServiceServer) Position(context.Context, *ReplicationPositionRequest) (*ReplicationPositionResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Position not implemented")
+}
+func (UnimplementedReplicationServiceServer) SyncConsumerProgress(context.Context, *ReplicationProgressRequest) (*ReplicationProgressResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SyncConsumerProgress not implemented")
 }
 func (UnimplementedReplicationServiceServer) mustEmbedUnimplementedReplicationServiceServer() {}
 func (UnimplementedReplicationServiceServer) testEmbeddedByValue()                            {}
@@ -1006,6 +1042,42 @@ func _ReplicationService_Snapshot_Handler(srv interface{}, stream grpc.ServerStr
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type ReplicationService_SnapshotServer = grpc.ServerStreamingServer[ReplicationSnapshotChunk]
 
+func _ReplicationService_Position_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReplicationPositionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ReplicationServiceServer).Position(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ReplicationService_Position_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ReplicationServiceServer).Position(ctx, req.(*ReplicationPositionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ReplicationService_SyncConsumerProgress_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReplicationProgressRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ReplicationServiceServer).SyncConsumerProgress(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ReplicationService_SyncConsumerProgress_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ReplicationServiceServer).SyncConsumerProgress(ctx, req.(*ReplicationProgressRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ReplicationService_ServiceDesc is the grpc.ServiceDesc for ReplicationService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1016,6 +1088,14 @@ var ReplicationService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Append",
 			Handler:    _ReplicationService_Append_Handler,
+		},
+		{
+			MethodName: "Position",
+			Handler:    _ReplicationService_Position_Handler,
+		},
+		{
+			MethodName: "SyncConsumerProgress",
+			Handler:    _ReplicationService_SyncConsumerProgress_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{
