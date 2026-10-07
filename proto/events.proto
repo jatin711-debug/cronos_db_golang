@@ -252,6 +252,9 @@ message ReplicationAppendRequest {
 
   // Batch checksum for end-to-end replication integrity
   uint32 checksum = 6;
+
+  // Node ID of the sending leader. A follower accepts one leader per term.
+  string leader_id = 7;
 }
 
 message ReplicationAppendResponse {
@@ -266,6 +269,63 @@ message ReplicationAppendResponse {
 
   // Term of the follower/acknowledger
   int64 term = 5;
+}
+
+// ReplicationPositionRequest asks a replica where its log ends.
+message ReplicationPositionRequest {
+  int32 partition_id = 1;
+}
+
+// ReplicationPositionResponse is a replica's log position, used to elect the
+// most complete replica and to check that a transfer target has caught up.
+message ReplicationPositionResponse {
+  // False when this node holds no data for the partition.
+  bool found = 1;
+
+  // Offset of the last log entry, -1 when the log is empty.
+  int64 last_offset = 2;
+
+  // Term the last log entry was written under, 0 when the log is empty.
+  int64 last_term = 3;
+
+  // Highest leadership epoch this replica has accepted.
+  int64 epoch = 4;
+
+  // True while this node accepts publishes for the partition as its leader.
+  bool accepting_writes = 5;
+}
+
+// ConsumerGroupProgress is one consumer group's delivery progress on a partition.
+message ConsumerGroupProgress {
+  string group_id = 1;
+  string topic = 2;
+
+  // Every offset below this one is complete for the group.
+  int64 committed_offset = 3;
+
+  // Completed offsets at or above committed_offset.
+  repeated int64 completed_offsets = 4;
+}
+
+// ReplicationProgressRequest carries the leader's consumer progress for a
+// partition so a follower that takes over does not redeliver finished work.
+message ReplicationProgressRequest {
+  int32 partition_id = 1;
+  int64 term = 2;
+  string leader_id = 3;
+  repeated ConsumerGroupProgress groups = 4;
+
+  // How far the leader's change feed (CDC sinks, cross-region replication)
+  // has delivered the log, so a follower that takes over continues from there
+  // instead of repeating or skipping events. Meaningful only when
+  // has_change_feed_offset is set; -1 means nothing has been delivered.
+  bool has_change_feed_offset = 5;
+  int64 change_feed_offset = 6;
+}
+
+message ReplicationProgressResponse {
+  bool success = 1;
+  string error = 2;
 }
 
 message ReplicationSyncRequest {
@@ -300,6 +360,12 @@ message ReplicationSnapshotRequest {
 
   // Soft cap on total bytes to transfer. 0 means no cap.
   int64 max_bytes = 3;
+
+  // Files the follower still holds from an interrupted transfer, identified
+  // by filename, is_index, file_size and crc32. The leader does not send the
+  // contents of a file that is unchanged; it answers with a header marked
+  // reuse instead.
+  repeated ReplicationSnapshotHeader have = 4;
 }
 
 message ReplicationSnapshotHeader {
@@ -320,6 +386,10 @@ message ReplicationSnapshotHeader {
 
   // True for sparse-index files, false for segment log files.
   bool is_index = 6;
+
+  // Set by the leader when the follower listed this exact file in have: no
+  // data chunks follow, and the follower keeps the copy it has.
+  bool reuse = 7;
 }
 
 message ReplicationSnapshotTrailer {
@@ -592,6 +662,12 @@ service ReplicationService {
 
   // Internal: Bulk snapshot install from leader
   rpc Snapshot(ReplicationSnapshotRequest) returns (stream ReplicationSnapshotChunk);
+
+  // Internal: Report the end of this replica's log
+  rpc Position(ReplicationPositionRequest) returns (ReplicationPositionResponse);
+
+  // Internal: Apply the leader's consumer progress
+  rpc SyncConsumerProgress(ReplicationProgressRequest) returns (ReplicationProgressResponse);
 }
 
 service RaftService {
