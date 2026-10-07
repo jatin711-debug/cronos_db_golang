@@ -75,3 +75,26 @@ func TestAuditProductionRejectsUnverifiedFeatures(t *testing.T) {
 		})
 	}
 }
+
+// Production does not run with a durability mode in which an acknowledged
+// event can be lost to a power cut.
+func TestAuditProductionRequiresDurableFsync(t *testing.T) {
+	secure := func(mode string) *types.Config {
+		return &types.Config{NodeID: "audit", PartitionCount: 1, ReplicationFactor: 3, MinInSyncReplicas: 2, DataDir: t.TempDir(), GPRCAddress: ":9000", FlushIntervalMS: 100,
+			FsyncMode: mode, TLSEnabled: true, TLSCertFile: "cert", TLSKeyFile: "key", AuthEnabled: true, AuthJWTSecret: "secret", AuthPolicyFile: "policy",
+			EncryptionEnabled: true, EncryptionKeyFile: "master.key"}
+	}
+	if err := ValidateConfig(secure("periodic")); err == nil || !strings.Contains(err.Error(), "fsync-mode") {
+		t.Fatalf("production accepted periodic fsync: %v", err)
+	}
+	for _, mode := range []string{"batch", "every_event"} {
+		if err := ValidateConfig(secure(mode)); err != nil && strings.Contains(err.Error(), "fsync-mode") {
+			t.Fatalf("production rejected fsync-mode %s: %v", mode, err)
+		}
+	}
+	dev := secure("periodic")
+	dev.DevMode = true
+	if err := ValidateConfig(dev); err != nil {
+		t.Fatalf("development mode rejected periodic fsync: %v", err)
+	}
+}
