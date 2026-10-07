@@ -70,6 +70,7 @@ services:
       - --segment-size=1073741824
       - --partition-count=16
       - --replication-factor=3
+      - --cluster-expected-nodes=3
       - --min-insync-replicas=2
       - --virtual-nodes=2048
       - --max-credits=50000
@@ -122,6 +123,7 @@ services:
       - --segment-size=1073741824
       - --partition-count=16
       - --replication-factor=3
+      - --cluster-expected-nodes=3
       - --min-insync-replicas=2
       - --virtual-nodes=2048
       - --max-credits=50000
@@ -176,6 +178,7 @@ services:
       - --segment-size=1073741824
       - --partition-count=16
       - --replication-factor=3
+      - --cluster-expected-nodes=3
       - --min-insync-replicas=2
       - --virtual-nodes=2048
       - --max-credits=50000
