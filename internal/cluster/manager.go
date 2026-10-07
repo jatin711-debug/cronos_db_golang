@@ -66,6 +66,8 @@ func NewManager(cfg *Config) *Manager {
 		FormationWait:     cfg.FormationWait,
 		NumPartitions:     cfg.PartitionCount,
 		VirtualNodes:      cfg.VirtualNodes,
+		ServerTLS:         cfg.ServerTLS,
+		ClientTLS:         cfg.ClientTLS,
 		Rack:              cfg.Rack,
 		Zone:              cfg.Zone,
 		Region:            cfg.Region,
@@ -115,6 +117,9 @@ func (m *Manager) Start() error {
 	}
 
 	log.Printf("[CLUSTER] Starting cluster manager for node %s", m.config.NodeID)
+	if err := checkTransportTLS(m.config); err != nil {
+		return err
+	}
 
 	// Initialize Raft FIRST (if enabled) - needed before membership starts
 	if m.config.RaftAddr != "" {

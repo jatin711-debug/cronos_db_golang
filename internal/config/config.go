@@ -177,7 +177,7 @@ func LoadConfig() (*types.Config, error) {
 
 	// Cluster configuration
 	flag.BoolVar(&config.ClusterEnabled, "cluster", DefaultClusterEnabled, "Enable cluster mode")
-	flag.StringVar(&config.ClusterGossipAddr, "cluster-gossip-addr", DefaultClusterGossipAddr, "Cluster gossip UDP address")
+	flag.StringVar(&config.ClusterGossipAddr, "cluster-gossip-addr", DefaultClusterGossipAddr, "Cluster membership (gossip) TCP address")
 	flag.StringVar(&config.ClusterGRPCAddr, "cluster-grpc-addr", DefaultClusterGRPCAddr, "Cluster gRPC address")
 	flag.StringVar(&config.ClusterRaftAddr, "cluster-raft-addr", DefaultClusterRaftAddr, "Cluster Raft address")
 	flag.IntVar(&config.VirtualNodes, "virtual-nodes", DefaultVirtualNodes, "Virtual nodes per physical node")
@@ -186,7 +186,7 @@ func LoadConfig() (*types.Config, error) {
 	flag.DurationVar(&config.SuspectTimeout, "suspect-timeout", DefaultSuspectTimeout, "Node suspect timeout")
 	flag.IntVar(&config.ClusterExpectedNodes, "cluster-expected-nodes", 0, "Nodes a new cluster starts with; first partition leaders are assigned as soon as that many are up (0 = unknown, use --cluster-formation-wait)")
 	flag.DurationVar(&config.ClusterFormationWait, "cluster-formation-wait", DefaultClusterFormationWait, "How long membership must be unchanged before a new cluster assigns first partition leaders when --cluster-expected-nodes is unset or not reached (0 = assign at once)")
-	flag.BoolVar(&config.UseMemberlist, "use-memberlist", DefaultUseMemberlist, "Use HashiCorp Memberlist (SWIM) instead of custom TCP gossip")
+	flag.BoolVar(&config.UseMemberlist, "use-memberlist", DefaultUseMemberlist, "Not supported; the server refuses to start with it")
 	flag.Int64Var(&config.ClockSkewThresholdMs, "clock-skew-threshold-ms", DefaultClockSkewThresholdMs, "Max allowed clock skew from leader in ms (0 = disabled)")
 
 	// TLS flags
@@ -197,10 +197,10 @@ func LoadConfig() (*types.Config, error) {
 	flag.BoolVar(&config.TLSClientAuth, "tls-client-auth", false, "Require client certificates (mTLS)")
 
 	// Internal replication mTLS flags
-	flag.BoolVar(&config.ReplicationTLSEnabled, "replication-tls-enabled", false, "Enable mTLS for internal replication traffic")
-	flag.StringVar(&config.ReplicationTLSCAFile, "replication-tls-ca-file", "", "Path to internal replication CA certificate file")
-	flag.StringVar(&config.ReplicationTLSCertFile, "replication-tls-cert-file", "", "Path to internal replication certificate file")
-	flag.StringVar(&config.ReplicationTLSKeyFile, "replication-tls-key-file", "", "Path to internal replication private key file")
+	flag.BoolVar(&config.ReplicationTLSEnabled, "replication-tls-enabled", false, "Enable mutual TLS for all traffic between nodes: replication, membership and Raft")
+	flag.StringVar(&config.ReplicationTLSCAFile, "replication-tls-ca-file", "", "Path to the CA certificate that signed the certificates of the cluster's nodes")
+	flag.StringVar(&config.ReplicationTLSCertFile, "replication-tls-cert-file", "", "Path to this node's certificate for traffic between nodes")
+	flag.StringVar(&config.ReplicationTLSKeyFile, "replication-tls-key-file", "", "Path to the private key of that certificate")
 
 	// Auth flags
 	flag.BoolVar(&config.AuthEnabled, "auth-enabled", false, "Enable JWT authentication")
@@ -339,6 +339,19 @@ func ValidateConfig(c *types.Config) error {
 	}
 	if c.CompactionInterval < 0 {
 		return fmt.Errorf("compaction-interval must be >= 0")
+	}
+	if c.UseMemberlist {
+		// The flag was accepted and did nothing: the server never used the
+		// memberlist adapter. Saying so is better than a cluster whose
+		// operator believes it runs a protocol it does not run.
+		return fmt.Errorf("use-memberlist is not supported: the server uses its own membership protocol; remove the flag")
+	}
+	if c.ReplicationTLSEnabled {
+		// Mutual TLS between nodes needs all three: without the CA a node
+		// could not tell a member of the cluster from anyone else.
+		if c.ReplicationTLSCAFile == "" || c.ReplicationTLSCertFile == "" || c.ReplicationTLSKeyFile == "" {
+			return fmt.Errorf("replication-tls-enabled requires replication-tls-ca-file, replication-tls-cert-file and replication-tls-key-file")
+		}
 	}
 
 	// Production hardening: require TLS, auth, encryption, and replication safety
