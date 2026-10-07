@@ -1562,6 +1562,18 @@ func (pm *PartitionManager) LocalReplicaPosition(partitionID int32) ReplicaPosit
 	partition, exists := pm.partitions[partitionID]
 	writable := pm.writable
 	pm.mu.RUnlock()
+	if !exists && pm.partitionOnDisk(partitionID) {
+		// After a restart a node holds its partitions on disk until something
+		// uses them. Answering "nothing here" for those would let an election
+		// pass over the most complete replica, and would hide the epoch a
+		// restored replica has accepted.
+		loaded, err := pm.GetOrCreateInternalPartition(partitionID, fmt.Sprintf("partition-%d", partitionID))
+		if err != nil {
+			log.Printf("[PARTITION] Partition %d is on disk but could not be loaded to report its position: %v", partitionID, err)
+		} else {
+			partition, exists = loaded, true
+		}
+	}
 	if !exists || partition.Wal == nil {
 		return ReplicaPosition{LastOffset: -1}
 	}
@@ -1578,6 +1590,13 @@ func (pm *PartitionManager) LocalReplicaPosition(partitionID int32) ReplicaPosit
 		Epoch:           partition.Epoch(),
 		AcceptingWrites: accepting,
 	}
+}
+
+// partitionOnDisk reports whether this node has a directory for the
+// partition, whether or not it is loaded.
+func (pm *PartitionManager) partitionOnDisk(partitionID int32) bool {
+	info, err := os.Stat(fmt.Sprintf("%s/partitions/%d", pm.config.DataDir, partitionID))
+	return err == nil && info.IsDir()
 }
 
 // ReplicaLogPosition returns the log position of the replica on the node at

@@ -582,3 +582,124 @@ func TestLeadershipReady(t *testing.T) {
 	}
 	expect(false, "its partition is being handed over")
 }
+
+// The first assignment of a partition takes account of what its replicas
+// already hold. In a new cluster that is nothing. After a restore it is logs
+// of different lengths, since every node's backup is its own, and epochs
+// from the cluster's previous life.
+func TestFirstAssignment_ContinuesFromWhatReplicasHold(t *testing.T) {
+	nodes := []string{"node-1", "node-2", "node-3"}
+	setup := func(t *testing.T, minISR int) *leadershipFixture {
+		f := newLeadershipFixture(t, "node-1", "node-1", 3, minISR, nodes...)
+		f.manager.router.UpdatePartitionAssignment(1, "node-1", nodes, nodes)
+		return f
+	}
+	assigned := func(f *leadershipFixture) (PartitionInfo, bool) {
+		f.manager.syncClusterState()
+		return f.store.Partition(1)
+	}
+
+	t.Run("a new cluster follows the ring", func(t *testing.T) {
+		f := setup(t, 2)
+		info, ok := assigned(f)
+		if !ok || info.LeaderID != "node-1" || info.Epoch != 1 {
+			t.Fatalf("assignment = %+v (committed=%v), want node-1 at epoch 1", info, ok)
+		}
+	})
+
+	t.Run("restored replicas: the most complete leads, above every accepted epoch", func(t *testing.T) {
+		f := setup(t, 2)
+		// node-1, the ring's choice, was backed up a moment before node-2.
+		f.positions.set("node-1", ReplicaPosition{LastOffset: 90, LastTerm: 7, Epoch: 7})
+		f.positions.set("node-2", ReplicaPosition{LastOffset: 100, LastTerm: 7, Epoch: 7})
+		f.positions.set("node-3", ReplicaPosition{LastOffset: 120, LastTerm: 6, Epoch: 9})
+		info, ok := assigned(f)
+		if !ok {
+			t.Fatal("partition was not assigned")
+		}
+		if info.LeaderID != "node-2" {
+			t.Fatalf("leader = %s, want node-2: its log ends in the latest term, and furthest within it", info.LeaderID)
+		}
+		if info.Epoch != 10 {
+			t.Fatalf("epoch = %d, want 10: one replica has accepted epoch 9 and would refuse anything lower", info.Epoch)
+		}
+	})
+
+	t.Run("equal logs keep the ring's choice", func(t *testing.T) {
+		f := setup(t, 2)
+		for _, id := range nodes {
+			f.positions.set(id, ReplicaPosition{LastOffset: 100, LastTerm: 3, Epoch: 3})
+		}
+		if info, ok := assigned(f); !ok || info.LeaderID != "node-1" || info.Epoch != 4 {
+			t.Fatalf("assignment = %+v (committed=%v), want node-1 at epoch 4", info, ok)
+		}
+	})
+
+	t.Run("it waits for the replica the ring would have lead", func(t *testing.T) {
+		f := setup(t, 2)
+		f.positions.unreachable["node-1"] = true
+		if _, ok := assigned(f); ok {
+			t.Fatal("partition assigned without knowing what its intended leader holds")
+		}
+		delete(f.positions.unreachable, "node-1")
+		if info, ok := assigned(f); !ok || info.LeaderID != "node-1" {
+			t.Fatalf("assignment after the leader answered = %+v (committed=%v)", info, ok)
+		}
+	})
+
+	t.Run("it waits for enough replicas to rule out a longer log", func(t *testing.T) {
+		// Writes acknowledged by the leader alone may be on any one replica,
+		// so all three have to answer.
+		f := setup(t, 1)
+		f.positions.unreachable["node-3"] = true
+		if _, ok := assigned(f); ok {
+			t.Fatal("partition assigned although a replica that may hold the longest log has not answered")
+		}
+		delete(f.positions.unreachable, "node-3")
+		if _, ok := assigned(f); !ok {
+			t.Fatal("partition not assigned after every replica answered")
+		}
+	})
+}
+
+// An election also commits above every epoch the replicas hold, not just
+// above the cluster's own count.
+func TestElection_EpochIsAboveWhatReplicasAccepted(t *testing.T) {
+	f := newLeadershipFixture(t, "node-1", "node-3", 3, 2, "node-1", "node-2", "node-3")
+	f.membership.nodes["node-3"].State = NodeStateDead
+	f.positions.set("node-1", ReplicaPosition{LastOffset: 10, LastTerm: 4, Epoch: 4})
+	f.positions.set("node-2", ReplicaPosition{LastOffset: 12, LastTerm: 4, Epoch: 12})
+
+	info := f.committed(t)
+	f.manager.electNewLeader(0, &info)
+	got := f.committed(t)
+	if got.LeaderID != "node-2" || got.Epoch != 13 {
+		t.Fatalf("elected %s at epoch %d, want node-2 at epoch 13", got.LeaderID, got.Epoch)
+	}
+}
+
+// The FSM raises the epoch on every change and honours a proposal for a
+// higher one; it never lowers it.
+func TestFSM_UpdateHonoursAHigherProposedEpoch(t *testing.T) {
+	store := &fsmStore{fsm: NewClusterFSM(), leader: true}
+	propose := func(epoch int64, assign bool) int64 {
+		t.Helper()
+		if err := store.ProposePartition(&PartitionInfo{ID: 0, LeaderID: "node-1", Replicas: []string{"node-1"}, Epoch: epoch, State: PartitionStateOnline}, assign); err != nil {
+			t.Fatal(err)
+		}
+		info, _ := store.Partition(0)
+		return info.Epoch
+	}
+	if got := propose(1, true); got != 1 {
+		t.Fatalf("assigned at epoch %d, want 1", got)
+	}
+	if got := propose(1, false); got != 2 {
+		t.Fatalf("an ordinary update gave epoch %d, want 2", got)
+	}
+	if got := propose(40, false); got != 40 {
+		t.Fatalf("an update asking for epoch 40 gave %d", got)
+	}
+	if got := propose(3, false); got != 41 {
+		t.Fatalf("an update asking for a lower epoch gave %d, want 41", got)
+	}
+}
