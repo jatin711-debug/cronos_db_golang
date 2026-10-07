@@ -17,21 +17,21 @@ existing-test review, not a new fault-injection or deployment campaign.
 |---|---|---|
 | F01: topic isolation | Partial | Replay and recipient topic filters, group topic checks, and ACK principal validation added. Public-RPC tests with two principals and concurrent subscribe/ACK paths, plus explicit tenant/group scope, remain. |
 | F02: policy loading | Fixed with startup regressions | Invalid/missing policy and public-key loading fail before data stores/listeners are initialized. Subprocess tests cover missing, empty, malformed, empty-subject, and null-subject policies. |
-| F03: ACK correctness | Partial | Tracked-delivery validation, per-event completion, and partition-local manager use added. Durable progress across failover, completion-state lifecycle, and end-to-end ACK concurrency remain. |
-| F04: delivery/backpressure | Partial | Worker and scheduler ready-slice ownership, worker count/64 MiB estimated-byte budget, WAL redrive, and unsent-group reservation cleanup added. Bounds on all other queues and disconnect/slow-consumer/reconnect conservation tests remain. |
+| F03: ACK correctness | Partial | Tracked-delivery validation, per-event completion, and partition-local manager use added. Acks on a stream are recorded in batches with one durable write, outside the group lock. A group's completed work is a durable floor plus the completions above it, and the partition leader sends that progress to its followers, so a follower that takes over does not redeliver finished work, including work finished out of order (tested end to end over the replication channel). Progress reaches followers on the leader's maintenance tick, so what completed in the last moments before a failover can be delivered again; a replication-factor-1 handoff does not move it; an ACK concurrency test through the public RPC remains. |
+| F04: delivery/backpressure | Partial | Worker and scheduler ready-slice ownership, worker count/64 MiB estimated-byte budget, WAL redrive, and unsent-group reservation cleanup added. Held-back, dropped, and abandoned deliveries are queued for redrive by offset range and follow acks; a connecting consumer drains its backlog at credit pace instead of a fixed 512 events/s; dead-lettered events are recorded complete. Regressions cover exhausted credits, worker overflow, disconnect, and backlog. Byte bounds on the other queues and an accepted-ID conservation ledger remain. |
 | F05: timer recovery | Partial | WAL reconstruction, overdue cold hydration, and promotion scheduling added. Pending-timer preservation now tested through three consecutive snapshot/restart cycles; complete recovery/completion behavior remains to be validated. |
-| F06: replication retries | Partial | Matching retries no longer truncate the tail; invalid/stale terms rejected and epochs persisted. Cluster-wide append authority and concurrent leader-change tests remain. |
-| F07: quorum/idempotency | Partial | Pending claims no longer prove acceptance; failed replication releases claims. Retries can still append duplicates; durable pending/accepted/completed outcomes remain unimplemented. |
-| F08: leadership/handoff | Partial | Local epoch persistence and fail-closed Raft initialization added. Committed write ownership, staged handoff, and demotion remain unresolved. |
-| F09: snapshot transfer | Partial | Stable checkpoint copy, per-file validation, filename checks, and install journal added. Crash-transition tests, transfer resume, large-partition bootstrap, and non-WAL state recovery remain. |
+| F06: replication retries | Core fix implemented | A replica accepts one leader per epoch and records it durably before applying any of its entries; entries carry their term on the wire; an existing entry is replaced only when its term differs from the leader's, never within a term; a superseded leader steps down. Tests cover two leaders claiming one term, replacement of a divergent tail, same-term conflicts, step-down, and a leader change concurrent with appends. A same-term content conflict is rejected and needs a snapshot to reconcile. Crash and network-partition campaigns remain. |
+| F07: quorum/idempotency | Core fix implemented | A publish that reaches the log and then fails (replication, requested fsync, or scheduling) is held: its events are not scheduled and its message IDs are recorded as appended at their offsets, distinct from accepted. A retry finishes that publish instead of appending again; so does the next publish that reaches the replicas, or follower catch-up, if nobody retries. After a restart or promotion the log position is recorded, so a retry is answered from the log; claims left by a crash are dropped when the store opens. Remaining: CDC still observes an event when it is appended, before it is accepted; a requested durable ACK still does not prove follower fsync; dedup recovery covers the last 500,000 log entries. |
+| F08: leadership/handoff | Core fix implemented | The Raft-committed assignment is the only source of leadership: a node leads, and reports that it leads, only what is committed to it, never what its hash ring alone suggests. Failover elects the reachable replica with the most complete log and waits for enough replicas to answer that no acknowledged write can be missing. A rebalance moves leadership by a staged handoff: the leader stops accepting publishes, the target's log is shown to be equal, and only then is the change committed. New clusters assign leaders once membership has settled; a node unloads partitions it no longer holds; `/health/ready` reports whether publishes are served. Exercised with three nodes on one machine (one node killed; nothing accepted was lost and the survivors' logs matched). Remaining: loss of the Raft leader during a handoff, network partitions, multi-machine runs, and a fault campaign. |
+| F09: snapshot transfer | Partial | Stable checkpoint copy, per-file validation, filename checks, and install journal added. The checkpoint now copies files without holding the WAL lock, so appends continue; every crash point of an install recovers to one complete generation (tested, including a crash during recovery); a snapshot from a node behind the replica's accepted epoch is refused and the installed epoch is persisted; a replica brought up by snapshot rebuilds timers and dedup records when promoted (tested). Remaining: transfer resume, large-partition bootstrap measurements, and detection of interior damage in a staged checkpoint (see F10). |
 | F10: key mismatch/corruption | Partial | Wrong-key recovery and unreadable-segment skipping now fail closed; wrong-key regression passes. Interior corruption versus torn-tail policy and explicit repair/lost-offset procedure remain. |
 | F11: DLQ | Partial | Record-length/reopen defect and batch payload handling addressed. Format compatibility, corruption/tail repair, encryption, retention, and final-disposition validation remain. |
 | F12: unordered time queries | Fixed with regressions | Correct full scans replace invalid timestamp pruning/index assumptions. Tests cover shuffled records across segment rotation and reopening. Full-scan cost remains a performance consideration under F17. |
-| F13: SDK consumption | Partial | Stream infrastructure is canceled before waiting; cancellation cause also preserved for producer RPCs. Default consumption across all relevant partitions and retained-data reconnect tests remain. |
+| F13: SDK consumption | Partial | Stream infrastructure is canceled before waiting; cancellation cause also preserved for producer RPCs. An unpinned SDK consumer opens one stream per partition, with a regression that publishes across four partitions. Assignment between several consumers of one group and reconnect tests against a multi-node cluster remain. |
 | F14: deployment | Partial | CLI precedence fixed; chart now wires bootstrap seeds, routable addresses, persistent Raft path, auth policy, private key staging, probes, placement, and shutdown grace. Image builds dashboard and uses Go 1.26.7/locked Rust dependencies. Render assertions pass; actual Linux image/chart startup still requires the new CI smoke job. |
-| F15: backup/retention | Partial | Standalone WAL checkpoints, independent event-log restore, and completion-aware live pruning now have regressions. Backups omit consumer/dedup/Raft state and keys; replica-safe deletion, cross-partition consistency, and production restore exercises remain. See the [maintenance validation](MAINTENANCE_VALIDATION_2026-09-29.md). |
+| F15: backup/retention | Partial | Backups now hold each partition's log, consumer groups with offsets and completions, dedup store, dead-letter queue and epoch, captured in an order that is safe to restore, with the size and CRC of every file in the manifest. `cronos-admin restore` checks every file and restores into an empty data directory, all partitions or none; tests cover damaged, incomplete and misplaced backups, and one backup was restored and served by the real binary. Completion-aware live pruning has regressions. Remaining: Raft metadata, encryption keys and credentials are not in a backup; backups are per partition, not cluster-consistent, and are full copies on a fixed hourly schedule; replica-safe deletion; restore exercises on Linux. See the [maintenance validation](MAINTENANCE_VALIDATION_2026-09-29.md). |
 | F16: transactions/splits | Contained for first release | Transactions and splitting are disabled by default and require --dev --experimental-features. Production rejects this opt-in and exactly-once commits. Public-RPC tests verify disabled endpoints; underlying experimental state machines remain unsupported. |
-| F17: overload/latency | Partial | Worker event-count and estimated-byte caps added. Byte-bounded queues throughout, quorum latency/deadlines, CDC failure behavior, and sustained overload measurements remain. |
+| F17: overload/latency | Partial | Worker event-count and estimated-byte caps added. Replication returns on quorum instead of waiting for every follower; sends to a slow follower stay ordered and bounded, and a skipped follower is caught up from the WAL; `--replication-timeout` is the Append deadline. `batch` fsync no longer syncs under the WAL lock: writers that append during a sync share the next one. An empty partition no longer allocates its bloom filter and consumer queue up front. Byte-bounded queues throughout, CDC failure behavior, and sustained overload measurements remain. |
 | F18: accounting/metrics | Partial | SLO interceptor counts semantic failure responses. Full accepted/delivered/expired/dropped accounting and lag/resource signals remain. |
 | F19: dependencies | Partial | Go module/toolchain, gRPC and dashboard lockfile updates present; Docker Go builder aligned. The archived Avro codec was replaced with a patched fork and explicit decoder limits after the first CI security scan failed. Release-artifact rescans and container/Rust security checks remain. |
 | F20: release gates | Partial | Linux cgo/race/vet/build/format checks, Rust and dashboard tests, Go/npm scans, chart assertions, and production-mode kind startup workflow added. CI execution and branch-protection enforcement remain unverified; full failure campaigns and independent restore gates remain. |
@@ -49,6 +49,73 @@ The next release-blocking work should establish the supported feature scope and
 acceptance/loss contract, then finish F03/F06–F09 and F13/F15, wire and exercise
 F14/F20, and measure F04/F17/F18 with a ledger of accepted event IDs. F01's public
 authorization tests and F19's release scans also remain release gates.
+
+### Fourth hardening batch — 2026-10-06
+
+This batch also changes the working tree only, and the verdict above is
+unchanged. The table rows for F03, F06, F07, F08, F09, F15, and F17 describe
+what moved. It also fixed these defects, which were not in the original
+findings:
+
+- **Log end reported as -1 after a segment rotation.** Until the next append,
+  `WAL.GetLastOffset` described the new, empty active segment. Replica
+  positions, elections, follower catch-up and timer replay all read it, and a
+  checkpoint taken in that state announced last offset -1, so installing it
+  failed.
+- **An empty follower was never caught up.** A follower with nothing in its
+  log reports next offset 0, which the leader ignored. A replica added after
+  the leader had data could only be brought up by snapshot.
+- **Dedup checkpoints were missing recent IDs.** The dedup store runs without
+  Pebble's own WAL, so its checkpoint held only what had reached an sstable.
+- **A crash could block a message ID until its TTL expired.** A claim written
+  before its event reached the log was never completed or released, and every
+  retry was refused as still pending.
+- **A WAL checkpoint stopped appends for the whole copy.**
+- **146 MB of memory per empty partition.** Every partition allocated a bloom
+  filter for the configured capacity (100 million IDs by default) and a
+  one-million-entry consumer queue when it was created. Both are now allocated
+  on first use, which leaves 12 MB.
+
+Verified here: the Go suite passes on Windows/amd64 both pure-Go and with cgo
+and `-race`. With three nodes on one machine, replication factor 3 and
+`min-insync-replicas=2`: 60,000 events were published, one node was killed,
+every partition got a new leader holding exactly the accepted events, 40,000
+more were accepted, and the two survivors' logs were identical. A backup was
+restored with `cronos-admin restore` and the server started on the restored
+directory. The tests for the empty-follower catch-up, the dedup checkpoint and
+the log end after a rotation were run without their fixes and fail there.
+
+Not verified: Linux runtime behavior, more than one machine, network
+partitions, loss of the Raft leader during a handoff, and any fault campaign.
+Cluster runs were kept to at most 720,000 events because of memory on the test
+host; see the [throughput follow-up](CLUSTER_PERFORMANCE_VALIDATION_2026-09-29.md#second-follow-up--2026-10-06).
+
+### Third hardening batch — 2026-10-06
+
+This batch changes the working tree only; the verdict above is unchanged. The
+table rows for F03, F04, F13, and F17 describe what moved. It also fixed five
+defects that were not in the original findings:
+
+- **Publish stall on every leadership reconcile.** The epoch file was rewritten
+  and fsynced every 5 seconds per led partition under the partition manager's
+  write lock. See the [throughput follow-up](CLUSTER_PERFORMANCE_VALIDATION_2026-09-29.md#follow-up--2026-10-06).
+- **WAL flush I/O under the append lock.** The periodic flush wrote mapped pages
+  to disk while holding the WAL lock, and a flush waiting behind an fsync held
+  the segment read lock, parking the next append.
+- **Two system calls per record on every WAL read.** Range reads, replay,
+  follower catch-up, and recovery scans read each record's length and body
+  separately; measured at about 20,000 events/s. Reads now use block reads.
+- **Poison messages redelivered after dead-lettering.** A dead-lettered event had
+  no completion record, so the WAL redrive handed it out again on every pass.
+- **Consumer store use after close.** An ack or redelivery scan still running at
+  shutdown called into a closed Pebble store, which panics.
+
+Verified here: the Go suite passes on Windows/amd64 both pure-Go and with cgo and
+`-race`; each fix has a regression test, and the tests for the epoch stall,
+quorum wait, WAL flush lock, and all-partition consumption were run against the
+previous revision and fail there. Not verified: Linux runtime behavior (the
+changed packages only cross-compile and vet), multi-node failover, and any
+fault campaign. Completion state is still local to the partition leader.
 
 ### Second hardening batch
 

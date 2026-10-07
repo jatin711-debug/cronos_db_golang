@@ -6,17 +6,30 @@ hardening changes were preserved.
 
 ## Behavior
 
-- Scheduled backups checkpoint every loaded partition's WAL, including its active
-  segment, into `backups/backup-*/partitions/<id>`. `backup.json` identifies the
-  partitions and last offsets. A generation becomes visible only when every
-  checkpoint succeeds. Failed attempts do not expire previous backups. Shutdown
+- Scheduled backups capture every loaded partition into
+  `backups/backup-*/partitions/<id>`, laid out like the partition's data
+  directory: the WAL including its active segment, consumer groups with their
+  offsets and completion records, the dedup store, the dead-letter queue, and
+  the fencing epoch (updated 2026-10-06; earlier generations hold the WAL
+  only). `backup.json` lists the partitions, their last offsets, and the size
+  and CRC-32 of every file. A generation becomes visible only when every
+  partition succeeds. Failed attempts do not expire previous backups. Shutdown
   waits for active backup and retention work before closing the WAL.
-- Each generation is independent. Restore `partitions/<id>` with
-  `storage.RestoreWAL` into fresh partition storage and provide the original key
-  for encrypted data. Tests restore both plaintext and encrypted generations
-  after later source writes. These are **event-log backups**: consumer progress,
-  dedup state, Raft metadata, keys and cross-partition atomicity are outside their
-  scope. Restoring may redeliver events.
+- A partition is captured while it serves traffic, in an order that makes the
+  result safe to restore: the log is copied last, so the other stores describe
+  a slightly older moment than the log and never a newer one. A restored node
+  may deliver again what was completed just before the backup. It cannot hold
+  a completion or dedup record for an offset its log does not contain, which
+  would silently drop the next event given that offset.
+- Each generation is independent. With the node stopped,
+  `cronos-admin restore --from <backup-dir> --data-dir <dir>` checks every file
+  against the manifest and restores all partitions or none; it refuses a data
+  directory that already holds one of them. Start the node on the restored
+  directory and provide the original key for encrypted data; timers are rebuilt
+  from the log. Tests restore plaintext and encrypted logs after later source
+  writes, a whole partition's state into a fresh node, and damaged, incomplete
+  and misplaced backups. Outside a backup's scope: Raft metadata, encryption
+  keys, credentials, and consistency across partitions.
 - Automatic compaction and both admin APIs use the live WAL's deletion lock.
   Every event must be past due and have a per-event completion record in every
   matching assigned consumer group. No matching group means keep the event.

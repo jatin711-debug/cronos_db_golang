@@ -23,7 +23,9 @@ Storage module provides durable append-only event persistence with indexed reads
    - `batch` (default) — **group-commit** fsync (concurrent writers share one sync)
    - `periodic` — background / coalescer flush with a bounded loss window
 4. Segment rotation keeps prior segments **readable**; compaction and retention reclaim space.
-5. Backup scheduler periodically copies closed segments.
+5. The backup scheduler periodically checkpoints every partition, including
+   the active segment. A checkpoint pauses appends only while it notes where
+   each file ends; the bytes are copied while appends continue.
 
 ## Production Decisions
 

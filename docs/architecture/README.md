@@ -39,7 +39,7 @@ Details and mermaid: [ARCHITECTURE.md § Known Limitations](../../ARCHITECTURE.m
 |-----|------------|---------------------|-------------|
 | **Lag-driven snapshot** | Bulk `InstallSnapshot` on join / `SyncPartitionFromLeader`; `--snapshot-catchup-threshold` (default 10000) | Mid-flight auto-snapshot when a connected follower’s lag exceeds threshold | [replication.md](features/replication.md) |
 | **Admin TriggerRebalance** | Automatic rebalance on membership + Raft reconcile (~5s) | On-demand `TriggerRebalance` RPC/UI is a soft stub (descriptive response) | [cluster.md](features/cluster.md), [dashboard.md](features/dashboard.md) |
-| **Deep delivery requeue** | Credits, CB, DLQ, backpressure **metrics**, resume-from-committed offset | Worker-level redrive queue that re-WAL-drives every credit-skipped ready event | [delivery.md](features/delivery.md) |
+| **Delivery redrive** | Credits, CB, DLQ, backpressure metrics; held-back events are redelivered from the WAL when credits return; backlog drained on subscribe | Progress for a group with no connected subscriber; replicated completion state | [delivery.md](features/delivery.md) |
 
 ## Start Here
 

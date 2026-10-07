@@ -30,40 +30,48 @@ The delivery module moves scheduled events to subscribers with backpressure, ret
 - Credit-based flow control and in-flight limits protect memory under slow consumers.
 - Publish-side admission (ready-queue / wheel / memory) lives in [partition/backpressure.go](../../../internal/partition/backpressure.go).
 
-## Known Limitation: deep requeue under backpressure
+## Redrive under backpressure
 
-This is an **intentional deferred** behavior (remediation plan item 2.5). It **is** part of the
-architecture story—not an undocumented footgun.
-
-### What works today
+Delivery is push-first: the scheduler hands ready events to the worker, and the
+dispatcher sends them to a subscriber with credits. Anything that path cannot
+hand over is redelivered from the WAL.
 
 | Mechanism | Behavior |
 |-----------|----------|
-| Credits | No credit → skip this dispatch pass; metric `cronos_dispatcher_backpressure_skips_total{reason="no_credits"}` |
-| In-flight cap | Cap hit → skip/reserve fail with metrics; protects memory |
+| Credits | No credit → the event is held back, counted in `cronos_dispatcher_backpressure_skips_total{reason="no_credits"}`, and its offset is queued for redrive |
+| In-flight cap | Cap hit → same, with `reason="in_flight_cap"` |
+| Worker queue | The worker keeps at most 10,000 ready events (64 MiB); the rest are queued for redrive for every group, `reason="worker_capacity"` |
+| Disconnect / failed send | Unacked deliveries of that subscriber are queued for redrive to the rest of its group |
 | Circuit breaker | Open circuit skips send without burning credits |
-| Durability | Event remains in **WAL**; not deleted by a skip |
-| Resume | Subscribe seeds from **committed offset** so reconnect can resume progress |
-| Poison path | After max retries → **DLQ** (wired at partition create) |
+| Poison path | After max retries → **DLQ**, and the event is recorded complete for the group so it is not delivered again |
 
-### What is deferred
+Each subscription runs `redriveRetained` (`internal/api/handlers.go`), which reads
+the WAL from three sources in priority order:
 
-- A **worker-level redrive queue** that, after every credit/in-flight skip, explicitly re-schedules
-  the event for another dispatch attempt from the WAL without relying on a later batch or reconnect.
-- Full “at-least-once even when consumers stay at zero credits indefinitely” without operator
-  intervention (reconnect, credit grant, scale consumers).
+1. **Queued ranges** — offsets the dispatcher reported as held back
+   (`Dispatcher.RequestRedrive`), re-read as soon as an ack returns credits.
+2. **Backlog** — records between the group's committed offset and the end of the
+   log when the subscription started, read once at the pace credits allow.
+3. **Sweep** — 256 records every 500 ms from the group's first incomplete offset,
+   as a safety net for anything not explicitly queued.
 
-### Why deferred
+The dispatcher skips records already completed or in flight for the group, so a
+range offered twice is not delivered twice.
 
-True requeue changes the push-based delivery model and risks double-delivery / hot-path
-complexity. Observability (metrics) landed first; redrive is follow-up work.
+### Limits
+
+- Redrive runs inside a subscription stream. A group with no connected
+  subscriber makes no progress until one connects.
+- Redelivery does not preserve offset order, and duplicates remain possible
+  after a crash or ack timeout (at-least-once).
+- Completion records live on the partition leader and are not replicated.
 
 ### Operator guidance
 
-1. Watch `cronos_dispatcher_backpressure_skips_total`.
-2. Ensure consumers ack and replenish credits.
-3. On prolonged stalls, reconnect consumers (resume-from-committed) or scale consumer concurrency.
-4. Do not assume every ready-queue event is in-flight to a subscriber if credits are zero.
+1. Watch `cronos_dispatcher_backpressure_skips_total`: it counts events deferred to
+   redrive. Sustained growth means consumers are slower than publishers.
+2. Ensure consumers ack; acks return credits and resume redrive.
+3. Scale consumer concurrency or credits (`max_buffer_size`) when a backlog builds.
 
 Canonical cross-link: [ARCHITECTURE.md § Known Limitations](../../../ARCHITECTURE.md#known-limitations).
 
