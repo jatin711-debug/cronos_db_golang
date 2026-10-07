@@ -172,12 +172,55 @@ func (h *ReplicationServiceHandler) Append(ctx context.Context, req *types.Repli
 		}
 	}
 
+	if err := dropForeignTail(p, req); err != nil {
+		return reject(err.Error())
+	}
+
 	return &types.ReplicationAppendResponse{
 		Success:    true,
 		LastOffset: p.Wal.GetLastOffset(),
 		NextOffset: p.Wal.GetNextOffset(),
 		Term:       p.Epoch(),
 	}, nil
+}
+
+// dropForeignTail removes what this replica holds beyond the end of the
+// leader's log, if another leader wrote it.
+//
+// Entries that reach a replica are compared with the leader's one by one,
+// and a tail of another term is replaced then. But a leader sends entries
+// only when it has some, and a replica can hold a tail the leader never had:
+// an old leader's unreplicated appends, or, after a restore, the last entry
+// of a backup that was cut a moment later than the others. Until somebody
+// published, that replica's log stayed longer than the leader's. A handoff
+// of leadership waits for the two logs to be equal and refuses publishes
+// while it waits, so it could neither finish nor let the publish through
+// that would have ended the difference.
+//
+// The entry at the leader's end decides. An entry there of the leader's own
+// term arrived with a later request than this one, which may be an old one
+// delivered late, and stays. An entry of another term is not in the leader's
+// log and never will be: the leader writes its own term there next. Terms do
+// not decrease along a log, so everything after that entry goes with it.
+func dropForeignTail(p *partition.Partition, req *types.ReplicationAppendRequest) error {
+	end := req.GetLeaderLogEnd()
+	if end <= 0 || end >= p.Wal.GetNextOffset() || end < p.Wal.GetFirstOffset() {
+		return nil
+	}
+	local, err := p.Wal.ReadEvent(end)
+	if err != nil {
+		return fmt.Errorf("read offset %d, beyond the end of the leader's log: %w", end, err)
+	}
+	if local.GetTerm() <= 0 || local.GetTerm() == req.GetTerm() {
+		return nil // written before terms were kept, or by this leader
+	}
+	removed, err := p.Wal.TruncateToOffset(end)
+	if err != nil {
+		return fmt.Errorf("remove the log tail beyond the leader's end at offset %d: %w", end, err)
+	}
+	slog.Warn("Removed log tail beyond the end of the leader's log, written under another leader",
+		"partition", p.ID, "from_offset", end, "local_term", local.GetTerm(), "leader_term", req.GetTerm(), "entries", removed)
+	return nil
 }
 
 // logMismatch checks that this replica's log agrees with the leader's at the

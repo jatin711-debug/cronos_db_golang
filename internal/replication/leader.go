@@ -528,6 +528,10 @@ func (l *Leader) appendToFollower(f *FollowerInfo, events []*types.Event, checks
 	}
 	if l.wal != nil {
 		req.LogStartOffset = l.wal.GetFirstOffset()
+		// Where this log ends. A follower that holds more, written under
+		// another leader, drops it: a new leader that takes no publishes
+		// would otherwise never send anything that replaces such a tail.
+		req.LeaderLogEnd = max(l.wal.GetNextOffset(), lastSent+1)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), l.getReplicateTimeout())
