@@ -244,6 +244,11 @@ func (w *WAL) loadSegments() error {
 		}
 
 		w.segments = append(w.segments, segment)
+	}
+	if err := w.judgeInvalidTails(); err != nil {
+		return err
+	}
+	for _, segment := range w.segments {
 		w.nextOffset.Store(segment.GetLastOffset() + 1)
 		w.highWatermark = segment.GetLastOffset()
 	}
@@ -252,6 +257,69 @@ func (w *WAL) loadSegments() error {
 		log.Printf("[WAL-%d] Loaded %d segments, nextOffset=%d", w.partitionID, len(w.segments), w.nextOffset.Load())
 	}
 
+	return nil
+}
+
+// ErrLogDamaged is returned when a log holds bytes that are not valid records
+// in a place where an interrupted write cannot have left them.
+var ErrLogDamaged = errors.New("log is damaged")
+
+// judgeInvalidTails decides what the bytes that are not valid records mean,
+// for every segment that has some after its last valid record.
+//
+// At the end of the log they are what a crash leaves behind: the last write
+// had not finished. The log ends before them, as it did for everyone who was
+// told so; with a synced fsync mode nothing that was acknowledged lies there.
+// The end of the log is the last segment that holds records. A segment
+// created by a rotation just before the crash may follow it, empty, and is
+// removed if the log now ends earlier than that segment begins.
+//
+// Anywhere before that they are damage. Segments are closed complete, so
+// valid records were there once, and later segments hold what was written
+// after them. Taking such bytes for the end of the segment, as opening a
+// segment does, would drop the events behind them without a word and leave
+// the log with a hole. The log refuses to open instead.
+func (w *WAL) judgeInvalidTails() error {
+	end := -1 // index of the last segment that holds records
+	for i, segment := range w.segments {
+		if segment.GetLastOffset() >= segment.GetFirstOffset() {
+			end = i
+		}
+	}
+	for i, segment := range w.segments {
+		invalid, position, found := segment.InvalidTail()
+		if !invalid {
+			continue
+		}
+		if i < end {
+			next := w.segments[i+1]
+			return fmt.Errorf("%w: segment %s holds %s at byte %d, after offset %d, and later segments hold events from offset %d on; "+
+				"the events in between cannot be read. A replica of a cluster is repaired by removing this partition's directory while the node is stopped: "+
+				"the leader fills it again. A partition without another replica is restored from a backup, or cut at the damage with "+
+				"'cronos-admin check-log --repair', which gives up the events that cannot be read",
+				ErrLogDamaged, segment.GetFilename(), found, position, segment.GetLastOffset(), next.GetFirstOffset())
+		}
+		log.Printf("[WAL-%d] WARNING: segment %s holds %s at byte %d. The log ends before it, at offset %d: this is what an interrupted write leaves behind",
+			w.partitionID, segment.GetFilename(), found, position, segment.GetLastOffset())
+		if err := segment.clearInvalidTail(); err != nil {
+			return fmt.Errorf("segment %s: %w", segment.GetFilename(), err)
+		}
+	}
+
+	// A rotation shortly before a crash can leave an empty segment that begins
+	// after the offsets of a write that was lost with the crash.
+	for end >= 0 && len(w.segments) > end+1 {
+		last := w.segments[len(w.segments)-1]
+		if last.GetFirstOffset() == w.segments[end].GetLastOffset()+1 {
+			break
+		}
+		log.Printf("[WAL-%d] Removing empty segment %s: the log ends at offset %d, before the segment begins",
+			w.partitionID, last.GetFilename(), w.segments[end].GetLastOffset())
+		if err := last.Delete(); err != nil {
+			return fmt.Errorf("remove empty segment %s: %w", last.GetFilename(), err)
+		}
+		w.segments = w.segments[:len(w.segments)-1]
+	}
 	return nil
 }
 
