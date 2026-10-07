@@ -559,6 +559,24 @@ func (r *Router) UpdatePartitionAssignment(partitionID int32, leaderID string, r
 	info.State = PartitionStateOnline
 }
 
+// KeepLeader makes the ring's entry name leaderID as the leader it wants for
+// a partition, until the ring is next computed from the membership. An
+// election calls it so that the leader it chose is not handed off at once to
+// the node the ring would have picked.
+//
+// It leaves the replicas alone. They are where the ring wants the partition
+// to live, and the ring's entry may be the only place that says a node which
+// has come back belongs to the partition again: an election that wrote the
+// replica list it started from over the entry made the cluster forget such a
+// node until the membership changed once more.
+func (r *Router) KeepLeader(partitionID int32, leaderID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if info, exists := r.assignments[partitionID]; exists {
+		info.LeaderID = leaderID
+	}
+}
+
 // UpdatePartitionISR updates the in-sync replica set for a partition.
 func (r *Router) UpdatePartitionISR(partitionID int32, isr []string) {
 	r.mu.Lock()

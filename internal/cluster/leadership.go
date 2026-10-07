@@ -402,8 +402,15 @@ func (m *Manager) electNewLeader(partitionID int32, info *PartitionInfo) {
 			return
 		}
 	}
-	if rt != nil {
+	switch {
+	case rt == nil:
+	case store == nil:
+		// Nothing is committed anywhere: the router's entry is the record.
 		rt.UpdatePartitionAssignment(partitionID, newLeader, updated.Replicas, updated.ISR)
+	default:
+		// The election stands until the membership changes again; the ring's
+		// placement is not this function's to change (see KeepLeader).
+		rt.KeepLeader(partitionID, newLeader)
 	}
 	log.Printf("[CLUSTER] Partition %d new leader: %s (was %s)", partitionID, newLeader, oldLeader)
 	// Promotion and demotion follow from the committed assignment.
@@ -771,7 +778,8 @@ func (m *Manager) advanceTransfers() {
 			log.Printf("[CLUSTER] Partition %d: failed to complete handoff to %s: %v", partitionID, target, err)
 			continue
 		}
-		rt.UpdatePartitionAssignment(partitionID, target, done.Replicas, done.ISR)
+		// The ring's entry is left as the ring has it: what was read from it
+		// above may be older than what it says now.
 		log.Printf("[CLUSTER] Partition %d: leadership handed off %s -> %s at offset %d", partitionID, leader, target, leaderPos.LastOffset)
 	}
 }
