@@ -272,12 +272,72 @@ func mostCompleteReplica(positions map[string]ReplicaPosition) string {
 			best = id
 			continue
 		}
-		p, b := positions[id], positions[best]
-		if p.LastTerm > b.LastTerm || (p.LastTerm == b.LastTerm && p.LastOffset > b.LastOffset) {
+		if moreComplete(positions[id], positions[best]) {
 			best = id
 		}
 	}
 	return best
+}
+
+// moreComplete reports whether log a ends after log b: in a later term, or in
+// the same term at a higher offset.
+func moreComplete(a, b ReplicaPosition) bool {
+	return a.LastTerm > b.LastTerm || (a.LastTerm == b.LastTerm && a.LastOffset > b.LastOffset)
+}
+
+// epochAbove returns an epoch above every epoch the replicas report having
+// accepted, and not below atLeast. A replica refuses a leader at an epoch
+// lower than the one it holds, and the cluster's own count says nothing about
+// replicas whose data came from a backup of another cluster's life.
+func epochAbove(positions map[string]ReplicaPosition, atLeast int64) int64 {
+	for _, p := range positions {
+		if p.Epoch >= atLeast {
+			atLeast = p.Epoch + 1
+		}
+	}
+	return atLeast
+}
+
+// adoptReplicaState fits a partition's first assignment to what its replicas
+// already hold. In a new cluster that is nothing, and the ring's choice
+// stands. After a restore the replicas hold logs, possibly of different
+// lengths because each node's backup is its own, and epochs from before: the
+// most complete replica must lead, or the others' entries beyond its log
+// would be replaced, and the epoch must be above what any of them accepted.
+//
+// It reports false when it has not heard from enough replicas to decide; the
+// assignment is then left for the next round. unanswered collects the nodes
+// that did not answer, so that one silent node is waited for once per round
+// and not once per partition.
+func (m *Manager) adoptReplicaState(assigned *PartitionInfo, alive map[string]string, unanswered map[string]bool) bool {
+	nodes := make(map[string]string, len(assigned.Replicas))
+	for _, id := range assigned.Replicas {
+		if addr, ok := alive[id]; ok && !unanswered[id] {
+			nodes[id] = addr
+		}
+	}
+	positions := m.replicaPositions(assigned.ID, nodes)
+	for id := range nodes {
+		if _, ok := positions[id]; !ok {
+			unanswered[id] = true
+		}
+	}
+	// As in an election: every acknowledged write is on at least minISR
+	// replicas, so this many answers include one that has it. The replica the
+	// ring would have lead must be among them.
+	need := min(max(len(assigned.Replicas)-max(m.config.MinInSyncReplicas, 1)+1, 1), len(assigned.Replicas))
+	leaderPos, leaderAnswered := positions[assigned.LeaderID]
+	if len(positions) < need || !leaderAnswered {
+		return false
+	}
+
+	assigned.Epoch = epochAbove(positions, max(assigned.Epoch, 1))
+	if best := mostCompleteReplica(positions); moreComplete(positions[best], leaderPos) {
+		log.Printf("[CLUSTER] Partition %d: first leader is %s, whose log is the most complete (offset %d), not the ring's choice %s (offset %d)",
+			assigned.ID, best, positions[best].LastOffset, assigned.LeaderID, leaderPos.LastOffset)
+		assigned.LeaderID = best
+	}
+	return true
 }
 
 // electNewLeader replaces a dead partition leader. It asks the surviving
@@ -304,8 +364,9 @@ func (m *Manager) electNewLeader(partitionID int32, info *PartitionInfo) {
 	}
 
 	newLeader := ""
+	var positions map[string]ReplicaPosition
 	if hasPositions {
-		positions := m.replicaPositions(partitionID, candidates)
+		positions = m.replicaPositions(partitionID, candidates)
 		need, guaranteed := cleanElectionQuorum(len(info.Replicas), m.config.MinInSyncReplicas)
 		if guaranteed && len(positions) < need {
 			log.Printf("[CLUSTER] Partition %d: not electing a leader, only %d of the %d replicas needed to rule out losing acknowledged writes answered",
@@ -331,7 +392,7 @@ func (m *Manager) electNewLeader(partitionID int32, info *PartitionInfo) {
 		LeaderID:       newLeader,
 		Replicas:       info.Replicas,
 		ISR:            info.ISR,
-		Epoch:          info.Epoch + 1,
+		Epoch:          epochAbove(positions, info.Epoch+1),
 		State:          PartitionStateOnline,
 		ReplicaOffsets: info.ReplicaOffsets,
 	}
@@ -549,6 +610,7 @@ func (m *Manager) syncClusterState() {
 	alive := m.aliveNodes()
 	committedAll := store.Partitions()
 	settled := m.membershipSettled()
+	unanswered := make(map[string]bool)
 	for partitionID, ring := range rt.DesiredAssignments() {
 		if ring.LeaderID == "" {
 			continue
@@ -562,6 +624,9 @@ func (m *Manager) syncClusterState() {
 				continue // the cluster is still forming; see initialAssignmentSettle
 			}
 			assigned := ring.clone()
+			if hasPositions && !m.adoptReplicaState(&assigned, alive, unanswered) {
+				continue // too few replicas have said what they hold; next round
+			}
 			if err := store.ProposePartition(&assigned, true); err != nil {
 				log.Printf("[CLUSTER] Failed to sync partition %d metadata to Raft: %v", partitionID, err)
 			}
@@ -698,6 +763,7 @@ func (m *Manager) advanceTransfers() {
 		}
 
 		done := info.clone()
+		done.Epoch = epochAbove(positions, info.Epoch+1)
 		done.LeaderID = target
 		done.Replicas, done.ISR = ring[partitionID].Replicas, ring[partitionID].ISR
 		done.State, done.TransferTo, done.TransferStartedMs = PartitionStateOnline, "", 0

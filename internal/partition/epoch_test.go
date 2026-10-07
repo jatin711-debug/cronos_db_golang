@@ -1,6 +1,7 @@
 package partition
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -173,5 +174,59 @@ func TestAcceptLeadershipUpgradesUnattributedEpoch(t *testing.T) {
 	}
 	if got := storedEpoch(t, epochFile); got.Epoch != 7 || got.LeaderID != "node-a" {
 		t.Fatalf("stored leadership = %+v, want epoch 7 held by node-a", got)
+	}
+}
+
+// A node reports the position of a partition it holds on disk even when it
+// has not loaded it, which is how every partition starts after a restart. A
+// partition it has never held stays unknown, and asking does not create it.
+func TestLocalReplicaPosition_LoadsThePartitionFromDisk(t *testing.T) {
+	cfg := unacceptedTestConfig(t)
+	cfg.PartitionCount = 4
+	cfg.ClusterEnabled = true
+
+	first := NewPartitionManager("node-1", cfg)
+	if err := first.PromoteToLeader(2, 7); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := first.GetInternalPartition(2)
+	for i := 0; i < 5; i++ {
+		if err := p.Wal.AppendEvent(&types.Event{MessageId: fmt.Sprintf("m%d", i), Topic: "orders", Payload: []byte("p"), ScheduleTs: 1}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// The node restarts. In a cluster nothing is loaded until it is used.
+	restarted := NewPartitionManager("node-1", cfg)
+	t.Cleanup(func() { restarted.Close() })
+	if _, err := restarted.GetInternalPartition(2); err == nil {
+		t.Fatal("setup: the partition is loaded before anything asked for it")
+	}
+
+	position := restarted.LocalReplicaPosition(2)
+	if !position.Found || position.LastOffset != 4 || position.Epoch != 7 {
+		t.Fatalf("position of a partition on disk = %+v, want found, last offset 4, epoch 7", position)
+	}
+	if position.AcceptingWrites {
+		t.Fatal("a partition loaded to report its position claims to accept writes")
+	}
+
+	// The epoch it reports is what a new cluster has to continue from: this
+	// replica refuses to lead at an epoch it has already passed.
+	if err := restarted.PromoteToLeader(2, 1); err == nil {
+		t.Fatal("a replica that accepted epoch 7 was promoted at epoch 1")
+	}
+	if err := restarted.PromoteToLeader(2, position.Epoch+1); err != nil {
+		t.Fatalf("promotion above the reported epoch: %v", err)
+	}
+
+	if unknown := restarted.LocalReplicaPosition(3); unknown.Found || unknown.LastOffset != -1 {
+		t.Fatalf("position of a partition this node never held = %+v", unknown)
+	}
+	if _, err := os.Stat(filepath.Join(cfg.DataDir, "partitions", "3")); !os.IsNotExist(err) {
+		t.Fatalf("asking for the position of an unknown partition created it (err=%v)", err)
 	}
 }

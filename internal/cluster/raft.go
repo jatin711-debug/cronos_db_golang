@@ -503,7 +503,10 @@ func (f *ClusterFSM) applyUpdatePartition(payload json.RawMessage) interface{} {
 		existing.State = info.State
 		existing.TransferTo = info.TransferTo
 		existing.TransferStartedMs = info.TransferStartedMs
-		existing.Epoch++
+		// Every change raises the epoch. A proposal may ask for a higher one:
+		// replicas restored from a backup have accepted epochs this cluster
+		// never issued, and would refuse a leader below them.
+		existing.Epoch = max(existing.Epoch+1, info.Epoch)
 		// Preserve replica offsets across the update. Dropping them here left the
 		// map nil, so failover election (electNewLeader) saw offset 0 for every
 		// candidate and picked the alphabetically-first replica — an unclean
