@@ -67,6 +67,9 @@ type Partition struct {
 	Leader bool
 	// Epoch is the cluster-assigned epoch for split-brain fencing (Raft term).
 	Epoch int64
+	// EpochLeader is the node whose writes this replica accepts at Epoch. Empty
+	// when the epoch was recorded before any leader identified itself.
+	EpochLeader string
 	// MinKey is the inclusive lower key boundary for range-partitioned keys.
 	// Empty means no lower bound.
 	MinKey string
@@ -86,23 +89,104 @@ type Partition struct {
 	// replayErr holds the last WAL timer-replay error, if any.
 	replayErr        atomic.Pointer[error]
 	retentionBlocked bool // immutable: clustered/replicated completion is not yet safely prunable
+	// persistedEpoch and persistedLeader mirror epoch.json (0 = nothing stored).
+	persistedEpoch  int64
+	persistedLeader string
+	// publishing counts publishes between BeginPublish and EndPublish.
+	publishing atomic.Int64
+	// held lists, in offset order, the events that are in the log but whose
+	// publish was not accepted (see unaccepted.go). heldCount mirrors its
+	// length for the publish path.
+	heldMu    sync.Mutex
+	held      []heldRange
+	heldCount atomic.Int32
+}
+
+// BeginPublish marks a publish to this partition as in flight. Callers check
+// that the partition is writable only after calling it, and call EndPublish
+// when the publish has finished, whether it succeeded or not. That order is
+// what lets a leadership handoff tell when the log can no longer grow: once
+// the partition is not writable and nothing is in flight, no publish that
+// could still append exists.
+func (p *Partition) BeginPublish() { p.publishing.Add(1) }
+
+// EndPublish ends a publish started with BeginPublish.
+func (p *Partition) EndPublish() { p.publishing.Add(-1) }
+
+// leadershipRecord is the fencing state a replica keeps on disk: the highest
+// leadership epoch it has accepted and the node that holds it.
+type leadershipRecord struct {
+	Epoch    int64  `json:"epoch"`
+	LeaderID string `json:"leader_id,omitempty"`
+}
+
+// parseLeadershipRecord reads epoch.json. Older builds stored a bare number.
+func parseLeadershipRecord(data []byte) (leadershipRecord, error) {
+	var record leadershipRecord
+	if err := json.Unmarshal(data, &record.Epoch); err == nil {
+		return record, nil
+	}
+	err := json.Unmarshal(data, &record)
+	return record, err
 }
 
 // PersistEpoch durably fences older leaders before accepting their successors.
 // Callers serialize it with ReplicateMu and/or the manager lifecycle lock.
 func (p *Partition) PersistEpoch(epoch int64) error {
+	return p.AcceptLeadership(epoch, "")
+}
+
+// AcceptLeadership records, durably and before any of its writes are applied,
+// that leaderID holds epoch on this replica. It refuses an epoch older than
+// the one already accepted, and a second node claiming an epoch that already
+// has a holder: a term has exactly one writer, which is what lets a follower
+// tell a deposed leader from its successor. An empty leaderID leaves the
+// holder open for the first node that identifies itself.
+//
+// Callers serialize it with ReplicateMu and/or the manager lifecycle lock.
+func (p *Partition) AcceptLeadership(epoch int64, leaderID string) error {
 	if epoch < p.Epoch {
 		return fmt.Errorf("epoch regression: %d < %d", epoch, p.Epoch)
 	}
-	data, err := json.Marshal(epoch)
+	holder := leaderID
+	if epoch == p.Epoch {
+		if p.EpochLeader != "" && leaderID != "" && leaderID != p.EpochLeader {
+			return fmt.Errorf("epoch %d is already held by %s", epoch, p.EpochLeader)
+		}
+		if holder == "" {
+			holder = p.EpochLeader
+		}
+	}
+	// Leadership reconciliation re-asserts the current epoch on every tick while
+	// holding the manager lock. Only a change needs the fsynced write; repeating
+	// it stalls every publish on this node behind that lock.
+	if epoch > 0 && epoch == p.persistedEpoch && holder == p.persistedLeader {
+		p.Epoch, p.EpochLeader = epoch, holder
+		return nil
+	}
+	data, err := json.Marshal(leadershipRecord{Epoch: epoch, LeaderID: holder})
 	if err != nil {
 		return err
 	}
 	if err := utils.AtomicWriteFile(p.DataDir+"/epoch.json", data, 0600); err != nil {
 		return err
 	}
-	p.Epoch = epoch
+	p.Epoch, p.EpochLeader = epoch, holder
+	p.persistedEpoch, p.persistedLeader = epoch, holder
 	return nil
+}
+
+// LogPosition returns the offset and term of the last entry in this replica's
+// log: (-1, 0) when it is empty.
+func (p *Partition) LogPosition() (lastOffset, lastTerm int64) {
+	lastOffset = p.Wal.GetLastOffset()
+	if lastOffset < 0 {
+		return -1, 0
+	}
+	if term, err := p.Wal.GetTermForOffset(lastOffset); err == nil {
+		lastTerm = term
+	}
+	return lastOffset, lastTerm
 }
 
 // GetReplayError returns the last WAL replay error for this partition, if any.
@@ -164,6 +248,14 @@ type PartitionManager struct {
 	splittingMu      sync.RWMutex         // protects splitting map
 	backpressureMgr  *BackpressureManager // memory + per-partition rate limits
 	fsyncCoalescer   *storage.FsyncCoalescer
+	// writable is the cluster's view of whether this node may accept publishes
+	// for a partition; nil means every led partition is writable.
+	writable func(partitionID int32) bool
+	// pinned partitions stay loaded even when this node holds no replica of
+	// them; releasing marks partitions whose stores are still being closed.
+	// Both are guarded by mu.
+	pinned    map[int32]bool
+	releasing map[int32]bool
 }
 
 // tenantAccountant is the minimal interface needed for delivery callbacks.
@@ -211,6 +303,10 @@ func NewPartitionManagerWithCache(nodeID string, config *types.Config, cache *pe
 
 // createPartitionLocked creates a new partition (assumes lock is held)
 func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic string) error {
+	// Its previous instance still holds the files until it has finished closing.
+	if pm.releasing[partitionID] {
+		return fmt.Errorf("partition %d is being released; retry", partitionID)
+	}
 	// Check if partition already exists
 	if _, exists := pm.partitions[partitionID]; exists {
 		return fmt.Errorf("partition %d already exists", partitionID)
@@ -299,6 +395,13 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 	}
 	dispatcher := delivery.NewDispatcherWithDLQ(dispatcherConfig, dlq)
 	dispatcher.IsCompleted = func(group string, offset int64) bool { return consumerGroup.IsCompleted(group, partitionID, offset) }
+	// A dead-lettered event has reached its final disposition for the group;
+	// without a completion record the WAL redrive would deliver it again.
+	dispatcher.OnDeadLettered = func(group string, events []*types.Event) {
+		if err := consumerGroup.CommitDelivery(group, partitionID, events); err != nil {
+			log.Printf("[Partition %d] record dead-letter disposition for group %s: %v", partitionID, group, err)
+		}
+	}
 
 	// Create worker. Batch size of 100 amortizes DispatchBatch overhead
 	// (metrics observe, map allocations, in-flight CAS, shard write-lock)
@@ -333,9 +436,12 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 	}
 
 	if data, err := os.ReadFile(dataDir + "/epoch.json"); err == nil {
-		if err := json.Unmarshal(data, &partition.Epoch); err != nil {
+		record, err := parseLeadershipRecord(data)
+		if err != nil {
 			return fmt.Errorf("read partition epoch: %w", err)
 		}
+		partition.Epoch, partition.EpochLeader = record.Epoch, record.LeaderID
+		partition.persistedEpoch, partition.persistedLeader = record.Epoch, record.LeaderID
 	} else if !os.IsNotExist(err) {
 		return err
 	}
@@ -749,11 +855,17 @@ func (pm *PartitionManager) recoverDedupFromWAL(partition *Partition) {
 			if minCreatedTS > 0 && ev.GetCreatedTs() > 0 && ev.GetCreatedTs() < minCreatedTS {
 				continue
 			}
-			if _, exists, err := partition.DedupStore.GetOffset(mid); err != nil || exists {
+			stored, exists, err := partition.DedupStore.GetOffset(mid)
+			if err != nil {
 				continue
 			}
-			// WAL presence alone proves no quorum/scheduling result.
-			if err := partition.DedupStore.Put(mid, -1, ev.GetCreatedTs()); err != nil {
+			if outcome, _ := dedup.DecodeOffset(stored); exists && (outcome == dedup.Accepted || stored == dedup.AppendedAt(ev.Offset)) {
+				continue
+			}
+			// The log holds the event, which does not show that its publish
+			// was accepted. Recording where it is lets a retry finish that
+			// publish instead of appending the event a second time.
+			if err := partition.DedupStore.Put(mid, dedup.AppendedAt(ev.Offset), ev.GetCreatedTs()); err != nil {
 				log.Printf("[Partition %d] Dedup recovery Put failed for %q: %v", partition.ID, mid, err)
 				continue
 			}
@@ -770,6 +882,8 @@ func (pm *PartitionManager) recoverDedupFromWAL(partition *Partition) {
 // schedule_ts is still in the future. This recovers timers lost during a crash.
 // Uses incremental checkpointing to avoid O(N) replay on each boot.
 func (pm *PartitionManager) replayWALTimers(partition *Partition) {
+	// Every event in the log is scheduled below, held or not.
+	partition.dropHeld()
 	lastOffset := partition.Wal.GetLastOffset()
 	if lastOffset < 0 {
 		return // Empty WAL, nothing to replay
@@ -961,6 +1075,11 @@ func (pm *PartitionManager) StopPartition(partitionID int32) error {
 	if err != nil {
 		return err
 	}
+	return stopPartition(partition)
+}
+
+// stopPartition stops a partition's workers and closes its stores.
+func stopPartition(partition *Partition) error {
 
 	// Signal delivery goroutines to stop FIRST to avoid circular lock deadlock
 	// Delivery goroutines read from deliveryQuit channel - closing it allows them to exit
@@ -1015,6 +1134,65 @@ func (pm *PartitionManager) StopPartition(partitionID int32) error {
 		}
 	}
 
+	return nil
+}
+
+// PinPartition keeps a partition loaded on this node whether or not the
+// cluster assigns it here. The node's first partition is pinned because the
+// public handlers are built on its stores.
+func (pm *PartitionManager) PinPartition(partitionID int32) {
+	pm.mu.Lock()
+	if pm.pinned == nil {
+		pm.pinned = make(map[int32]bool)
+	}
+	pm.pinned[partitionID] = true
+	pm.mu.Unlock()
+}
+
+// ReleasePartition unloads a partition that this node no longer leads or
+// holds a replica of: its timers and delivery stop, its stores are closed and
+// the manager forgets it. An idle partition otherwise keeps its memory, its
+// file handles and its preallocated log segment for as long as the process
+// runs, and its scheduler would go on firing timers for a log this node no
+// longer owns.
+//
+// The partition's directory is removed only if its log is empty. Otherwise
+// the files stay on disk, and the partition is reopened from them if it is
+// assigned to this node again.
+//
+// It is a no-op for a partition that is not loaded or is pinned, and an error
+// for one that is still leading or has a publish in flight.
+func (pm *PartitionManager) ReleasePartition(partitionID int32) error {
+	pm.mu.Lock()
+	partition, exists := pm.partitions[partitionID]
+	if !exists || pm.pinned[partitionID] {
+		pm.mu.Unlock()
+		return nil
+	}
+	if partition.Leader || partition.ReplLeader != nil || partition.publishing.Load() > 0 {
+		pm.mu.Unlock()
+		return fmt.Errorf("partition %d is still in use", partitionID)
+	}
+	delete(pm.partitions, partitionID)
+	if pm.releasing == nil {
+		pm.releasing = make(map[int32]bool)
+	}
+	pm.releasing[partitionID] = true
+	pm.mu.Unlock()
+
+	empty := partition.Wal != nil && partition.Wal.GetLastOffset() < 0
+	err := stopPartition(partition)
+	if err == nil && empty {
+		err = os.RemoveAll(partition.DataDir)
+	}
+
+	pm.mu.Lock()
+	delete(pm.releasing, partitionID)
+	pm.mu.Unlock()
+	if err != nil {
+		return fmt.Errorf("release partition %d: %w", partitionID, err)
+	}
+	log.Printf("[PARTITION] Partition %d released: this node no longer holds it (data removed=%v)", partitionID, empty)
 	return nil
 }
 
@@ -1146,16 +1324,22 @@ func (pm *PartitionManager) SyncPartitionFromLeader(partitionID int32, leaderAdd
 	}
 	pm.mu.Unlock()
 
-	// Set leader info
-	partition.Follower.SetLeader(fmt.Sprintf("leader-%d", partitionID), leaderAddr, 0)
-
 	// Perform bulk snapshot install.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 	partition.ReplicateMu.Lock()
 	defer partition.ReplicateMu.Unlock()
+	// The follower refuses a source that is behind the epoch accepted here.
+	partition.Follower.SetLeader(fmt.Sprintf("leader-%d", partitionID), leaderAddr, partition.Epoch)
 	if err := partition.Follower.InstallSnapshot(ctx, leaderAddr, partitionID, 0); err != nil {
 		return fmt.Errorf("install snapshot from leader %s: %w", leaderAddr, err)
+	}
+	// This replica now holds a log written up to the source's epoch, and must
+	// not take appends from an older leader after a restart either.
+	if epoch := partition.Follower.GetEpoch(); epoch > partition.Epoch {
+		if err := partition.PersistEpoch(epoch); err != nil {
+			return fmt.Errorf("record epoch %d of installed snapshot: %w", epoch, err)
+		}
 	}
 
 	log.Printf("[PARTITION] Partition %d synced from leader %s", partitionID, leaderAddr)
@@ -1184,7 +1368,9 @@ func (pm *PartitionManager) PromoteToLeader(partitionID int32, epoch int64) erro
 	if epoch <= 0 {
 		return fmt.Errorf("leadership epoch must be positive")
 	}
-	if err := partition.PersistEpoch(epoch); err != nil {
+	// Claim the epoch for this node. If another node already holds it here,
+	// this node may not lead until the cluster assigns a newer one.
+	if err := partition.AcceptLeadership(epoch, pm.nodeID); err != nil {
 		return err
 	}
 	if partition.ReplLeader != nil {
@@ -1215,8 +1401,24 @@ func (pm *PartitionManager) PromoteToLeader(partitionID int32, epoch int64) erro
 		partition.Epoch = epoch
 		return nil
 	}
-	leader := replication.NewLeader(partitionID, int32(pm.config.ReplicationBatchSize), pm.config.ReplicationTimeout, partition.Wal, pm.config.MinInSyncReplicas, pm.nodeID, pm.replicationTLSConfig())
+	// The third argument is the reconnect tick, not the RPC deadline: 0 keeps
+	// the leader's default so a dropped follower is redialed promptly.
+	leader := replication.NewLeader(partitionID, int32(pm.config.ReplicationBatchSize), 0, partition.Wal, pm.config.MinInSyncReplicas, pm.nodeID, pm.replicationTLSConfig())
+	leader.SetReplicateTimeout(pm.config.ReplicationTimeout)
 	leader.SetEpoch(epoch) // advertise the real cluster epoch on the wire, not the default 1
+	// Followers receive this group progress so a failover does not redeliver
+	// what consumers already finished.
+	consumerGroup := partition.ConsumerGroup
+	leader.SetProgressSource(func() (uint64, []*types.ConsumerGroupProgress) {
+		return consumerGroup.ExportProgress(partitionID)
+	})
+	// A publish whose replication failed is finished once catch-up has taken
+	// its events to a quorum, even if nobody retries it.
+	leader.SetQuorumObserver(func(offset int64) {
+		if err := partition.AcceptThrough(offset); err != nil {
+			log.Printf("[PARTITION] Partition %d: accepting replicated publishes up to offset %d failed: %v", partitionID, offset, err)
+		}
+	})
 	leader.Start()
 	partition.ReplLeader = leader
 	partition.Leader = true
@@ -1257,15 +1459,100 @@ func (pm *PartitionManager) DemoteFromLeader(partitionID int32) error {
 	if !exists {
 		return fmt.Errorf("partition %d not found", partitionID)
 	}
+	if !partition.Leader && partition.ReplLeader == nil {
+		return nil // reconciliation calls this for every partition it does not lead
+	}
 
 	if partition.ReplLeader != nil {
 		partition.ReplLeader.Stop()
 		partition.ReplLeader = nil
 	}
 	partition.Leader = false
+	// The new leader decides what becomes of this node's unreplicated tail.
+	partition.dropHeld()
 
 	log.Printf("[PARTITION] Partition %d demoted from leader", partitionID)
 	return nil
+}
+
+// ReplicaPosition describes where a replica's log ends.
+type ReplicaPosition struct {
+	// Found is false when the node holds no data for the partition.
+	Found bool
+	// LastOffset and LastTerm identify the last log entry (-1, 0 when empty).
+	LastOffset int64
+	LastTerm   int64
+	// Epoch is the highest leadership epoch the replica has accepted.
+	Epoch int64
+	// AcceptingWrites is true while the node serves publishes as leader.
+	AcceptingWrites bool
+}
+
+// SetWritableCheck supplies the cluster's view of whether this node may accept
+// publishes for a partition. Without it every led partition counts as writable.
+func (pm *PartitionManager) SetWritableCheck(writable func(partitionID int32) bool) {
+	pm.mu.Lock()
+	pm.writable = writable
+	pm.mu.Unlock()
+}
+
+// LocalReplicaPosition reports this node's log position for a partition.
+//
+// AcceptingWrites is false only when the node could not extend the log any
+// more: it does not lead the partition, or the cluster has stopped it from
+// taking publishes and none is still in flight. Publishes announce themselves
+// before they check writability, so that answer is final until the node is
+// made writable again, and the position returned with it is where the log
+// ends.
+func (pm *PartitionManager) LocalReplicaPosition(partitionID int32) ReplicaPosition {
+	pm.mu.RLock()
+	partition, exists := pm.partitions[partitionID]
+	writable := pm.writable
+	pm.mu.RUnlock()
+	if !exists || partition.Wal == nil {
+		return ReplicaPosition{LastOffset: -1}
+	}
+	// Order matters: writability first, then publishes in flight.
+	accepting := partition.Leader
+	if accepting && writable != nil && !writable(partitionID) {
+		accepting = partition.publishing.Load() > 0
+	}
+	lastOffset, lastTerm := partition.LogPosition()
+	return ReplicaPosition{
+		Found:           true,
+		LastOffset:      lastOffset,
+		LastTerm:        lastTerm,
+		Epoch:           partition.Epoch,
+		AcceptingWrites: accepting,
+	}
+}
+
+// ReplicaLogPosition returns the log position of the replica on the node at
+// addr, or of this node when addr is empty. It is what the cluster uses to
+// elect the most complete replica and to check a handoff target.
+func (pm *PartitionManager) ReplicaLogPosition(ctx context.Context, addr string, partitionID int32) (found bool, lastOffset, lastTerm, epoch int64, acceptingWrites bool, err error) {
+	position := pm.LocalReplicaPosition(partitionID)
+	if addr != "" {
+		if position, err = pm.RemoteReplicaPosition(ctx, addr, partitionID); err != nil {
+			return false, -1, 0, 0, false, err
+		}
+	}
+	return position.Found, position.LastOffset, position.LastTerm, position.Epoch, position.AcceptingWrites, nil
+}
+
+// RemoteReplicaPosition asks the node at addr for its log position.
+func (pm *PartitionManager) RemoteReplicaPosition(ctx context.Context, addr string, partitionID int32) (ReplicaPosition, error) {
+	resp, err := replication.QueryPosition(ctx, addr, partitionID, pm.replicationTLSConfig())
+	if err != nil {
+		return ReplicaPosition{}, err
+	}
+	return ReplicaPosition{
+		Found:           resp.GetFound(),
+		LastOffset:      resp.GetLastOffset(),
+		LastTerm:        resp.GetLastTerm(),
+		Epoch:           resp.GetEpoch(),
+		AcceptingWrites: resp.GetAcceptingWrites(),
+	}, nil
 }
 
 // GetPartitionEpoch returns the cluster epoch for a partition.

@@ -138,7 +138,7 @@ func TestMaintenancePublishDeliverAckAndPruneOverGRPC(t *testing.T) {
 			t.Fatalf("missing durable completion at %d", offset)
 		}
 	}
-	if err := pm.BackupWALs(t.TempDir()); err != nil {
+	if err := pm.Backup(t.TempDir()); err != nil {
 		t.Fatal(err)
 	}
 	n, err := p.PruneWAL(ctx, storage.PruneOptions{AllCompleted: true})
