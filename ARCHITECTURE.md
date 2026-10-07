@@ -1640,15 +1640,14 @@ flowchart LR
 | **Code** | `internal/api/admin_handler.go` (`TriggerRebalance`), `internal/cluster/manager.go` / `router.go` |
 | **Feature docs** | [cluster.md](docs/architecture/features/cluster.md), [dashboard.md](docs/architecture/features/dashboard.md), [api.md](docs/architecture/features/api.md) |
 
-### 3. Deep delivery requeue under backpressure (deferred)
+### 3. Delivery redrive under backpressure
 
 | | |
 |--|--|
-| **What works today** | Credits, in-flight caps, circuit breakers, retry heap, and durable DLQ after max retries. Subscribe can **resume from committed offset**. Backpressure skips emit `cronos_dispatcher_backpressure_skips_total{partition,reason}`. Events remain **durable in the WAL**. |
-| **What is deferred** | When a dispatch pass finds **no credits / in-flight capacity**, the event is **not re-enqueued into a worker-level redrive queue** on that pass. Recovery relies on later dispatch attempts, consumer credit replenishment, and/or **reconnect resume from committed offset**—not a dedicated “requeue from WAL until acked” loop for every skipped ready event. |
-| **Why deferred** | Changing the push model to true pull/redrive risks hot-path complexity and double-delivery patterns; deferred after observability was added (`plan.md` item 2.5). |
-| **Operator impact** | Under sustained zero-credit consumers, metrics show skips; ensure consumers ack and grant credits, or reconnect. Do not assume every ready-queue dequeue is immediately redelivered without credit recovery. |
-| **Code** | `internal/delivery/dispatcher.go` (credit / in-flight paths + backpressure metrics), `internal/partition/backpressure.go` (publish admission) |
+| **What works today** | Credits, in-flight caps, circuit breakers, retry heap, and durable DLQ after max retries. An event the push path cannot hand over (no credits, in-flight cap, full worker queue, failed send, subscriber disconnect) stays in the WAL and its offset range is queued for redrive; each subscription re-reads exactly that range when credits return. A new subscription first drains the backlog from its group's committed offset at the pace its credits allow. A slow sweep from the first incomplete offset remains as a safety net. Dead-lettered events are recorded complete for the group, so they are not delivered again. |
+| **What is not covered** | Redrive runs inside a subscription stream: a group with no connected subscriber makes no progress until one connects. Redelivery does not preserve offset order, and at-least-once duplicates remain possible after a crash or ack timeout. Completion records are local to the partition leader and are not replicated (audit F03). |
+| **Operator impact** | `cronos_dispatcher_backpressure_skips_total{partition,reason}` now counts events that were deferred to redrive, not events that need a reconnect. Sustained growth means consumers are slower than publishers. |
+| **Code** | `internal/delivery/redrive.go`, `internal/delivery/dispatcher.go` (`dispatchGroupBatch`), `internal/api/handlers.go` (`redriveRetained`) |
 | **Feature doc** | [docs/architecture/features/delivery.md](docs/architecture/features/delivery.md) |
 
 ### Related open work (smaller)

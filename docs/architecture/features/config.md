@@ -98,6 +98,8 @@ Defaults from `internal/config/defaults.go` unless noted. Flags marked **env** h
 | `--snapshot-catchup-threshold` | `10000` | **Dead config key** — parsed, never read (**env**) |
 | `--cluster` | `false` | Enable cluster mode (**env**) |
 | `--cluster-seeds` | *(empty)* | Comma-separated seed gossip addresses (**env**) |
+| `--cluster-expected-nodes` | `0` | Nodes a new cluster starts with; first partition leaders are assigned as soon as that many are up. `0` = unknown (**env**) |
+| `--cluster-formation-wait` | `5s` | When the expected nodes are unknown or not all up: how long membership must be unchanged before first leaders are assigned. `0` assigns at once (**env**) |
 | `--cluster-gossip-addr` | `:7946` | Membership gossip listen address |
 | `--cluster-grpc-addr` | `:7947` | Internal gRPC (replication/raft/cross-region) address |
 | `--cluster-raft-addr` | `:7948` | Raft transport listen address |

@@ -40,7 +40,7 @@ $ go test ./internal/api/ \
 
 ### 1. `FsyncBatch` is now a true per-request group commit
 
-The old implementation treated `batch` and `periodic` identically: both relied on the background flush loop. After Tier 3 #12, `batch` performs the buffer flush under the WAL lock and the expensive `fsync` outside the lock. This means:
+The old implementation treated `batch` and `periodic` identically: both relied on the background flush loop. After Tier 3 #12, `batch` syncs on every append. Since 2026-10-06 the flush and the `fsync` both happen after the WAL lock is released, and writers that append while a sync is in flight share the next one; the numbers below predate that change. This means:
 
 * `batch=1` is now event-level durable (like `every_event`) and is much slower than the old `batch=1` number, which was not actually syncing.
 * `batch` and `periodic` are no longer comparable; `periodic` remains the highest-throughput mode with a small loss window, while `batch` is the recommended durable-high-throughput mode and is now the default.

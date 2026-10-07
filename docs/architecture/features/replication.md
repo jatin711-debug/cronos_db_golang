@@ -35,18 +35,30 @@ exist:
    `ReplicationService.Append` carrying `PartitionId`, `Events`,
    `ExpectedNextOffset`, `Term`, `PrevLogTerm`, and an IEEE CRC32 batch
    checksum (`computeBatchChecksum`).
-4. The follower handler (`ReplicationServiceHandler.Append`) enforces term
-   fencing (rejects `req.Term < p.Epoch`, steps up on a newer term) and
-   appends via `WAL.AppendReplicatedBatch`.
+4. The follower handler (`ReplicationServiceHandler.Append`) verifies the
+   batch checksum, then decides whether the sender may write: it rejects a
+   term older than the one it has accepted and a second node claiming a term
+   another node already holds, and records a newer term and its leader on
+   disk before applying anything. Entries it already holds are compared with
+   the leader's and appended via `WAL.AppendReplicatedBatch` (see
+   [Leadership and fencing](#leadership-and-fencing)).
 5. The leader returns success to the client only after at least
    `min-insync-replicas` **replicas including the leader itself** have
-   acknowledged (i.e. minISR−1 followers).
+   acknowledged (i.e. minISR−1 followers). It returns as soon as that
+   quorum is reached, or as soon as it can no longer be reached; sends to
+   the remaining followers finish in the background, in offset order.
+   Each `Append` RPC is bounded by `--replication-timeout`.
 
 ### Incremental catch-up (`Sync`)
 
 When a follower falls behind (`f.NextOffset < events[0].Offset`),
 `Leader.catchUpFollower` slices `[from, to)` from the leader's WAL into
 `batchSize`-sized chunks and replays them through the same `Append` RPC.
+A follower with more than four batches outstanding is skipped for new
+batches instead of queueing without bound; it is caught up from the WAL by
+its next send, or by the leader's maintenance loop (every 500 ms) when the
+partition is otherwise idle. A follower whose log is empty is caught up from
+offset 0 the same way.
 For very long catch-up ranges the leader may also serve
 `ReplicationService.Sync`, a server-streaming RPC that returns
 `ReplicationSyncResponse` chunks of decoded events.
@@ -67,13 +79,19 @@ Newly joined replicas or freshly wiped followers are initialized via
 3. The follower stages files under
    `<dataDir>/snapshot-staging/{segments,index}/`, computing a running
    CRC32 over each file as it lands.
-4. On the trailer, the follower verifies the last file's computed CRC32
-   against the header, closes the local WAL, atomically renames
-   `segments`/`index` to `*.old`, moves the staged dirs into place,
-   removes `*.old`, calls `wal.ReloadSegments()`, and updates
-   `nextOffset`/`epoch` from the trailer.
-5. The trailer carries the leader epoch at snapshot time; subsequent
-   `Append` calls honour term fencing against that epoch.
+4. Each file's size and CRC32 are checked against its header as it
+   completes. The trailer carries the source's epoch: a source behind the
+   epoch this replica has accepted was superseded as leader, and its snapshot
+   is refused without touching the local log.
+5. `WAL.InstallCheckpoint` then swaps the generations under a journal
+   (`snapshot-install.state`): it writes `prepared`, moves `segments` and
+   `index` aside as `*.old`, moves the staged directories into place, loads
+   and verifies them against the announced last offset, writes `installed`,
+   and removes the old directories. A failure, or a crash before `installed`,
+   restores the old log; `RecoverSnapshot` finishes or undoes an interrupted
+   install whenever the WAL is opened.
+6. The installed epoch is persisted, so the replica refuses appends from an
+   older leader after a restart as well.
 
 The full install is wrapped in a 10-minute `context` by
 `PartitionManager.SyncPartitionFromLeader`
@@ -81,10 +99,62 @@ The full install is wrapped in a 10-minute `context` by
 `Manager.JoinCluster` (`internal/cluster/manager.go:620`) for every
 partition the joining node owns.
 
-After formation, `Manager.reconcileLocalLeadership` runs every 5s and
-idempotently wires up `PromoteToLeader` + `AddFollower` on every locally
-led partition, which is what enables streaming `Append` on a healthy
-cluster.
+`Manager.reconcileLocalLeadership` runs whenever a committed assignment
+changes, and every 5s, and idempotently wires up `PromoteToLeader` +
+`AddFollower` on every partition committed to this node, which is what
+enables streaming `Append` on a healthy cluster.
+
+The leader's checkpoint copies files without holding the WAL lock: appends are
+paused only while it notes where each file ends.
+
+## Leadership and fencing
+
+- **One authority.** A node leads a partition only when the Raft-committed
+  assignment says so (`internal/cluster/leadership.go`). The hash ring decides
+  where replicas belong and which node would ideally lead; it never makes a
+  node the leader by itself.
+- **One leader per epoch.** Every committed change raises the partition's
+  epoch. A replica stores `{epoch, leader}` in `epoch.json` and accepts appends
+  at that epoch from that leader only.
+- **Divergent tails.** Log entries carry the term they were written in. When a
+  leader sends an entry the follower already holds, the same offset and term
+  is a retry and is skipped; a different term means the follower's entry and
+  everything after it were written under another leader, and they are removed
+  and replaced. Entries are never removed within a term.
+- **Failover.** When the committed leader is dead, the Raft leader asks the
+  remaining replicas where their logs end (`ReplicationService.Position`) and
+  elects the most complete one. It needs `replicas - minISR + 1` answers to be
+  sure every acknowledged write is on a replica that answered; with fewer it
+  waits, except when the leader alone acknowledged writes (`minISR` 1).
+- **Handoff.** When the ring prefers another live replica, the Raft leader
+  commits the intent first. The current leader then refuses publishes; once it
+  reports that none is in flight and the target's log ends at the same entry,
+  the change of leader is committed. Until then nothing changes hands. A
+  handoff that takes too long is abandoned and the leader stays.
+- **Consumer progress.** The leader sends each consumer group's completed work
+  to its followers (`ReplicationService.SyncConsumerProgress`) whenever it
+  changes and at least every 30 seconds, so a promoted follower does not
+  redeliver it.
+
+## Publishes that fail after the append
+
+A publish appends to the leader's log before replication, a requested fsync,
+and scheduling. If one of those fails the log cannot take the events back, so
+the partition holds them (`internal/partition/unaccepted.go`): they are not
+scheduled, and their message IDs are recorded as *appended at offset N*, not
+as accepted. They are accepted, and scheduled, when the log is known to be
+replicated that far:
+
+- by a retry of the publish, which is finished rather than appended again;
+- by the next publish that reaches the required replicas, since a follower
+  holds a prefix of the log;
+- by the leader's maintenance loop once catch-up has taken them to a quorum.
+
+After a restart or a promotion every event in the log is scheduled, and the
+dedup store is re-seeded from the log tail with *appended* records, so a retry
+is answered from the log. If the log no longer holds the event, because a newer
+leader replaced this node's unreplicated tail, the record is dropped and the
+retry is published as new.
 
 ## Production Decisions
 
@@ -94,20 +164,19 @@ cluster.
   contend for public-API rate limits or interceptors.
 - **Integrity**:
   - Every `ReplicationAppendRequest` carries a per-batch IEEE CRC32
-    (`computeBatchChecksum`). **Note:** the checksum is computed and sent
-    by the leader but is currently **not verified** by the follower
-    handler — integrity on the Append path today rests on gRPC transport
-    framing and per-record WAL CRCs.
-  - Every `ReplicationSnapshotHeader` carries a per-file IEEE CRC32;
-    the follower verifies the final file's CRC against the header and
-    aborts the install on mismatch (earlier files' CRCs are sent but not
-    verified — records are still protected by their own CRCs at read time).
+    (`computeBatchChecksum`), which the follower handler verifies before it
+    applies the batch.
+  - Every `ReplicationSnapshotHeader` carries a per-file IEEE CRC32 and
+    size; the follower checks each file against its header and aborts the
+    install on a mismatch.
   - Each WAL record (v2) carries its own CRC32 plus a payload checksum
     and Raft term, so per-record integrity is preserved on disk after
     install.
 - **Term fencing**: `ReplicationServiceHandler.Append` rejects
-  `req.Term < p.Epoch` and steps the follower's epoch up on a newer term,
-  preventing stale-leader replays after a leadership change.
+  `req.Term < p.Epoch`, rejects a second leader at the current term, and on a
+  newer term persists it (stepping down first if this node was leading)
+  before applying the sender's entries. See
+  [Leadership and fencing](#leadership-and-fencing).
 - **Quorum durability**: `Leader.Replicate` returns success only after
   `min-insync-replicas` replicas **including the leader** have appended
   (`--min-insync-replicas`, default `1`). With RF=3 / minISR=2 the leader
@@ -126,10 +195,11 @@ cluster.
   `internal/cluster` reads it; `SyncPartitionFromLeader` installs a
   snapshot unconditionally. Treated as a future-work knob here; flag stays
   so configuration is forward-compatible.
-- **Atomic swap on install**: WAL is closed before `segments.old`/
-  `index.old` rename, then staged dirs are renamed into place. Mirrors
-  the close ordering in `StopPartition`, which keeps Windows file
-  handles from blocking the rename.
+- **Journaled swap on install**: the WAL is closed before the
+  `segments.old`/`index.old` renames, staged dirs are renamed into place, and
+  the old pair is kept until the new log has been loaded and verified. Every
+  crash point recovers to one complete generation, never a mix
+  (`internal/storage/checkpoint_test.go`).
 - **mTLS**: `--replication-tls-enabled` plus
   `--replication-tls-{ca,cert,key}-file` enable cluster-only mTLS via
   `replication.BuildClientTLSConfig` / `BuildServerTLSConfig`. Server
@@ -150,7 +220,7 @@ cluster.
 | Path | Trigger | Code |
 |------|---------|------|
 | Bulk snapshot install (`InstallSnapshot`) | New node joins and owns partitions it does not yet have data for (wipe/bootstrap), or the router moves a partition | `Manager.JoinCluster` / router rebalance → `PartitionManager.SyncPartitionFromLeader` (unconditional) |
-| Incremental catch-up (`Sync` / `Append` loop) | A **connected** follower reports `NextOffset < nextBatchStart` during normal `Replicate` | `Leader.catchUpFollower` |
+| Incremental catch-up (`Sync` / `Append` loop) | A **connected** follower reports `NextOffset < nextBatchStart` during normal `Replicate`, or is found behind while idle by the maintenance loop | `Leader.catchUpFollower`, `Leader.catchUpIdleFollowers` |
 | Automatic lag-driven snapshot install | **Not implemented (documented gap).** No mid-flight loop watches lag and switches to `InstallSnapshot` when lag &gt; `--snapshot-catchup-threshold` — the flag is parsed but never read (dead config key). | See [ARCHITECTURE.md § Known Limitations](../../../ARCHITECTURE.md#known-limitations) |
 
 ### Why mid-flight auto-snapshot is deferred

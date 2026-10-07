@@ -38,7 +38,7 @@ Ryzen 7 6800H host. See the [measurement settings and baseline comparison](docs/
 - **Configurable Fsync** — `every_event` | `batch` (default) | `periodic` modes
 - **Automatic Compaction** — Removes closed standalone WAL segments only after every relevant consumer group has completed every event
 - **Retention Enforcer** — Age/size policies use the same completion checks and preserve future timers and active segments; clustered/replicated pruning is disabled pending durable cluster-wide completion and handoff watermarks
-- **WAL Backups** — Hourly independent checkpoints of loaded partitions, including active segments; event-log restore is covered for plaintext and encrypted storage (see [maintenance validation](docs/MAINTENANCE_VALIDATION_2026-09-29.md))
+- **Backups** — Hourly independent backups of every loaded partition: event log including the active segment, consumer progress, dedup store, dead-letter queue and epoch, with per-file checksums; `cronos-admin restore` verifies and restores one into an empty data directory (see [maintenance validation](docs/MAINTENANCE_VALIDATION_2026-09-29.md))
 - **Hierarchical Timing Wheel** — O(1) timer add/remove/tick for millions of events
 - **Two-Tier Cold/Hot Scheduler** — PebbleDB cold store for far-future events (>1hr); adaptive hydrator adjusts scan frequency based on load (5s–5min). Keeps hot memory bounded.
 - **Absolute Time Tracking** — No drift across overflow wheel cascades
@@ -421,6 +421,9 @@ if err != nil {
 ### Consumer example (auto-ack)
 
 ```go
+// PartitionID defaults to -1: one stream per partition, so the consumer sees
+// the whole topic however publishers key their events. The handler then runs
+// concurrently across partitions.
 cons := client.DefaultConsumerConfig("orders", "order-processors")
 cons.AckMode = client.AckModeAuto
 
@@ -560,7 +563,7 @@ flag-only).
 | `-dedup-ttl` | `168` | Dedup TTL in hours (7 days) |
 | `-bloom-capacity` | `100000000` | Bloom filter capacity per partition (100M items) |
 | `-replication-batch` | `100` | Replication batch size |
-| `-replication-timeout` | `10s` | Replication RPC timeout |
+| `-replication-timeout` | `10s` | Deadline for one replication Append RPC to a follower |
 | `-min-insync-replicas` | `1` | Minimum in-sync replicas (incl. leader) required to ack a write; production target ≥2 |
 | `-snapshot-catchup-threshold` | `10000` | Intended: replication lag (events) above which a follower requests a full snapshot. **Currently a dead config key** — parsed but never read; snapshot install is unconditional on the join/`SyncPartitionFromLeader` path and no lag-driven trigger is wired |
 | `-raft-dir` | `./raft` | Raft data directory |
@@ -570,6 +573,8 @@ flag-only).
 | `-cluster-grpc-addr` | `:7947` | Cluster internal gRPC listener (`InternalGRPCServer`, replication + Raft) |
 | `-cluster-raft-addr` | `:7948` | Cluster Raft listen address |
 | `-cluster-seeds` | *(empty)* | Comma-separated seed node addresses |
+| `-cluster-expected-nodes` | `0` | Nodes a new cluster starts with; partitions get their first leaders as soon as that many are up (`1` for a single-node cluster). `0` = unknown |
+| `-cluster-formation-wait` | `5s` | With the expected nodes unknown or not all up: how long membership must be unchanged before first leaders are assigned; publishes are refused with a retryable error until then. `0` assigns at once |
 | `-virtual-nodes` | `2048` | Virtual nodes per physical node in hash ring |
 | `-heartbeat-interval` | `1s` | Cluster heartbeat interval |
 | `-failure-timeout` | `5s` | Node failure detection timeout |
@@ -609,6 +614,7 @@ flag-only).
 | `-tracing-otlp-endpoint` | `127.0.0.1:4317` | OTLP gRPC endpoint for trace export |
 | `-tracing-sample-ratio` | `0.01` | Sampling ratio (0.0-1.0); lower keeps overhead low |
 | `-tracing-insecure` | `true` | Disable TLS when exporting via OTLP |
+| `-pprof-addr` | *(empty)* | Serve `net/http/pprof` (CPU, block, mutex profiles) on this address; empty disables. Must be a loopback address outside `--dev` |
 
 ### Environment Variables
 
@@ -766,7 +772,8 @@ See [proto/events.proto](proto/events.proto) for the complete specification.
 - [x] Partition leader election on failure
 
 ### Performance 🔄 Under validation (single machine)
-- [ ] Investigate the measured RF=1 regression against v0.5.0 before setting a production target
+- [x] Find the RF=1 regression against v0.5.0: an fsynced epoch write under the partition-manager lock on every 5 s leadership reconcile (see the [validation record](docs/CLUSTER_PERFORMANCE_VALIDATION_2026-09-29.md#follow-up--2026-10-06))
+- [ ] Re-run the full 4.8M-event matched comparison on an idle host before setting a production target
 - [x] Durable throughput validated with `batch` fsync
 - [x] Lock-free Rust bloom filter via CGO FFI
 - [x] sync.Pool for timers, record buffers, transport buffers

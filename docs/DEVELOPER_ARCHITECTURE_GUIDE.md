@@ -614,7 +614,7 @@ flowchart TB
   - Dedup, schema validation, epoch checks, transaction state machine.
 - Backpressure:
   - Credits, admission control, rate limiters, tenant accounting, `cronos_dispatcher_backpressure_skips_total`.
-  - **Gap (documented):** no deep worker redrive queue for every credit-skipped ready event; rely on credits/reconnect/WAL durability ([delivery.md](architecture/features/delivery.md), [ARCHITECTURE known limitations](../ARCHITECTURE.md#known-limitations)).
+  - Events held back by flow control are redelivered from the WAL when credits return; redrive needs a connected subscriber ([delivery.md](architecture/features/delivery.md), [ARCHITECTURE known limitations](../ARCHITECTURE.md#known-limitations)).
 - Fault isolation:
   - Circuit breaker, retry queue, DLQ, service-level error boundaries.
 - Operability:

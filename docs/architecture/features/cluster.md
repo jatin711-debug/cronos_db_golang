@@ -20,9 +20,18 @@ The cluster module provides node membership, partition routing, leader assignmen
 ## Main Flow
 
 1. Cluster manager starts Raft and membership services.
-2. Router computes partition ownership via consistent hash ring.
-3. Join/leave events trigger rebalance and state transfer actions.
-4. Leader-only tasks monitor partition health and reconcile metadata into Raft.
+2. Router computes partition placement, and the leader it would prefer, via
+   the consistent hash ring.
+3. The Raft leader commits each partition's assignment. A partition that has
+   never had a leader gets one five seconds after membership last changed, so
+   a cluster whose nodes start one after another is assigned once, across all
+   of them.
+4. Each node acts on the committed assignments only: it leads what is
+   committed to it, follows what it is a replica of, and unloads what it no
+   longer holds. A partition with no committed assignment has no leader.
+5. Leader-only tasks elect a replacement for a dead leader and move leadership
+   to the ring's preferred replica by a staged handoff. Both are described in
+   [replication.md](replication.md#leadership-and-fencing).
 
 ## Production Decisions
 
@@ -33,7 +42,9 @@ The cluster module provides node membership, partition routing, leader assignmen
 - Rebalance path uses partition accessor hooks to avoid ownership without data.
 - Explicit epoch usage supports leader fencing behavior.
 - New-node join path: `Manager.JoinCluster` iterates `router.GetLocalPartitions()` and calls `PartitionManager.SyncPartitionFromLeader(partitionID, leader.Address)`, which triggers `Follower.InstallSnapshot` (bulk `ReplicationService.Snapshot` install) for each partition the joining node owns.
-- After formation, `reconcileLocalLeadership` runs every 5s and uses **Raft-committed assignments** (not gossip alone) to idempotently `PromoteToLeader` / demote / `AddFollower` for local partitions — enabling streaming `ReplicationService.Append` on a healthy cluster.
+- `reconcileLocalLeadership` runs whenever a committed assignment changes, and every 5s, and uses **Raft-committed assignments** only to idempotently `PromoteToLeader` / demote / `AddFollower` for local partitions — enabling streaming `ReplicationService.Append` on a healthy cluster. A node that has just joined leads nothing until it has received the assignments.
+- `/health/ready` answers 503 while a partition has no committed leader, while this node is still loading a partition committed to it, or while one of its partitions is being handed over. Publishes for those partitions are refused with a retryable error in the meantime.
+- Under replication factor 1 a handoff copies the log to the target by snapshot; consumer progress does not move with it, so the target may redeliver.
 - Partition ID routing for keys uses **FNV-1a**; node placement on the ring uses **SHA-256 virtual nodes** (default 2048).
 
 ## Known Limitation: Admin `TriggerRebalance` soft stub
