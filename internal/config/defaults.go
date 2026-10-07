@@ -26,6 +26,10 @@ const (
 	// DefaultFlushIntervalMS is the periodic flush interval when using batch/periodic fsync.
 	DefaultFlushIntervalMS = 1000
 
+	// DefaultBackupInterval is how often a node backs up its partitions, and
+	// DefaultBackupRetention how long it keeps a backup.
+	DefaultBackupInterval  = time.Hour
+	DefaultBackupRetention = 7 * 24 * time.Hour
 	// DefaultCompactionInterval is how often a partition looks for log
 	// segments whose events are all finished.
 	DefaultCompactionInterval = 10 * time.Minute
