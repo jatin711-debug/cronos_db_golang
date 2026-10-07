@@ -1,6 +1,7 @@
 package partition
 
 import (
+	"fmt"
 	"log"
 	"sort"
 
@@ -192,6 +193,52 @@ func (p *Partition) LoggedEvent(messageID string, offset int64) (event *types.Ev
 		return nil, false, nil
 	}
 	return events[0], true, nil
+}
+
+// resetSchedule drops what is scheduled and what waits to be dispatched. It
+// is followed by scheduling the log again, at once or when this node next
+// leads the partition.
+func (p *Partition) resetSchedule() error {
+	if p.Worker != nil {
+		p.Worker.Clear()
+	}
+	if p.Scheduler == nil {
+		return nil
+	}
+	return p.Scheduler.Reset()
+}
+
+// forgetBeyondLog removes what consumer groups have recorded as finished at
+// offset and beyond: this replica's log does not hold those entries (see
+// consumer.GroupManager.ForgetCompletionsFrom). why says so in the log line.
+func (p *Partition) forgetBeyondLog(offset int64, why string) error {
+	if p.ConsumerGroup == nil {
+		return nil
+	}
+	groups, err := p.ConsumerGroup.ForgetCompletionsFrom(p.ID, offset)
+	if err != nil {
+		return fmt.Errorf("partition %d: forget consumer progress from offset %d: %w", p.ID, offset, err)
+	}
+	if groups > 0 {
+		log.Printf("[Partition %d] Consumer progress of %d groups reached to offset %d or beyond and was brought back to it: %s",
+			p.ID, groups, offset, why)
+	}
+	return nil
+}
+
+// CutLog removes the log entries at offset and beyond, which the partition's
+// leader does not have, and what this replica had recorded about them. It
+// returns how many entries went. The caller holds ReplicateMu and has
+// accepted the sender as leader.
+func (p *Partition) CutLog(offset int64) (int, error) {
+	if offset >= p.Wal.GetNextOffset() {
+		return 0, nil
+	}
+	// Before the entries go: if this fails, the next request cuts again.
+	if err := p.forgetBeyondLog(offset, "the leader's log replaces what this replica held there"); err != nil {
+		return 0, err
+	}
+	return p.Wal.TruncateToOffset(offset)
 }
 
 // dropHeld forgets held publishes. It is called when the whole log is about to

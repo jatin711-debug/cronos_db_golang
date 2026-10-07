@@ -99,6 +99,9 @@ type Partition struct {
 	// replica. Its log is pruned from the start only, by its leader, and the
 	// other replicas follow (see retention.go). Immutable.
 	replicated bool
+	// followed is true for a partition with more than one replica: its leader
+	// replicates to followers. Immutable.
+	followed bool
 	// logStartSeen is the highest log start a leader has told this replica.
 	logStartSeen atomic.Int64
 	// pruneMu lets one pruning pass run at a time. pruneWaitsAt, which it
@@ -499,6 +502,7 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 	// Create partition
 	partition := &Partition{
 		replicated:    pm.config.ClusterEnabled || pm.config.ReplicationFactor > 1,
+		followed:      pm.config.ReplicationFactor > 1,
 		pruneWaitsAt:  -1,
 		ID:            partitionID,
 		Topic:         topic,
@@ -518,6 +522,12 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 	if err = consumerGroup.SetLogStart(partitionID, wal.GetFirstOffset()); err != nil {
 		return fmt.Errorf("apply log start to consumer progress: %w", err)
 	}
+	// And nothing is finished beyond its end: a log that came back from a
+	// crash without its last entries gives their offsets to new events.
+	if err = partition.forgetBeyondLog(wal.GetNextOffset(), "the log ends there"); err != nil {
+		return err
+	}
+	dispatcher.DeliverableThrough = partition.DeliverableThrough
 
 	if data, err := os.ReadFile(dataDir + "/epoch.json"); err == nil {
 		record, err := parseLeadershipRecord(data)
@@ -983,6 +993,12 @@ func (pm *PartitionManager) recoverDedupFromWAL(partition *Partition) {
 func (pm *PartitionManager) replayWALTimers(partition *Partition) {
 	// Every event in the log is scheduled below, held or not.
 	partition.dropHeld()
+	// What was scheduled before goes first. It was read from the log as it
+	// was then, and the log may have been cut and written again since.
+	if err := partition.resetSchedule(); err != nil {
+		partition.setReplayError(err)
+		return
+	}
 	lastOffset := partition.Wal.GetLastOffset()
 	if lastOffset < 0 {
 		return // Empty WAL, nothing to replay
@@ -1447,6 +1463,10 @@ func (pm *PartitionManager) SyncPartitionFromLeader(partitionID int32, leaderAdd
 			return fmt.Errorf("apply log start of installed snapshot: %w", err)
 		}
 	}
+	// And it ends where the source's did: nothing is finished beyond that.
+	if err := partition.forgetBeyondLog(partition.Wal.GetNextOffset(), "the installed log ends there"); err != nil {
+		return err
+	}
 
 	log.Printf("[PARTITION] Partition %d synced from leader %s", partitionID, leaderAddr)
 	return nil
@@ -1490,6 +1510,14 @@ func (pm *PartitionManager) PromoteToLeader(partitionID int32, epoch int64) erro
 		return nil // Already leader, just update epoch
 	}
 
+	// From here on this log is the partition's. What it does not hold was
+	// never finished, whatever a former leader's progress said about offsets
+	// this replica did not get to.
+	if !partition.IsLeader() {
+		if err := partition.forgetBeyondLog(partition.Wal.GetNextOffset(), "this replica leads from there"); err != nil {
+			return err
+		}
+	}
 	if !partition.started {
 		if err := pm.startPartitionInternal(partition); err != nil {
 			return err
@@ -1528,6 +1556,11 @@ func (pm *PartitionManager) PromoteToLeader(partitionID int32, epoch int64) erro
 	// Followers also learn how far the change feed has got, so that the one
 	// that takes over continues it instead of repeating or skipping events.
 	leader.SetChangeFeedSource(partition.ChangeFeedPosition)
+	// A follower that answers for a newer term has a newer leader. This node
+	// stops leading then, without waiting to hear of it from the cluster.
+	leader.SetSupersededObserver(func(term int64) {
+		go pm.stepDownFor(partitionID, leader, term)
+	})
 	leader.Start()
 	partition.ReplLeader = leader
 	partition.replQuorum.Store(leader)
@@ -1569,8 +1602,14 @@ func (pm *PartitionManager) DemoteFromLeader(partitionID int32) error {
 	if !exists {
 		return fmt.Errorf("partition %d not found", partitionID)
 	}
+	pm.demoteLocked(partition)
+	return nil
+}
+
+// demoteLocked stops a partition leading. The caller holds pm.mu.
+func (pm *PartitionManager) demoteLocked(partition *Partition) {
 	if !partition.IsLeader() && partition.ReplLeader == nil {
-		return nil // reconciliation calls this for every partition it does not lead
+		return // reconciliation calls this for every partition it does not lead
 	}
 
 	// Not leading comes first. What follows forgets which entries were never
@@ -1584,9 +1623,32 @@ func (pm *PartitionManager) DemoteFromLeader(partitionID int32) error {
 	partition.replQuorum.Store(nil)
 	// The new leader decides what becomes of this node's unreplicated tail.
 	partition.dropHeld()
+	// Nothing is delivered from here until this node leads again, and then
+	// the log is scheduled anew: it may not be the same log by then.
+	if err := partition.resetSchedule(); err != nil {
+		log.Printf("[PARTITION] Partition %d: clearing the schedule on demotion failed: %v", partition.ID, err)
+	}
 
-	log.Printf("[PARTITION] Partition %d demoted from leader", partitionID)
-	return nil
+	log.Printf("[PARTITION] Partition %d demoted from leader", partition.ID)
+}
+
+// stepDownFor stops this node leading a partition after a follower answered
+// leader for a newer term than this node's. The term is recorded first, which is what keeps
+// this node from being promoted again under the one it had: the cluster's
+// records here may go on naming it leader for a moment.
+func (pm *PartitionManager) stepDownFor(partitionID int32, leader *replication.Leader, term int64) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	partition, exists := pm.partitions[partitionID]
+	if !exists || partition.ReplLeader != leader {
+		return // demoted, or promoted anew, in the meantime
+	}
+	if err := partition.PersistEpoch(term); err != nil {
+		log.Printf("[PARTITION] Partition %d: recording term %d of the leader that replaced this node failed: %v", partitionID, term, err)
+	}
+	log.Printf("[PARTITION] Partition %d has a leader of term %d; this node stops leading it", partitionID, term)
+	pm.demoteLocked(partition)
 }
 
 // ReplicaPosition describes where a replica's log ends.
