@@ -143,7 +143,7 @@ func (h *ReplicationServiceHandler) Append(ctx context.Context, req *types.Repli
 				return reject(fmt.Sprintf("log conflict: read offset %d: %v", e.Offset, err))
 			}
 			if existing.Term != e.Term {
-				removed, err := p.Wal.TruncateToOffset(e.Offset)
+				removed, err := p.CutLog(e.Offset)
 				if err != nil {
 					return reject(fmt.Sprintf("truncate divergent log at offset %d: %v", e.Offset, err))
 				}
@@ -214,7 +214,7 @@ func dropForeignTail(p *partition.Partition, req *types.ReplicationAppendRequest
 	if local.GetTerm() <= 0 || local.GetTerm() == req.GetTerm() {
 		return nil // written before terms were kept, or by this leader
 	}
-	removed, err := p.Wal.TruncateToOffset(end)
+	removed, err := p.CutLog(end)
 	if err != nil {
 		return fmt.Errorf("remove the log tail beyond the leader's end at offset %d: %w", end, err)
 	}
@@ -299,7 +299,7 @@ func (h *ReplicationServiceHandler) SyncConsumerProgress(ctx context.Context, re
 	if p.ConsumerGroup == nil {
 		return &types.ReplicationProgressResponse{Error: "consumer state not initialized"}, nil
 	}
-	if err := p.ConsumerGroup.ApplyReplicatedProgress(req.GetPartitionId(), req.GetGroups()); err != nil {
+	if err := p.ConsumerGroup.ApplyReplicatedProgress(req.GetPartitionId(), p.Wal.GetNextOffset(), req.GetGroups()); err != nil {
 		return &types.ReplicationProgressResponse{Error: err.Error()}, nil
 	}
 	p.NoteLeaderFeedPosition(req.GetChangeFeedOffset(), req.GetHasChangeFeedOffset())

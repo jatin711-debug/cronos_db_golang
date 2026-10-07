@@ -219,7 +219,7 @@ func TestReplicatedProgressMatchesLeader(t *testing.T) {
 
 	followerDir := t.TempDir()
 	follower := newStoreBackedManager(t, followerDir)
-	if err := follower.ApplyReplicatedProgress(0, progress); err != nil {
+	if err := follower.ApplyReplicatedProgress(0, 12, progress); err != nil {
 		t.Fatal(err)
 	}
 	check := func(manager *GroupManager, when string) {
@@ -237,7 +237,7 @@ func TestReplicatedProgressMatchesLeader(t *testing.T) {
 
 	// A stale round must not undo newer progress.
 	stale := []*types.ConsumerGroupProgress{{GroupId: "g", Topic: "orders", CommittedOffset: 1}}
-	if err := follower.ApplyReplicatedProgress(0, stale); err != nil {
+	if err := follower.ApplyReplicatedProgress(0, 12, stale); err != nil {
 		t.Fatal(err)
 	}
 	check(follower, "after stale round")

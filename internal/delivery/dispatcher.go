@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"strconv"
 	"strings"
 	"sync"
@@ -122,6 +123,11 @@ type Dispatcher struct {
 	// (successful ack or DLQ). The tenantID is extracted from Event.Meta.
 	OnDeliveryComplete func(tenantID string)
 	IsCompleted        func(group string, offset int64) bool
+	// DeliverableThrough, when set, returns the last log offset whose entry
+	// may be handed to a consumer, -1 for none. Entries beyond it are not on
+	// the replicas the partition requires, so they can still be removed from
+	// the log; they are held back until it has moved past them.
+	DeliverableThrough func() int64
 	// OnDeadLettered is called once a delivery's events are safely in the DLQ so
 	// their final disposition can be recorded; they are then not re-driven.
 	OnDeadLettered func(group string, events []*types.Event)
@@ -736,7 +742,23 @@ func (d *Dispatcher) dispatchGroupBatch(partitionID int32, events []*types.Event
 	batchesBySub := acquireBatchesBySubMap()
 	defer releaseBatchesBySubMap(batchesBySub)
 
+	deliverable := int64(math.MaxInt64)
+	if d.DeliverableThrough != nil {
+		deliverable = d.DeliverableThrough()
+	}
+	notReplicated := 0
+
 	for _, event := range events {
+		if event.Offset > deliverable {
+			// Not on the required replicas, so not certain to stay in the log.
+			notReplicated++
+			for groupID := range consumerGroupSubs {
+				if onlyGroup == "" || groupID == onlyGroup {
+					holdBack(groupID, event)
+				}
+			}
+			continue
+		}
 		for groupID, groupSubs := range consumerGroupSubs {
 			if onlyGroup != "" && groupID != onlyGroup {
 				continue
@@ -784,6 +806,10 @@ func (d *Dispatcher) dispatchGroupBatch(partitionID int32, events []*types.Event
 			d.markPending(groupID, event.Offset)
 			batchesBySub[selectedSub] = append(batchesBySub[selectedSub], event)
 		}
+	}
+
+	if notReplicated > 0 {
+		metrics.IncDispatcherBackpressureSkip(strconv.FormatInt(int64(partitionID), 10), "not_replicated", notReplicated)
 	}
 
 	// Commit the locally advanced cursor positions back to the persistent store

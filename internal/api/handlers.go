@@ -1253,6 +1253,10 @@ const (
 //
 // Only due records of the subscribed topic are eligible, and the dispatcher
 // skips records already completed or in flight for the group.
+//
+// Nothing is read beyond what may be delivered (Partition.DeliverableThrough):
+// the end of the log can hold entries that are not on enough replicas yet, or
+// never will be. What is left of a range waits until they are.
 func (h *EventServiceHandler) redriveRetained(ctx context.Context, p *partition.Partition, group, topic string, origin int64) error {
 	requests := p.Dispatcher.RegisterRedrive(group)
 	defer p.Dispatcher.UnregisterRedrive(requests)
@@ -1306,55 +1310,60 @@ func (h *EventServiceHandler) redriveRetained(ctx context.Context, p *partition.
 			}
 		}
 
-		end := p.Wal.GetLastOffset()
+		deliverable := p.DeliverableThrough()
+		end := min(p.Wal.GetLastOffset(), deliverable)
+		retryTo := min(retryLow+redriveBatchEvents-1, retryHigh, deliverable)
+		backlogTo := min(backlog+redriveBatchEvents-1, backlogEnd, deliverable)
 		var wait time.Duration
 		switch {
-		case retryLow <= retryHigh:
-			to := min(retryLow+redriveBatchEvents-1, retryHigh)
-			blocked, err := offer(retryLow, to)
+		case retryLow <= retryTo:
+			blocked, err := offer(retryLow, retryTo)
 			if err != nil {
 				return err
 			}
 			if blocked {
 				wait = redriveBlockedWait
 			} else {
-				retryLow = to + 1
+				retryLow = retryTo + 1
 			}
-		case backlog <= backlogEnd:
-			to := min(backlog+redriveBatchEvents-1, backlogEnd)
-			blocked, err := offer(backlog, to)
+		case backlog <= backlogTo:
+			blocked, err := offer(backlog, backlogTo)
 			if err != nil {
 				return err
 			}
 			if blocked {
 				wait = redriveBlockedWait
 			} else {
-				backlog = to + 1
+				backlog = backlogTo + 1
 			}
 		default:
 			if now := time.Now(); now.Before(nextSweep) {
 				wait = nextSweep.Sub(now)
-				break
-			}
-			nextSweep = time.Now().Add(redriveSweepInterval)
-			floor := origin
-			if committed, err := p.ConsumerGroup.GetCommittedOffset(group, p.ID); err == nil {
-				floor = max(floor, committed)
-			}
-			if sweep < floor || sweep > end {
-				sweep = floor
-			}
-			if sweep <= end {
-				to := min(sweep+redriveSweepEvents-1, end)
-				blocked, err := offer(sweep, to)
-				if err != nil {
-					return err
+			} else {
+				nextSweep = now.Add(redriveSweepInterval)
+				floor := origin
+				if committed, err := p.ConsumerGroup.GetCommittedOffset(group, p.ID); err == nil {
+					floor = max(floor, committed)
 				}
-				if !blocked {
-					sweep = to + 1
+				if sweep < floor || sweep > end {
+					sweep = floor
 				}
+				if sweep <= end {
+					to := min(sweep+redriveSweepEvents-1, end)
+					blocked, err := offer(sweep, to)
+					if err != nil {
+						return err
+					}
+					if !blocked {
+						sweep = to + 1
+					}
+				}
+				wait = redriveSweepInterval
 			}
-			wait = redriveSweepInterval
+			if retryLow <= retryHigh || backlog <= backlogEnd {
+				// The rest of these is not replicated yet; look again soon.
+				wait = min(wait, redriveBlockedWait)
+			}
 		}
 
 		if wait == 0 {

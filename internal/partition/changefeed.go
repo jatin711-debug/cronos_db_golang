@@ -215,6 +215,39 @@ func (p *Partition) AcceptedThrough() int64 {
 	return max(through, -1)
 }
 
+// DeliverableThrough returns the offset up to which log entries may be handed
+// to consumers, -1 for none.
+//
+// What a consumer has taken cannot be taken back, and what it acknowledges is
+// recorded by offset. So an entry is not handed out while it can still leave
+// the log: while it is held after a publish that failed past the append, and,
+// on a partition with followers, while it is not known to be on the replicas
+// the partition requires. A leader that has lost its followers holds entries
+// like that until it takes the log of the leader that replaced it, which
+// removes them. It used to deliver them in the meantime, and the completion
+// it recorded then stood for the events its successor wrote at those offsets.
+//
+// Deliveries are the leader's: a replica that does not lead hands out nothing.
+func (p *Partition) DeliverableThrough() int64 {
+	if p.replicated && !p.IsLeader() {
+		return -1
+	}
+	through := p.Wal.GetLastOffset()
+	if p.HasUnaccepted() {
+		p.heldMu.Lock()
+		if len(p.held) > 0 {
+			through = min(through, p.held[0].from-1)
+		}
+		p.heldMu.Unlock()
+	}
+	if leader := p.replQuorum.Load(); leader != nil {
+		through = min(through, leader.ReplicatedThrough())
+	} else if p.followed {
+		return -1 // between leading and not, with no say on what is replicated
+	}
+	return max(through, -1)
+}
+
 // wakeFeed tells the change feed that the accepted watermark may have moved.
 func (p *Partition) wakeFeed() {
 	if f := p.feed; f != nil {

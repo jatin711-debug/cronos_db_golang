@@ -22,6 +22,16 @@ import (
 // The floor is distinct from the group's committed offset, which older APIs
 // can set directly: an offset committed that way proves nothing about the
 // events below it, so it never counts as completion.
+//
+// Completion is recorded by offset, so it is only as good as the log entry at
+// that offset. A replica's log can lose its end: a follower drops what a
+// replaced leader wrote, a node that crashed comes back without what it had
+// not synced. The offsets are then given to other events, and a record that
+// outlived its entry would make the new event count as finished before it
+// was ever delivered. So a replica keeps no completion at or beyond the end
+// of its own log: ForgetCompletionsFrom removes it when the log is cut and
+// when a partition starts, and ApplyReplicatedProgress takes a leader's
+// progress only as far as the local log reaches.
 
 func completionKey(group string, partition int32, offset int64) string {
 	return fmt.Sprintf("done:%d:%s:%d:%020d", len(group), group, partition, offset)
@@ -191,6 +201,112 @@ func (g *GroupManager) raiseHighestCompleted(prefix string, offset int64) int64 
 	}
 	g.completedMax[prefix] = offset
 	return offset
+}
+
+// lowerHighestCompleted brings the cached value down to offset. A value that
+// is too low only costs a lookup of the stored state.
+func (g *GroupManager) lowerHighestCompleted(prefix string, offset int64) {
+	g.completedMaxMu.Lock()
+	if current, known := g.completedMax[prefix]; known && current > offset {
+		g.completedMax[prefix] = offset
+	}
+	g.completedMaxMu.Unlock()
+}
+
+// ForgetCompletionsFrom removes what is recorded as complete at offset and
+// beyond on a partition, for every group: the log does not hold those entries
+// any more, or never did. Each group's floor and committed offset are brought
+// down to offset if they were past it. It reports how many groups had
+// something to forget.
+func (g *GroupManager) ForgetCompletionsFrom(partitionID int32, offset int64) (int, error) {
+	offset = max(offset, 0)
+	g.commitMu.Lock()
+	defer g.commitMu.Unlock()
+
+	g.mu.RLock()
+	var tracked []string
+	for id, group := range g.groups {
+		if _, ok := group.CommittedOffsets[partitionID]; ok {
+			tracked = append(tracked, id)
+		}
+	}
+	store := g.offsetStore
+	g.mu.RUnlock()
+
+	// floors holds, for each group with something to forget, its stored floor.
+	floors := make(map[string]int64)
+	for _, id := range tracked {
+		highest := g.highestCompleted(id, partitionID)
+		g.mu.RLock()
+		floor := g.floors[completionPrefix(id, partitionID)]
+		committed := g.groups[id].CommittedOffsets[partitionID]
+		g.mu.RUnlock()
+		if highest >= offset || floor > offset || committed > offset {
+			floors[id] = floor
+		}
+	}
+	if len(floors) == 0 {
+		return 0, nil
+	}
+
+	if store != nil {
+		err := store.withDB(func(db *pebble.DB) error {
+			batch := db.NewBatch()
+			defer batch.Close()
+			for id, floor := range floors {
+				prefix := completionPrefix(id, partitionID)
+				if err := batch.DeleteRange([]byte(completionKey(id, partitionID, offset)), []byte(prefix+":"), nil); err != nil {
+					return err
+				}
+				if floor > offset {
+					value := make([]byte, 8)
+					binary.BigEndian.PutUint64(value, uint64(offset))
+					if err := batch.Set([]byte(floorKey(id, partitionID)), value, nil); err != nil {
+						return err
+					}
+				}
+			}
+			return batch.Commit(pebble.Sync)
+		})
+		if err != nil {
+			return 0, fmt.Errorf("forget completion from offset %d: %w", offset, err)
+		}
+	}
+
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for id, floor := range floors {
+		group := g.groups[id]
+		if group == nil {
+			continue
+		}
+		prefix := completionPrefix(id, partitionID)
+		if store == nil {
+			for key := range g.completed {
+				if strings.HasPrefix(key, prefix) {
+					if done, ok := parseCompletionOffset(key, prefix); ok && done >= offset {
+						delete(g.completed, key)
+					}
+				}
+			}
+		}
+		if floor > offset {
+			g.setFloorLocked(id, partitionID, offset)
+		}
+		if group.CommittedOffsets[partitionID] > offset {
+			group.CommittedOffsets[partitionID] = offset
+			group.UpdatedTS = time.Now().UnixMilli()
+			if store != nil {
+				_ = store.CommitOffset(id, partitionID, offset)
+			}
+			// The group record carries the committed offset too, and the
+			// higher of the two is taken when it is read back.
+			g.persistGroup(group)
+		}
+		g.lowerHighestCompleted(prefix, offset-1)
+	}
+	g.progressVersion.Add(1)
+	return len(floors), nil
 }
 
 func parseCompletionOffset(key, prefix string) (int64, bool) {
@@ -547,7 +663,12 @@ func (g *GroupManager) completedFromLocked(group string, partition int32, from i
 // ignored, and completions are added, never removed. The write is not synced;
 // the leader re-sends its full progress, so a lost tail is repaired by the
 // next round.
-func (g *GroupManager) ApplyReplicatedProgress(partitionID int32, groups []*types.ConsumerGroupProgress) error {
+//
+// logEnd is where the follower's log ends: the offset its next entry gets.
+// Progress at or beyond it is left for a later round. It is about entries
+// this replica does not hold, and may never get: if it leads next, those
+// offsets go to new events, which must not count as finished.
+func (g *GroupManager) ApplyReplicatedProgress(partitionID int32, logEnd int64, groups []*types.ConsumerGroupProgress) error {
 	g.commitMu.Lock()
 	defer g.commitMu.Unlock()
 
@@ -568,9 +689,9 @@ func (g *GroupManager) ApplyReplicatedProgress(partitionID int32, groups []*type
 			batch := db.NewBatch()
 			defer batch.Close()
 			for _, progress := range groups {
-				group, cursor := progress.GetGroupId(), max(progress.GetCommittedOffset(), cursors[progress.GetGroupId()])
+				group, cursor := progress.GetGroupId(), max(min(progress.GetCommittedOffset(), logEnd), cursors[progress.GetGroupId()])
 				for _, offset := range progress.GetCompletedOffsets() {
-					if offset < cursor {
+					if offset < cursor || offset >= logEnd {
 						continue
 					}
 					if err := batch.Set([]byte(completionKey(group, partitionID, offset)), []byte{1}, nil); err != nil {
@@ -617,10 +738,10 @@ func (g *GroupManager) ApplyReplicatedProgress(partitionID int32, groups []*type
 			group.CommittedOffsets[partitionID] = -1
 			changed = true
 		}
-		cursor := max(progress.GetCommittedOffset(), cursors[groupID])
+		cursor := max(min(progress.GetCommittedOffset(), logEnd), cursors[groupID])
 		highest := cursor - 1
 		for _, offset := range progress.GetCompletedOffsets() {
-			if offset < cursor {
+			if offset < cursor || offset >= logEnd {
 				continue
 			}
 			highest = max(highest, offset)

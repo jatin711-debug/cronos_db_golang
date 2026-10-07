@@ -422,6 +422,45 @@ func (tw *TimingWheel) cascadeFromOverflow() {
 	}
 }
 
+// Clear removes every timer from this wheel and the wheels above it, with
+// those that have expired and were not collected yet. It returns how many.
+func (tw *TimingWheel) Clear() int {
+	tw.mu.Lock()
+	defer tw.mu.Unlock()
+	return tw.clearLocked()
+}
+
+func (tw *TimingWheel) clearLocked() int {
+	removed := len(tw.timers) + len(tw.overflowRetry)
+	clear(tw.wheel)
+	for _, timer := range tw.timers {
+		tw.PutTimer(timer)
+	}
+	clear(tw.timers)
+	for _, timer := range tw.overflowRetry {
+		tw.PutTimer(timer)
+	}
+	tw.overflowRetry = nil
+	for drained := false; !drained; {
+		select {
+		case expired := <-tw.expired:
+			removed += len(expired)
+			for _, timer := range expired {
+				tw.PutTimer(timer)
+			}
+			expiredSlicePool.Put(expired)
+		default:
+			drained = true
+		}
+	}
+	if tw.overflowWheel != nil {
+		tw.overflowWheel.mu.Lock()
+		removed += tw.overflowWheel.clearLocked()
+		tw.overflowWheel.mu.Unlock()
+	}
+	return removed
+}
+
 // AdvanceTo advances the wheel tick-by-tick until targetTick, sleeping one
 // tickMs between advances. Returns an error if targetTick is in the past.
 func (tw *TimingWheel) AdvanceTo(targetTick int64) error {

@@ -106,7 +106,10 @@ type Scheduler struct {
 	// expired events, GetReadyEvents drains, the tick drains expired timers), so
 	// keeping it off the RWMutex shared with checkpoint/stats/hydrator state cuts
 	// contention. Never hold mu and readyMu at the same time.
-	readyMu          sync.Mutex
+	readyMu sync.Mutex
+	// tickMu is held while expired timers move from the wheel to the ready
+	// queue, so that Reset cannot run between the two.
+	tickMu           sync.Mutex
 	timingWheel      *TimingWheel   // hierarchical wheel for near-future timers
 	readyQueue       []*types.Event // events whose schedule time has arrived
 	readySignal      chan struct{}  // buffered notify for ready-queue consumers
@@ -285,6 +288,28 @@ func (s *Scheduler) ScheduleBatch(events []*types.Event) error {
 	return nil
 }
 
+// Reset forgets everything that is scheduled: the timers, the events that
+// are ready, and the references to events far in the future. The caller
+// schedules the log again from its start.
+//
+// A timer holds the event as it was read when it was scheduled. Scheduling
+// the log a second time on top of what was there kept those: where the log
+// had been cut and written again in between, the timer of the removed entry
+// stayed, the entry that took its offset was refused as scheduled already,
+// and the removed event fired in its place.
+func (s *Scheduler) Reset() error {
+	s.tickMu.Lock()
+	defer s.tickMu.Unlock()
+	s.timingWheel.Clear()
+	s.readyMu.Lock()
+	s.readyQueue = nil
+	s.readyMu.Unlock()
+	if s.coldStore != nil {
+		return s.coldStore.Clear()
+	}
+	return nil
+}
+
 // GetReadyEvents drains and returns events ready for execution.
 // The caller owns the returned slice and its backing array.
 func (s *Scheduler) GetReadyEvents() []*types.Event {
@@ -385,8 +410,10 @@ func (s *Scheduler) worker() {
 	for {
 		select {
 		case <-ticker.C:
+			s.tickMu.Lock()
 			s.timingWheel.Tick()
 			s.drainExpiredToReady()
+			s.tickMu.Unlock()
 
 			// FIX: Only emit metrics every 10th tick to reduce
 			// RLock acquisitions and GetStats overhead

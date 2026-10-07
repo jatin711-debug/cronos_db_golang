@@ -155,6 +155,19 @@ func (cs *ColdStore) DeleteBatch(entries []struct {
 	return nil
 }
 
+// Clear removes every stored reference.
+func (cs *ColdStore) Clear() error {
+	end := make([]byte, 17)
+	for i := range end {
+		end[i] = 0xff
+	}
+	if err := cs.db.DeleteRange([]byte{}, end, pebble.NoSync); err != nil {
+		return fmt.Errorf("cold store clear: %w", err)
+	}
+	cs.count.Store(0)
+	return nil
+}
+
 // Count returns the approximate number of entries in the cold store.
 func (cs *ColdStore) Count() int64 {
 	return cs.count.Load()

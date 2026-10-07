@@ -85,6 +85,15 @@ func (w *Worker) AddReadyEvents(events []*types.Event) {
 	w.signal()
 }
 
+// Clear drops the events that wait to be dispatched. Whoever scheduled them
+// schedules the log again.
+func (w *Worker) Clear() {
+	w.mu.Lock()
+	w.readyQueue = nil
+	w.queuedBytes = 0
+	w.mu.Unlock()
+}
+
 // Account for payload backing capacity and metadata, not only wire size.
 // This is a per-worker retention budget, not a bound on whole-process RSS.
 func retainedEventBytes(event *types.Event) int64 {
