@@ -41,6 +41,9 @@ type Manager struct {
 	stopCh  chan struct{}
 	ctx     context.Context
 	cancel  context.CancelFunc
+
+	// alive is the last reading of who is alive that seesEnoughReplicas took.
+	alive atomic.Pointer[aliveView]
 }
 
 // NewManager creates a cluster Manager from the simplified startup Config.

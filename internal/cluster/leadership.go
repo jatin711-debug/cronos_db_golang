@@ -86,15 +86,64 @@ func (m *Manager) committed(partitionID int32) (PartitionInfo, bool) {
 }
 
 // IsPartitionWritable reports whether this node may accept publishes for a
-// partition right now: it is the committed leader and no handoff is under way.
+// partition right now: it is the committed leader, no handoff is under way,
+// and it counts enough of the partition's replicas as alive for a publish to
+// be acknowledged.
 func (m *Manager) IsPartitionWritable(partitionID int32) bool {
 	if info, ok := m.committed(partitionID); ok {
-		return info.LeaderID == m.config.NodeID && info.TransferTo == ""
+		return info.LeaderID == m.config.NodeID && info.TransferTo == "" && m.seesEnoughReplicas(info)
 	}
 	if m.leadershipIsCommitted() {
 		return false // no leader has been committed for it yet
 	}
 	return m.router.IsPartitionLeader(partitionID)
+}
+
+// aliveViewFor is how long seesEnoughReplicas uses one reading of who is
+// alive. It is asked for every publish.
+var aliveViewFor = 250 * time.Millisecond
+
+// aliveView is who this node counted as alive at one moment.
+type aliveView struct {
+	at    time.Time
+	nodes map[string]string
+}
+
+// seesEnoughReplicas reports whether this node counts enough replicas of a
+// partition as alive, itself included, to make up the in-sync replicas a
+// publish needs.
+//
+// A leader that is cut off from the other replicas is still the committed
+// leader as far as it can tell: the change that replaces it is committed by
+// the nodes it cannot hear. It cannot acknowledge anything, since no second
+// replica answers, but it used to take every publish, write it to its own
+// log and hold the caller until the replication timed out. Applications that
+// still reached it were held up for as long as the network was down, while
+// the node that could have taken their publishes waited next to it. A leader
+// in that position now says at once that the publish has to go elsewhere.
+func (m *Manager) seesEnoughReplicas(info PartitionInfo) bool {
+	need := m.config.MinInSyncReplicas
+	m.mu.RLock()
+	mem := m.membership
+	m.mu.RUnlock()
+	if need <= 1 || mem == nil {
+		return true
+	}
+	view := m.alive.Load()
+	if view == nil || time.Since(view.at) >= aliveViewFor {
+		view = &aliveView{at: time.Now(), nodes: m.aliveNodes()}
+		m.alive.Store(view)
+	}
+	seen := 1 // this node
+	for _, replica := range info.Replicas {
+		if replica == m.config.NodeID {
+			continue
+		}
+		if _, ok := view.nodes[replica]; ok {
+			seen++
+		}
+	}
+	return seen >= need
 }
 
 // leadershipIsCommitted reports whether committed assignments are this node's

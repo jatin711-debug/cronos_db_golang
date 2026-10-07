@@ -552,6 +552,42 @@ func TestInitialAssignmentWaitsForTheClusterToForm(t *testing.T) {
 	})
 }
 
+// A leader that is cut off from the other replicas of a partition cannot have
+// a publish acknowledged, and says so at once instead of taking the publish
+// and holding its sender until replication times out. With one other replica
+// in sight it has the two a publish needs.
+func TestWritable_NotWithoutEnoughReplicasInSight(t *testing.T) {
+	previous := aliveViewFor
+	aliveViewFor = 0
+	t.Cleanup(func() { aliveViewFor = previous })
+
+	f := newLeadershipFixture(t, "node-1", "node-1", 3, 2, "node-1", "node-2", "node-3")
+	if !f.manager.IsPartitionWritable(0) {
+		t.Fatal("the leader does not take publishes although it sees every replica")
+	}
+	lost := f.membership.nodes["node-3"]
+	delete(f.membership.nodes, "node-3")
+	if !f.manager.IsPartitionWritable(0) {
+		t.Fatal("the leader does not take publishes although it sees one other replica, which is all a publish needs")
+	}
+	delete(f.membership.nodes, "node-2")
+	if f.manager.IsPartitionWritable(0) {
+		t.Fatal("a leader that sees no other replica takes publishes it cannot have acknowledged")
+	}
+	f.membership.nodes["node-3"] = lost
+	if !f.manager.IsPartitionWritable(0) {
+		t.Fatal("the leader does not take publishes again after a replica came back")
+	}
+
+	// Where the leader alone is enough, it needs nobody.
+	alone := newLeadershipFixture(t, "node-1", "node-1", 3, 1, "node-1", "node-2", "node-3")
+	delete(alone.membership.nodes, "node-2")
+	delete(alone.membership.nodes, "node-3")
+	if !alone.manager.IsPartitionWritable(0) {
+		t.Fatal("with min-insync-replicas 1 the leader refused publishes for want of other replicas")
+	}
+}
+
 // Readiness is about serving publishes: every partition needs a committed
 // leader, and this node must have taken up the ones committed to it.
 func TestLeadershipReady(t *testing.T) {
