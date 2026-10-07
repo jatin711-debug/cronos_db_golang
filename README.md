@@ -39,7 +39,7 @@ Ryzen 7 6800H host. See the [measurement settings and baseline comparison](docs/
 - **Damage Detection** — A log that holds unreadable bytes anywhere but at its end refuses to open instead of dropping what follows; `cronos-admin check-log` reports and repairs offline
 - **Automatic Compaction** — Removes closed WAL segments only after every relevant consumer group has completed every event. In a cluster the partition's leader removes them from the start of the log and the other replicas follow
 - **Retention Enforcer** — Age/size policies use the same completion checks and preserve future timers and active segments
-- **Backups** — Hourly independent backups of every loaded partition: event log including the active segment, consumer progress, dedup store, dead-letter queue and epoch, with per-file checksums and all logs cut at one instant; `cronos-admin restore` verifies and restores one into an empty data directory, and can check the encryption key first (see [maintenance validation](docs/MAINTENANCE_VALIDATION_2026-09-29.md))
+- **Backups** — Independent backups of every loaded partition, hourly by default (`-backup-interval`, `-backup-dir`): event log including the active segment, consumer progress, dedup store, dead-letter queue and epoch, with per-file checksums and all logs cut at one instant; `cronos-admin restore` verifies and restores one into an empty data directory, and can check the encryption key first (see [maintenance validation](docs/MAINTENANCE_VALIDATION_2026-09-29.md))
 - **Hierarchical Timing Wheel** — O(1) timer add/remove/tick for millions of events
 - **Two-Tier Cold/Hot Scheduler** — PebbleDB cold store for far-future events (>1hr); adaptive hydrator adjusts scan frequency based on load (5s–5min). Keeps hot memory bounded.
 - **Absolute Time Tracking** — No drift across overflow wheel cascades
@@ -542,6 +542,9 @@ flag-only).
 | `-index-interval` | `1000` | Sparse index interval (events per entry) |
 | `-fsync-mode` | `batch` | `every_event` \| `batch` \| `periodic` — `batch` is the durable default, `periodic` is the throughput ceiling |
 | `-flush-interval` | `1000` | Background flush interval (ms) |
+| `-backup-interval` | `1h` | How often the node backs up its partitions, at wall-clock multiples of the interval, so the nodes of a cluster back up at the same moment. `0` = no scheduled backups |
+| `-backup-retention` | `168h` | How long a backup is kept. `0` = for good |
+| `-backup-dir` | *(empty)* | Where backups go; default `backups` under `-data-dir`. A backup on the volume of the data it copies does not survive the loss of that volume |
 | `-retention-max-age-hours` | `168` | Delete WAL segments older than this many hours (0 = disable) |
 | `-retention-max-size-gb` | `0` | Keep WAL segments within this many GB by deleting oldest (0 = disable) |
 | `-dev` | `false` | Developer mode: disables production security requirements |

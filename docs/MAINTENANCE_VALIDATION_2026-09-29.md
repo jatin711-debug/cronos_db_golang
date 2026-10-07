@@ -41,9 +41,27 @@ hardening changes were preserved.
   partition is first led by the replica with the most complete log, and epochs
   continue above those stored with the data. The backups of different nodes
   remain separate copies that agree only as closely as the schedule and the
-  clocks do, which is why the most complete replica leads. This path is
-  tested with stand-in replicas; a restore of a real multi-node cluster has
-  not been run.
+  clocks do, which is why the most complete replica leads.
+- A whole cluster has been restored from its backups
+  (`TestClusterRestoredFromBackups` in `tests/acceptance`, run in CI). Three
+  server processes take their backups while publishes keep arriving, so the
+  three copies of a partition do not end at the same entry. Every node is
+  then killed and its data directory removed, each node is restored from its
+  own backup with `cronos-admin restore`, and the nodes are started. The
+  test checks that every publish acknowledged before the earliest of the
+  three backups is in the restored logs, that the three replicas of every
+  partition hold the same log, that events which were waiting for their time
+  are delivered at that time and not before, that an ID accepted before the
+  backup is still refused as a duplicate, and that the cluster accepts and
+  delivers new events. In the runs so far none of the events that had been
+  finished before the backup was delivered again. Publishes acknowledged
+  after a node's backup are lost with the cluster; that is what a backup
+  means.
+- `--backup-interval`, `--backup-retention` and `--backup-dir` set how often
+  backups are taken, how long they are kept and where they go. The default
+  location is on the data volume, which protects against mistakes and
+  damage, not against the loss of that volume: point `--backup-dir` at
+  another volume or copy the backups away.
 - Automatic compaction and both admin APIs use the live WAL's deletion lock.
   Every event must be past due and have a per-event completion record in every
   matching assigned consumer group. No matching group means keep the event.
