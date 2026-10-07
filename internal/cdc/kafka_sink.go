@@ -33,24 +33,31 @@ func (k *KafkaSink) Name() string { return "kafka" }
 // Write marshals the change event as JSON and produces it to Kafka.
 // Message keys are "topic/partitionID" for partitioning.
 func (k *KafkaSink) Write(ctx context.Context, event *ChangeEvent) error {
+	return k.WriteBatch(ctx, []*ChangeEvent{event})
+}
+
+// WriteBatch produces the events in one call. Events with the same key go to
+// one Kafka partition in the order given, so the log order of a CronosDB
+// partition is kept per topic.
+func (k *KafkaSink) WriteBatch(ctx context.Context, events []*ChangeEvent) error {
 	// Lazy-init writer on first use
 	if err := k.ensureWriter(); err != nil {
 		return err
 	}
 
-	data, err := json.Marshal(event)
-	if err != nil {
-		return fmt.Errorf("marshal change event: %w", err)
+	msgs := make([]kafka.Message, len(events))
+	for i, event := range events {
+		data, err := json.Marshal(event)
+		if err != nil {
+			return fmt.Errorf("marshal change event: %w", err)
+		}
+		msgs[i] = kafka.Message{
+			Key:   fmt.Appendf(nil, "%s/%d", event.Topic, event.PartitionID),
+			Value: data,
+			Time:  event.Timestamp,
+		}
 	}
-
-	key := fmt.Sprintf("%s/%d", event.Topic, event.PartitionID)
-	msg := kafka.Message{
-		Key:   []byte(key),
-		Value: data,
-		Time:  event.Timestamp,
-	}
-
-	return k.writer.WriteMessages(ctx, msg)
+	return k.writer.WriteMessages(ctx, msgs...)
 }
 
 // Close shuts down the Kafka writer if it was opened.

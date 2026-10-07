@@ -58,6 +58,9 @@ type Leader struct {
 	// quorumObserver is told, on every maintenance tick, how far the log is
 	// replicated to a quorum. Nil when nothing needs to know.
 	quorumObserver func(offset int64)
+	// changeFeedSource returns how far the partition's change feed has got;
+	// known is false when it has none. Nil sends nothing about it.
+	changeFeedSource func() (offset int64, known bool)
 }
 
 // FollowerInfo tracks a follower replica and its gRPC replication client state.
@@ -94,6 +97,10 @@ type FollowerInfo struct {
 	progressSent    uint64
 	progressSentAt  time.Time
 	progressSending bool
+	// feedSent is the change feed position sent with it, feedSentKnown whether
+	// there was one. Guarded by mu.
+	feedSent      int64
+	feedSentKnown bool
 	// progressFailing is set while sends keep failing, so that an unreachable
 	// follower is logged once rather than on every maintenance tick.
 	progressFailing bool
@@ -482,13 +489,15 @@ func (l *Leader) appendToFollower(f *FollowerInfo, events []*types.Event, checks
 	}
 
 	req := &types.ReplicationAppendRequest{
-		PartitionId:        l.partitionID,
-		Events:             events,
-		ExpectedNextOffset: events[0].Offset,
-		Term:               atomic.LoadInt64(&l.epoch),
-		LeaderId:           l.nodeID,
-		PrevLogTerm:        l.getPrevLogTerm(events[0].Offset - 1),
-		Checksum:           checksum,
+		PartitionId: l.partitionID,
+		Events:      events,
+		Term:        atomic.LoadInt64(&l.epoch),
+		LeaderId:    l.nodeID,
+		Checksum:    checksum,
+	}
+	if len(events) > 0 { // none: a probe, which only asks where the follower is
+		req.ExpectedNextOffset = events[0].Offset
+		req.PrevLogTerm = l.getPrevLogTerm(events[0].Offset - 1)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), l.getReplicateTimeout())
@@ -706,6 +715,7 @@ func (l *Leader) maintenanceLoop() {
 		select {
 		case <-ticker.C:
 			l.reconnectDeadFollowers()
+			l.probeNewFollowers()
 			l.catchUpIdleFollowers()
 			l.shipConsumerProgress()
 			l.reportQuorumOffset()
@@ -731,6 +741,40 @@ func (l *Leader) reconnectDeadFollowers() {
 	l.mu.RUnlock()
 	for _, r := range dead {
 		l.connectFollower(r.id, r.addr)
+	}
+}
+
+// probeNewFollowers asks every follower that has not acknowledged anything yet
+// where its log ends, with an append that carries no entries.
+//
+// Until a follower has answered once the leader knows nothing about it: it is
+// not caught up, and nothing counts as replicated to it. On a partition that
+// takes publishes that resolves itself with the first one. On an idle one,
+// after a failover for instance, a follower that is behind would stay behind,
+// and the offset known to be on a quorum would stay unknown, until somebody
+// published again.
+func (l *Leader) probeNewFollowers() {
+	l.mu.RLock()
+	followers := make([]*FollowerInfo, 0, len(l.followers))
+	for _, f := range l.followers {
+		followers = append(followers, f)
+	}
+	l.mu.RUnlock()
+
+	for _, f := range followers {
+		f.mu.Lock()
+		unknown := f.client != nil && f.pendingSends == 0 && f.LastAckTS == 0
+		f.mu.Unlock()
+		if !unknown {
+			continue
+		}
+		l.queueFollowerWork(f, nil, func() error {
+			err := l.appendToFollower(f, nil, 0)
+			if err != nil {
+				l.logSendFailure(f, "Probe of", err)
+			}
+			return err
+		})
 	}
 }
 
@@ -775,6 +819,15 @@ func (l *Leader) catchUpIdleFollowers() {
 	}
 }
 
+// SetChangeFeedSource has the change feed's position sent to followers along
+// with the consumer progress. source reports known=false for a partition
+// without a feed.
+func (l *Leader) SetChangeFeedSource(source func() (offset int64, known bool)) {
+	l.mu.Lock()
+	l.changeFeedSource = source
+	l.mu.Unlock()
+}
+
 // SetProgressSource enables consumer-progress replication. source returns the
 // partition's current group progress and a version that changes with it.
 func (l *Leader) SetProgressSource(source func() (uint64, []*types.ConsumerGroupProgress)) {
@@ -790,6 +843,7 @@ func (l *Leader) SetProgressSource(source func() (uint64, []*types.ConsumerGroup
 func (l *Leader) shipConsumerProgress() {
 	l.mu.RLock()
 	source := l.progressSource
+	feedSource := l.changeFeedSource
 	followers := make([]*FollowerInfo, 0, len(l.followers))
 	for _, f := range l.followers {
 		followers = append(followers, f)
@@ -800,10 +854,16 @@ func (l *Leader) shipConsumerProgress() {
 	}
 
 	version, groups := source()
+	var feedOffset int64
+	var feedKnown bool
+	if feedSource != nil {
+		feedOffset, feedKnown = feedSource()
+	}
 	for _, f := range followers {
 		f.mu.Lock()
 		client := f.client
-		current := f.progressSent == version && time.Since(f.progressSentAt) < progressResendInterval
+		current := f.progressSent == version && time.Since(f.progressSentAt) < progressResendInterval &&
+			f.feedSentKnown == feedKnown && (!feedKnown || f.feedSent == feedOffset)
 		if client == nil || current || f.progressSending {
 			f.mu.Unlock()
 			continue
@@ -814,10 +874,12 @@ func (l *Leader) shipConsumerProgress() {
 		go func(f *FollowerInfo) {
 			ctx, cancel := context.WithTimeout(context.Background(), l.getReplicateTimeout())
 			resp, err := client.SyncConsumerProgress(ctx, &types.ReplicationProgressRequest{
-				PartitionId: l.partitionID,
-				Term:        atomic.LoadInt64(&l.epoch),
-				LeaderId:    l.nodeID,
-				Groups:      groups,
+				PartitionId:         l.partitionID,
+				Term:                atomic.LoadInt64(&l.epoch),
+				LeaderId:            l.nodeID,
+				Groups:              groups,
+				HasChangeFeedOffset: feedKnown,
+				ChangeFeedOffset:    feedOffset,
 			})
 			cancel()
 			if err == nil && !resp.GetSuccess() {
@@ -827,6 +889,7 @@ func (l *Leader) shipConsumerProgress() {
 			f.progressSending = false
 			if err == nil {
 				f.progressSent, f.progressSentAt = version, time.Now()
+				f.feedSent, f.feedSentKnown = feedOffset, feedKnown
 			}
 			firstFailure := err != nil && !f.progressFailing
 			f.progressFailing = err != nil

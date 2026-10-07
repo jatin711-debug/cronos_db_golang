@@ -108,18 +108,12 @@ type Partition struct {
 	heldMu    sync.Mutex
 	held      []heldRange
 	heldCount atomic.Int32
+	// feed exports accepted events (see changefeed.go); nil when nothing
+	// consumes them. It is set before the partition takes appends.
+	feed *changeFeed
+	// replQuorum is ReplLeader for readers that do not hold the manager lock.
+	replQuorum atomic.Pointer[replication.Leader]
 }
-
-// BeginPublish marks a publish to this partition as in flight. Callers check
-// that the partition is writable only after calling it, and call EndPublish
-// when the publish has finished, whether it succeeded or not. That order is
-// what lets a leadership handoff tell when the log can no longer grow: once
-// the partition is not writable and nothing is in flight, no publish that
-// could still append exists.
-func (p *Partition) BeginPublish() { p.publishing.Add(1) }
-
-// EndPublish ends a publish started with BeginPublish.
-func (p *Partition) EndPublish() { p.publishing.Add(-1) }
 
 // leadershipRecord is the fencing state a replica keeps on disk: the highest
 // leadership epoch it has accepted and the node that holds it.
@@ -288,6 +282,9 @@ type PartitionManager struct {
 	// writable is the cluster's view of whether this node may accept publishes
 	// for a partition; nil means every led partition is writable.
 	writable func(partitionID int32) bool
+	// changeFeed receives the accepted events of every partition; nil when
+	// nothing consumes them.
+	changeFeed FeedFunc
 	// pinned partitions stay loaded even when this node holds no replica of
 	// them; releasing marks partitions whose stores are still being closed.
 	// Both are guarded by mu.
@@ -479,6 +476,11 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 		partition.restoreLeadership(record)
 	} else if !os.IsNotExist(err) {
 		return err
+	}
+	if pm.changeFeed != nil {
+		if err := partition.openChangeFeed(pm.changeFeed, pm.config.ClusterEnabled); err != nil {
+			return err
+		}
 	}
 	pm.partitions[partitionID] = partition
 
@@ -786,6 +788,14 @@ func (pm *PartitionManager) startPartitionInternal(partition *Partition) error {
 			}
 		}
 	})
+
+	if partition.feed != nil {
+		partition.background.Add(1)
+		utils.GoSafe("partition-change-feed", func() {
+			defer partition.background.Done()
+			partition.runChangeFeed()
+		})
+	}
 
 	// Start compaction loop (runs every 10 minutes)
 	compactionInterval := 10 * time.Minute
@@ -1432,6 +1442,7 @@ func (pm *PartitionManager) PromoteToLeader(partitionID int32, epoch int64) erro
 	}
 	if pm.config.ReplicationFactor <= 1 {
 		partition.leader.Store(true)
+		partition.wakeFeed()
 		return nil
 	}
 	// The third argument is the reconnect tick, not the RPC deadline: 0 keeps
@@ -1451,10 +1462,16 @@ func (pm *PartitionManager) PromoteToLeader(partitionID int32, epoch int64) erro
 		if err := partition.AcceptThrough(offset); err != nil {
 			log.Printf("[PARTITION] Partition %d: accepting replicated publishes up to offset %d failed: %v", partitionID, offset, err)
 		}
+		partition.wakeFeed()
 	})
+	// Followers also learn how far the change feed has got, so that the one
+	// that takes over continues it instead of repeating or skipping events.
+	leader.SetChangeFeedSource(partition.ChangeFeedPosition)
 	leader.Start()
 	partition.ReplLeader = leader
+	partition.replQuorum.Store(leader)
 	partition.leader.Store(true)
+	partition.wakeFeed()
 
 	log.Printf("[PARTITION] Partition %d promoted to leader (epoch=%d)", partitionID, epoch)
 	return nil
@@ -1495,11 +1512,15 @@ func (pm *PartitionManager) DemoteFromLeader(partitionID int32) error {
 		return nil // reconciliation calls this for every partition it does not lead
 	}
 
+	// Not leading comes first. What follows forgets which entries were never
+	// accepted, and the change feed must see that this node stopped leading
+	// before it can see that.
+	partition.leader.Store(false)
 	if partition.ReplLeader != nil {
 		partition.ReplLeader.Stop()
 		partition.ReplLeader = nil
 	}
-	partition.leader.Store(false)
+	partition.replQuorum.Store(nil)
 	// The new leader decides what becomes of this node's unreplicated tail.
 	partition.dropHeld()
 

@@ -196,6 +196,30 @@ func main() {
 	// Create partition manager with shared cache
 	pm := partition.NewPartitionManagerWithCache(cfg.NodeID, cfg, sharedCache)
 
+	// Change data capture and replication to other regions read the change
+	// feed of every partition: accepted events only, in log order, from the
+	// partition's leader. Set before any partition exists, so that partitions
+	// created later, which in a cluster is nearly all of them, have one too.
+	crossRegion := cfg.NodeRegion != ""
+	if cdcManager.HasSinks() || crossRegion {
+		pm.SetChangeFeed(func(ctx context.Context, partitionID int32, events []*types.Event) error {
+			if err := cdcManager.Deliver(ctx, partitionID, events); err != nil {
+				return err
+			}
+			if crossRegion {
+				for _, event := range events {
+					// Not what arrived from another region: CrossRegionServer tags
+					// those with source_region, and sending them back out would
+					// bounce them between regions for ever.
+					if event.GetMeta()["source_region"] == "" {
+						crossRegionReplicator.ReplicateAsync(event)
+					}
+				}
+			}
+			return nil
+		})
+	}
+
 	// Start disk pressure monitor
 	diskMonitor := partition.NewDiskMonitor(cfg.DataDir, 0.85, func() {
 		slog.Info("Disk pressure detected: triggering emergency compaction")
@@ -330,40 +354,6 @@ func main() {
 		} else {
 			slog.Info("Created and started partition", "partition_id", i)
 		}
-	}
-
-	// Wire CDC and cross-region replication hooks into all partitions
-	for i := int32(0); i < int32(cfg.PartitionCount); i++ {
-		p, err := pm.GetInternalPartition(i)
-		if err != nil || p == nil || p.Wal == nil {
-			continue
-		}
-		p.Wal.SetAppendHook(func(event *types.Event) {
-			// Fast path: skip the ChangeEvent allocation + time.Now() syscall
-			// entirely when there are no CDC sinks and no cross-region
-			// replicator configured. This is the common case in dev / load
-			// test mode and avoids per-event heap pressure at 1M+ events/sec.
-			if cdcManager != nil && cdcManager.HasSinks() {
-				cdcManager.Emit(context.Background(), &cdc.ChangeEvent{
-					Timestamp:   time.Now(),
-					Op:          "append",
-					PartitionID: event.PartitionId,
-					Topic:       event.Topic,
-					Offset:      event.Offset,
-					Event:       event,
-				})
-			}
-			if crossRegionReplicator != nil && cfg.NodeRegion != "" {
-				// Do not re-replicate events that arrived FROM another region.
-				// CrossRegionServer.ReplicateEvents tags received events with
-				// source_region; without this guard, appending a received event
-				// fires this hook and ships it straight back out, creating an
-				// infinite cross-region echo loop.
-				if event.GetMeta()["source_region"] == "" {
-					crossRegionReplicator.ReplicateAsync(event)
-				}
-			}
-		})
 	}
 
 	// Get any available partition for handler setup (dedup and consumer group are shared)

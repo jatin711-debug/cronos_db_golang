@@ -81,10 +81,9 @@ type WAL struct {
 	quit           chan struct{}
 	quitOnce       sync.Once
 	wg             sync.WaitGroup
-	cipher         *SegmentCipher           // optional at-rest encryption; nil = plaintext
-	currentTerm    int64                    // Raft term stamped on newly produced records
-	appendHook     func(event *types.Event) // called after successful append (e.g. CDC)
-	coalescer      *FsyncCoalescer          // optional global fsync coalescer
+	cipher         *SegmentCipher  // optional at-rest encryption; nil = plaintext
+	currentTerm    int64           // Raft term stamped on newly produced records
+	coalescer      *FsyncCoalescer // optional global fsync coalescer
 
 	// Group-commit coordinator for FsyncBatch mode: writers that finish
 	// appending while a sync is in flight share the next one. See groupCommitSync.
@@ -198,11 +197,6 @@ func (w *WAL) SetCurrentTerm(term int64) {
 // GetCurrentTerm returns the term used for new records.
 func (w *WAL) GetCurrentTerm() int64 {
 	return atomic.LoadInt64(&w.currentTerm)
-}
-
-// SetAppendHook registers a callback invoked after each successful event append.
-func (w *WAL) SetAppendHook(hook func(event *types.Event)) {
-	w.appendHook = hook
 }
 
 // loadSegments loads existing segments and verifies their integrity on startup.
@@ -556,12 +550,6 @@ func (w *WAL) AppendBatch(events []*types.Event) error {
 	}
 	w.dirty.Store(true)
 
-	// Collect hook events to fire after unlock
-	var hookEvents []*types.Event
-	if w.appendHook != nil {
-		hookEvents = append(hookEvents, events...)
-	}
-
 	// every_event flushes and syncs inline, under the WAL lock. batch does both
 	// after releasing it (groupCommitSync), so other writers keep appending
 	// while the disk works and then share one sync.
@@ -607,11 +595,6 @@ func (w *WAL) AppendBatch(events []*types.Event) error {
 
 	// 4. Return buffers to pool
 	returnBuffersToPool(prepared)
-
-	// Fire hooks AFTER releasing the lock to avoid blocking writers
-	for _, e := range hookEvents {
-		w.appendHook(e)
-	}
 
 	return nil
 }
@@ -696,11 +679,6 @@ func (w *WAL) AppendReplicatedBatch(events []*types.Event) error {
 	}
 	w.dirty.Store(true)
 
-	var hookEvents []*types.Event
-	if w.appendHook != nil {
-		hookEvents = append(hookEvents, events...)
-	}
-
 	// Flush and sync under the WAL lock for every_event; batch does both after
 	// the lock is released (groupCommitSync).
 	syncSegment := w.activeSegment
@@ -735,10 +713,6 @@ func (w *WAL) AppendReplicatedBatch(events []*types.Event) error {
 	}
 
 	returnBuffersToPool(prepared)
-
-	for _, e := range hookEvents {
-		w.appendHook(e)
-	}
 
 	return nil
 }
@@ -806,12 +780,6 @@ func (w *WAL) AppendEvent(event *types.Event) error {
 	}
 	w.dirty.Store(true)
 
-	// Collect hook events to fire after unlock
-	var hookEvents []*types.Event
-	if w.appendHook != nil {
-		hookEvents = append(hookEvents, event)
-	}
-
 	syncSegment := w.activeSegment
 	// For every_event, flush + sync inline under the lock. For batch, flush
 	// under the lock (so we don't race with concurrent appends) and sync after
@@ -861,11 +829,6 @@ func (w *WAL) AppendEvent(event *types.Event) error {
 
 	if len(prep.Buf) <= 4096 {
 		recordBufPool.Put(prep.Buf)
-	}
-
-	// Fire hooks AFTER releasing the lock to avoid blocking writers
-	for _, e := range hookEvents {
-		w.appendHook(e)
 	}
 
 	return nil

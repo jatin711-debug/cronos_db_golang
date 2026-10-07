@@ -106,11 +106,11 @@ func TestReleasePartition(t *testing.T) {
 			t.Fatal(err)
 		}
 		p, _ := pm.GetInternalPartition(3)
-		p.BeginPublish()
+		inFlight := p.BeginPublish()
 		if err := pm.ReleasePartition(3); err == nil || !loaded(pm, 3) {
 			t.Fatalf("a partition with a publish in flight was released (err=%v)", err)
 		}
-		p.EndPublish()
+		p.EndPublish(inFlight)
 		if err := pm.ReleasePartition(3); err != nil || loaded(pm, 3) {
 			t.Fatalf("an idle, demoted partition was not released (err=%v)", err)
 		}
