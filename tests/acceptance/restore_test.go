@@ -104,13 +104,26 @@ func TestClusterRestoredFromBackups(t *testing.T) {
 		for i := 0; i < count; i++ {
 			id := fmt.Sprintf("%s-%03d", prefix, i)
 			events.noteSent(id, due.UnixMilli())
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			result, err := producer.Send(ctx, client.Message{MessageID: id, Topic: topic, Payload: []byte(id), ScheduleTS: due.UnixMilli()})
-			cancel()
-			if err != nil {
-				t.Fatalf("publish %s: %v", id, err)
+			// A partition refuses publishes for a moment while its leadership
+			// moves, which it does when a cluster has just formed. The event
+			// is sent again under the same ID until it is taken, as an
+			// application that must not lose it does.
+			for giveUp := time.Now().Add(45 * time.Second); ; time.Sleep(200 * time.Millisecond) {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				result, err := producer.Send(ctx, client.Message{MessageID: id, Topic: topic, Payload: []byte(id), ScheduleTS: due.UnixMilli()})
+				cancel()
+				if err == nil {
+					events.noteAccepted(id, result.PartitionID, result.Offset)
+					break
+				}
+				if acceptedEarlier(err) {
+					events.noteAccepted(id, -1, -1)
+					break
+				}
+				if time.Now().After(giveUp) {
+					t.Fatalf("publish %s: %v", id, err)
+				}
 			}
-			events.noteAccepted(id, result.PartitionID, result.Offset)
 		}
 	}
 	// consume runs one consumer of the group until the returned function is
@@ -199,7 +212,9 @@ func TestClusterRestoredFromBackups(t *testing.T) {
 			result, err := producer.Send(ctx, client.Message{MessageID: id, Topic: topic, Payload: []byte(id), ScheduleTS: pendingDue.UnixMilli()})
 			cancel()
 			if err != nil {
-				events.forget(id) // not acknowledged: nothing is owed
+				// Not acknowledged, so nothing is owed. It stays on record
+				// all the same: the cluster may have stored it before the
+				// answer was lost, and may then deliver it.
 				continue
 			}
 			events.noteAccepted(id, result.PartitionID, result.Offset)
@@ -303,11 +318,19 @@ func TestClusterRestoredFromBackups(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer producer.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	_, err = producer.Send(ctx, client.Message{MessageID: "pending-000", Topic: topic, Payload: []byte("again"), ScheduleTS: time.Now().Add(time.Second).UnixMilli()})
-	cancel()
-	if err == nil || !acceptedEarlier(err) {
-		t.Errorf("an ID that was accepted before the backup was not refused as a duplicate after the restore: %v", err)
+	for giveUp := time.Now().Add(45 * time.Second); ; time.Sleep(200 * time.Millisecond) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_, err = producer.Send(ctx, client.Message{MessageID: "pending-000", Topic: topic, Payload: []byte("again"), ScheduleTS: time.Now().Add(time.Second).UnixMilli()})
+		cancel()
+		if err != nil && acceptedEarlier(err) {
+			break
+		}
+		// Any other refusal is of the moment, a partition whose leadership is
+		// moving for instance, and says nothing about the ID.
+		if err == nil || time.Now().After(giveUp) {
+			t.Errorf("an ID that was accepted before the backup was not refused as a duplicate after the restore: %v", err)
+			break
+		}
 	}
 
 	// And it works: new events are accepted and delivered.
