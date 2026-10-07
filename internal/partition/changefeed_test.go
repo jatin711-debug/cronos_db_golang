@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jatin711-debug/cronos_db_golang/internal/storage"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 )
 
@@ -342,4 +343,51 @@ func TestChangeFeed_Disabled(t *testing.T) {
 		t.Fatal("a partition without a feed reports a feed position")
 	}
 	p.NoteLeaderFeedPosition(10, true) // must not panic
+}
+
+// Pruning waits for the change feed as it waits for consumer groups: a
+// segment whose events every group has finished stays until the feed has
+// exported them. A sink that was down when compaction ran would otherwise
+// never see them.
+func TestChangeFeed_PruningWaitsForTheFeed(t *testing.T) {
+	sink := &feedSink{}
+	cfg := unacceptedTestConfig(t)
+	cfg.SegmentSizeBytes = 1024 // every 2 KB event closes a segment
+	pm := feedManager(t, cfg, sink)
+	p := startedPartition(t, pm, 0)
+	if err := p.ConsumerGroup.CreateGroup("workers", "orders", []int32{0}); err != nil {
+		t.Fatal(err)
+	}
+
+	sink.refuse.Store(true)
+	token := p.BeginPublish()
+	var events []*types.Event
+	for i := 0; i < 4; i++ {
+		events = append(events, appendMaintenanceEvent(t, p, fmt.Sprintf("done-%d", i), "orders", time.Now().Add(-time.Hour), 2048))
+	}
+	p.EndPublish(token)
+	if err := p.ConsumerGroup.CommitDelivery("workers", 0, events); err != nil {
+		t.Fatal(err)
+	}
+
+	prune := func() int {
+		t.Helper()
+		deleted, err := p.PruneWAL(context.Background(), storage.PruneOptions{AllCompleted: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return deleted
+	}
+	if deleted := prune(); deleted != 0 {
+		t.Fatalf("%d segments were removed although the change feed had exported none of their events", deleted)
+	}
+	if got, err := p.Wal.ReadEvents(0, 3); err != nil || len(got) != 4 {
+		t.Fatalf("log holds %d of 4 events after pruning (err=%v)", len(got), err)
+	}
+
+	sink.refuse.Store(false)
+	sink.expect(t, 0, "[0 1 2 3]")
+	if deleted := prune(); deleted == 0 {
+		t.Fatal("nothing was removed after the feed had exported every finished event")
+	}
 }
