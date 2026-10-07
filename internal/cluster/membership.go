@@ -276,6 +276,12 @@ type GossipMessage struct {
 
 // handleJoinRequest handles a node join request
 func (m *Membership) handleJoinRequest(conn net.Conn, msg *GossipMessage) {
+	if msg.NodeID == m.localNode.ID {
+		// This node, reached through its own entry in a seed list. Its record
+		// stays as it is; the reply names it alone, which tells the caller so.
+		json.NewEncoder(conn).Encode(map[string]interface{}{"success": true, "nodes": []*Node{m.localNode}})
+		return
+	}
 	node := &Node{
 		ID:         msg.NodeID,
 		Address:    msg.Address,
@@ -744,25 +750,77 @@ func (m *Membership) detectFailures() {
 	}
 }
 
-// joinSeedNodes attempts to join the cluster via seed nodes
+// seedRetryInterval is how long joinSeedNodes waits between rounds; after
+// seedRetryFastRounds rounds it waits five times as long.
+const (
+	seedRetryInterval   = time.Second
+	seedRetryFastRounds = 30
+)
+
+// joinSeedNodes introduces this node to every seed and keeps trying the ones
+// that do not answer.
+//
+// The nodes of a new cluster start together, so a seed may not be listening
+// yet, and a seed list usually names this node as well. Trying each seed once
+// and stopping at the first answer left a node that started early on its own
+// for good: its own listener answered, it counted that as having joined, and
+// it never became part of the cluster or got a Raft leader. Stopping at the
+// first other node is not enough either: two nodes that find each other
+// before the bootstrap node is up would never reach it.
 func (m *Membership) joinSeedNodes(ctx context.Context) {
-	for _, seedAddr := range m.config.SeedNodes {
-		if err := m.joinViaNode(ctx, seedAddr); err != nil {
-			log.Printf("[MEMBERSHIP] Failed to join via %s: %v", seedAddr, err)
-			continue
+	done := make(map[string]bool, len(m.config.SeedNodes))
+	logged := make(map[string]bool, len(m.config.SeedNodes))
+	for round := 0; ; round++ {
+		pending := 0
+		for _, seedAddr := range m.config.SeedNodes {
+			if done[seedAddr] {
+				continue
+			}
+			if seedAddr == m.localNode.GossipAddr || seedAddr == m.config.BindAddr {
+				done[seedAddr] = true
+				continue
+			}
+			others, err := m.joinViaNode(ctx, seedAddr)
+			switch {
+			case err != nil:
+				pending++
+				if !logged[seedAddr] {
+					logged[seedAddr] = true
+					log.Printf("[MEMBERSHIP] Seed %s is not reachable yet, will keep trying: %v", seedAddr, err)
+				}
+			case others == 0:
+				// Only this node answered: the seed is this node under another name.
+				done[seedAddr] = true
+			default:
+				done[seedAddr] = true
+				log.Printf("[MEMBERSHIP] Successfully joined cluster via %s", seedAddr)
+			}
 		}
-		log.Printf("[MEMBERSHIP] Successfully joined cluster via %s", seedAddr)
-		return
+		if pending == 0 {
+			return
+		}
+		wait := seedRetryInterval
+		if round >= seedRetryFastRounds {
+			wait *= 5
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-m.stopCh:
+			return
+		case <-time.After(wait):
+		}
 	}
-	log.Printf("[MEMBERSHIP] Could not join via any seed node, starting as standalone")
 }
 
-// joinViaNode attempts to join the cluster via a specific node
-func (m *Membership) joinViaNode(ctx context.Context, addr string) error {
+// joinViaNode introduces this node to the node at addr and registers the
+// members it reports. It returns how many of those are other nodes; none means
+// the node at addr is this one.
+func (m *Membership) joinViaNode(ctx context.Context, addr string) (int, error) {
 	dialer := &net.Dialer{Timeout: 5 * time.Second}
 	conn, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
-		return fmt.Errorf("connect to %s: %w", addr, err)
+		return 0, fmt.Errorf("connect to %s: %w", addr, err)
 	}
 	defer conn.Close()
 
@@ -776,14 +834,14 @@ func (m *Membership) joinViaNode(ctx context.Context, addr string) error {
 		Timestamp:  time.Now().UnixMilli(),
 	}
 	if err := json.NewEncoder(conn).Encode(joinMsg); err != nil {
-		return fmt.Errorf("send join request: %w", err)
+		return 0, fmt.Errorf("send join request: %w", err)
 	}
 
 	// Read response
 	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	var response map[string]interface{}
 	if err := json.NewDecoder(conn).Decode(&response); err != nil {
-		return fmt.Errorf("read join response: %w", err)
+		return 0, fmt.Errorf("read join response: %w", err)
 	}
 
 	if success, ok := response["success"].(bool); !ok || !success {
@@ -791,15 +849,17 @@ func (m *Membership) joinViaNode(ctx context.Context, addr string) error {
 		if e, ok := response["error"].(string); ok {
 			errMsg = e
 		}
-		return fmt.Errorf("join rejected: %s", errMsg)
+		return 0, fmt.Errorf("join rejected: %s", errMsg)
 	}
 
 	// Process nodes from response
+	others := 0
 	if nodes, ok := response["nodes"].([]interface{}); ok {
 		for _, nodeData := range nodes {
 			if nodeMap, ok := nodeData.(map[string]interface{}); ok {
 				nodeID := getString(nodeMap, "id") // lowercase per JSON tag
 				if nodeID != "" && nodeID != m.localNode.ID {
+					others++
 					node := &Node{
 						ID:         nodeID,
 						Address:    getString(nodeMap, "address"),
@@ -820,7 +880,7 @@ func (m *Membership) joinViaNode(ctx context.Context, addr string) error {
 		}
 	}
 
-	return nil
+	return others, nil
 }
 
 // getString safely extracts a string from a map
