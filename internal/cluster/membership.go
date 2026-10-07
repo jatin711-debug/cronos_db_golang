@@ -76,6 +76,26 @@ type Membership struct {
 	// refusedLogged is when a caller that failed the TLS handshake was last
 	// logged, in Unix nanoseconds. Such callers can come every second.
 	refusedLogged atomic.Int64
+	// clusterFormed says whether this node belongs to a cluster, for nodes
+	// that ask before they create one. Guarded by mu.
+	clusterFormed func() bool
+}
+
+// SetClusterFormed sets what this node answers when another asks whether a
+// cluster exists.
+func (m *Membership) SetClusterFormed(formed func() bool) {
+	m.mu.Lock()
+	m.clusterFormed = formed
+	m.mu.Unlock()
+}
+
+// handleProbe answers a node that asks whether a cluster exists. It changes
+// nothing here: the node that asks is not a member yet.
+func (m *Membership) handleProbe(conn net.Conn) {
+	m.mu.RLock()
+	formed := m.clusterFormed
+	m.mu.RUnlock()
+	json.NewEncoder(conn).Encode(probeAnswer{NodeID: m.localNode.ID, ClusterFormed: formed != nil && formed()})
 }
 
 // deadProbeRounds is how many heartbeat rounds pass between attempts to reach
@@ -285,6 +305,9 @@ func (m *Membership) handleConnection(conn net.Conn) {
 		case "node_joined":
 			m.handleNodeJoinedBroadcast(&msg)
 			return
+		case "probe":
+			m.handleProbe(conn)
+			return
 		default:
 			log.Printf("[MEMBERSHIP] Unknown message type: %s", msg.Type)
 		}
@@ -316,9 +339,9 @@ func (m *Membership) dial(ctx context.Context, addr string, timeout time.Duratio
 }
 
 // GossipMessage is the wire format for the custom TCP gossip protocol
-// (join, heartbeat, state, node_joined).
+// (join, heartbeat, state, node_joined, probe).
 type GossipMessage struct {
-	// Type is the message kind: "join", "heartbeat", "state", or "node_joined".
+	// Type is the message kind: "join", "heartbeat", "state", "node_joined" or "probe".
 	Type string `json:"type"`
 	// NodeID is the sender (or subject) node identifier.
 	NodeID string `json:"node_id"`

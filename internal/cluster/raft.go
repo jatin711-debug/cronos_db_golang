@@ -171,6 +171,12 @@ func (n *RaftNode) Leave(nodeID string) error {
 	return nil
 }
 
+// HasState reports whether this node belongs to a cluster: it created one or
+// was added to one, and has the log or a snapshot to show for it.
+func (n *RaftNode) HasState() bool {
+	return n.raft.LastIndex() > 0
+}
+
 // IsLeader returns true if this node is the Raft leader
 func (n *RaftNode) IsLeader() bool {
 	return n.raft.State() == raft.Leader

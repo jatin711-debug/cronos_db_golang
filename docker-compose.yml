@@ -62,7 +62,12 @@ services:
       - --raft-dir=/data/raft
       - --node-id=node1
       - --cluster
-      - --cluster-seeds=
+      # Every node names every node. This one creates the cluster, and only
+      # when it has no state and no other node belongs to one.
+      - --cluster-seeds=cronos-node1:7946,cronos-node2:7946,cronos-node3:7946
+      - --cluster-bootstrap
+      - --cluster-gossip-addr=cronos-node1:7946
+      - --cluster-grpc-addr=cronos-node1:7947
       - --cluster-raft-addr=cronos-node1:7948
       - --fsync-mode=periodic
       - --flush-interval=50
@@ -115,7 +120,9 @@ services:
       - --raft-dir=/data/raft
       - --node-id=node2
       - --cluster
-      - --cluster-seeds=cronos-node1:7946
+      - --cluster-seeds=cronos-node1:7946,cronos-node2:7946,cronos-node3:7946
+      - --cluster-gossip-addr=cronos-node2:7946
+      - --cluster-grpc-addr=cronos-node2:7947
       - --cluster-raft-addr=cronos-node2:7948
       - --fsync-mode=periodic
       - --flush-interval=50
@@ -170,7 +177,9 @@ services:
       - --raft-dir=/data/raft
       - --node-id=node3
       - --cluster
-      - --cluster-seeds=cronos-node1:7946
+      - --cluster-seeds=cronos-node1:7946,cronos-node2:7946,cronos-node3:7946
+      - --cluster-gossip-addr=cronos-node3:7946
+      - --cluster-grpc-addr=cronos-node3:7947
       - --cluster-raft-addr=cronos-node3:7948
       - --fsync-mode=periodic
       - --flush-interval=50

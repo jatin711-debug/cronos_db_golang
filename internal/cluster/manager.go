@@ -68,6 +68,7 @@ func NewManager(cfg *Config) *Manager {
 		VirtualNodes:      cfg.VirtualNodes,
 		ServerTLS:         cfg.ServerTLS,
 		ClientTLS:         cfg.ClientTLS,
+		Bootstrap:         cfg.Bootstrap,
 		Rack:              cfg.Rack,
 		Zone:              cfg.Zone,
 		Region:            cfg.Region,
@@ -134,8 +135,14 @@ func (m *Manager) Start() error {
 			// named one takes over within moments of the commit.
 			raft.SetOnPartitionChange(m.kickReconcile)
 
-			// Bootstrap only if we're the first node (no seeds)
-			if len(m.config.SeedNodes) == 0 {
+			// Create the cluster only if there is none; see bootstrap.go.
+			create, err := m.createsCluster(raft.HasState())
+			if err != nil {
+				_ = m.raft.Shutdown()
+				m.raft = nil
+				return err
+			}
+			if create {
 				log.Printf("[CLUSTER] Bootstrapping new Raft cluster")
 				if err := m.raft.Bootstrap(); err != nil {
 					_ = m.raft.Shutdown()
@@ -149,6 +156,8 @@ func (m *Manager) Start() error {
 					m.raft = nil
 					return fmt.Errorf("wait for Raft authority: %w", err)
 				}
+			} else if raft.HasState() {
+				log.Printf("[CLUSTER] Continuing in the cluster this node has on disk")
 			} else {
 				log.Printf("[CLUSTER] Will join existing Raft cluster via membership")
 			}
@@ -172,6 +181,10 @@ func (m *Manager) Start() error {
 		log.Printf("[CLUSTER] Using custom TCP gossip for cluster membership")
 	}
 	m.membership = membership
+	if asked, ok := membership.(interface{ SetClusterFormed(func() bool) }); ok && m.raft != nil {
+		// What this node answers when another asks whether a cluster exists.
+		asked.SetClusterFormed(m.raft.HasState)
+	}
 
 	// Set up membership callbacks to handle Raft cluster changes
 	m.noteMembershipChange()

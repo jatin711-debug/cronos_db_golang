@@ -32,7 +32,8 @@ def check(ephemeral=False):
     for name in ["GOSSIP", "GRPC", "RAFT"]:
         assert "$(POD_NAME)." in env[f"CRONOS_CLUSTER_{name}_ADDR"]
     assert sts["spec"]["podManagementPolicy"] == "Parallel"
-    assert "--cluster-seeds=" in app["args"][0]
+    assert "--cluster-bootstrap" in app["args"][0]
+    assert "--cluster-seeds" not in app["args"][0]
     assert pod["terminationGracePeriodSeconds"] > 60
     assert app["startupProbe"]["httpGet"]["path"] == "/health"
     assert pod["nodeSelector"]["pool"] == "database"

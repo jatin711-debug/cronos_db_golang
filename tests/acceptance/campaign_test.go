@@ -97,11 +97,6 @@ func TestFaultCampaign(t *testing.T) {
 	// A node loses its disk and is replaced: it comes back under its name
 	// with nothing, and is killed once more while it is being filled.
 	replaced := c.nodes[(c.leaderOf(observer, 0).index+1)%len(c.nodes)]
-	if replaced.index == 0 {
-		// The first node is the one that creates a cluster when it finds no
-		// state. Replacing it is a procedure of its own.
-		replaced = c.nodes[(replaced.index+1)%len(c.nodes)]
-	}
 	step(t, "replacing %s with an empty node", replaced.id)
 	c.kill(replaced)
 	c.wipe(replaced)
