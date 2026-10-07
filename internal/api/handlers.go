@@ -209,7 +209,7 @@ func (h *EventServiceHandler) ensureClusterPartitionWritable(partitionID int32) 
 func (h *EventServiceHandler) ensurePublishAllowed(partitionID int32) error {
 	if h.clusterRouter != nil && !h.clusterRouter.IsPartitionWritable(partitionID) {
 		return status.Errorf(codes.Unavailable,
-			"partition %d is changing leader; retry against the partition leader", partitionID)
+			"partition %d does not take publishes on this node now: its leadership is moving, or this node cannot reach enough of its replicas; retry against the partition leader", partitionID)
 	}
 	return nil
 }
