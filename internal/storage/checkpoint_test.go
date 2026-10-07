@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 )
@@ -331,5 +332,109 @@ func TestCheckpointDoesNotBlockAppends(t *testing.T) {
 	}
 	if tag, count := generation(t, w); tag != "log" || count != 65 {
 		t.Fatalf("source WAL holds %d %q entries after the checkpoint, want 65", count, tag)
+	}
+}
+
+// Several logs are cut at one instant. A writer that alternates between two
+// logs is never more than one event ahead on the first, so two cuts taken
+// together differ by at most one event, however long each takes to copy.
+// Cut one after the other, they would differ by whatever was written in
+// between.
+func TestCutCheckpointsCutsEveryLogAtOneInstant(t *testing.T) {
+	// A cut syncs every segment file, so this test keeps the segments few.
+	config := &WALConfig{SegmentSizeBytes: 32 << 10, IndexInterval: 1, FsyncMode: "periodic", FlushIntervalMS: 0}
+	open := func() *WAL {
+		w, err := NewWAL(t.TempDir(), 0, config, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { w.Close() })
+		return w
+	}
+	a, b := open(), open()
+
+	stop, stopped := make(chan struct{}), make(chan error, 1)
+	go func() {
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				stopped <- nil
+				return
+			default:
+			}
+			for _, w := range []*WAL{a, b} {
+				if err := w.AppendEvent(&types.Event{MessageId: fmt.Sprintf("pair-%d", i), Topic: "t", Payload: make([]byte, 64), ScheduleTs: 1}); err != nil {
+					stopped <- err
+					return
+				}
+			}
+			time.Sleep(200 * time.Microsecond)
+		}
+	}()
+
+	const rounds = 12
+	for round := 0; round < rounds; round++ {
+		cuts, err := CutCheckpoints([]*WAL{a, b})
+		if err != nil {
+			t.Fatal(err)
+		}
+		lastA, lastB := cuts[0].LastOffset(), cuts[1].LastOffset()
+		if ahead := lastA - lastB; ahead < 0 || ahead > 1 {
+			t.Fatalf("round %d: the logs were cut at offsets %d and %d; one instant allows a difference of 0 or 1", round, lastA, lastB)
+		}
+		// Each copy holds its log exactly as far as it was cut, although the
+		// writer has moved on by the time the files are copied.
+		for i, cut := range cuts {
+			dir := t.TempDir()
+			if _, last, err := cut.CopyTo(dir); err != nil || last != cut.LastOffset() {
+				t.Fatalf("round %d: copy of log %d ends at offset %d, cut at %d (err=%v)", round, i, last, cut.LastOffset(), err)
+			}
+			copied, err := NewWAL(dir, 0, config, nil)
+			if err != nil {
+				t.Fatalf("round %d: open the copy of log %d: %v", round, i, err)
+			}
+			if got := copied.GetLastOffset(); got != cut.LastOffset() {
+				t.Fatalf("round %d: the copy of log %d holds offsets through %d, cut at %d", round, i, got, cut.LastOffset())
+			}
+			copied.Close()
+		}
+	}
+	close(stop)
+	if err := <-stopped; err != nil {
+		t.Fatalf("writer: %v", err)
+	}
+	if a.GetLastOffset() < rounds {
+		t.Fatalf("the writer appended only %d events while %d cuts were taken", a.GetLastOffset()+1, rounds)
+	}
+}
+
+// A cut holds back deletion and truncation of its log until it is copied or
+// released, and can be used once.
+func TestCheckpointCutIsReleasedOnce(t *testing.T) {
+	w := openWAL(t, t.TempDir())
+	appendTagged(t, w, "a", 20)
+
+	cuts, err := CutCheckpoints([]*WAL{w})
+	if err != nil {
+		t.Fatal(err)
+	}
+	compacted := make(chan error, 1)
+	go func() {
+		_, err := w.CompactByOffset(10)
+		compacted <- err
+	}()
+	select {
+	case err := <-compacted:
+		t.Fatalf("segments were removed while a cut of the log was outstanding (err=%v)", err)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	cuts[0].Release()
+	cuts[0].Release() // harmless
+	if err := <-compacted; err != nil {
+		t.Fatalf("compaction after the cut was released: %v", err)
+	}
+	if _, _, err := cuts[0].CopyTo(t.TempDir()); err == nil {
+		t.Fatal("a released cut was copied")
 	}
 }
