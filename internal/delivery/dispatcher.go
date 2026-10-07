@@ -113,7 +113,9 @@ type Dispatcher struct {
 	// In-flight limiter to protect memory under slow consumers.
 	inFlightCount atomic.Int64
 
-	// Retry heap for non-blocking delayed retries.
+	// Retry heap for non-blocking delayed retries. Guarded by retryMu, which
+	// may be taken while a shard is locked and never the other way round.
+	retryMu   sync.Mutex
 	retryHeap *RetryHeap
 
 	// OnDeliveryComplete is called when a delivery reaches final disposition
@@ -425,6 +427,17 @@ func (d *Dispatcher) Unsubscribe(subscriptionID string) error {
 			delete(shard.activeDeliveries, deliveryID)
 			shard.expiry.remove(deliveryID)
 		}
+	}
+	// So are the deliveries that timed out and wait to be sent to it again.
+	// They are in flight no longer, but their events are still marked as on
+	// their way to this subscriber.
+	d.retryMu.Lock()
+	waiting := d.retryHeap.Remove(func(active *ActiveDelivery) bool { return active.Subscription == sub })
+	d.retryMu.Unlock()
+	for _, entry := range waiting {
+		events := deliveryEvents(entry.active.Delivery)
+		d.releasePending(sub.ConsumerGroup, events)
+		abandoned.add(events...)
 	}
 	if abandoned.set {
 		// Unacked work goes back to the group's remaining subscribers.
@@ -980,7 +993,7 @@ func (d *Dispatcher) scanExpiredDeliveries(now time.Time) {
 			if active.Attempt < d.config.MaxRetries {
 				// Non-blocking: push to retry heap instead of sleeping inline
 				backoff := time.Duration(active.Attempt) * d.config.RetryBackoff
-				d.retryHeap.PushEntry(NewRetryEntry(active, backoff))
+				d.pushRetry(active, backoff)
 			} else {
 				d.releaseCredits(active.Subscription, active.CreditsConsumed)
 				d.sendToDLQ(active, "delivery timeout after max retries")
@@ -990,9 +1003,42 @@ func (d *Dispatcher) scanExpiredDeliveries(now time.Time) {
 	}
 }
 
+// pushRetry queues a delivery to be sent again after backoff.
+func (d *Dispatcher) pushRetry(active *ActiveDelivery, backoff time.Duration) {
+	d.retryMu.Lock()
+	d.retryHeap.PushEntry(NewRetryEntry(active, backoff))
+	d.retryMu.Unlock()
+}
+
+// subscribed reports whether sub is still registered.
+func (d *Dispatcher) subscribed(sub *Subscription) bool {
+	shard := d.getShard(sub.ID)
+	shard.mu.RLock()
+	current := shard.subscriptions[sub.ID]
+	shard.mu.RUnlock()
+	return current == sub
+}
+
+// giveBack returns a delivery that was not acknowledged to its consumer
+// group: its events are no longer on their way to anybody, and the group's
+// subscribers are asked to read them from the log again.
+//
+// It is for a delivery that cannot be sent to its consumer again, because the
+// consumer has left or its stream has failed. Neither says anything against
+// the events, so neither counts towards dead-lettering them.
+func (d *Dispatcher) giveBack(active *ActiveDelivery) {
+	events := deliveryEvents(active.Delivery)
+	group := active.Subscription.ConsumerGroup
+	d.releaseCredits(active.Subscription, active.CreditsConsumed)
+	d.releasePending(group, events)
+	d.requestRedriveOf(group, events)
+}
+
 // processRetries dispatches any retry entries whose backoff has elapsed.
 func (d *Dispatcher) processRetries(now time.Time) {
+	d.retryMu.Lock()
 	entries := d.retryHeap.Due(now.UnixMilli())
+	d.retryMu.Unlock()
 	if len(entries) == 0 {
 		return
 	}
@@ -1002,11 +1048,16 @@ func (d *Dispatcher) processRetries(now time.Time) {
 		if active == nil || active.Subscription == nil {
 			continue
 		}
+		if !d.subscribed(active.Subscription) {
+			// Its consumer left between the timeout and now.
+			d.giveBack(active)
+			continue
+		}
 
 		// Check circuit breaker before retrying
 		if active.Subscription.circuitBreaker != nil && !active.Subscription.circuitBreaker.CanTry() {
 			// Circuit still open — re-queue with a meaningful backoff (5s) to avoid busy-loop
-			d.retryHeap.PushEntry(NewRetryEntry(active, 5*time.Second))
+			d.pushRetry(active, 5*time.Second)
 			continue
 		}
 
@@ -1021,7 +1072,7 @@ func (d *Dispatcher) processRetries(now time.Time) {
 		if !d.tryReserveInFlight(1) {
 			// Re-queue with short backoff to try later
 			deliveryMessagePool.Put(retryDelivery)
-			d.retryHeap.PushEntry(NewRetryEntry(active, time.Second))
+			d.pushRetry(active, time.Second)
 			continue
 		}
 
@@ -1037,15 +1088,9 @@ func (d *Dispatcher) processRetries(now time.Time) {
 					d.config.CircuitBreakerOpenDurationMs,
 				)
 			}
-
-			if retryDelivery.Attempt < d.config.MaxRetries {
-				// Re-queue with backoff
-				backoff := time.Duration(retryDelivery.Attempt) * d.config.RetryBackoff
-				d.retryHeap.PushEntry(NewRetryEntry(active, backoff))
-			} else {
-				d.releaseCredits(active.Subscription, active.CreditsConsumed)
-				d.sendToDLQ(active, fmt.Sprintf("retry failed after max retries: %v", err))
-			}
+			// The stream failed, not the event: another subscriber of the
+			// group takes it, or this one when it returns.
+			d.giveBack(active)
 			continue
 		}
 
@@ -1170,8 +1215,9 @@ func (d *Dispatcher) HandleAck(deliveryID string, success bool, nextOffset int64
 
 	if active.Attempt < d.config.MaxRetries {
 		if retryErr := d.retryDelivery(active); retryErr != nil {
-			d.releaseCredits(active.Subscription, active.CreditsConsumed)
-			d.sendToDLQ(active, fmt.Sprintf("ack failure; retry failed: %v", retryErr))
+			// It could not be sent again, which is no further failure of the
+			// event; the group gets it back.
+			d.giveBack(active)
 			return retryErr
 		}
 		return nil
@@ -1305,7 +1351,9 @@ func (d *Dispatcher) GetStats() *DispatcherStats {
 		}
 		shard.mu.RUnlock()
 	}
+	d.retryMu.Lock()
 	stats.RetryQueueDepth = int64(d.retryHeap.Len())
+	d.retryMu.Unlock()
 	if d.dlq != nil {
 		stats.DLQSize = int64(d.dlq.Count())
 	}

@@ -61,6 +61,30 @@ func (h *RetryHeap) Due(now int64) []*RetryEntry {
 	return due
 }
 
+// Remove takes out the entries whose delivery match selects and returns them.
+func (h *RetryHeap) Remove(match func(*ActiveDelivery) bool) []*RetryEntry {
+	var removed []*RetryEntry
+	kept := h.entries[:0]
+	for _, entry := range h.entries {
+		if match(entry.active) {
+			entry.index = -1
+			removed = append(removed, entry)
+		} else {
+			kept = append(kept, entry)
+		}
+	}
+	if len(removed) == 0 {
+		return nil
+	}
+	clear(h.entries[len(kept):])
+	h.entries = kept
+	for i, entry := range h.entries {
+		entry.index = i
+	}
+	heap.Init(h)
+	return removed
+}
+
 // Len returns the number of entries in the heap.
 func (h *RetryHeap) Len() int {
 	return len(h.entries)
