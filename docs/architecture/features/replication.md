@@ -164,6 +164,36 @@ paused only while it notes where each file ends.
   change feed, so a promoted follower continues exporting where the old
   leader stopped (see [cdc.md](cdc.md)).
 
+## Log start
+
+The leader of a partition removes finished segments from the start of its log
+(see [storage.md](storage.md)). Every append, and an append without entries
+when a partition is idle, names the offset the leader's log starts at
+(`log_start_offset`), and a follower follows it
+(`Partition.FollowLogStart`):
+
+- It removes the segments of its own log that lie wholly below that offset.
+  Its segments need not end where the leader's do, so its log may start a
+  little earlier than the leader's.
+- If its log **ends** before that offset, it empties its log and restarts it
+  there. The entries in between cannot be sent any more, and nobody needs
+  them: they were finished before the leader removed them. This is how a
+  replica with an empty disk joins a partition that has already removed
+  entries, and how one that was away for long comes back, without a snapshot.
+- Either way the entries below that offset count as complete for every
+  consumer group on that replica, so that it does not look for them if it
+  leads next.
+
+A follower never removes anything by its own decision: its copy of the
+consumer progress trails the leader's. A new leader removes nothing until it
+has heard from enough followers to know what a quorum holds.
+
+What this does not do: the leader does not wait for a follower that is behind
+or down before it removes entries. That follower restarts its log at the
+leader's start when it returns, which costs nothing that is still needed but
+means that, for a while, the removed range existed on fewer replicas than the
+replication factor. It was finished by then.
+
 ## Publishes that fail after the append
 
 A publish appends to the leader's log before replication, a requested fsync,

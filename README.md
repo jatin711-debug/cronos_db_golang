@@ -36,8 +36,9 @@ Ryzen 7 6800H host. See the [measurement settings and baseline comparison](docs/
 - **Append-Only WAL v2** — Segmented logs (512MB), per-entry Raft term + CRC32 integrity, sparse indexing. Upgrading from earlier builds requires a clean data directory.
 - **Memory-Mapped Reads** — Zero-copy segment reads on Linux/Windows
 - **Configurable Fsync** — `every_event` | `batch` (default) | `periodic` modes
-- **Automatic Compaction** — Removes closed standalone WAL segments only after every relevant consumer group has completed every event
-- **Retention Enforcer** — Age/size policies use the same completion checks and preserve future timers and active segments; clustered/replicated pruning is disabled pending durable cluster-wide completion and handoff watermarks
+- **Damage Detection** — A log that holds unreadable bytes anywhere but at its end refuses to open instead of dropping what follows; `cronos-admin check-log` reports and repairs offline
+- **Automatic Compaction** — Removes closed WAL segments only after every relevant consumer group has completed every event. In a cluster the partition's leader removes them from the start of the log and the other replicas follow
+- **Retention Enforcer** — Age/size policies use the same completion checks and preserve future timers and active segments
 - **Backups** — Hourly independent backups of every loaded partition: event log including the active segment, consumer progress, dedup store, dead-letter queue and epoch, with per-file checksums and all logs cut at one instant; `cronos-admin restore` verifies and restores one into an empty data directory, and can check the encryption key first (see [maintenance validation](docs/MAINTENANCE_VALIDATION_2026-09-29.md))
 - **Hierarchical Timing Wheel** — O(1) timer add/remove/tick for millions of events
 - **Two-Tier Cold/Hot Scheduler** — PebbleDB cold store for far-future events (>1hr); adaptive hydrator adjusts scan frequency based on load (5s–5min). Keeps hot memory bounded.

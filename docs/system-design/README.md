@@ -177,6 +177,9 @@ position in that log.
   (`mmap_unix.go`, `mmap_windows.go`).
 - **Space comes back by deleting whole files** — by retention (age or size) or
   by compaction (every consumer group has finished every event in the file).
+  In a cluster only files at the start of the log go, so that the log stays
+  one unbroken range, and the partition's leader decides; the other replicas
+  are told where its log starts and follow.
 
 **The durability knob.** A write is only safe once it is on the disk, and a
 disk sync takes milliseconds however few bytes it covers. `--fsync-mode`

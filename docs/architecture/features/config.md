@@ -53,6 +53,7 @@ Defaults from `internal/config/defaults.go` unless noted. Flags marked **env** h
 | `--index-interval` | `1000` | Sparse index interval (events per entry) |
 | `--fsync-mode` | `batch` | `every_event` \| `batch` \| `periodic`. Production mode refuses `periodic`: it acknowledges before the data is on disk |
 | `--flush-interval` | `1000` | Background flush interval (ms) for batch/periodic fsync |
+| `--compaction-interval` | `10m` | How often a partition looks for log segments whose events are all finished and removes them |
 | `--retention-max-age-hours` | `168` | Delete WAL segments older than this (0 = disable) |
 | `--retention-max-size-gb` | `0` | Size-based WAL retention in GB (0 = disable) |
 
