@@ -23,6 +23,7 @@ func TestNetworkPartitions(t *testing.T) {
 	c.startAll()
 	observer := c.dial()
 	w := startWorkload(t, c, "partitioned", "partitioned-workers", 2, 20, 2)
+	clocks := c.watchClocks()
 	accepted := func() int64 { return w.ledger.accepted.Load() }
 	delivered := func() int64 { return w.ledger.delivered.Load() }
 	acceptedOn := func(partition int32) func() int64 {
@@ -93,6 +94,9 @@ func TestNetworkPartitions(t *testing.T) {
 
 	step(t, "faults done; waiting for the remaining deliveries")
 	w.stopPublishers()
+	ahead := clocks.Load() + 1 // both clocks are read in whole milliseconds
+	w.ledger.clockAhead.Store(ahead)
+	t.Logf("the nodes' clocks were up to %d ms ahead of this machine's; a delivery is early if it is earlier than that", ahead)
 	checkDelivery(t, w)
 	w.stopConsumers()
 	checkLogs(t, c, w.topic, w.ledger, false)

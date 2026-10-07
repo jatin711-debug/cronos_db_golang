@@ -164,9 +164,9 @@ func checkDelivery(t *testing.T, w *workload) {
 		t.Errorf("%d acknowledged events were never delivered:\n  %s", len(missing), sample(missing, 25))
 	}
 	w.ledger.mu.Lock()
-	early, unknown := w.ledger.early, w.ledger.unknown
+	unknown := w.ledger.unknown
 	w.ledger.mu.Unlock()
-	if len(early) > 0 {
+	if early := w.ledger.tooEarly(); len(early) > 0 {
 		t.Errorf("%d deliveries arrived before their scheduled time:\n  %s", len(early), sample(early, 25))
 	}
 	if len(unknown) > 0 {

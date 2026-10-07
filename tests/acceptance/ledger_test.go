@@ -36,8 +36,13 @@ type ledger struct {
 	sent map[string]*sentEvent
 	// early lists deliveries that arrived before their scheduled time, and
 	// unknown deliveries of events this run never published.
-	early   []string
+	early   []earlyDelivery
 	unknown []string
+	// clockAhead is how many milliseconds the nodes' clocks may be ahead of
+	// this machine's. It is zero when the nodes run on this machine. Nodes in
+	// containers can run on a clock of their own, and what such a node
+	// delivers on time is early by ours by the difference.
+	clockAhead atomic.Int64
 
 	accepted  atomic.Int64
 	delivered atomic.Int64 // distinct events delivered
@@ -46,7 +51,32 @@ type ledger struct {
 	acceptedByPartition [partitionCount]atomic.Int64
 }
 
+// earlyDelivery is a delivery that arrived before its time by this machine's
+// clock, or under another time than the event was published with.
+type earlyDelivery struct {
+	what string
+	by   int64 // milliseconds early
+	// wrongTime is set when the delivery named another scheduled time than
+	// the publish did, which no clock explains.
+	wrongTime bool
+}
+
 func newLedger() *ledger { return &ledger{sent: make(map[string]*sentEvent)} }
+
+// tooEarly lists the deliveries that arrived earlier than the difference
+// between the clocks allows.
+func (l *ledger) tooEarly() []string {
+	allowed := l.clockAhead.Load()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var early []string
+	for _, delivery := range l.early {
+		if delivery.wrongTime || delivery.by > allowed {
+			early = append(early, delivery.what)
+		}
+	}
+	return early
+}
 
 // noteSent records an event before its first publish attempt: a delivery can
 // arrive before the publish call returns.
@@ -82,8 +112,12 @@ func (l *ledger) noteDelivered(id string, scheduleTS, receivedAt int64, partitio
 		return
 	}
 	if receivedAt < event.scheduleTS || scheduleTS != event.scheduleTS {
-		l.early = append(l.early, fmt.Sprintf("%s: scheduled for %d (delivery says %d), received at %d, %d ms early",
-			id, event.scheduleTS, scheduleTS, receivedAt, event.scheduleTS-receivedAt))
+		l.early = append(l.early, earlyDelivery{
+			what: fmt.Sprintf("%s: scheduled for %d (delivery says %d), received at %d, %d ms early",
+				id, event.scheduleTS, scheduleTS, receivedAt, event.scheduleTS-receivedAt),
+			by:        event.scheduleTS - receivedAt,
+			wrongTime: scheduleTS != event.scheduleTS,
+		})
 	}
 	if event.deliveries == 0 {
 		l.delivered.Add(1)

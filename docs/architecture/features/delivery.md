@@ -44,9 +44,10 @@ hand over is redelivered from the WAL.
 | Credits | No credit → the event is held back, counted in `cronos_dispatcher_backpressure_skips_total{reason="no_credits"}`, and its offset is queued for redrive |
 | In-flight cap | Cap hit → same, with `reason="in_flight_cap"` |
 | Worker queue | The worker keeps at most 10,000 ready events (64 MiB); the rest are queued for redrive for every group, `reason="worker_capacity"` |
-| Disconnect / failed send | Unacked deliveries of that subscriber are queued for redrive to the rest of its group |
+| Disconnect / failed send | Unacked deliveries of that subscriber are queued for redrive to the rest of its group, including those that timed out and were waiting to be sent to it again. A delivery that cannot be sent again goes back to the group the same way; neither counts as an attempt |
+| Not replicated yet | An entry beyond the offset the required replicas hold is held back, counted with `reason="not_replicated"`, and queued for redrive. The subscription's own log reader stops at that offset |
 | Circuit breaker | Open circuit skips send without burning credits |
-| Poison path | After max retries → **DLQ**, and the event is recorded complete for the group so it is not delivered again |
+| Poison path | After max retries → **DLQ**, and the event is recorded complete for the group so it is not delivered again. An attempt is a delivery the consumer failed, or did not acknowledge in time while still connected |
 
 Each subscription runs `redriveRetained` (`internal/api/handlers.go`), which reads
 the WAL from three sources in priority order:
@@ -67,7 +68,9 @@ range offered twice is not delivered twice.
   subscriber makes no progress until one connects.
 - Redelivery does not preserve offset order, and duplicates remain possible
   after a crash or ack timeout (at-least-once).
-- Completion records live on the partition leader and are not replicated.
+- Completion records are written on the partition leader and sent to its
+  followers (see [replication.md](replication.md)); a follower's copy trails
+  the leader's.
 
 ### Operator guidance
 

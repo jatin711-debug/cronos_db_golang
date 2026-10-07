@@ -19,4 +19,13 @@
 //
 // CRONOS_BINARY names a server binary to use instead of building one, and
 // CRONOS_ACCEPTANCE_ARTIFACTS a directory the node logs are copied to.
+//
+// One test needs more than processes. TestNetworkPartitions cuts the links
+// between nodes while all of them keep running, which processes on one
+// machine cannot have done to them. It runs the nodes as three containers of
+// the image CRONOS_IMAGE names and drops packets between them, and is skipped
+// when no image is named:
+//
+//	docker build -t cronos-db:local .
+//	CRONOS_IMAGE=cronos-db:local go test -tags acceptance -count=1 -timeout 20m -run TestNetworkPartitions ./tests/acceptance/
 package acceptance

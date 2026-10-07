@@ -109,7 +109,7 @@ jobs:
 
   production-chart-startup:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v7
@@ -132,6 +132,22 @@ jobs:
           ignore-unfixed: true
           exit-code: "1"
           version: v0.75.0
+      # Three containers of the image on a network of their own. Links between
+      # them are cut and restored while producers and consumers work: a leader
+      # alone, one link down, each node alone in turn, every link down.
+      - name: Network partitions between three containers of the image
+        env:
+          CRONOS_IMAGE: cronos-db:ci
+          CRONOS_ACCEPTANCE_ARTIFACTS: ${{ github.workspace }}/build/partition-logs
+        run: go test -tags acceptance -count=1 -timeout 20m -v -run TestNetworkPartitions ./tests/acceptance/
+      - name: Keep the node logs of the partition test
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: partition-node-logs
+          path: build/partition-logs
+          retention-days: 7
+          if-no-files-found: ignore
       - name: Create isolated Kubernetes cluster
         run: |
           go install sigs.k8s.io/kind@v0.33.0

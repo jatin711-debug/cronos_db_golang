@@ -140,6 +140,18 @@ paused only while it notes where each file ends.
   never replicated is brought in line without waiting for a publish. What a
   follower holds counts as replicated only up to the entry the leader has
   checked.
+- **What a refusal says.** A follower that refuses an append reports where
+  its log ends, which tells the leader where to resume sending and nothing
+  else. It is no evidence of what the follower holds: a follower that has
+  gone over to a newer leader reports a log that the newer leader wrote. The
+  leader skips sending only what the follower has acknowledged of this
+  leader's own log.
+- **A replaced leader stops by itself.** Every answer carries the term the
+  follower has accepted. A leader that reads a newer term than its own there
+  has been replaced, whatever the cluster's records on its node say so far:
+  it refuses publishes, counts nothing more as replicated, records the term,
+  and stops leading (`PartitionManager.stepDownFor`). After a network failure
+  the followers' answers arrive seconds before the cluster's records do.
 - **Beyond the end of the leader's log.** Every request also says where the
   leader's log ends (`leader_log_end`). A follower that holds an entry there
   which was written in another term holds a tail the leader never had, and
@@ -172,6 +184,27 @@ paused only while it notes where each file ends.
   redeliver it. The same message carries the position of the partition's
   change feed, so a promoted follower continues exporting where the old
   leader stopped (see [cdc.md](cdc.md)).
+- **Progress stops at the end of the log.** Completion is recorded by
+  offset, so it is worth as much as the entry at that offset. A replica keeps
+  none at or beyond the end of its own log: a follower takes its leader's
+  progress only that far, and is sent it again once it has caught up; what
+  was recorded for entries that a follower removes goes with them
+  (`Partition.CutLog`); and whatever is left beyond the end of the log is
+  removed when a partition starts and when a replica is made leader. Without
+  this the events that later took those offsets counted as finished and were
+  never delivered.
+- **Only replicated entries are delivered.** A leader hands its consumers
+  entries up to the offset that the required replicas hold
+  (`Partition.DeliverableThrough`), and holds back the rest of its log until
+  they have it. An entry that only the leader holds can still be removed, and
+  a consumer cannot give an event back. What the required replicas held at
+  any time since the leader began to lead counts
+  (`Leader.ReplicatedThrough`): a leader that loses its followers goes on
+  delivering what was replicated before, since every later leader has it. A
+  new leader delivers nothing until it has heard from enough followers,
+  which takes one round of its maintenance loop. A replica that does not
+  lead delivers nothing. With `--min-insync-replicas=1` the leader alone is
+  enough, and it delivers everything it has written.
 
 ## Log start
 

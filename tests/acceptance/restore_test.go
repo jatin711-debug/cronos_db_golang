@@ -339,9 +339,9 @@ func TestClusterRestoredFromBackups(t *testing.T) {
 	stop()
 
 	events.mu.Lock()
-	early, unknown := events.early, events.unknown
+	unknown := events.unknown
 	events.mu.Unlock()
-	if len(early) > 0 {
+	if early := events.tooEarly(); len(early) > 0 {
 		t.Errorf("%d deliveries arrived before their scheduled time:\n  %s", len(early), sample(early, 25))
 	}
 	if len(unknown) > 0 {
