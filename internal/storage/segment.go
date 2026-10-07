@@ -50,6 +50,15 @@ type Segment struct {
 
 	// deleted is set by Delete: the segment has left the log.
 	deleted atomic.Bool
+
+	// invalidTail is set when the bytes after the last valid record are not
+	// empty space: a record that was never finished, or one that no longer
+	// reads. What that means depends on where the segment is in the log (see
+	// WAL.loadSegments). invalidAt is where those bytes begin, invalidWhy what
+	// was found there.
+	invalidTail bool
+	invalidAt   int64
+	invalidWhy  string
 }
 
 const defaultSegmentPreallocSize = 64 * 1024 * 1024
@@ -1251,6 +1260,9 @@ func (s *Segment) scan() error {
 	var recordStartPos int64 = 64
 	lengthBytes := make([]byte, 4)
 	recordBuf := make([]byte, 0, 4096)
+	// invalid is why reading stopped before the end of the file, when it was
+	// for anything but reaching space that was never written.
+	invalid := ""
 	// Positions are tracked in lastGoodPos, and OpenSegment repositions the file
 	// handle after the scan, so reading ahead here is safe.
 	reader := bufio.NewReaderSize(file, 1<<20)
@@ -1266,16 +1278,25 @@ func (s *Segment) scan() error {
 				break
 			}
 			if err == io.ErrUnexpectedEOF {
-				// Truncated file - corrupt tail detected
-				log.Printf("[SEGMENT] Truncated tail detected at position %d, truncating file", lastGoodPos)
+				invalid = "the file ends inside a record length"
 				break
 			}
 			return fmt.Errorf("read length: %w", err)
 		}
 
 		length := int64(binary.BigEndian.Uint32(lengthBytes))
+		if length == 0 {
+			// Space that was never written, which a preallocated file ends
+			// with, unless something follows it.
+			if follows, err := dataFollows(reader); err != nil {
+				return fmt.Errorf("read after the last record: %w", err)
+			} else if follows {
+				invalid = "a record length of 0 with data after it"
+			}
+			break
+		}
 		if length <= 4 || length > 10*1024*1024 { // Sanity check: must be > 4 bytes, max 10MB record
-			log.Printf("[SEGMENT] Invalid record length %d at position %d, treating as corrupt tail", length, lastGoodPos)
+			invalid = fmt.Sprintf("a record length of %d", length)
 			break
 		}
 
@@ -1287,8 +1308,7 @@ func (s *Segment) scan() error {
 		recordData := recordBuf[:recordLen]
 		if _, err := io.ReadFull(reader, recordData); err != nil {
 			if err == io.EOF || err == io.ErrUnexpectedEOF {
-				// Truncated or incomplete file - corrupt tail detected
-				log.Printf("[SEGMENT] Incomplete record at position %d (expected %d bytes), truncating", lastGoodPos, length)
+				invalid = fmt.Sprintf("a record of %d bytes that the file ends inside of", length)
 				break
 			}
 			return fmt.Errorf("read record: %w", err)
@@ -1301,8 +1321,8 @@ func (s *Segment) scan() error {
 		}
 		event, err := parseEventRecordWithoutLength(decrypted)
 		if err != nil {
-			// CRC mismatch or parse error - corrupt frame detected
-			log.Printf("[SEGMENT] Corrupt frame at position %d: %v, truncating file", lastGoodPos, err)
+			// CRC mismatch or parse error
+			invalid = fmt.Sprintf("a record that does not read (%v)", err)
 			break
 		}
 
@@ -1322,6 +1342,7 @@ func (s *Segment) scan() error {
 	// range reads on every restart.
 	realDataEnd := lastGoodPos
 	s.sizeBytes = realDataEnd
+	s.invalidTail, s.invalidAt, s.invalidWhy = invalid != "", lastGoodPos, invalid
 
 	// Do NOT physically truncate the file/mmap here. Retaining the preallocated
 	// tail keeps the segment's mmap at its full size so continued appends have
@@ -1346,6 +1367,61 @@ func (s *Segment) scan() error {
 		s.lastOffset = s.firstOffset - 1
 	}
 
+	return nil
+}
+
+// dataFollows reports whether anything but zero bytes comes next in r. It
+// looks at the next 64 KiB: enough to tell space that was never written from
+// a hole punched into written data, without reading the whole of a
+// preallocated file every time a log is opened.
+func dataFollows(r io.Reader) (bool, error) {
+	window := make([]byte, 64<<10)
+	n, err := io.ReadFull(r, window)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return false, err
+	}
+	for _, b := range window[:n] {
+		if b != 0 {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// InvalidTail reports whether the bytes after the segment's last valid record
+// are something other than empty space, where they begin and what was found.
+func (s *Segment) InvalidTail() (invalid bool, position int64, found string) {
+	return s.invalidTail, s.invalidAt, s.invalidWhy
+}
+
+// clearInvalidTail overwrites everything after the segment's last valid record
+// with zeros, which is what never-written space looks like.
+//
+// New records are written over an interrupted write from its start, but they
+// need not reach its end. Whatever stuck out would still be there when the
+// segment is full and closed, and the next time the log is opened it would be
+// found in a closed segment, where bytes that are not records mean damage.
+func (s *Segment) clearInvalidTail() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.invalidTail {
+		return nil
+	}
+	info, err := s.segmentFile.Stat()
+	if err != nil {
+		return fmt.Errorf("stat segment: %w", err)
+	}
+	zeros := make([]byte, 1<<20)
+	for position := s.invalidAt; position < info.Size(); position += int64(len(zeros)) {
+		chunk := zeros[:min(int64(len(zeros)), info.Size()-position)]
+		if _, err := s.segmentFile.WriteAt(chunk, position); err != nil {
+			return fmt.Errorf("clear segment from byte %d: %w", s.invalidAt, err)
+		}
+	}
+	if err := s.segmentFile.Sync(); err != nil {
+		return fmt.Errorf("sync cleared segment: %w", err)
+	}
+	s.invalidTail, s.invalidWhy = false, ""
 	return nil
 }
 
