@@ -54,8 +54,8 @@ type Membership struct {
 	stopCh      chan struct{}
 	stopOnce    sync.Once
 	listener    net.Listener
-	gossipConns map[string]net.Conn // Persistent connections for heartbeats
-	connMu      sync.Mutex          // Protects gossipConns
+	gossipConns map[string]*gossipConn // Persistent connections for heartbeats
+	connMu      sync.Mutex             // Protects gossipConns
 
 	// Callbacks
 	onJoin   func(node *Node)
@@ -101,6 +101,32 @@ func (m *Membership) handleProbe(conn net.Conn) {
 // deadProbeRounds is how many heartbeat rounds pass between attempts to reach
 // a node that is counted as dead.
 const deadProbeRounds = 5
+
+// gossipConn is a connection heartbeats are sent on, and when it was opened.
+type gossipConn struct {
+	conn   net.Conn
+	opened time.Time
+}
+
+// A heartbeat connection is kept and used again, but only on evidence that it
+// works. Writing to it is no evidence: a write succeeds when the bytes are in
+// this machine's buffer. When the network between two nodes drops everything,
+// each goes on writing heartbeats into a connection that carries nothing, and
+// when the network returns that connection does not: the system resends what
+// is waiting in it at longer and longer intervals, up to minutes apart. Two
+// nodes stayed dead to each other for as long as that took.
+//
+// So a connection is used again only while the node at its other end is
+// being heard from, and for a limited time. Hearing from a node says that
+// the path works in its direction at least; the time limit covers a path that
+// carries nothing in this direction only.
+const (
+	// heardWithinRounds is how many heartbeat intervals may have passed since
+	// a node was last heard from for its connection to be used again.
+	heardWithinRounds = 3
+	// gossipConnRounds is how many heartbeat intervals a connection is used.
+	gossipConnRounds = 10
+)
 
 // MemberEvent represents a membership change event delivered on Events().
 type MemberEvent struct {
@@ -164,7 +190,7 @@ func NewMembership(config *ClusterConfig) (*Membership, error) {
 		config:      config,
 		localNode:   localNode,
 		nodes:       make(map[string]*Node),
-		gossipConns: make(map[string]net.Conn),
+		gossipConns: make(map[string]*gossipConn),
 		unreachable: make(map[string]bool),
 		state: &ClusterState{
 			ClusterID:  config.ClusterID,
@@ -224,8 +250,8 @@ func (m *Membership) Stop() {
 	}
 	// Close all persistent gossip connections
 	m.connMu.Lock()
-	for addr, conn := range m.gossipConns {
-		conn.Close()
+	for addr, kept := range m.gossipConns {
+		kept.conn.Close()
 		delete(m.gossipConns, addr)
 	}
 	m.connMu.Unlock()
@@ -792,8 +818,10 @@ func (m *Membership) heartbeatLoop(ctx context.Context) {
 // without seeds would stay alone. A node counted as dead is tried less often.
 func (m *Membership) sendHeartbeats() {
 	round := m.heartbeatRound.Add(1)
+	heardSince := time.Now().Add(-heardWithinRounds * m.config.HeartbeatInterval)
 	m.mu.RLock()
 	nodes := make([]*Node, 0, len(m.nodes))
+	heard := make([]bool, 0, len(m.nodes))
 	for _, node := range m.nodes {
 		if node.ID == m.localNode.ID {
 			continue
@@ -802,16 +830,19 @@ func (m *Membership) sendHeartbeats() {
 			continue
 		}
 		nodes = append(nodes, node)
+		heard = append(heard, node.State == NodeStateAlive && node.UpdatedAt.After(heardSince))
 	}
 	m.mu.RUnlock()
 
-	for _, node := range nodes {
-		go m.sendHeartbeat(node)
+	for i, node := range nodes {
+		go m.sendHeartbeat(node, heard[i])
 	}
 }
 
-// sendHeartbeat sends a heartbeat to a specific node using persistent connections
-func (m *Membership) sendHeartbeat(node *Node) {
+// sendHeartbeat sends a heartbeat to a node. heard says whether the node has
+// been heard from lately, which is what allows the connection that is open to
+// it to be used once more; see gossipConn.
+func (m *Membership) sendHeartbeat(node *Node, heard bool) {
 	// Create heartbeat message
 	hb := &GossipMessage{
 		Type:       "heartbeat",
@@ -835,18 +866,25 @@ func (m *Membership) sendHeartbeat(node *Node) {
 
 	// Try sending on persistent connection first
 	m.connMu.Lock()
-	conn, exists := m.gossipConns[targetAddr]
+	kept := m.gossipConns[targetAddr]
+	if kept != nil && (!heard || time.Since(kept.opened) > gossipConnRounds*m.config.HeartbeatInterval) {
+		kept.conn.Close()
+		delete(m.gossipConns, targetAddr)
+		kept = nil
+	}
 	m.connMu.Unlock()
 
-	if exists && conn != nil {
-		conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
-		if _, err := conn.Write(append(data, '\n')); err == nil {
+	if kept != nil {
+		kept.conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+		if _, err := kept.conn.Write(append(data, '\n')); err == nil {
 			return // Success on cached connection
 		}
 		// Write failed — stale connection, close and reconnect
-		conn.Close()
+		kept.conn.Close()
 		m.connMu.Lock()
-		delete(m.gossipConns, targetAddr)
+		if m.gossipConns[targetAddr] == kept {
+			delete(m.gossipConns, targetAddr)
+		}
 		m.connMu.Unlock()
 	}
 
@@ -876,9 +914,9 @@ func (m *Membership) sendHeartbeat(node *Node) {
 	}
 	// Cache the connection for future heartbeats
 	if old := m.gossipConns[targetAddr]; old != nil {
-		old.Close()
+		old.conn.Close()
 	}
-	m.gossipConns[targetAddr] = newConn
+	m.gossipConns[targetAddr] = &gossipConn{conn: newConn, opened: time.Now()}
 }
 
 // failureDetectorLoop detects failed nodes
