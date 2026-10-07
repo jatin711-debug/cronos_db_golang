@@ -489,11 +489,20 @@ func (m *Membership) Join(node *Node) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if _, exists := m.nodes[node.ID]; exists {
+	if known, exists := m.nodes[node.ID]; exists {
 		// Update existing node
+		back := known.State != NodeStateAlive && node.State == NodeStateAlive
 		m.nodes[node.ID] = node
 		m.state.Nodes[node.ID] = node
-		m.emitEvent(EventTypeUpdate, node)
+		if back {
+			// It was counted as failed and has announced itself again. Those
+			// who were told that it failed are told that it is back, or they
+			// go on without it: the router took it out of the ring.
+			log.Printf("[MEMBERSHIP] Node %s is back", node.ID)
+			m.emitEvent(EventTypeJoin, node)
+		} else {
+			m.emitEvent(EventTypeUpdate, node)
+		}
 		return nil
 	}
 
