@@ -51,7 +51,7 @@ Defaults from `internal/config/defaults.go` unless noted. Flags marked **env** h
 |------|---------|-------------|
 | `--segment-size` | `536870912` (512MB) | WAL segment size before rotation |
 | `--index-interval` | `1000` | Sparse index interval (events per entry) |
-| `--fsync-mode` | `batch` | `every_event` \| `batch` \| `periodic` |
+| `--fsync-mode` | `batch` | `every_event` \| `batch` \| `periodic`. Production mode refuses `periodic`: it acknowledges before the data is on disk |
 | `--flush-interval` | `1000` | Background flush interval (ms) for batch/periodic fsync |
 | `--retention-max-age-hours` | `168` | Delete WAL segments older than this (0 = disable) |
 | `--retention-max-size-gb` | `0` | Size-based WAL retention in GB (0 = disable) |

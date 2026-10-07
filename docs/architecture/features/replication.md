@@ -14,6 +14,8 @@ exist:
 - **Cross-region replication** (`internal/replication/region.go`) —
   asynchronous, best-effort batched push via the separate
   `CrossRegionService` gRPC service. No ISR semantics; fire-and-forget.
+  **Experimental**: a node with `CRONOS_REGIONS` set refuses to start without
+  `--dev --experimental-features`, and the service is registered only there.
 
 ## Key Files
 
@@ -128,6 +130,16 @@ paused only while it notes where each file ends.
   is a retry and is skipped; a different term means the follower's entry and
   everything after it were written under another leader, and they are removed
   and replaced. Entries are never removed within a term.
+- **Where an append continues from.** A leader sends entries from where it
+  believes the follower's log ends, so the comparison above only covers what
+  it sends. Every append therefore also names the entry it follows and that
+  entry's term. A follower that holds an entry of another term there refuses
+  the append and reports that term and where its run of it starts; the leader
+  resends from the point where the two logs still agree. An idle leader sends
+  the same check with no entries, so an old leader that returns with a tail it
+  never replicated is brought in line without waiting for a publish. What a
+  follower holds counts as replicated only up to the entry the leader has
+  checked.
 - **Failover.** When the committed leader is dead, the Raft leader asks the
   remaining replicas where their logs end (`ReplicationService.Position`) and
   elects the most complete one. It needs `replicas - minISR + 1` answers to be
@@ -198,11 +210,12 @@ retry is published as new.
   (`--min-insync-replicas`, default `1`). With RF=3 / minISR=2 the leader
   + at least one follower must ack before the client write is
   acknowledged. If the cluster degrades below minISR, writes fail closed
-  rather than silently succeeding on a leader-only ack. **Caveat:** a
-  follower acks after its in-memory WAL append — in the default
-  `periodic`/`batch` fsync modes an ack does not imply the follower has
-  fsynced, so a simultaneous leader+follower crash inside one flush
-  interval can still lose quorum-acknowledged writes.
+  rather than silently succeeding on a leader-only ack. In the `batch` and
+  `every_event` fsync modes a follower syncs an append before it
+  acknowledges it, so a quorum-acknowledged write is on that many disks. In
+  `periodic` mode it acknowledges first and syncs on a timer, and a
+  simultaneous leader and follower crash inside one flush interval can lose
+  acknowledged writes; production mode refuses `periodic`.
 - **Snapshot trigger**: bulk install is invoked by
   `PartitionManager.SyncPartitionFromLeader` (node join and router-driven
   partition moves). The `--snapshot-catchup-threshold` flag (default

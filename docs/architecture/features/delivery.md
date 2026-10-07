@@ -26,7 +26,10 @@ The delivery module moves scheduled events to subscribers with backpressure, ret
 - Circuit breaker isolates unstable subscribers.
 - Retry queue is non-blocking and deadline ordered (no inline sleep in timeout loop).
 - Dispatcher sharding reduces lock contention in high concurrency.
-- **DLQ is constructed per partition** at create time (`NewDeadLetterQueue` + `NewDispatcherWithDLQ` in `partition.Manager`) so poison messages are not silently dropped.
+- **DLQ is constructed per partition** at create time (`NewEncryptedDeadLetterQueue` + `NewDispatcherWithDLQ` in `partition.Manager`) so poison messages are not silently dropped.
+- **DLQ entries are encrypted** with the partition's key when encryption at rest is on: a dead-lettered event is stored whole, payload included. Entries written before encryption was switched on are still read. An encrypted entry that cannot be opened, because the key is wrong or missing, stops the partition from starting.
+- **A damaged DLQ file loses only the damaged records.** Records that fail their checksum are counted and logged with their file, and the counts are part of the queue's stats (`CorruptRecords`, `UnreadableBytes`). A file that cannot be read at all is an error.
+- **A subscription ends when its node stops leading the partition**, with an error that says so, and the consumer reconnects to the node that leads now. The dispatcher of a node that no longer leads delivers nothing.
 - Credit-based flow control and in-flight limits protect memory under slow consumers.
 - Publish-side admission (ready-queue / wheel / memory) lives in [partition/backpressure.go](../../../internal/partition/backpressure.go).
 

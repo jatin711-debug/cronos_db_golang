@@ -13,6 +13,18 @@ splitting are disabled by default. Both require `--dev --experimental-features`;
 production configuration rejects that flag. Production also rejects
 `--exactly-once-commits`: commit-ID storage is not an end-to-end delivery guarantee.
 
+Change data capture to Kafka and webhooks is supported: it exports accepted
+events in log order from each partition's leader, and a partition keeps its
+log entries until they have been exported. Replication to other regions is
+experimental and part of the same opt-in: a node with `CRONOS_REGIONS` set
+refuses to start without `--dev --experimental-features`.
+
+Production mode accepts `--fsync-mode=batch` and `every_event`. In both, a
+replica has an entry on disk before it acknowledges it, so a publish
+acknowledged with `min-insync-replicas=2` is on two disks. `periodic` is
+refused: it acknowledges first and syncs later, and loses acknowledged
+publishes when the machines of a quorum lose power together.
+
 ## Configuration and installation
 
 Settings are applied in this order: defaults, matching `CRONOS_*` environment
@@ -61,7 +73,9 @@ resulting application image digest for a release deployment.
 
 `.github/workflows/ci.yml` defines Linux cgo/race tests, Go vet/build/formatting,
 Rust tests, dashboard tests/build, Go/npm vulnerability checks, Helm assertions,
-and a disposable kind cluster running the production chart with security enabled.
+a scan of the built image for known vulnerabilities, a fault campaign against
+three server processes, and a disposable kind cluster running the production
+chart with security enabled.
 Make these jobs required in repository branch protection before treating them as
 enforced merge gates. A vulnerability finding fails its job; it is not silently
 waived.
@@ -75,8 +89,19 @@ unauthenticated HTTP admin requests. It is a startup smoke test, not a proof of
 quorum acceptance, failover, or restore. Tooling follows the
 [kind quick-start workflow](https://kind.sigs.k8s.io/docs/user/quick-start/).
 
-Before release, also require a fault campaign reconciling accepted event IDs,
-independent backup restoration, repeated restart/snapshot interruption tests,
-consumer coverage across partitions, bounded overload behavior, and security
-scans of the actual release image. Set and measure explicit throughput, payload,
+The `fault-campaign` job runs `tests/acceptance`: three server processes on the
+runner, producers and a two-member consumer group working through the client
+library, and a sequence of faults (a leader killed, a follower killed, a leader
+frozen and released, each node restarted, a replica replaced with an empty one
+and killed while it is refilled, the whole cluster killed). It fails if an
+acknowledged event was not delivered, if one arrived before its time, or if
+the replicas of a partition do not end with the same log. Run it locally with
+`go test -tags acceptance -count=1 -timeout 20m ./tests/acceptance/`; it needs
+about 500 MB of memory. It stops and kills processes. It does not cut network
+links, and it publishes about 60 events a second, so it says nothing about
+network partitions or behavior under load.
+
+Before release, also require independent backup restoration, bounded overload
+behavior, and a scan of the image that is actually published: CI scans the
+image it builds from the same Dockerfile, not the published one. Set and measure explicit throughput, payload,
 retention, delay, and crash-loss targets. See the audit acceptance contract.
