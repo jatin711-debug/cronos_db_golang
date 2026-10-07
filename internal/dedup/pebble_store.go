@@ -25,6 +25,9 @@ type PebbleStore struct {
 	dataDir     string
 	partitionID int32
 	ttlHours    int32 // entry TTL applied at flush time
+	// openedAt is when this process opened the store (Unix nanoseconds). A
+	// claim written before it belongs to a publish that can no longer finish.
+	openedAt int64
 
 	pendingMu sync.RWMutex
 	pending   map[string]int64 // messageID -> offset (not yet durable)
@@ -70,6 +73,7 @@ func NewPebbleStore(dataDir string, partitionID int32, ttlHours int32, cache *pe
 		dataDir:     dir,
 		partitionID: partitionID,
 		ttlHours:    ttlHours,
+		openedAt:    time.Now().UnixNano(),
 		pending:     make(map[string]int64),
 		quit:        make(chan struct{}),
 	}
@@ -219,6 +223,51 @@ func (p *PebbleStore) RollbackClaim(messageIDs []string) error {
 		return fmt.Errorf("rollback commit: %w", err)
 	}
 	return nil
+}
+
+// DeleteIf removes messageID only while its stored offset is still stored, the
+// value the caller read earlier. It reports whether the entry was removed.
+func (p *PebbleStore) DeleteIf(messageID string, stored int64) (bool, error) {
+	p.claimMu.Lock()
+	defer p.claimMu.Unlock()
+
+	key := []byte(messageID)
+	p.pendingMu.Lock()
+	buffered, isBuffered := p.pending[messageID]
+	if isBuffered && buffered == stored {
+		delete(p.pending, messageID)
+	}
+	p.pendingMu.Unlock()
+	if isBuffered && buffered != stored {
+		return false, nil
+	}
+	if !isBuffered {
+		value, closer, err := p.db.Get(key)
+		if err == pebble.ErrNotFound {
+			return false, nil
+		}
+		if err != nil {
+			return false, fmt.Errorf("get key: %w", err)
+		}
+		offset, _, _, err := p.parseValue(value)
+		closer.Close()
+		if err != nil || offset != stored {
+			return false, err
+		}
+	}
+	if err := p.db.Delete(key, pebble.NoSync); err != nil {
+		return false, fmt.Errorf("delete key: %w", err)
+	}
+	return true, nil
+}
+
+// isAbandonedClaim reports whether a stored value is a claim left by an
+// earlier run of this process: one with no log position, written before the
+// store was opened. The publish that made it is gone, so nothing will ever
+// complete or release it.
+func (p *PebbleStore) isAbandonedClaim(value []byte) bool {
+	offset, _, createdTS, err := p.parseValue(value)
+	return err == nil && offset == ClaimedOffset && createdTS < p.openedAt
 }
 
 // GetOffset returns the stored WAL offset for messageID, checking pending first.
@@ -392,19 +441,51 @@ func (p *PebbleStore) GetTimestamp(messageID string) (time.Time, bool, error) {
 }
 
 // Put inserts or overwrites an entry directly with a given created timestamp.
-// This bypasses the pending buffer to ensure the entry is durable immediately.
+// It bypasses the pending buffer; crash recovery still relies on the WAL.
 func (p *PebbleStore) Put(messageID string, offset int64, createdTS int64) error {
-	if err := p.flushPending(); err != nil {
-		return fmt.Errorf("flush pending before put: %w", err)
-	}
-
-	key := []byte(messageID)
+	p.claimMu.Lock()
+	defer p.claimMu.Unlock()
 	expirationTS := time.Now().UnixMilli() + int64(p.ttlHours)*60*60*1000
 	value := p.buildValue(offset, expirationTS, createdTS)
-
-	if err := p.db.Set(key, value, pebble.NoSync); err != nil {
+	if err := p.db.Set([]byte(messageID), value, pebble.NoSync); err != nil {
 		return fmt.Errorf("set key: %w", err)
 	}
+	p.pendingMu.Lock()
+	delete(p.pending, messageID)
+	p.pendingMu.Unlock()
+	return nil
+}
+
+// PutBatch finalizes pending claims with one Pebble commit. Pending entries are
+// removed only after the commit succeeds, so a failed commit still blocks a
+// duplicate claim until recovery can reconcile the WAL.
+func (p *PebbleStore) PutBatch(messageIDs []string, offsets, createdTS []int64) error {
+	if len(messageIDs) != len(offsets) || len(messageIDs) != len(createdTS) {
+		return fmt.Errorf("dedup completion batch lengths differ")
+	}
+	if len(messageIDs) == 0 {
+		return nil
+	}
+	p.claimMu.Lock()
+	defer p.claimMu.Unlock()
+
+	batch := p.db.NewBatch()
+	defer batch.Close()
+	expirationTS := time.Now().UnixMilli() + int64(p.ttlHours)*60*60*1000
+	for i, id := range messageIDs {
+		value := p.buildValue(offsets[i], expirationTS, createdTS[i])
+		if err := batch.Set([]byte(id), value, nil); err != nil {
+			return fmt.Errorf("set completion key: %w", err)
+		}
+	}
+	if err := batch.Commit(pebble.NoSync); err != nil {
+		return fmt.Errorf("commit completion batch: %w", err)
+	}
+	p.pendingMu.Lock()
+	for _, id := range messageIDs {
+		delete(p.pending, id)
+	}
+	p.pendingMu.Unlock()
 	return nil
 }
 
@@ -412,26 +493,35 @@ func (p *PebbleStore) Put(messageID string, offset int64, createdTS int64) error
 // This is used for observability and test verification, so we compute key count
 // exactly via iteration rather than using file-size based approximations.
 func (p *PebbleStore) GetStats() (*DedupStats, error) {
+	// Capture both tiers while flush/claims are paused; counting the pending
+	// buffer before a flush and Pebble after it double-counts the same keys.
+	p.claimMu.Lock()
 	p.pendingMu.RLock()
-	pendingCount := int64(len(p.pending))
+	pending := make(map[string]struct{}, len(p.pending))
+	for id := range p.pending {
+		pending[id] = struct{}{}
+	}
 	p.pendingMu.RUnlock()
 
 	iter, err := p.db.NewIter(nil)
+	p.claimMu.Unlock() // The iterator has a stable snapshot; don't block writes while scanning.
 	if err != nil {
 		return nil, fmt.Errorf("create iterator: %w", err)
 	}
 	defer iter.Close()
 
-	count := int64(0)
+	count := int64(len(pending))
 	for iter.First(); iter.Valid(); iter.Next() {
-		count++
+		if _, buffered := pending[string(iter.Key())]; !buffered {
+			count++
+		}
 	}
 	if err := iter.Error(); err != nil {
 		return nil, fmt.Errorf("iterate keys: %w", err)
 	}
 
 	return &DedupStats{
-		ApproximateCount: count + pendingCount,
+		ApproximateCount: count,
 		TTLHours:         p.ttlHours,
 		LastPruneTS:      time.Now().UnixMilli(),
 	}, nil
@@ -463,6 +553,12 @@ func (p *PebbleStore) Close() error {
 func (p *PebbleStore) Checkpoint(destDir string) error {
 	if err := p.flushPending(); err != nil {
 		return fmt.Errorf("flush pending before checkpoint: %w", err)
+	}
+	// This store runs without Pebble's own WAL, so a checkpoint holds only
+	// what has reached an sstable. Flush the memtable first, or every ID
+	// recorded since the last flush would be missing from it.
+	if err := p.db.Flush(); err != nil {
+		return fmt.Errorf("flush memtable before checkpoint: %w", err)
 	}
 	if err := p.db.Checkpoint(destDir); err != nil {
 		return fmt.Errorf("dedup checkpoint: %w", err)

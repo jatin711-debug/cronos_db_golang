@@ -63,48 +63,48 @@ var walFlushErrorsTotal = promauto.NewCounterVec(
 // Offsets are reserved atomically, then written in strict order via an append
 // sequencer so concurrent producers never interleave records on disk.
 type WAL struct {
-	mu                 sync.RWMutex
-	dataDir            string // root directory for segments/ and index/
-	partitionID        int32  // owning partition ID
-	partitionLabel     string // cached string form of partitionID for metrics
-	segments           []*Segment
-	activeSegment      *Segment
-	nextSegment        *Segment     // pre-created next segment for fast rotation
-	nextSegMu          sync.Mutex   // protects nextSegment
-	preCreateTriggered atomic.Bool  // avoids duplicate pre-creation goroutines
-	nextOffset         atomic.Int64 // next offset to assign; reserved outside w.mu
-	highWatermark      int64        // highest durable offset written (inclusive)
-	appendSeq          atomic.Int64 // next offset that must be appended (in-order writes)
-	appendSeqMu        sync.Mutex
-	appendSeqCond      *sync.Cond
-	config             *WALConfig
-	fsyncMode          FsyncMode   // parsed once at init; avoids per-write string cmp
-	dirty              atomic.Bool // set on write, cleared on flush
-	flushErrors        atomic.Int64
-	quit               chan struct{}
-	quitOnce           sync.Once
-	wg                 sync.WaitGroup
-	cipher             *SegmentCipher           // optional at-rest encryption; nil = plaintext
-	currentTerm        int64                    // Raft term stamped on newly produced records
-	appendHook         func(event *types.Event) // called after successful append (e.g. CDC)
-	coalescer          *FsyncCoalescer          // optional global fsync coalescer
+	mu             sync.RWMutex
+	dataDir        string // root directory for segments/ and index/
+	partitionID    int32  // owning partition ID
+	partitionLabel string // cached string form of partitionID for metrics
+	segments       []*Segment
+	activeSegment  *Segment
+	nextOffset     atomic.Int64 // next offset to assign; reserved outside w.mu
+	highWatermark  int64        // highest durable offset written (inclusive)
+	appendSeq      atomic.Int64 // next offset that must be appended (in-order writes)
+	appendSeqMu    sync.Mutex
+	appendSeqCond  *sync.Cond
+	config         *WALConfig
+	fsyncMode      FsyncMode   // parsed once at init; avoids per-write string cmp
+	dirty          atomic.Bool // set on write, cleared on flush
+	flushErrors    atomic.Int64
+	quit           chan struct{}
+	quitOnce       sync.Once
+	wg             sync.WaitGroup
+	cipher         *SegmentCipher  // optional at-rest encryption; nil = plaintext
+	currentTerm    int64           // Raft term stamped on newly produced records
+	coalescer      *FsyncCoalescer // optional global fsync coalescer
 
-	// Group-commit coordinator for FsyncBatch mode. When multiple concurrent
-	// writers need to fsync the same segment, the first becomes the leader and
-	// performs a single fsync; followers register and wait for the leader's
-	// result. The fsync latency (~1ms on SSD) is the natural coalescing window.
-	// This preserves the "durable after AppendBatch returns" guarantee of
-	// FsyncBatch while collapsing N concurrent fsyncs into one.
-	gcMu        sync.Mutex
-	gcLeaderSeg *Segment    // non-nil while a leader is mid-sync for this segment
-	gcFollowers []*gcWaiter // writers waiting for the leader's sync result
+	// Group-commit coordinator for FsyncBatch mode: writers that finish
+	// appending while a sync is in flight share the next one. See groupCommitSync.
+	gcMu      sync.Mutex
+	gcCurrent *groupSync // sync in flight, nil when idle
+	gcNext    *groupSync // sync that starts when gcCurrent finishes
+
+	// checkpointMu is held while Checkpoint copies files, and by everything
+	// that deletes segment files or cuts them short. It is taken before mu.
+	checkpointMu sync.Mutex
+	// afterCheckpointCut, when set by a test, runs once Checkpoint has released
+	// the WAL lock and before it copies anything.
+	afterCheckpointCut func()
 }
 
-// gcWaiter is a follower in the group-commit protocol. The leader fills err
-// and closes done after its fsync completes.
-type gcWaiter struct {
-	done chan struct{} // closed when the leader finishes fsync
-	err  error         // fsync error shared with followers; nil on success
+// groupSync is one flush+fsync shared by a group of writers. The writer that
+// created it runs it; the others wait on done and read err.
+type groupSync struct {
+	seg  *Segment
+	done chan struct{}
+	err  error
 }
 
 // WALConfig configures segment sizing, sparse indexing, and durability mode.
@@ -156,8 +156,14 @@ func newWAL(dataDir string, partitionID int32, config *WALConfig, cipher *Segmen
 	}
 	wal.appendSeqCond = sync.NewCond(&wal.appendSeqMu)
 
+	if err := RecoverSnapshot(dataDir); err != nil {
+		return nil, fmt.Errorf("recover snapshot install: %w", err)
+	}
 	// Load existing segments
 	if err := wal.loadSegments(); err != nil {
+		for _, seg := range wal.segments {
+			_ = seg.Close()
+		}
 		return nil, fmt.Errorf("load segments: %w", err)
 	}
 
@@ -193,11 +199,6 @@ func (w *WAL) GetCurrentTerm() int64 {
 	return atomic.LoadInt64(&w.currentTerm)
 }
 
-// SetAppendHook registers a callback invoked after each successful event append.
-func (w *WAL) SetAppendHook(hook func(event *types.Event)) {
-	w.appendHook = hook
-}
-
 // loadSegments loads existing segments and verifies their integrity on startup.
 func (w *WAL) loadSegments() error {
 	segmentsDir := filepath.Join(w.dataDir, "segments")
@@ -228,9 +229,7 @@ func (w *WAL) loadSegments() error {
 	for _, filename := range segmentFiles {
 		segment, err := OpenSegment(w.dataDir, filename, w.cipher)
 		if err != nil {
-			log.Printf("[WAL-%d] WARNING: Failed to open segment %s: %v", w.partitionID, filename, err)
-			// Try to recover by skipping corrupt segment
-			continue
+			return fmt.Errorf("open existing segment %s: %w", filename, err)
 		}
 
 		// Verify segment integrity by reading all events and checking CRCs
@@ -241,11 +240,15 @@ func (w *WAL) loadSegments() error {
 			} else {
 				log.Printf("[WAL-%d] WARNING: Segment %s verification failed: %v", w.partitionID, filename, err)
 			}
-			// Skip corrupt segment - data before this segment is still valid
-			continue
+			return fmt.Errorf("verify existing segment %s: %w", filename, err)
 		}
 
 		w.segments = append(w.segments, segment)
+	}
+	if err := w.judgeInvalidTails(); err != nil {
+		return err
+	}
+	for _, segment := range w.segments {
 		w.nextOffset.Store(segment.GetLastOffset() + 1)
 		w.highWatermark = segment.GetLastOffset()
 	}
@@ -254,6 +257,69 @@ func (w *WAL) loadSegments() error {
 		log.Printf("[WAL-%d] Loaded %d segments, nextOffset=%d", w.partitionID, len(w.segments), w.nextOffset.Load())
 	}
 
+	return nil
+}
+
+// ErrLogDamaged is returned when a log holds bytes that are not valid records
+// in a place where an interrupted write cannot have left them.
+var ErrLogDamaged = errors.New("log is damaged")
+
+// judgeInvalidTails decides what the bytes that are not valid records mean,
+// for every segment that has some after its last valid record.
+//
+// At the end of the log they are what a crash leaves behind: the last write
+// had not finished. The log ends before them, as it did for everyone who was
+// told so; with a synced fsync mode nothing that was acknowledged lies there.
+// The end of the log is the last segment that holds records. A segment
+// created by a rotation just before the crash may follow it, empty, and is
+// removed if the log now ends earlier than that segment begins.
+//
+// Anywhere before that they are damage. Segments are closed complete, so
+// valid records were there once, and later segments hold what was written
+// after them. Taking such bytes for the end of the segment, as opening a
+// segment does, would drop the events behind them without a word and leave
+// the log with a hole. The log refuses to open instead.
+func (w *WAL) judgeInvalidTails() error {
+	end := -1 // index of the last segment that holds records
+	for i, segment := range w.segments {
+		if segment.GetLastOffset() >= segment.GetFirstOffset() {
+			end = i
+		}
+	}
+	for i, segment := range w.segments {
+		invalid, position, found := segment.InvalidTail()
+		if !invalid {
+			continue
+		}
+		if i < end {
+			next := w.segments[i+1]
+			return fmt.Errorf("%w: segment %s holds %s at byte %d, after offset %d, and later segments hold events from offset %d on; "+
+				"the events in between cannot be read. A replica of a cluster is repaired by removing this partition's directory while the node is stopped: "+
+				"the leader fills it again. A partition without another replica is restored from a backup, or cut at the damage with "+
+				"'cronos-admin check-log --repair', which gives up the events that cannot be read",
+				ErrLogDamaged, segment.GetFilename(), found, position, segment.GetLastOffset(), next.GetFirstOffset())
+		}
+		log.Printf("[WAL-%d] WARNING: segment %s holds %s at byte %d. The log ends before it, at offset %d: this is what an interrupted write leaves behind",
+			w.partitionID, segment.GetFilename(), found, position, segment.GetLastOffset())
+		if err := segment.clearInvalidTail(); err != nil {
+			return fmt.Errorf("segment %s: %w", segment.GetFilename(), err)
+		}
+	}
+
+	// A rotation shortly before a crash can leave an empty segment that begins
+	// after the offsets of a write that was lost with the crash.
+	for end >= 0 && len(w.segments) > end+1 {
+		last := w.segments[len(w.segments)-1]
+		if last.GetFirstOffset() == w.segments[end].GetLastOffset()+1 {
+			break
+		}
+		log.Printf("[WAL-%d] Removing empty segment %s: the log ends at offset %d, before the segment begins",
+			w.partitionID, last.GetFilename(), w.segments[end].GetLastOffset())
+		if err := last.Delete(); err != nil {
+			return fmt.Errorf("remove empty segment %s: %w", last.GetFilename(), err)
+		}
+		w.segments = w.segments[:len(w.segments)-1]
+	}
 	return nil
 }
 
@@ -522,6 +588,9 @@ func (w *WAL) AppendBatch(events []*types.Event) error {
 		offset := startOffset + int64(i)
 		prep.Event.Offset = offset
 		prep.Event.PartitionId = w.partitionID
+		// The record's term travels with the event: replication sends it to
+		// followers, which store the same term for the same offset.
+		prep.Event.Term = prep.Term
 
 		// Fill offset (bytes 16-24)
 		binary.BigEndian.PutUint64(prep.Buf[16:24], uint64(offset))
@@ -549,15 +618,9 @@ func (w *WAL) AppendBatch(events []*types.Event) error {
 	}
 	w.dirty.Store(true)
 
-	// Collect hook events to fire after unlock
-	var hookEvents []*types.Event
-	if w.appendHook != nil {
-		hookEvents = append(hookEvents, events...)
-	}
-
-	// Flush under the WAL lock so appends and flushes do not interleave on the
-	// segment's bufio writer. For every_event we also sync inline; for batch we
-	// sync outside the lock to let other writers pipeline during the fsync.
+	// every_event flushes and syncs inline, under the WAL lock. batch does both
+	// after releasing it (groupCommitSync), so other writers keep appending
+	// while the disk works and then share one sync.
 	syncSegment := w.activeSegment
 	if w.fsyncMode == FsyncEveryEvent {
 		if err := syncSegment.FlushBuffer(); err != nil {
@@ -572,13 +635,6 @@ func (w *WAL) AppendBatch(events []*types.Event) error {
 			returnBuffersToPool(prepared)
 			return fmt.Errorf("sync batch: %w", err)
 		}
-	} else if w.fsyncMode == FsyncBatch {
-		if err := syncSegment.FlushBuffer(); err != nil {
-			w.mu.Unlock()
-			w.advanceAppendTurn(endOffset)
-			returnBuffersToPool(prepared)
-			return fmt.Errorf("flush batch: %w", err)
-		}
 	}
 
 	// Rotate segment if full
@@ -589,13 +645,6 @@ func (w *WAL) AppendBatch(events []*types.Event) error {
 			returnBuffersToPool(prepared)
 			return fmt.Errorf("rotate segment: %w", err)
 		}
-	} else {
-		// Trigger background pre-creation at 75% capacity so the next segment is
-		// almost certainly ready before rotation is required.
-		threshold := int64(float64(w.config.SegmentSizeBytes) * 0.75)
-		if w.activeSegment.GetSize() >= threshold && w.preCreateTriggered.CompareAndSwap(false, true) {
-			go w.maybePreCreateNextSegment(w.nextOffset.Load())
-		}
 	}
 
 	// Advance the sequencer while still holding w.mu so the next writer cannot
@@ -603,11 +652,8 @@ func (w *WAL) AppendBatch(events []*types.Event) error {
 	w.advanceAppendTurn(endOffset)
 	w.mu.Unlock()
 
-	// For batch mode, the buffer was already flushed under the lock; now sync the
-	// file descriptor outside the WAL lock so other writers can continue appending.
-	// Group commit coalesces concurrent fsyncs into one: the first writer to
-	// arrive becomes the leader and fsyncs; concurrent writers join as followers
-	// and share the result, collapsing N fsyncs into one.
+	// Batch mode: make the append durable outside the WAL lock, sharing the
+	// flush and fsync with every writer that appended in the meantime.
 	if w.fsyncMode == FsyncBatch {
 		if err := w.groupCommitSync(syncSegment); err != nil {
 			returnBuffersToPool(prepared)
@@ -617,11 +663,6 @@ func (w *WAL) AppendBatch(events []*types.Event) error {
 
 	// 4. Return buffers to pool
 	returnBuffersToPool(prepared)
-
-	// Fire hooks AFTER releasing the lock to avoid blocking writers
-	for _, e := range hookEvents {
-		w.appendHook(e)
-	}
 
 	return nil
 }
@@ -706,13 +747,8 @@ func (w *WAL) AppendReplicatedBatch(events []*types.Event) error {
 	}
 	w.dirty.Store(true)
 
-	var hookEvents []*types.Event
-	if w.appendHook != nil {
-		hookEvents = append(hookEvents, events...)
-	}
-
-	// Flush under the WAL lock for every_event; for batch, flush under the lock
-	// and sync outside so followers can continue appending while the fsync runs.
+	// Flush and sync under the WAL lock for every_event; batch does both after
+	// the lock is released (groupCommitSync).
 	syncSegment := w.activeSegment
 	if w.fsyncMode == FsyncEveryEvent {
 		if err := syncSegment.FlushBuffer(); err != nil {
@@ -725,12 +761,6 @@ func (w *WAL) AppendReplicatedBatch(events []*types.Event) error {
 			returnBuffersToPool(prepared)
 			return fmt.Errorf("sync replicated batch: %w", err)
 		}
-	} else if w.fsyncMode == FsyncBatch {
-		if err := syncSegment.FlushBuffer(); err != nil {
-			w.mu.Unlock()
-			returnBuffersToPool(prepared)
-			return fmt.Errorf("flush replicated batch: %w", err)
-		}
 	}
 
 	if w.activeSegment.IsFull(w.config.SegmentSizeBytes) {
@@ -738,11 +768,6 @@ func (w *WAL) AppendReplicatedBatch(events []*types.Event) error {
 			w.mu.Unlock()
 			returnBuffersToPool(prepared)
 			return fmt.Errorf("rotate segment: %w", err)
-		}
-	} else {
-		threshold := int64(float64(w.config.SegmentSizeBytes) * 0.9)
-		if w.activeSegment.GetSize() >= threshold && w.preCreateTriggered.CompareAndSwap(false, true) {
-			go w.maybePreCreateNextSegment(w.nextOffset.Load())
 		}
 	}
 
@@ -757,39 +782,7 @@ func (w *WAL) AppendReplicatedBatch(events []*types.Event) error {
 
 	returnBuffersToPool(prepared)
 
-	for _, e := range hookEvents {
-		w.appendHook(e)
-	}
-
 	return nil
-}
-
-// maybePreCreateNextSegment creates the next segment in the background
-// so that rotation can swap it in with minimal lock hold time.
-func (w *WAL) maybePreCreateNextSegment(nextOffset int64) {
-	w.nextSegMu.Lock()
-	if w.nextSegment != nil {
-		w.nextSegMu.Unlock()
-		return
-	}
-	w.nextSegMu.Unlock()
-
-	seg, err := NewSegmentWithSize(w.dataDir, nextOffset, true, w.cipher, w.config.SegmentSizeBytes)
-	if err != nil {
-		log.Printf("[WAL-%d] failed to pre-create next segment: %v", w.partitionID, err)
-		w.preCreateTriggered.Store(false)
-		return
-	}
-
-	w.nextSegMu.Lock()
-	if w.nextSegment == nil {
-		w.nextSegment = seg
-	} else {
-		if err := seg.Close(); err != nil {
-			log.Printf("[WAL-%d] failed to close unused pre-created segment: %v", w.partitionID, err)
-		}
-	}
-	w.nextSegMu.Unlock()
 }
 
 // openActiveSegment opens the last active segment or creates a new one.
@@ -809,7 +802,6 @@ func (w *WAL) openActiveSegment() error {
 	}
 	w.segments = append(w.segments, segment)
 	w.activeSegment = segment
-
 	return nil
 }
 
@@ -831,6 +823,7 @@ func (w *WAL) AppendEvent(event *types.Event) error {
 	endOffset := w.nextOffset.Add(1)
 	offset := endOffset - 1
 	event.Offset = offset
+	event.Term = prep.Term
 	event.PartitionId = w.partitionID
 	binary.BigEndian.PutUint64(prep.Buf[16:24], uint64(offset))
 	crc := crc32.ChecksumIEEE(prep.Buf[8:])
@@ -855,12 +848,6 @@ func (w *WAL) AppendEvent(event *types.Event) error {
 	}
 	w.dirty.Store(true)
 
-	// Collect hook events to fire after unlock
-	var hookEvents []*types.Event
-	if w.appendHook != nil {
-		hookEvents = append(hookEvents, event)
-	}
-
 	syncSegment := w.activeSegment
 	// For every_event, flush + sync inline under the lock. For batch, flush
 	// under the lock (so we don't race with concurrent appends) and sync after
@@ -882,15 +869,6 @@ func (w *WAL) AppendEvent(event *types.Event) error {
 			}
 			return fmt.Errorf("sync event: %w", err)
 		}
-	} else if w.fsyncMode == FsyncBatch {
-		if err := syncSegment.FlushBuffer(); err != nil {
-			w.mu.Unlock()
-			w.advanceAppendTurn(endOffset)
-			if len(prep.Buf) <= 4096 {
-				recordBufPool.Put(prep.Buf)
-			}
-			return fmt.Errorf("flush event: %w", err)
-		}
 	}
 
 	// Rotate segment if full
@@ -902,13 +880,6 @@ func (w *WAL) AppendEvent(event *types.Event) error {
 				recordBufPool.Put(prep.Buf)
 			}
 			return fmt.Errorf("rotate segment: %w", err)
-		}
-	} else {
-		// Trigger background pre-creation at 75% capacity so the next segment is
-		// almost certainly ready before rotation is required.
-		threshold := int64(float64(w.config.SegmentSizeBytes) * 0.75)
-		if w.activeSegment.GetSize() >= threshold && w.preCreateTriggered.CompareAndSwap(false, true) {
-			go w.maybePreCreateNextSegment(w.nextOffset.Load())
 		}
 	}
 
@@ -928,46 +899,30 @@ func (w *WAL) AppendEvent(event *types.Event) error {
 		recordBufPool.Put(prep.Buf)
 	}
 
-	// Fire hooks AFTER releasing the lock to avoid blocking writers
-	for _, e := range hookEvents {
-		w.appendHook(e)
-	}
-
 	return nil
 }
 
-// rotateSegment swaps to the pre-created next segment if available,
-// otherwise falls back to synchronous creation.
+// rotateSegment creates a segment at the actual appended offset boundary.
+// The caller must hold w.mu.
 func (w *WAL) rotateSegment() error {
 	start := time.Now()
 	defer func() {
 		metrics.ObserveSegmentRotation(strconv.FormatInt(int64(w.partitionID), 10), time.Since(start))
 	}()
 
-	var nextSeg *Segment
-
-	// Try to use pre-created segment
-	w.nextSegMu.Lock()
-	if w.nextSegment != nil {
-		nextSeg = w.nextSegment
-		w.nextSegment = nil
-	}
-	w.nextSegMu.Unlock()
-
-	if nextSeg == nil {
-		// Fallback: create synchronously
-		var err error
-		nextSeg, err = NewSegmentWithSize(w.dataDir, w.nextOffset.Load(), true, w.cipher, w.config.SegmentSizeBytes)
-		if err != nil {
-			return fmt.Errorf("create new active segment: %w", err)
-		}
+	// nextOffset includes reservations by waiting writers. The new segment's
+	// start must follow the last record actually appended, not those reservations.
+	// Speculatively naming a segment at 75% capacity also gets this boundary wrong.
+	firstOffset := w.activeSegment.GetLastOffset() + 1
+	nextSeg, err := NewSegmentWithSize(w.dataDir, firstOffset, true, w.cipher, w.config.SegmentSizeBytes)
+	if err != nil {
+		return fmt.Errorf("create new active segment: %w", err)
 	}
 
 	// Now we have the new segment ready!
 	oldActive := w.activeSegment
 	w.segments = append(w.segments, nextSeg)
 	w.activeSegment = nextSeg
-	w.preCreateTriggered.Store(false)
 
 	// Deactivate (not Close) the old active segment: release its write-side/mmap
 	// resources but keep its read handle + index open so historical reads of this
@@ -987,8 +942,25 @@ func (w *WAL) rotateSegment() error {
 // ReadEvents reads events in the inclusive offset range [startOffset, endOffset]
 // across all segments that overlap the range.
 func (w *WAL) ReadEvents(startOffset, endOffset int64) ([]*types.Event, error) {
+	// Only the segment list and where each segment ends need the WAL lock.
+	// Reading under it would hold up every append to this partition for the
+	// length of the read; each segment guards its own data. The ends are noted
+	// here because an append moves the active segment's while holding this
+	// lock, and looking again after releasing it would race with that.
+	type span struct {
+		segment     *Segment
+		first, last int64
+	}
 	w.mu.RLock()
-	defer w.mu.RUnlock()
+	spans := make([]span, 0, 2)
+	for _, segment := range w.segments {
+		first, last := segment.GetFirstOffset(), segment.GetLastOffset()
+		if last < startOffset || first > endOffset {
+			continue
+		}
+		spans = append(spans, span{segment, first, last})
+	}
+	w.mu.RUnlock()
 
 	// Pre-allocate with a reasonable capacity estimate
 	// (endOffset-startOffset+1) capped at 1024 to avoid over-allocation
@@ -1001,18 +973,19 @@ func (w *WAL) ReadEvents(startOffset, endOffset int64) ([]*types.Event, error) {
 	}
 	result := make([]*types.Event, 0, estimated)
 
-	// Find segments that contain the range
-	for _, segment := range w.segments {
-		if segment.GetLastOffset() < startOffset || segment.GetFirstOffset() > endOffset {
-			continue
-		}
-
+	for _, sp := range spans {
+		segment := sp.segment
 		// Read events from this segment
-		readOffset := max(startOffset, segment.GetFirstOffset())
-		endForSegment := min(endOffset, segment.GetLastOffset())
+		readOffset := max(startOffset, sp.first)
+		endForSegment := min(endOffset, sp.last)
 
 		events, err := segment.ReadEventsByOffsetRange(readOffset, endForSegment)
 		if err != nil {
+			if segment.deleted.Load() {
+				// Pruned since the list was taken: its entries are no longer
+				// in the log, which is what the caller gets to see.
+				continue
+			}
 			return nil, fmt.Errorf("read offset range from segment %s: %w", segment.GetFilename(), err)
 		}
 
@@ -1057,10 +1030,6 @@ func (w *WAL) ReadEventsByTime(startTS, endTS int64) ([]*types.Event, error) {
 
 	// Find segments that contain the timestamp range
 	for _, segment := range w.segments {
-		if segment.GetLastTS() < startTS || segment.GetFirstTS() > endTS {
-			continue
-		}
-
 		events, err := segment.ReadEventsByTime(startTS, endTS)
 		if err != nil {
 			return nil, fmt.Errorf("read from segment %s: %w", segment.GetFilename(), err)
@@ -1084,13 +1053,16 @@ func (w *WAL) backgroundFlushBuffer() (*Segment, bool, error) {
 		return nil, false, nil
 	}
 
-	w.mu.Lock()
+	// Only the segment pointer needs the WAL lock. The flush itself is disk
+	// I/O for mmap segments and is serialized by the segment's own locks;
+	// doing it under w.mu would stall every append for its duration.
+	w.mu.RLock()
 	seg := w.activeSegment
+	w.mu.RUnlock()
 	var err error
 	if seg != nil {
 		err = seg.FlushBuffer()
 	}
-	w.mu.Unlock()
 
 	needsSync := w.fsyncMode == FsyncPeriodic || w.fsyncMode == FsyncBatch
 	return seg, needsSync, err
@@ -1113,14 +1085,15 @@ func (w *WAL) periodicFlushLoop() {
 				continue
 			}
 
-			// Flush buffer under lock (fast — just memcpy to kernel page cache)
-			w.mu.Lock()
+			// Flush outside the WAL lock: for mmap segments this is disk I/O,
+			// and the segment serializes it with appends on its own.
+			w.mu.RLock()
 			seg := w.activeSegment
+			w.mu.RUnlock()
 			var flushErr error
 			if seg != nil {
 				flushErr = seg.FlushBuffer()
 			}
-			w.mu.Unlock()
 
 			if seg == nil || flushErr != nil {
 				if flushErr != nil {
@@ -1171,82 +1144,65 @@ func (w *WAL) GetFlushErrors() int64 {
 // This performs both buffer flush and fsync regardless of mode,
 // and is intended for explicit durability checkpoints (e.g. shutdown).
 func (w *WAL) Flush() error {
-	w.mu.Lock()
+	w.mu.RLock()
 	seg := w.activeSegment
-	var err error
-	if seg != nil {
-		err = seg.FlushBuffer()
-	}
-	w.mu.Unlock()
-
+	w.mu.RUnlock()
 	if seg == nil {
 		return nil
 	}
-
-	if err != nil {
+	if err := seg.FlushBuffer(); err != nil {
 		return err
 	}
 	return seg.Sync()
 }
 
-// groupCommitSync coalesces concurrent fsync requests in FsyncBatch mode.
+// groupCommitSync makes a completed append durable in FsyncBatch mode, sharing
+// the flush and fsync between concurrent writers.
 //
-// When multiple writers call this method concurrently for the same segment,
-// the first caller becomes the "leader" and performs a single fsync. All
-// subsequent callers ("followers") that arrive while the leader is syncing
-// register themselves and block until the leader completes, then return the
-// leader's result. This turns N concurrent per-batch fsyncs into one shared
-// fsync, with the fsync latency (~1ms on SSD) acting as the natural coalescing
-// window — no timer or batching delay is needed.
+// A writer may only rely on a sync that started after its append finished: a
+// sync already in flight captured the segment's write position earlier and
+// says nothing about later bytes. So a writer that finds no sync in flight
+// runs one itself, and a writer that finds one in flight joins the next sync,
+// which starts as soon as the current one ends. Everything appended during one
+// fsync is therefore covered by a single following fsync, and no append is
+// acknowledged before a sync that includes it has succeeded.
 //
-// Durability semantics are unchanged: every caller still waits for a
-// successful fsync before returning. The guarantee is "durable after
-// AppendBatch returns" — group commit just makes N such guarantees cheaper.
-//
-// Callers targeting a DIFFERENT segment (e.g. after rotation) become leaders
-// of their own group, so cross-segment fsyncs are never incorrectly shared.
+// A queued sync covers one segment. A writer whose segment differs (a rotation
+// happened in between) flushes that segment directly.
 func (w *WAL) groupCommitSync(seg *Segment) error {
 	w.gcMu.Lock()
-	// If a leader is already syncing THIS segment, join its group as a follower.
-	if w.gcLeaderSeg == seg {
-		waiter := &gcWaiter{done: make(chan struct{})}
-		w.gcFollowers = append(w.gcFollowers, waiter)
+	current := w.gcCurrent
+	if current == nil {
+		current = &groupSync{seg: seg, done: make(chan struct{})}
+		w.gcCurrent = current
 		w.gcMu.Unlock()
-		<-waiter.done
-		return waiter.err
+		return w.runGroupSync(current)
 	}
-
-	// No active leader for this segment — become the leader.
-	w.gcLeaderSeg = seg
-	// Detach the current follower list (followers that joined before us for a
-	// prior leader were already woken when that leader finished; the slice is
-	// empty at this point, but reset it for clarity).
-	followers := w.gcFollowers
-	w.gcFollowers = nil
+	next := w.gcNext
+	if next == nil {
+		next = &groupSync{seg: seg, done: make(chan struct{})}
+		w.gcNext = next
+		w.gcMu.Unlock()
+		<-current.done // promoted to gcCurrent by the sync that just ended
+		return w.runGroupSync(next)
+	}
 	w.gcMu.Unlock()
+	if next.seg != seg {
+		return seg.Flush()
+	}
+	<-next.done
+	return next.err
+}
 
-	// Perform the actual fsync outside gcMu so new followers can register while
-	// we sync (they will see gcLeaderSeg == seg and join us).
-	syncErr := seg.Sync()
-
-	// Wake all followers (including any that joined during the fsync above) and
-	// clear leadership so the next caller can become a new leader.
+// runGroupSync flushes and syncs the group's segment, then hands the turn to
+// the queued sync, if any, before waking the group.
+func (w *WAL) runGroupSync(group *groupSync) error {
+	group.err = group.seg.Flush()
 	w.gcMu.Lock()
-	w.gcLeaderSeg = nil
-	// Merge followers that joined during our fsync with the snapshot taken earlier.
-	allFollowers := followers
-	if len(w.gcFollowers) > 0 {
-		allFollowers = append(allFollowers, w.gcFollowers...)
-		w.gcFollowers = nil
-	}
+	w.gcCurrent, w.gcNext = w.gcNext, nil
 	w.gcMu.Unlock()
-
-	for _, fw := range allFollowers {
-		fw.err = syncErr
-		close(fw.done)
-	}
-
-	return syncErr
+	close(group.done)
+	return group.err
 }
 
 // Close stops the background flush loop, flushes and syncs the active segment,
@@ -1289,16 +1245,6 @@ func (w *WAL) Close() error {
 		}
 	}
 
-	// Close pre-created next segment if it was prepared but never activated.
-	w.nextSegMu.Lock()
-	if w.nextSegment != nil {
-		if err := w.nextSegment.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("close pre-created segment: %w", err))
-		}
-		w.nextSegment = nil
-	}
-	w.nextSegMu.Unlock()
-
 	return errors.Join(errs...)
 }
 
@@ -1315,6 +1261,8 @@ func (w *WAL) GetSegments() []*Segment {
 // CompactByOffset removes all segments whose last offset is less than upToOffset.
 // Returns the number of segments deleted.
 func (w *WAL) CompactByOffset(upToOffset int64) (int, error) {
+	w.checkpointMu.Lock()
+	defer w.checkpointMu.Unlock()
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -1359,6 +1307,8 @@ func (w *WAL) CompactByOffset(upToOffset int64) (int, error) {
 // deleted). This must only be invoked by an epoch-fenced caller — the replication
 // Append handler verifies the leader's term before calling it.
 func (w *WAL) TruncateToOffset(offset int64) (int, error) {
+	w.checkpointMu.Lock()
+	defer w.checkpointMu.Unlock()
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -1417,15 +1367,6 @@ func (w *WAL) TruncateToOffset(offset int64) (int, error) {
 	w.segments = kept
 	w.activeSegment = newActive
 
-	// Discard any pre-created next segment; its firstOffset is now stale.
-	w.nextSegMu.Lock()
-	if w.nextSegment != nil {
-		_ = w.nextSegment.Close()
-		w.nextSegment = nil
-	}
-	w.nextSegMu.Unlock()
-	w.preCreateTriggered.Store(false)
-
 	// Rewind offset counters so the next append lands exactly at `offset`.
 	w.nextOffset.Store(offset)
 	w.appendSeq.Store(offset)
@@ -1439,6 +1380,8 @@ func (w *WAL) TruncateToOffset(offset int64) (int, error) {
 // CompactByTimestamp removes all segments whose last timestamp is less than upToTS.
 // Returns the number of segments deleted.
 func (w *WAL) CompactByTimestamp(upToTS int64) (int, error) {
+	w.checkpointMu.Lock()
+	defer w.checkpointMu.Unlock()
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -1484,6 +1427,55 @@ func (w *WAL) GetNextOffset() int64 {
 	return w.nextOffset.Load()
 }
 
+// GetFirstOffset returns the offset of the first entry still in the log. For
+// a log that holds none it is the offset the next entry will get.
+func (w *WAL) GetFirstOffset() int64 {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	if len(w.segments) == 0 {
+		return w.nextOffset.Load()
+	}
+	return w.segments[0].GetFirstOffset()
+}
+
+// FirstOffsetOfTerm returns the lowest offset whose entry was written in term,
+// given that the entry at upTo was. The term never decreases along a log, so
+// the start of a term's run is found by bisection.
+func (w *WAL) FirstOffsetOfTerm(term, upTo int64) int64 {
+	lo, hi := w.GetFirstOffset(), upTo
+	for lo < hi {
+		mid := lo + (hi-lo)/2
+		if got, err := w.GetTermForOffset(mid); err == nil && got >= term {
+			hi = mid
+		} else {
+			lo = mid + 1
+		}
+	}
+	return lo
+}
+
+// LastOffsetOfTerm returns the highest offset whose entry was written in term,
+// or -1 when the log holds no entry of that term.
+func (w *WAL) LastOffsetOfTerm(term int64) int64 {
+	lo, hi := w.GetFirstOffset(), w.GetLastOffset()
+	if hi < lo {
+		return -1
+	}
+	// Find the last entry whose term is at most term.
+	for lo < hi {
+		mid := lo + (hi-lo+1)/2
+		if got, err := w.GetTermForOffset(mid); err == nil && got <= term {
+			lo = mid
+		} else {
+			hi = mid - 1
+		}
+	}
+	if got, err := w.GetTermForOffset(lo); err != nil || got != term {
+		return -1
+	}
+	return lo
+}
+
 // GetTermForOffset returns the Raft term stored for the entry at the given offset.
 func (w *WAL) GetTermForOffset(offset int64) (int64, error) {
 	event, err := w.ReadEvent(offset)
@@ -1502,8 +1494,8 @@ func (w *WAL) GetHighWatermark() int64 {
 	return w.highWatermark
 }
 
-// GetLastOffset returns the last offset present in the highest segment, or -1
-// if the WAL has no segments.
+// GetLastOffset returns the offset of the last event in the log, or -1 if
+// nothing has been written to it.
 func (w *WAL) GetLastOffset() int64 {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
@@ -1511,8 +1503,17 @@ func (w *WAL) GetLastOffset() int64 {
 	if len(w.segments) == 0 {
 		return -1
 	}
+	return logEndOf(w.segments[len(w.segments)-1])
+}
 
-	return w.segments[len(w.segments)-1].GetLastOffset()
+// logEndOf returns the offset of the last event at or before the end of
+// segment. A segment holds no events right after the rotation that created
+// it, and the log then ends just before the segment's first offset.
+func logEndOf(segment *Segment) int64 {
+	if last := segment.GetLastOffset(); last >= 0 {
+		return last
+	}
+	return segment.GetFirstOffset() - 1
 }
 
 // GetDataDir returns the WAL data directory path.
@@ -1525,6 +1526,8 @@ func (w *WAL) GetDataDir() string {
 // ReloadSegments reloads segments from disk after bulk file sync (e.g. snapshot
 // install). Existing open segment handles are closed first.
 func (w *WAL) ReloadSegments() error {
+	w.checkpointMu.Lock()
+	defer w.checkpointMu.Unlock()
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -1555,6 +1558,8 @@ func (w *WAL) ReloadSegments() error {
 // It removes segments whose last offset is less than the minimum
 // offset that any consumer has processed.
 func (w *WAL) Compact(beforeOffset int64, consumerOffsets map[int64]bool) error {
+	w.checkpointMu.Lock()
+	defer w.checkpointMu.Unlock()
 	w.mu.Lock()
 	defer w.mu.Unlock()
 

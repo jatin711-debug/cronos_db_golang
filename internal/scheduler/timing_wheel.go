@@ -142,11 +142,17 @@ func (tw *TimingWheel) addTimerLocked(timer *Timer) error {
 	// Create overflow wheel if needed
 	if tw.overflowWheel == nil {
 		nextLevel := tw.currentLevel + 1
-		// Overflow wheel has larger tick interval: tickMs * wheelSize
-		// Its start time should be the absolute time at current tick position
-		// This ensures proper cascade timing when timers move back from overflow
+		// One tick of the overflow wheel is one rotation of this wheel, and it
+		// is advanced each time this wheel completes a rotation. Its tick 0 is
+		// therefore the rotation this wheel is in now, which began up to a
+		// rotation ago, not the moment the overflow wheel happens to be
+		// created. Counting from that moment made the overflow wheel's clock
+		// run ahead of this one: timers were handed down with more than a
+		// rotation still to go, wrapped around this wheel, and fired a whole
+		// rotation early.
 		overflowTickMs := tw.tickMs * tw.wheelSize
-		overflowStartTime := tw.startTimeMs + tw.currentTick*int64(tw.tickMs)
+		rotationStart := tw.currentTick - tw.currentTick%int64(tw.wheelSize)
+		overflowStartTime := tw.startTimeMs + rotationStart*int64(tw.tickMs)
 		tw.overflowWheel = NewTimingWheel(overflowTickMs, tw.wheelSize, tw.maxLevels, nextLevel, overflowStartTime)
 		// Share pool with overflow wheel
 		tw.overflowWheel.timerPool = tw.timerPool
@@ -336,6 +342,16 @@ func (tw *TimingWheel) cascadeFromOverflow() {
 	// Get the slot for the current tick
 	overflowSlot := int32(overflowTick % int64(tw.overflowWheel.wheelSize))
 
+	// When the overflow wheel has completed a rotation of its own, it takes
+	// timers from the level above first. Some of those are due within the
+	// overflow tick that starts now and land in the slot emptied below; pulled
+	// in afterwards they would sit there until the overflow wheel came round
+	// again.
+	if tw.overflowWheel.overflowWheel != nil &&
+		overflowTick%int64(tw.overflowWheel.wheelSize) == 0 {
+		tw.overflowWheel.cascadeFromOverflow()
+	}
+
 	// Get current absolute time for this wheel
 	currentAbsoluteMs := tw.startTimeMs + tw.currentTick*int64(tw.tickMs)
 
@@ -403,12 +419,6 @@ func (tw *TimingWheel) cascadeFromOverflow() {
 				tw.timers[t.EventID] = t
 			}
 		}
-	}
-
-	// Recursively cascade if overflow wheel also completed a rotation
-	if tw.overflowWheel.overflowWheel != nil &&
-		overflowTick%int64(tw.overflowWheel.wheelSize) == 0 {
-		tw.overflowWheel.cascadeFromOverflow()
 	}
 }
 

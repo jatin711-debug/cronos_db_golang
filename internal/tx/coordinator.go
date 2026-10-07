@@ -357,7 +357,10 @@ func (c *Coordinator) acquireLocks(participants []Participant) ([]*sync.Mutex, e
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
 
 	var acquired []*sync.Mutex
-	for _, id := range ids {
+	for i, id := range ids {
+		if i > 0 && id == ids[i-1] {
+			continue
+		}
 		m := c.getTxLock(id)
 		m.Lock()
 		acquired = append(acquired, m)
@@ -446,7 +449,7 @@ func (c *Coordinator) Prepare(ctx context.Context, txID TxID) error {
 
 	for _, p := range tx.Participants {
 		if err := p.Prepare(ctx, txID); err != nil {
-			_ = c.abortInternal(ctx, tx)
+			_ = c.abortLocked(ctx, tx)
 			return fmt.Errorf("prepare failed: %w", err)
 		}
 	}
@@ -486,11 +489,17 @@ func (c *Coordinator) Commit(ctx context.Context, txID TxID) error {
 	status := tx.Status
 	c.mu.Unlock()
 
+	if status == StatusAborted {
+		return fmt.Errorf("transaction %s already aborted", txID)
+	}
+	if status == StatusCommitted {
+		return nil
+	}
 	// Phase 1: Prepare (only if status is pending)
 	if status == StatusPending {
 		for _, p := range tx.Participants {
 			if err := p.Prepare(ctx, txID); err != nil {
-				c.abortInternal(ctx, tx)
+				c.abortLocked(ctx, tx)
 				return fmt.Errorf("prepare failed: %w", err)
 			}
 		}
@@ -508,6 +517,13 @@ func (c *Coordinator) Commit(ctx context.Context, txID TxID) error {
 	// StatusPrepared or StatusCommitting means Prepare already succeeded; skip
 	// to Phase 2.
 
+	// Persist the coordinator decision before any participant can commit.
+	if err := c.txLog.write(txID, StatusCommitting, extractPartitionIDs(tx.Participants), tx.CreatedAt); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	tx.Status = StatusCommitting
+	c.mu.Unlock()
 	// Phase 2: Commit
 	var commitErr error
 	for _, p := range tx.Participants {
@@ -570,6 +586,20 @@ func (c *Coordinator) abortInternal(ctx context.Context, tx *Transaction) error 
 	}
 	defer releaseLocks(locks)
 
+	return c.abortLocked(ctx, tx)
+}
+
+// abortLocked requires the participant locks to be held by the caller.
+func (c *Coordinator) abortLocked(ctx context.Context, tx *Transaction) error {
+	c.mu.RLock()
+	status := tx.Status
+	c.mu.RUnlock()
+	if status == StatusCommitted || status == StatusCommitting {
+		return fmt.Errorf("transaction %s has a commit decision", tx.ID)
+	}
+	if status == StatusAborted {
+		return nil
+	}
 	for _, p := range tx.Participants {
 		_ = p.Abort(ctx, tx.ID)
 	}
@@ -665,13 +695,8 @@ func (c *Coordinator) recover() {
 				cancel()
 			}
 		case "prepared":
-			if inMemStatus != StatusPrepared {
-				continue // Already advanced by another goroutine
-			}
-			// Re-run commit for prepared transactions
-			ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
-			err = c.Commit(ctx, txID)
-			cancel()
+			// A prepare vote is not a commit decision. Await an explicit decision.
+			continue
 		case "committing":
 			if inMemStatus != StatusCommitting && inMemStatus != StatusPrepared {
 				continue

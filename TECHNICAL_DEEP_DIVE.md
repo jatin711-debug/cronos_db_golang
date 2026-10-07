@@ -50,8 +50,8 @@
 **In CronosDB** (`internal/storage/wal.go`):
 - Segmented into 512MB files
 - Each record uses **WAL v2** format:
-  `[Length(4B)][CRC32(4B)][Offset(8B)][Raft Term(8B)][ScheduleTS(8B)][MsgID][Topic][Payload][Meta][Trailing Checksum(4B)]`
-- CRC32 + trailing checksum detect corruption; Raft term enables term-aware replication
+  `[Length(4B)][CRC32(4B)][Raft Term(8B)][Offset(8B)][ScheduleTS(8B)][MsgID][Topic][Payload][Payload Checksum(4B)][Meta]`
+- CRC32 covers the record after the length prefix; the payload checksum (written before Meta) covers the payload only; Raft term enables term-aware replication
 - Sparse index for O(log N) lookups
 - Upgrading from earlier builds requires a clean `--data-dir` (v2 is not backward-compatible)
 
@@ -66,10 +66,13 @@
 
 **How routing works**:
 ```
-topic "orders" → FNV-1a hash → hash % 16 = partition_id
+message_id (or meta["partition_key"]) → FNV-1a hash → hash % partition_count = partition_id
 ```
 
-All nodes use the same hash function, so they all agree on which partition owns "orders".
+All nodes use the same hash function, so they all agree on which partition owns a given
+key. The routing key is the event's `message_id` by default — `meta["partition_key"]`
+overrides it when producers need related events co-located (the topic name is *not* the
+routing key; it is only a fallback on internal partition-creation paths).
 
 ---
 
@@ -237,8 +240,8 @@ Level 0 rotation complete → Take Level 1 slot 0 → Recalculate positions in L
 
 **In CronosDB**: `internal/scheduler/timing_wheel.go`
 - 10ms tick default (configurable via `-tick-ms`)
-- 60 slots per wheel
-- Up to 10 levels
+- 600 slots per wheel (configurable via `-wheel-size`)
+- Up to 10 levels (hardcoded)
 - Handles millions of events with bounded memory
 
 ### 3.4 Absolute Time Tracking (No Drift)
@@ -334,14 +337,14 @@ Check "order-123":
 ```
 
 **Math**:
-- 100M items, 1% false positive rate → ~12MB memory
-- 0.1% FPR → ~17MB
+- 1% false positive rate needs about 10 bits per item: 100M items → ~120MB memory
+- 0.1% FPR needs about 15 bits per item → ~180MB
 - Check time: O(K) = ~7 hash operations = ~40 nanoseconds
 
 **Why this is perfect for dedup**:
 - 99% of checks: "definitely new" → skip disk entirely
 - 1% of checks: "maybe" → check disk to confirm
-- 100M items in 12MB instead of 6.4GB
+- 100M items in ~120MB instead of 6.4GB
 
 ### 4.3 Two-Tier Deduplication
 
@@ -701,11 +704,11 @@ Publish: Pick connection from pool → Round-robin
 
 ```
 Metadata Cache:
-  partition 0 → Node A (expires in 30s)
-  partition 1 → Node B (expires in 30s)
+  partition 0 → Node A (expires in 15s)
+  partition 1 → Node B (expires in 15s)
   ...
 
-Background refresh every 30s.
+Background refresh every 5s.
 ```
 
 **Why cache?**
@@ -733,7 +736,7 @@ Node A keeps failing → Circuit opens → Stop sending to Node A
 
 ```
 Send to Node A (primary)
-Wait 50ms...
+Wait 15ms (default hedge delay)...
 Node A hasn't responded? Send to Node B (hedge)
 Node B responds first? Use B's response, cancel A
 ```
@@ -973,15 +976,15 @@ Segment 2 fills up → Instant swap to Segment 3 (already ready)
 | Sparse index | Every 1000 events | O(log N) lookup without full index memory |
 | Timing wheel | Hierarchical circular buffers | O(1) timer ops for millions of events |
 | Cold store | PebbleDB LSM tree | Range scans + compaction + bounded memory |
-| Bloom filter | Rust FFI + AtomicU64 | 40ns checks, lock-free, 12MB for 100M items |
+| Bloom filter | Rust FFI + AtomicU64 | 40ns checks, lock-free, ~120MB for 100M items |
 | PebbleDB fallback | LSM tree with TTL | Exact dedup + automatic expiration |
 | 32-shard dispatcher | Sharded hash maps | Lock contention ÷ 32 |
 | Credit flow control | Atomic CAS counters | Lock-free backpressure |
 | Circuit breaker | Atomic state machine | Instant isolation, no goroutine leaks |
 | Retry heap | Min-heap by timestamp | O(log N) retries, responsive timeoutLoop |
 | Raft consensus | HashiCorp Raft | Strong metadata consistency |
-| Custom replication | Binary TCP protocol | Throughput over consistency for data |
-| Consistent hashing | SHA-256 + 150 vnodes | Minimal data movement |
+| Custom replication | gRPC (internal listener) | Throughput over consistency for data |
+| Consistent hashing | SHA-256 + 2048 vnodes | Minimal data movement |
 | FNV-1a routing | Fast non-cryptographic hash | 5ns vs 400ns for SHA-256 |
 | sync.Pool | Object reuse | Near-zero GC pressure |
 | Batch operations | Single lock/syscall per N items | Amortized overhead |

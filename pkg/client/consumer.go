@@ -2,6 +2,9 @@ package client
 
 import (
 	"context"
+	crand "crypto/rand"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -12,14 +15,33 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/jatin711-debug/cronos_db_golang/pkg/client/internal/errs"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 
 	"google.golang.org/grpc"
 )
 
-var subscriptionCounter atomic.Uint64
+var (
+	subscriptionCounter atomic.Uint64
+	connectionCounter   atomic.Uint64
+	// clientInstance tells this process's subscriptions from those of every
+	// other. The members of a consumer group need different IDs, and consumers
+	// of one program, started the same way, would otherwise all pick the same.
+	clientInstance = newInstanceID()
+)
+
+func newInstanceID() string {
+	var raw [6]byte
+	if _, err := crand.Read(raw[:]); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 36)
+	}
+	return hex.EncodeToString(raw[:])
+}
+
+// errStreamEnded is what a subscription that the server closed without an
+// error reconnects with. A subscription has no end of its own: a server ends
+// one when it shuts down or stops leading the partition.
+var errStreamEnded = errors.New("the server ended the subscription")
 
 // AckMode controls whether acknowledgements are sent automatically or manually.
 type AckMode string
@@ -131,10 +153,18 @@ type ConsumerConfig struct {
 	Topic string
 	// ConsumerGroup is the consumer group ID used for offset tracking (required).
 	ConsumerGroup string
-	// SubscriptionID optionally labels this subscription; empty lets the client generate one.
+	// SubscriptionID optionally labels this subscription; empty lets the client
+	// generate one that no other process uses. Two consumers of one group must
+	// not share an ID. The server sees it with a suffix that changes on every
+	// connection, so that a connection the server has not yet noticed is gone
+	// cannot stand in the way of the one that replaces it.
 	SubscriptionID string
 
-	// PartitionID selects a partition. -1 uses server auto-assignment.
+	// PartitionID pins the subscription to one partition. -1 consumes every
+	// partition of the cluster, one stream per partition: publishes are spread
+	// over partitions by message ID or partition key, so a single partition only
+	// carries part of a topic. The handler then runs concurrently across
+	// partitions and must be safe for concurrent use.
 	PartitionID int32
 	// StartOffset is the initial read offset. -1 means latest (server semantics).
 	StartOffset int64
@@ -175,7 +205,9 @@ type ConsumerConfig struct {
 	MaxReconnectBackoff time.Duration
 	// ReconnectJitter is the fractional jitter applied to reconnect delays (e.g. 0.2 = ±20%).
 	ReconnectJitter float64
-	// MaxReconnectAttempts limits reconnects (0 = unlimited until context cancel).
+	// MaxReconnectAttempts limits how many rounds of reconnecting may fail in
+	// a row (0 = unlimited until context cancel). A subscription that has
+	// received a delivery starts counting again.
 	MaxReconnectAttempts int
 
 	// HeartbeatInterval is how often optional OnHeartbeat callbacks fire while connected.
@@ -255,7 +287,7 @@ func (c ConsumerConfig) withDefaults() ConsumerConfig {
 		out.HeartbeatInterval = 3 * time.Second
 	}
 	if out.SubscriptionID == "" {
-		out.SubscriptionID = fmt.Sprintf("client-sub-%d", subscriptionCounter.Add(1))
+		out.SubscriptionID = fmt.Sprintf("client-%s-%d", clientInstance, subscriptionCounter.Add(1))
 	}
 	if out.AckMode == "" {
 		if c.AutoAck {
@@ -439,6 +471,10 @@ type Consumer struct {
 	client  *Client        // shared metadata-aware client
 	cfg     ConsumerConfig // resolved consumer settings
 	handler MessageHandler // user callback invoked per delivery
+
+	// received is set when the current connection hands over a delivery: the
+	// node it goes to serves the partition.
+	received atomic.Bool
 }
 
 // NewConsumer creates a consumer runtime.
@@ -474,9 +510,77 @@ func (c *Client) Subscribe(ctx context.Context, cfg ConsumerConfig, handler Mess
 	return consumer.Run(ctx)
 }
 
-// Run executes the consumer stream lifecycle with reconnect behavior.
+// Run executes the consumer stream lifecycle with reconnect behavior. With
+// PartitionID -1 it runs one such lifecycle per partition and returns when any
+// of them ends.
 func (c *Consumer) Run(ctx context.Context) error {
+	if c.cfg.PartitionID >= 0 {
+		return c.runPartition(ctx)
+	}
+	partitions := c.subscriptionPartitions(ctx)
+	if len(partitions) == 0 {
+		// Partition layout unknown (no metadata service and no static count):
+		// keep the single server-assigned stream.
+		return c.runPartition(ctx)
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	results := make(chan error, len(partitions))
+	for _, partitionID := range partitions {
+		cfg := c.cfg
+		cfg.PartitionID = partitionID
+		cfg.SubscriptionID = fmt.Sprintf("%s-p%d", c.cfg.SubscriptionID, partitionID)
+		sub := &Consumer{client: c.client, cfg: cfg, handler: c.handler}
+		utils.GoSafe("consumer-partition", func() {
+			results <- sub.runPartition(ctx)
+		})
+	}
+
+	// One partition ending would otherwise leave part of the topic silently
+	// unconsumed, so the first to finish stops the rest.
+	var result error
+	for i := range partitions {
+		err := <-results
+		if i == 0 {
+			result = err
+			cancel()
+		}
+	}
+	return result
+}
+
+// subscriptionPartitions lists every partition an unpinned consumer must
+// read, from cluster metadata or the statically configured partition count.
+func (c *Consumer) subscriptionPartitions(ctx context.Context) []int32 {
+	infos := c.client.metadata.Partitions()
+	if len(infos) == 0 {
+		refreshCtx, cancel := context.WithTimeout(ctx, c.client.cfg.RequestTimeout)
+		_ = c.client.ForceMetadataRefresh(refreshCtx)
+		cancel()
+		infos = c.client.metadata.Partitions()
+	}
+	if len(infos) > 0 {
+		ids := make([]int32, 0, len(infos))
+		for _, info := range infos {
+			ids = append(ids, info.GetPartitionId())
+		}
+		return ids
+	}
+	ids := make([]int32, 0, c.client.cfg.PartitionCount)
+	for id := int32(0); id < int32(c.client.cfg.PartitionCount); id++ {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// runPartition runs one subscribe stream (a pinned partition, or the
+// server-assigned one) and reconnects it until ctx ends or attempts run out.
+func (c *Consumer) runPartition(ctx context.Context) error {
 	attempt := 0
+	// moved is set when a stream that was delivering ended: the partition is
+	// probably served elsewhere now, and the metadata says where.
+	moved := false
 	var lastErr error
 	for {
 		if ctx.Err() != nil {
@@ -488,29 +592,47 @@ func (c *Consumer) Run(ctx context.Context) error {
 			}
 			return c.wrapErr("consumer.run", ErrorKindUnavailable, lastErr)
 		}
-		if attempt > 0 && c.cfg.PartitionID >= 0 {
+		if (attempt > 0 || moved) && c.cfg.PartitionID >= 0 {
 			refreshCtx, cancel := context.WithTimeout(ctx, c.client.cfg.RequestTimeout)
 			_ = c.client.ForceMetadataRefresh(refreshCtx)
 			cancel()
 		}
+		moved = false
 
 		candidates := c.candidateAddresses()
 		if len(candidates) == 0 {
 			return c.wrapErr("consumer.run", ErrorKindValidation, fmt.Errorf("no candidate node addresses"))
 		}
 
+		served := false
 		for _, addr := range candidates {
+			c.received.Store(false)
 			err := c.consumeFromNode(ctx, addr)
-			if err == nil || ctx.Err() != nil {
+			if ctx.Err() != nil {
 				return err
+			}
+			if err == nil {
+				err = errStreamEnded
+			}
+			if c.cfg.PartitionID >= 0 {
+				c.client.noteRefused(c.cfg.PartitionID, addr)
 			}
 			lastErr = err
 			if c.cfg.OnReconnect != nil {
 				c.cfg.OnReconnect(ctx, attempt+1, err)
 			}
-			if errs.IsLeaderRelated(err) {
-				c.client.MarkMetadataStale()
+			// Whatever ended the stream, the partition may be led elsewhere now.
+			c.client.MarkMetadataStale()
+			if c.received.Load() {
+				// This node was serving the partition until now. Where the
+				// partition went is not known from the old list of candidates.
+				served = true
+				break
 			}
+		}
+		if served {
+			attempt, moved = 0, true
+			continue
 		}
 
 		attempt++
@@ -582,7 +704,7 @@ func (c *Consumer) consumeFromNode(ctx context.Context, addr string) error {
 		PartitionId:    c.cfg.PartitionID,
 		StartOffset:    startOffset,
 		MaxBufferSize:  c.cfg.MaxBufferSize,
-		SubscriptionId: c.cfg.SubscriptionID,
+		SubscriptionId: fmt.Sprintf("%s.%d", c.cfg.SubscriptionID, connectionCounter.Add(1)),
 	}
 	start = time.Now()
 	err = subscribeStream.Send(subReq)
@@ -638,6 +760,9 @@ func (c *Consumer) consumeFromNode(ctx context.Context, addr string) error {
 	}
 
 	recvErr := c.recvLoop(subCtx, addr, subscribeStream, assignmentState, deliveries)
+	// A broken stream cannot drain ACKs. Stop its infrastructure before joining it;
+	// the outer reconnect loop will resume from the last confirmed checkpoint.
+	cancel()
 
 	close(deliveries)
 	workerWG.Wait()
@@ -680,6 +805,9 @@ func (c *Consumer) recvLoop(
 		}
 		if assignmentState != nil {
 			assignmentState.updateFromDelivery(ctx, delivery)
+		}
+		if !c.received.Swap(true) && c.cfg.PartitionID >= 0 {
+			c.client.noteServed(c.cfg.PartitionID, addr)
 		}
 
 		select {

@@ -33,7 +33,6 @@ LICENSE
 
 # Rust build artifacts (we rebuild in Docker)
 internal/dedup/rust/target/
-Cargo.lock
 
 # Local config
 .env
@@ -47,6 +46,9 @@ Thumbs.db
 
 # Node/npm (if applicable)
 node_modules/
+**/node_modules/
+web/dashboard/dist/
+internal/api/web/dist/
 npm-debug.log
 yarn-error.log
 

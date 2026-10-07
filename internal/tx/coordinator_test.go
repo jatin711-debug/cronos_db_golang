@@ -427,7 +427,6 @@ func TestCoordinator_RecoverPreparedLocks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetInternalPartition failed: %v", err)
 	}
-	part.Leader = true // Make it leader so WAL is active
 
 	// Create coordinator
 	c := NewCoordinator(30*time.Second, t.TempDir())

@@ -43,6 +43,75 @@ type Router struct {
 	// onRebalance is called whenever the router recomputes assignments due to
 	// membership changes. It lets the manager immediately sync metadata to Raft.
 	onRebalance func()
+
+	// committed returns the Raft-committed assignment of a partition, when
+	// there is one. Leadership reported by the router comes from it; the ring
+	// only decides placement.
+	committed func(partitionID int32) (PartitionInfo, bool)
+}
+
+// SetCommittedSource makes the router report committed leadership, and only
+// that: a partition the source has no assignment for has no leader. Without a
+// source the ring's first replica is the leader.
+func (r *Router) SetCommittedSource(committed func(partitionID int32) (PartitionInfo, bool)) {
+	r.mu.Lock()
+	r.committed = committed
+	r.mu.Unlock()
+}
+
+// effective returns the assignment in force for a partition: the ring's entry
+// with the committed leadership and replica set on top. ring may be nil.
+func (r *Router) effective(partitionID int32, ring *PartitionInfo, committed func(int32) (PartitionInfo, bool)) (PartitionInfo, bool) {
+	var info PartitionInfo
+	if ring != nil {
+		info = ring.clone()
+	}
+	if committed != nil {
+		if c, ok := committed(partitionID); ok {
+			info.ID = partitionID
+			info.LeaderID, info.Epoch, info.State = c.LeaderID, c.Epoch, c.State
+			info.TransferTo, info.TransferStartedMs = c.TransferTo, c.TransferStartedMs
+			if len(c.Replicas) > 0 {
+				info.Replicas = c.Replicas
+			}
+			if len(info.ISR) == 0 {
+				info.ISR = c.ISR // the ring's entry carries what leaders report
+			}
+			if info.Topic == "" {
+				info.Topic = c.Topic
+			}
+			return info, true
+		}
+		// With a committed source, leadership comes from nowhere else. The
+		// ring still says where the partition's replicas belong.
+		info.LeaderID, info.TransferTo, info.TransferStartedMs = "", "", 0
+	}
+	return info, ring != nil
+}
+
+// lookup returns the assignment in force for one partition.
+func (r *Router) lookup(partitionID int32) (PartitionInfo, bool) {
+	r.mu.RLock()
+	ring, committed := r.assignments[partitionID], r.committed
+	var ringCopy *PartitionInfo
+	if ring != nil {
+		c := ring.clone()
+		ringCopy = &c
+	}
+	r.mu.RUnlock()
+	return r.effective(partitionID, ringCopy, committed)
+}
+
+// DesiredAssignments returns the ring's own view of every partition: where
+// replicas should live and which node it would prefer as leader.
+func (r *Router) DesiredAssignments() map[int32]PartitionInfo {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make(map[int32]PartitionInfo, len(r.assignments))
+	for id, info := range r.assignments {
+		out[id] = info.clone()
+	}
+	return out
 }
 
 // NewRouter creates a new partition router.
@@ -110,6 +179,7 @@ func (r *Router) initializePartitions() {
 			LeaderID: leaderID,
 			Replicas: nodes,
 			ISR:      nodes, // Initially all replicas are in-sync
+			Epoch:    1,
 			State:    PartitionStateOnline,
 		}
 	}
@@ -266,6 +336,7 @@ func (r *Router) updateAssignments() {
 				LeaderID: leaderID,
 				Replicas: nodes,
 				ISR:      nodes,
+				Epoch:    1,
 				State:    PartitionStateOnline,
 			}
 		}
@@ -286,16 +357,19 @@ func (r *Router) executeRebalance(moves []PartitionMove) {
 				continue
 			}
 
-			// Find the current leader to sync from
+			// Find the current leader to sync from. A partition without one
+			// (nothing committed yet) has nothing to copy.
 			leader, err := r.GetPartitionLeader(move.PartitionID)
 			if err != nil {
-				log.Printf("[ROUTER] Cannot sync partition %d: %v", move.PartitionID, err)
 				continue
 			}
 
 			if leader == nil || leader.Address == "" {
 				log.Printf("[ROUTER] No leader address for partition %d", move.PartitionID)
 				continue
+			}
+			if leader.ID == r.localNodeID {
+				continue // this node already holds the data it would copy
 			}
 
 			log.Printf("[ROUTER] Node %s initiating bulk file sync from %s for partition %d", r.localNodeID, leader.Address, move.PartitionID)
@@ -320,12 +394,13 @@ func (r *Router) executeRebalance(moves []PartitionMove) {
 
 // GetPartitionLeader returns the leader node for a partition
 func (r *Router) GetPartitionLeader(partitionID int32) (*Node, error) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	info, exists := r.assignments[partitionID]
+	info, exists := r.lookup(partitionID)
 	if !exists {
 		return nil, fmt.Errorf("partition %d not found", partitionID)
+	}
+
+	if info.LeaderID == "" {
+		return nil, fmt.Errorf("partition %d has no leader", partitionID)
 	}
 
 	return r.membership.GetNode(info.LeaderID)
@@ -366,16 +441,30 @@ func (r *Router) GetPartitionForKey(key string) int32 {
 // IsLocalPartition returns true if the partition is owned by this node
 func (r *Router) IsLocalPartition(partitionID int32) bool {
 	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	info, exists := r.assignments[partitionID]
-	if !exists {
-		return false
+	ring, committed := r.assignments[partitionID], r.committed
+	local := false
+	if ring != nil {
+		for _, nodeID := range ring.Replicas {
+			if nodeID == r.localNodeID {
+				local = true
+				break
+			}
+		}
 	}
-
-	for _, nodeID := range info.Replicas {
-		if nodeID == r.localNodeID {
+	r.mu.RUnlock()
+	if local || committed == nil {
+		return local
+	}
+	// The committed leader and replicas hold the partition until a handoff
+	// has moved it, even when the ring already places it elsewhere.
+	if c, ok := committed(partitionID); ok {
+		if c.LeaderID == r.localNodeID {
 			return true
+		}
+		for _, nodeID := range c.Replicas {
+			if nodeID == r.localNodeID {
+				return true
+			}
 		}
 	}
 	return false
@@ -383,15 +472,8 @@ func (r *Router) IsLocalPartition(partitionID int32) bool {
 
 // IsPartitionLeader returns true if this node is the leader for a partition
 func (r *Router) IsPartitionLeader(partitionID int32) bool {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	info, exists := r.assignments[partitionID]
-	if !exists {
-		return false
-	}
-
-	return info.LeaderID == r.localNodeID
+	info, exists := r.lookup(partitionID)
+	return exists && info.LeaderID == r.localNodeID
 }
 
 // GetLocalPartitions returns partitions owned by this node
@@ -418,7 +500,13 @@ func (r *Router) GetLeaderPartitions() []int32 {
 
 	partitions := make([]int32, 0)
 	for partitionID, info := range r.assignments {
-		if info.LeaderID == r.localNodeID {
+		leaderID := info.LeaderID
+		if r.committed != nil {
+			if c, ok := r.committed(partitionID); ok {
+				leaderID = c.LeaderID
+			}
+		}
+		if leaderID == r.localNodeID {
 			partitions = append(partitions, partitionID)
 		}
 	}
@@ -427,22 +515,16 @@ func (r *Router) GetLeaderPartitions() []int32 {
 
 // GetPartitionInfo returns partition information
 func (r *Router) GetPartitionInfo(partitionID int32) (*PartitionInfo, error) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	info, exists := r.assignments[partitionID]
+	info, exists := r.lookup(partitionID)
 	if !exists {
 		return nil, fmt.Errorf("partition %d not found", partitionID)
 	}
-	return info, nil
+	return &info, nil
 }
 
 // GetPartitionEpoch returns the cluster epoch for a partition.
 func (r *Router) GetPartitionEpoch(partitionID int32) int64 {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	info, exists := r.assignments[partitionID]
+	info, exists := r.lookup(partitionID)
 	if !exists {
 		return 0
 	}
@@ -475,6 +557,24 @@ func (r *Router) UpdatePartitionAssignment(partitionID int32, leaderID string, r
 		info.ISR = nil
 	}
 	info.State = PartitionStateOnline
+}
+
+// KeepLeader makes the ring's entry name leaderID as the leader it wants for
+// a partition, until the ring is next computed from the membership. An
+// election calls it so that the leader it chose is not handed off at once to
+// the node the ring would have picked.
+//
+// It leaves the replicas alone. They are where the ring wants the partition
+// to live, and the ring's entry may be the only place that says a node which
+// has come back belongs to the partition again: an election that wrote the
+// replica list it started from over the entry made the cluster forget such a
+// node until the membership changed once more.
+func (r *Router) KeepLeader(partitionID int32, leaderID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if info, exists := r.assignments[partitionID]; exists {
+		info.LeaderID = leaderID
+	}
 }
 
 // UpdatePartitionISR updates the in-sync replica set for a partition.
@@ -515,11 +615,18 @@ func (r *Router) UpdateReplicaOffsets(partitionID int32, offsets map[string]int6
 // GetAllPartitions returns all partition information
 func (r *Router) GetAllPartitions() map[int32]*PartitionInfo {
 	r.mu.RLock()
-	defer r.mu.RUnlock()
+	committed := r.committed
+	ring := make(map[int32]PartitionInfo, len(r.assignments))
+	for id, info := range r.assignments {
+		ring[id] = info.clone()
+	}
+	r.mu.RUnlock()
 
-	result := make(map[int32]*PartitionInfo)
-	for k, v := range r.assignments {
-		result[k] = v
+	result := make(map[int32]*PartitionInfo, len(ring))
+	for id, info := range ring {
+		info := info
+		effective, _ := r.effective(id, &info, committed)
+		result[id] = &effective
 	}
 	return result
 }

@@ -1,8 +1,10 @@
 package delivery
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -34,6 +36,17 @@ type DLQEntry struct {
 	Tombstone bool `json:"tombstone,omitempty"`
 }
 
+// EntryCipher encrypts dead-letter entries at rest. storage.SegmentCipher,
+// which also encrypts the event log, implements it.
+type EntryCipher interface {
+	Encrypt(plaintext []byte) ([]byte, error)
+	Decrypt(ciphertext []byte) ([]byte, error)
+}
+
+// sealedPrefix marks an encrypted entry. An entry without it is plain JSON:
+// one written before encryption was switched on, which is still read.
+var sealedPrefix = []byte("\x00CRNDLQE1")
+
 // DeadLetterQueue stores failed deliveries in memory and on append-only segments.
 // Remove/Retry append tombstones so actions survive restart; a background
 // retry worker can re-drive entries via a registered callback.
@@ -43,6 +56,10 @@ type DeadLetterQueue struct {
 	dataDir string
 	maxSize int // max in-memory entries; oldest are dropped on overflow
 	writer  *DLQSegmentWriter
+	// cipher encrypts entries when the node encrypts at rest; nil otherwise.
+	cipher EntryCipher
+	// damage is what could not be read when the queue was opened.
+	damage DLQDamage
 
 	// Background retry worker
 	retryQuit chan struct{}
@@ -52,6 +69,17 @@ type DeadLetterQueue struct {
 // NewDeadLetterQueue creates a DLQ under dataDir/dlq, loading existing segments.
 // A non-positive maxSize defaults to 10000 in-memory entries.
 func NewDeadLetterQueue(dataDir string, maxSize int) (*DeadLetterQueue, error) {
+	return NewEncryptedDeadLetterQueue(dataDir, maxSize, nil)
+}
+
+// NewEncryptedDeadLetterQueue is NewDeadLetterQueue for a node that encrypts
+// at rest. A dead-lettered event is stored whole, payload included, so the
+// queue's files are encrypted with the same key as the event log. cipher may
+// be nil, which stores entries in the clear.
+//
+// It fails rather than start empty when existing entries cannot be read: with
+// the wrong key, or without one for entries that are encrypted.
+func NewEncryptedDeadLetterQueue(dataDir string, maxSize int, cipher EntryCipher) (*DeadLetterQueue, error) {
 	dlqDir := filepath.Join(dataDir, "dlq")
 	if err := os.MkdirAll(dlqDir, 0755); err != nil {
 		return nil, fmt.Errorf("create dlq dir: %w", err)
@@ -71,15 +99,48 @@ func NewDeadLetterQueue(dataDir string, maxSize int) (*DeadLetterQueue, error) {
 		dataDir: dlqDir,
 		maxSize: maxSize,
 		writer:  writer,
+		cipher:  cipher,
 	}
 
-	// Load existing entries from segments
+	// Load existing entries from segments. Starting empty after a failure
+	// would hide every dead-lettered event behind a queue that looks healthy.
 	if err := dlq.load(); err != nil {
-		// Log but don't fail - start fresh
-		fmt.Printf("[DLQ] Failed to load existing entries: %v\n", err)
+		_ = writer.Close()
+		return nil, fmt.Errorf("load dead-letter queue in %s: %w", dlqDir, err)
+	}
+	if d := dlq.damage; d.CorruptRecords > 0 || d.UnreadableBytes > 0 {
+		log.Printf("[DLQ] %s: %d corrupt records skipped and %d bytes unreadable in %v; the files are left as they are",
+			dlqDir, d.CorruptRecords, d.UnreadableBytes, d.Files)
 	}
 
 	return dlq, nil
+}
+
+// seal prepares an entry for the segment file.
+func (d *DeadLetterQueue) seal(data []byte) ([]byte, error) {
+	if d.cipher == nil {
+		return data, nil
+	}
+	sealed, err := d.cipher.Encrypt(data)
+	if err != nil {
+		return nil, fmt.Errorf("encrypt dlq entry: %w", err)
+	}
+	return append(append(make([]byte, 0, len(sealedPrefix)+len(sealed)), sealedPrefix...), sealed...), nil
+}
+
+// unseal reverses seal. Entries written in the clear are returned as they are.
+func (d *DeadLetterQueue) unseal(record []byte) ([]byte, error) {
+	if !bytes.HasPrefix(record, sealedPrefix) {
+		return record, nil
+	}
+	if d.cipher == nil {
+		return nil, fmt.Errorf("the queue holds encrypted entries, and no encryption key is configured")
+	}
+	data, err := d.cipher.Decrypt(record[len(sealedPrefix):])
+	if err != nil {
+		return nil, fmt.Errorf("decrypt dlq entry (wrong encryption key?): %w", err)
+	}
+	return data, nil
 }
 
 // Add records a failed delivery in memory and appends it to the segment log.
@@ -108,6 +169,9 @@ func (d *DeadLetterQueue) Add(event *types.Event, deliveryID string, attempts in
 	data, err := json.Marshal(entry)
 	if err != nil {
 		return fmt.Errorf("marshal dlq entry: %w", err)
+	}
+	if data, err = d.seal(data); err != nil {
+		return err
 	}
 	return d.writer.WriteEntry(data)
 }
@@ -181,7 +245,22 @@ func (d *DeadLetterQueue) writeTombstone(deliveryID string) error {
 	if err != nil {
 		return fmt.Errorf("marshal dlq tombstone: %w", err)
 	}
+	if data, err = d.seal(data); err != nil {
+		return err
+	}
 	return d.writer.WriteEntry(data)
+}
+
+// Checkpoint copies the queue's segment files into destDir for a backup. The
+// copy includes the tombstones of removed and retried entries, so a queue
+// opened on it holds exactly the entries this one does now.
+func (d *DeadLetterQueue) Checkpoint(destDir string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.writer == nil {
+		return nil
+	}
+	return d.writer.Checkpoint(destDir)
 }
 
 // Count returns the number of in-memory DLQ entries.
@@ -209,27 +288,38 @@ func (d *DeadLetterQueue) load() error {
 	if d.writer == nil {
 		return nil
 	}
-	records, err := d.writer.Scan()
+	records, damage, err := d.writer.Scan()
 	if err != nil {
 		return fmt.Errorf("scan dlq segments: %w", err)
 	}
+	d.damage = damage
+
+	// A record that passed its checksum and still cannot be decrypted means
+	// the key is wrong, which is a reason to stop. One that decrypts and is
+	// not an entry is counted with the corrupt ones.
+	decoded := make([]*DLQEntry, 0, len(records))
+	for _, record := range records {
+		data, err := d.unseal(record)
+		if err != nil {
+			return err
+		}
+		entry := new(DLQEntry)
+		if err := json.Unmarshal(data, entry); err != nil {
+			d.damage.CorruptRecords++
+			continue
+		}
+		decoded = append(decoded, entry)
+	}
 
 	tombstones := make(map[string]bool)
-	for _, record := range records {
-		var marker DLQEntry
-		if err := json.Unmarshal(record, &marker); err != nil {
-			continue // Skip corrupt entries
-		}
+	for _, marker := range decoded {
 		if marker.Tombstone {
 			tombstones[marker.DeliveryID] = true
 		}
 	}
 
-	for _, record := range records {
-		var entry DLQEntry
-		if err := json.Unmarshal(record, &entry); err != nil {
-			continue // Skip corrupt entries
-		}
+	for _, decodedEntry := range decoded {
+		entry := *decodedEntry
 		if entry.Tombstone {
 			continue
 		}
@@ -249,6 +339,10 @@ type DLQStats struct {
 	OldestEntryAge int64 `json:"oldest_entry_age_ms"`
 	// NewestEntryAge is now minus the newest entry's FailedAt, in milliseconds.
 	NewestEntryAge int64 `json:"newest_entry_age_ms"`
+	// CorruptRecords and UnreadableBytes describe what could not be read from
+	// the queue's files when it was opened. Both are zero for a healthy queue.
+	CorruptRecords  int   `json:"corrupt_records"`
+	UnreadableBytes int64 `json:"unreadable_bytes"`
 }
 
 // SetRetryCallback registers a function that will be called for each DLQ entry
@@ -326,7 +420,9 @@ func (d *DeadLetterQueue) GetStats() *DLQStats {
 	defer d.mu.RUnlock()
 
 	stats := &DLQStats{
-		TotalEntries: len(d.entries),
+		TotalEntries:    len(d.entries),
+		CorruptRecords:  d.damage.CorruptRecords,
+		UnreadableBytes: d.damage.UnreadableBytes,
 	}
 
 	now := time.Now().UnixMilli()

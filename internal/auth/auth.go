@@ -43,6 +43,7 @@ type Config struct {
 type Policy struct {
 	// Subjects maps principal names (JWT sub) to their permissions.
 	Subjects map[string]*Subject `json:"subjects"`
+	allowAll bool                // Only AllowAllPolicy may enable this; never decoded from a file.
 }
 
 // Subject holds permissions for a principal.
@@ -82,9 +83,15 @@ func NewPolicyFromFile(path string) (*Policy, error) {
 		return nil, fmt.Errorf("read policy file: %w", err)
 	}
 	p := &Policy{Subjects: make(map[string]*Subject)}
-	if len(data) > 0 {
-		if err := json.Unmarshal(data, &p.Subjects); err != nil {
-			return nil, fmt.Errorf("parse policy file: %w", err)
+	if err := json.Unmarshal(data, &p.Subjects); err != nil {
+		return nil, fmt.Errorf("parse policy file: %w", err)
+	}
+	if len(p.Subjects) == 0 {
+		return nil, fmt.Errorf("policy must contain at least one subject")
+	}
+	for id, subject := range p.Subjects {
+		if strings.TrimSpace(id) == "" || subject == nil {
+			return nil, fmt.Errorf("policy contains an invalid subject")
 		}
 	}
 	return p, nil
@@ -92,7 +99,7 @@ func NewPolicyFromFile(path string) (*Policy, error) {
 
 // AllowAllPolicy returns a policy that permits everything.
 func AllowAllPolicy() *Policy {
-	return &Policy{Subjects: make(map[string]*Subject)}
+	return &Policy{Subjects: make(map[string]*Subject), allowAll: true}
 }
 
 // LoadPublicKey loads a PEM-encoded public key from file.
@@ -276,7 +283,7 @@ func CheckTopicPermission(ctx context.Context, topic string, op string, policy *
 		return status.Error(codes.FailedPrecondition, "authorization policy not configured")
 	}
 
-	if len(policy.Subjects) == 0 {
+	if policy.allowAll {
 		// Explicit allow-all policy (empty subjects map). This is only set
 		// deliberately via AllowAllPolicy(), so we honor it.
 		return nil
@@ -288,7 +295,7 @@ func CheckTopicPermission(ctx context.Context, topic string, op string, policy *
 	}
 
 	subject, ok := policy.Subjects[claims.Subject]
-	if !ok {
+	if !ok || subject == nil {
 		return status.Errorf(codes.PermissionDenied, "subject %q not found in policy", claims.Subject)
 	}
 
@@ -336,7 +343,7 @@ func CheckAdminPermission(ctx context.Context, policy *Policy) error {
 		return status.Error(codes.FailedPrecondition, "authorization policy not configured")
 	}
 
-	if len(policy.Subjects) == 0 {
+	if policy.allowAll {
 		// Explicit AllowAllPolicy().
 		return nil
 	}
@@ -347,7 +354,7 @@ func CheckAdminPermission(ctx context.Context, policy *Policy) error {
 	}
 
 	subject, ok := policy.Subjects[claims.Subject]
-	if !ok {
+	if !ok || subject == nil {
 		return status.Errorf(codes.PermissionDenied, "subject %q not found in policy", claims.Subject)
 	}
 

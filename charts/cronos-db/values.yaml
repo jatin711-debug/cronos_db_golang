@@ -18,6 +18,10 @@ serviceAccount:
   name: ""
 
 podAnnotations: {}
+terminationGracePeriodSeconds: 75
+startupProbe:
+  periodSeconds: 5
+  failureThreshold: 60
 
 securityContext:
   runAsNonRoot: true
@@ -92,19 +96,23 @@ tls:
 # Enable only when an authentication secret is provided.
 auth:
   enabled: false
+  policyKey: policy.json
   # existingSecret: cronos-db-auth
   # secretKey: jwt-secret
 
 # Enable only when an encryption key secret is provided.
 encryption:
   enabled: false
+  secretKey: master.key
   # existingSecret: cronos-db-encryption
   # secretKey: master.key
 
-# Enable only when replication mTLS certificates are provided via secrets.
+# Mutual TLS for all traffic between nodes: replication, membership and Raft.
+# Enable only when the certificates are provided via a secret with the keys
+# tls.crt, tls.key and ca.crt. The certificate must be valid for the names the
+# nodes reach each other by (*.<release>-cronos-db-headless.<namespace>.svc).
 replicationTLS:
   enabled: false
-  caCertEnabled: false
   # existingSecret: cronos-db-replication-tls
 
 metrics:
@@ -117,3 +125,7 @@ metrics:
 
 alerts:
   enabled: false
+  # Warn when the 99th percentile of delivery lateness, the time between an
+  # event's scheduled time and its first delivery to a consumer, stays above
+  # this many seconds.
+  deliveryLatenessSeconds: 30

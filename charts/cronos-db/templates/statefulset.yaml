@@ -6,6 +6,7 @@ metadata:
     {{- include "cronos-db.labels" . | nindent 4 }}
 spec:
   serviceName: {{ include "cronos-db.headlessServiceName" . }}
+  podManagementPolicy: Parallel
   replicas: {{ .Values.replicaCount }}
   selector:
     matchLabels:
@@ -19,13 +20,56 @@ spec:
       labels:
         {{- include "cronos-db.selectorLabels" . | nindent 8 }}
     spec:
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       serviceAccountName: {{ include "cronos-db.serviceAccountName" . }}
       securityContext:
         {{- toYaml .Values.securityContext | nindent 8 }}
+      {{- if .Values.encryption.enabled }}
+      initContainers:
+        - name: prepare-encryption-key
+          image: "{{ .Values.image.repository }}{{- if .Values.image.digest }}@{{ .Values.image.digest }}{{- else }}:{{ .Values.image.tag | default .Chart.AppVersion }}{{- end }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - umask 077; cp /key-source/master.key /key-private/master.key; chmod 600 /key-private/master.key
+          volumeMounts:
+            - name: encryption-source
+              mountPath: /key-source
+              readOnly: true
+            - name: encryption
+              mountPath: /key-private
+      {{- end }}
       containers:
         - name: {{ .Chart.Name }}
           image: "{{ .Values.image.repository }}{{- if .Values.image.digest }}@{{ .Values.image.digest }}{{- else }}:{{ .Values.image.tag | default .Chart.AppVersion }}{{- end }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              # Ordinal zero is the node that creates the cluster. It does so
+              # only when it has no Raft state and no other pod belongs to a
+              # cluster, so it joins the existing one when it comes back with
+              # an empty volume. Every pod names every pod as a seed.
+              if [ "${POD_NAME##*-}" = "0" ]; then
+                exec /app/cronos-api --cluster-bootstrap
+              fi
+              exec /app/cronos-api
           env:
             - name: POD_NAME
               valueFrom:
@@ -33,6 +77,16 @@ spec:
                   fieldPath: metadata.name
             - name: CRONOS_NODE_ID
               value: "$(POD_NAME)"
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: CRONOS_CLUSTER_GOSSIP_ADDR
+              value: "$(POD_NAME).{{ include "cronos-db.headlessServiceName" . }}.$(POD_NAMESPACE).svc:{{ .Values.headlessService.gossipPort }}"
+            - name: CRONOS_CLUSTER_GRPC_ADDR
+              value: "$(POD_NAME).{{ include "cronos-db.headlessServiceName" . }}.$(POD_NAMESPACE).svc:{{ .Values.headlessService.clusterGRPCPort }}"
+            - name: CRONOS_CLUSTER_RAFT_ADDR
+              value: "$(POD_NAME).{{ include "cronos-db.headlessServiceName" . }}.$(POD_NAMESPACE).svc:{{ .Values.headlessService.raftPort }}"
             {{- if .Values.tls.enabled }}
             - name: CRONOS_TLS_ENABLED
               value: "true"
@@ -48,6 +102,8 @@ spec:
             {{- if .Values.auth.enabled }}
             - name: CRONOS_AUTH_ENABLED
               value: "true"
+            - name: CRONOS_AUTH_POLICY_FILE
+              value: "/etc/cronos/auth/{{ .Values.auth.policyKey }}"
             - name: CRONOS_AUTH_JWT_SECRET
               valueFrom:
                 secretKeyRef:
@@ -67,10 +123,8 @@ spec:
               value: "/etc/cronos/replication-tls/tls.crt"
             - name: CRONOS_REPLICATION_TLS_KEY_FILE
               value: "/etc/cronos/replication-tls/tls.key"
-            {{- if .Values.replicationTLS.caCertEnabled }}
             - name: CRONOS_REPLICATION_TLS_CA_FILE
               value: "/etc/cronos/replication-tls/ca.crt"
-            {{- end }}
             {{- end }}
           envFrom:
             - configMapRef:
@@ -91,6 +145,13 @@ spec:
             - name: raft
               containerPort: {{ .Values.headlessService.raftPort }}
               protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: {{ .Values.startupProbe.periodSeconds }}
+            failureThreshold: {{ .Values.startupProbe.failureThreshold }}
+            timeoutSeconds: 3
           livenessProbe:
             httpGet:
               path: /health
@@ -136,7 +197,7 @@ spec:
         {{- if .Values.tls.enabled }}
         - name: tls
           secret:
-            secretName: {{ .Values.tls.existingSecret }}
+            secretName: {{ default (printf "%s-tls" (include "cronos-db.fullname" .)) .Values.tls.existingSecret }}
         {{- end }}
         {{- if .Values.auth.enabled }}
         - name: auth
@@ -145,13 +206,25 @@ spec:
         {{- end }}
         {{- if .Values.encryption.enabled }}
         - name: encryption
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+        - name: encryption-source
           secret:
-            secretName: {{ .Values.encryption.existingSecret }}
+            secretName: {{ default (printf "%s-encryption" (include "cronos-db.fullname" .)) .Values.encryption.existingSecret }}
+            defaultMode: 0440
+            items:
+              - key: {{ .Values.encryption.secretKey }}
+                path: master.key
         {{- end }}
         {{- if .Values.replicationTLS.enabled }}
         - name: replication-tls
           secret:
-            secretName: {{ .Values.replicationTLS.existingSecret }}
+            secretName: {{ default (printf "%s-replication-tls" (include "cronos-db.fullname" .)) .Values.replicationTLS.existingSecret }}
+        {{- end }}
+        {{- if not .Values.persistence.enabled }}
+        - name: data
+          emptyDir: {}
         {{- end }}
   {{- if .Values.persistence.enabled }}
   volumeClaimTemplates:

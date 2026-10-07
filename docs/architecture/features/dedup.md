@@ -34,7 +34,23 @@ Deduplication prevents duplicate message processing while keeping publish latenc
 - Persistence and TTL behavior: [internal/dedup/pebble_store.go](../../../internal/dedup/pebble_store.go)
 - Recovery: [internal/partition/manager.go](../../../internal/partition/manager.go) (`recoverDedupFromWAL`)
 
-## Related Diagrams
+## Diagrams
 
-- [dedup_decision_flow.mmd](../../mermaid/dedup_decision_flow.mmd)
-- [publish_flow.mmd](../../mermaid/publish_flow.mmd)
+### Dedup decision flow
+
+```mermaid
+flowchart TB
+    Start[Incoming message_id] --> FastCheck[Bloom check]
+    FastCheck --> MaybeDup{Possible duplicate?}
+    MaybeDup -- no --> StoreFast[Store and continue]
+    MaybeDup -- yes --> PersistentCheck[Persistent store lookup]
+    PersistentCheck --> Exists{Exists in store?}
+    Exists -- yes --> Reject[Reject as duplicate]
+    Exists -- no --> StoreConfirmed[Store and continue]
+    StoreFast --> Accept[Publish continues]
+    StoreConfirmed --> Accept
+```
+
+### Related diagrams
+
+- [Publish flow](api.md#publish-flow)

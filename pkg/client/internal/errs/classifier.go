@@ -32,6 +32,15 @@ func IsRetryable(err error) bool {
 	}
 }
 
+// IsOverloaded reports whether a node refused a request because it is at
+// capacity or a quota is used up. The node is healthy and has answered: the
+// caller should send less, and sending the same request to another node gets
+// it nowhere.
+func IsOverloaded(err error) bool {
+	st, ok := status.FromError(err)
+	return ok && st.Code() == codes.ResourceExhausted
+}
+
 // IsLeaderRelated reports whether an error likely indicates stale routing.
 func IsLeaderRelated(err error) bool {
 	if err == nil {
@@ -63,6 +72,10 @@ func IsLeaderRelatedMessage(message string) bool {
 		"not current leader",
 		"leader id mismatch",
 		"leader election",
+		// What a node that does not serve the partition answers.
+		"not owned by this node",
+		"changing leader",
+		"retry against the partition leader",
 	}
 	for _, p := range phrases {
 		if strings.Contains(m, p) {

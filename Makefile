@@ -9,7 +9,7 @@
 	verify-env verify-tag-env verify-release-env tag-preflight release-preflight lint ci tag tag-push release publish \
 	node1 node2 node3 cluster loadtest loadtest-single loadtest-batch loadtest-max loadtest-small loadtest-throughput health \
 	docker docker-build docker-build-no-cache docker-build-hub docker-push docker-push-hub docker-single docker-cluster docker-logs docker-down docker-clean \
-	observability-up observability-down dashboard
+	observability-up observability-down dashboard docs-install docs-serve docs-build docs-deploy
 
 # -----------------------------------------------------------------------------
 # Tooling and build settings
@@ -238,6 +238,12 @@ help:
 	@echo Observability
 	@echo   make observability-up   - Start Prometheus + Grafana + Tempo + OTEL Collector
 	@echo   make observability-down - Stop/remove observability services
+	@echo.
+	@echo Docs site (MkDocs Material)
+	@echo   make docs-install - Install documentation toolchain (pip)
+	@echo   make docs-serve   - Serve docs locally with live reload (http://127.0.0.1:8000)
+	@echo   make docs-build   - Build the static site into site/
+	@echo   make docs-deploy  - Deploy to GitHub Pages (gh-pages branch)
 	@echo.
 	@echo Release
 	@echo   make tag VERSION=v0.2.1      - Create local annotated tag (requires clean git state)
@@ -573,3 +579,15 @@ observability-up:
 observability-down:
 	$(DOCKER_COMPOSE) --profile observability stop grafana prometheus tempo otel-collector
 	$(DOCKER_COMPOSE) --profile observability rm -f grafana prometheus tempo otel-collector
+
+docs-install:
+	pip install -r requirements-docs.txt
+
+docs-serve:
+	mkdocs serve
+
+docs-build:
+	mkdocs build
+
+docs-deploy:
+	mkdocs gh-deploy --force

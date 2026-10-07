@@ -1,0 +1,109 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 778" width="1000" height="778" role="img" aria-labelledby="title desc" font-family="'Segoe UI', system-ui, -apple-system, BlinkMacSystemFont, Roboto, 'Helvetica Neue', Arial, sans-serif">
+  <title id="title">Replication — quorum writes, epochs and failover</title>
+  <desc id="desc">The leader appends a batch to its own log and sends it to both followers in parallel. As soon as one follower acknowledges, two of three replicas hold the batch and the producer gets success; the slower follower catches up afterwards. Every append carries the leader epoch, and a replica refuses an epoch older than the one it has accepted, which fences a stale leader. On failure the Raft leader asks the survivors where their logs end and commits the most complete one as leader at a higher epoch.</desc>
+  <defs>
+    <marker id="ah-2e8b57" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8.5" markerHeight="8.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0.9 L9.6 5 L0 9.1 z" fill="#2e8b57"/></marker>
+    <marker id="ah-57606a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8.5" markerHeight="8.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0.9 L9.6 5 L0 9.1 z" fill="#57606a"/></marker>
+    <marker id="ah-cf3a30" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8.5" markerHeight="8.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0.9 L9.6 5 L0 9.1 z" fill="#cf3a30"/></marker>
+  </defs>
+
+  <!-- card: the diagram brings its own background so it reads on light and dark pages -->
+  <rect x="0.5" y="0.5" width="999" height="777" rx="14" fill="#ffffff" stroke="#d0d7de"/>
+  <text x="28" y="37" font-size="20" font-weight="700" fill="#1f2328">Replication — quorum writes, epochs and failover</text>
+  <text x="28" y="58" font-size="12.5" fill="#57606a">Shown for replication factor 3 and min-insync-replicas 2: a write is acknowledged once two of the three replicas hold it.</text>
+  <line x1="120" y1="114" x2="120" y2="378" stroke="#afb8c1" stroke-width="1.2" stroke-dasharray="4 4"/>
+  <rect x="40" y="78" width="160" height="36" rx="8" fill="#e4f6f4" stroke="#1f9d94" stroke-width="1.3"/>
+  <text x="120" y="100.4" font-size="12.5" fill="#0d524d" text-anchor="middle" font-weight="600">Producer</text>
+  <line x1="370" y1="114" x2="370" y2="378" stroke="#afb8c1" stroke-width="1.2" stroke-dasharray="4 4"/>
+  <rect x="290" y="78" width="160" height="36" rx="8" fill="#f2ecfd" stroke="#7c4ddb" stroke-width="1.3"/>
+  <text x="370" y="100.4" font-size="12.5" fill="#3d1f85" text-anchor="middle" font-weight="600">Leader · node A</text>
+  <line x1="630" y1="114" x2="630" y2="378" stroke="#afb8c1" stroke-width="1.2" stroke-dasharray="4 4"/>
+  <rect x="550" y="78" width="160" height="36" rx="8" fill="#eaf2fe" stroke="#3b78d8" stroke-width="1.3"/>
+  <text x="630" y="100.4" font-size="12.5" fill="#0b3a7e" text-anchor="middle" font-weight="600">Follower · node B</text>
+  <line x1="880" y1="114" x2="880" y2="378" stroke="#afb8c1" stroke-width="1.2" stroke-dasharray="4 4"/>
+  <rect x="800" y="78" width="160" height="36" rx="8" fill="#eaf2fe" stroke="#3b78d8" stroke-width="1.3"/>
+  <text x="880" y="100.4" font-size="12.5" fill="#0b3a7e" text-anchor="middle" font-weight="600">Follower · node C</text>
+  <path d="M120 146 L368.6 146" fill="none" stroke="#57606a" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#ah-57606a)"/>
+  <text x="244.3" y="140" font-size="10.8" fill="#1f2328" text-anchor="middle" paint-order="stroke" stroke="#ffffff" stroke-width="4" stroke-linejoin="round">PublishBatch(events)</text>
+  <rect x="274" y="158" width="192" height="28" rx="5" fill="#e7f6ed" stroke="#2e8b57" stroke-width="1.3"/>
+  <text x="370" y="175.7" font-size="10.6" fill="#1f2328" text-anchor="middle">append to own log · epoch 7</text>
+  <path d="M370 214 L628.6 214" fill="none" stroke="#57606a" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#ah-57606a)"/>
+  <text x="499.3" y="208" font-size="10.8" fill="#1f2328" text-anchor="middle" paint-order="stroke" stroke="#ffffff" stroke-width="4" stroke-linejoin="round">Append(events, epoch 7, CRC)</text>
+  <path d="M370 236 L878.6 236" fill="none" stroke="#57606a" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#ah-57606a)"/>
+  <text x="755" y="230" font-size="10.8" fill="#57606a" text-anchor="middle" paint-order="stroke" stroke="#ffffff" stroke-width="4" stroke-linejoin="round">the same batch, in parallel</text>
+  <path d="M630 268 L371.4 268" fill="none" stroke="#57606a" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#ah-57606a)"/>
+  <text x="500.7" y="262" font-size="10.8" fill="#1f2328" text-anchor="middle" paint-order="stroke" stroke="#ffffff" stroke-width="4" stroke-linejoin="round">ack: I hold everything up to offset 49</text>
+  <rect x="254" y="282" width="232" height="28" rx="5" fill="#fff4d9" stroke="#c98a00" stroke-width="1.3"/>
+  <text x="370" y="299.8" font-size="10.8" fill="#1f2328" text-anchor="middle" font-weight="600">leader + B = 2 of 3  →  quorum</text>
+  <path d="M370 336 L121.4 336" fill="none" stroke="#57606a" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#ah-57606a)"/>
+  <text x="245.7" y="330" font-size="10.8" fill="#1f2328" text-anchor="middle" paint-order="stroke" stroke="#ffffff" stroke-width="4" stroke-linejoin="round">success · offsets 40–49</text>
+  <path d="M880 362 L371.4 362" fill="none" stroke="#57606a" stroke-width="1.5" stroke-linejoin="round" stroke-dasharray="5 4" marker-end="url(#ah-57606a)"/>
+  <text x="735" y="356" font-size="10.8" fill="#57606a" text-anchor="middle" paint-order="stroke" stroke="#ffffff" stroke-width="4" stroke-linejoin="round">late ack — or C is caught up afterwards from the leader’s log</text>
+
+  <!-- fencing -->
+  <rect x="24" y="398" width="472" height="216" rx="12" fill="#fdecea" stroke="#cf3a30" stroke-width="1.2" stroke-dasharray="5 4" fill-opacity="0.25"/>
+  <text x="38" y="416" font-size="10.5" fill="#8a1f17" font-weight="700" letter-spacing="0.04em">EPOCHS FENCE A STALE LEADER</text>
+  <rect x="44" y="428" width="112" height="58" rx="8" fill="#fdecea" stroke="#cf3a30" stroke-width="1.3"/>
+  <text x="100" y="446.1" font-size="12.5" fill="#8a1f17" text-anchor="middle" font-weight="600">Node A</text>
+  <text x="100" y="463.2" font-size="10.3" fill="#57606a" text-anchor="middle">old leader,</text>
+  <text x="100" y="477" font-size="10.3" fill="#57606a" text-anchor="middle">still at epoch 7</text>
+  <rect x="204" y="428" width="112" height="58" rx="8" fill="#eaf2fe" stroke="#3b78d8" stroke-width="1.3"/>
+  <text x="260" y="446.1" font-size="12.5" fill="#0b3a7e" text-anchor="middle" font-weight="600">Node C</text>
+  <text x="260" y="463.2" font-size="10.3" fill="#57606a" text-anchor="middle">follower, has</text>
+  <text x="260" y="477" font-size="10.3" fill="#57606a" text-anchor="middle">accepted epoch 8</text>
+  <rect x="364" y="428" width="112" height="58" rx="8" fill="#f2ecfd" stroke="#7c4ddb" stroke-width="1.3"/>
+  <text x="420" y="446.1" font-size="12.5" fill="#3d1f85" text-anchor="middle" font-weight="600">Node B</text>
+  <text x="420" y="463.2" font-size="10.3" fill="#57606a" text-anchor="middle">committed leader</text>
+  <text x="420" y="477" font-size="10.3" fill="#57606a" text-anchor="middle">at epoch 8</text>
+  <path d="M156 460 L202.6 460" fill="none" stroke="#cf3a30" stroke-width="1.8" stroke-linejoin="round" marker-end="url(#ah-cf3a30)"/>
+  <path d="M364 460 L317.4 460" fill="none" stroke="#2e8b57" stroke-width="1.8" stroke-linejoin="round" marker-end="url(#ah-2e8b57)"/>
+  <path d="M175 441 L185 451 M185 441 L175 451" fill="none" stroke="#cf3a30" stroke-width="2.2" stroke-linejoin="round"/>
+  <path d="M334 446 L339 451 L347 440" fill="none" stroke="#2e8b57" stroke-width="2.2" stroke-linejoin="round"/>
+  <text x="44" y="510" font-size="10.8" fill="#1f2328">A → C:  Append(epoch 7) is refused, because C has accepted epoch 8.</text>
+  <text x="44" y="527" font-size="10.8" fill="#1f2328">B → C:  Append(epoch 8) is applied.</text>
+  <text x="44" y="551" font-size="10.8" fill="#57606a">Cut off from the others, A cannot reach min-insync, so it cannot acknowledge</text>
+  <text x="44" y="566.3" font-size="10.8" fill="#57606a">anything. What it appended alone is replaced when it rejoins: every record carries its</text>
+  <text x="44" y="581.7" font-size="10.8" fill="#57606a">term, so the difference shows.</text>
+
+  <!-- failover -->
+  <rect x="508" y="398" width="468" height="216" rx="12" fill="#f2ecfd" stroke="#7c4ddb" stroke-width="1.2" stroke-dasharray="5 4" fill-opacity="0.25"/>
+  <text x="522" y="416" font-size="10.5" fill="#3d1f85" font-weight="700" letter-spacing="0.04em">FAILOVER, STEP BY STEP</text>
+  <circle cx="532" cy="430" r="9.5" fill="#7c4ddb" stroke="#ffffff" stroke-width="2"/>
+  <text x="532" y="433.9" font-size="11" fill="#ffffff" text-anchor="middle" font-weight="700">1</text>
+  <text x="550" y="434" font-size="10.8" fill="#1f2328">The leader stops answering heartbeats; after about 5 s it is marked failed.</text>
+  <circle cx="532" cy="452.7" r="9.5" fill="#7c4ddb" stroke="#ffffff" stroke-width="2"/>
+  <text x="532" y="456.6" font-size="11" fill="#ffffff" text-anchor="middle" font-weight="700">2</text>
+  <text x="550" y="456.7" font-size="10.8" fill="#1f2328">The Raft leader asks the surviving replicas where their logs end.</text>
+  <circle cx="532" cy="475.4" r="9.5" fill="#7c4ddb" stroke="#ffffff" stroke-width="2"/>
+  <text x="532" y="479.3" font-size="11" fill="#ffffff" text-anchor="middle" font-weight="700">3</text>
+  <text x="550" y="479.4" font-size="10.8" fill="#1f2328">It needs RF − min-insync + 1 answers (here: both survivors). Any such set</text>
+  <text x="550" y="494.1" font-size="10.8" fill="#1f2328">includes a replica that holds every acknowledged write.</text>
+  <circle cx="532" cy="512.8" r="9.5" fill="#7c4ddb" stroke="#ffffff" stroke-width="2"/>
+  <text x="532" y="516.7" font-size="11" fill="#ffffff" text-anchor="middle" font-weight="700">4</text>
+  <text x="550" y="516.8" font-size="10.8" fill="#1f2328">It commits the replica with the most complete log as leader, at epoch + 1.</text>
+  <circle cx="532" cy="535.4" r="9.5" fill="#7c4ddb" stroke="#ffffff" stroke-width="2"/>
+  <text x="532" y="539.3" font-size="11" fill="#ffffff" text-anchor="middle" font-weight="700">5</text>
+  <text x="550" y="539.4" font-size="10.8" fill="#1f2328">The new leader arms timers from its log; replicas replace any tail written under</text>
+  <text x="550" y="554.1" font-size="10.8" fill="#1f2328">the old epoch.</text>
+
+  <!-- catch-up -->
+  <rect x="24" y="630" width="304" height="132" rx="8" fill="#eaf2fe" stroke="#3b78d8" stroke-width="1.2"/>
+  <text x="37" y="653" font-size="12.5" fill="#0b3a7e" font-weight="700">A small gap → resend from the log</text>
+  <text x="37" y="675.4" font-size="10.9" fill="#1f2328">The leader reads the missing range from its own log</text>
+  <text x="37" y="690.8" font-size="10.9" fill="#1f2328">and sends it through the same Append call. This also</text>
+  <text x="37" y="706.3" font-size="10.9" fill="#1f2328">runs while the partition is idle, so a follower does not</text>
+  <text x="37" y="721.8" font-size="10.9" fill="#1f2328">stay behind until the next publish.</text>
+  <rect x="348" y="630" width="304" height="132" rx="8" fill="#e7f6ed" stroke="#2e8b57" stroke-width="1.2"/>
+  <text x="361" y="653" font-size="12.5" fill="#145232" font-weight="700">New, wiped or far behind → snapshot</text>
+  <text x="361" y="675.4" font-size="10.9" fill="#1f2328">The follower copies the leader’s segment files. Each</text>
+  <text x="361" y="690.8" font-size="10.9" fill="#1f2328">is checked against its CRC, staged next to the old log</text>
+  <text x="361" y="706.3" font-size="10.9" fill="#1f2328">and swapped in under a journal, so a crash leaves one</text>
+  <text x="361" y="721.8" font-size="10.9" fill="#1f2328">complete log. A broken transfer resumes with the</text>
+  <text x="361" y="737.3" font-size="10.9" fill="#1f2328">files that already arrived.</text>
+  <rect x="672" y="630" width="304" height="132" rx="8" fill="#fffbe8" stroke="#d9bf50" stroke-width="1.2"/>
+  <text x="685" y="653" font-size="12.5" fill="#4d3f00" font-weight="700">What Raft is not used for</text>
+  <text x="685" y="675.4" font-size="10.9" fill="#1f2328">Event data never goes through Raft. Raft only decides</text>
+  <text x="685" y="690.8" font-size="10.9" fill="#1f2328">who leads; the leader ships its own log. That keeps a</text>
+  <text x="685" y="706.3" font-size="10.9" fill="#1f2328">publish to one round trip, and makes the epoch the</text>
+  <text x="685" y="721.8" font-size="10.9" fill="#1f2328">thing that stops an old leader from doing damage.</text>
+</svg>

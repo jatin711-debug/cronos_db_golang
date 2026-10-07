@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/hamba/avro/v2"
+	"github.com/iskorotkov/avro/v2"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/descriptorpb"
 )
@@ -33,7 +33,7 @@ type avroField struct {
 	hasDefault bool
 }
 
-// checkAvroCompatibility uses hamba/avro to parse schemas and compare fields.
+// checkAvroCompatibility parses schemas and compares fields.
 func checkAvroCompatibility(oldDef, newDef string, mode CompatibilityMode) error {
 	oldSchema, err := avro.Parse(oldDef)
 	if err != nil {

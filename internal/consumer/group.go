@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
@@ -35,6 +36,25 @@ type GroupManager struct {
 	groups      map[string]*types.ConsumerGroup
 	partitions  map[int32]*types.Partition // partition_id -> partition
 	offsetStore *OffsetStore               // persistent offset storage
+	completed   map[string]bool            // Used only by the in-memory manager.
+	// floors holds each group's completion floor per partition, keyed by
+	// completionPrefix: every offset below it is complete. Guarded by mu.
+	floors map[string]int64
+	// logStart holds, per partition, where its log starts (see SetLogStart).
+	// Guarded by mu.
+	logStart map[int32]int64
+
+	// completedMax caches, per group and partition, the highest offset known
+	// complete. Guarded by completedMaxMu, which is never held while waiting
+	// for mu.
+	completedMaxMu sync.Mutex
+	completedMax   map[string]int64
+
+	// commitMu serializes progress writes (acks and replicated progress): each
+	// derives a group's new cursor from the one before it.
+	commitMu sync.Mutex
+	// progressVersion changes whenever any group's progress or membership does.
+	progressVersion atomic.Uint64
 }
 
 // NewGroupManager creates an in-memory-only group manager.
@@ -56,7 +76,20 @@ func NewGroupManagerWithStore(offsetStore *OffsetStore) *GroupManager {
 	}
 	// Restore persisted group metadata if available.
 	if offsetStore != nil {
+		if floors, err := offsetStore.loadFloors(); err == nil {
+			gm.floors = floors
+		}
 		for id, group := range offsetStore.LoadGroups() {
+			// Progress is written with every ack; the group record only when
+			// membership changes. Take whichever is further along.
+			for _, partitionID := range group.Partitions {
+				if offset, err := offsetStore.GetOffset(id, partitionID); err == nil && offset > group.CommittedOffsets[partitionID] {
+					group.CommittedOffsets[partitionID] = offset
+				}
+				if floor := gm.floors[completionPrefix(id, partitionID)]; floor > group.CommittedOffsets[partitionID] {
+					group.CommittedOffsets[partitionID] = floor
+				}
+			}
 			gm.groups[id] = group
 		}
 	}
@@ -65,6 +98,7 @@ func NewGroupManagerWithStore(offsetStore *OffsetStore) *GroupManager {
 
 // persistGroup writes group metadata to the offset store if one is configured.
 func (g *GroupManager) persistGroup(group *types.ConsumerGroup) {
+	g.progressVersion.Add(1)
 	if g.offsetStore != nil {
 		_ = g.offsetStore.PersistGroup(group)
 	}
@@ -103,13 +137,42 @@ func (g *GroupManager) CreateGroup(groupID, topic string, partitions []int32) er
 	return nil
 }
 
-// GetGroup returns the consumer group with groupID, if it exists.
+// GetGroup returns a copy of the consumer group with groupID, if it exists.
 func (g *GroupManager) GetGroup(groupID string) (*types.ConsumerGroup, bool) {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 
 	group, exists := g.groups[groupID]
-	return group, exists
+	if !exists {
+		return nil, false
+	}
+	return copyGroup(group), true
+}
+
+// copyGroup returns a copy of a group that shares nothing with it. The
+// manager's own group objects change under its lock, their maps included, so
+// handing one out would let a reader race with a commit: reading a map while
+// it is written ends the process.
+func copyGroup(group *types.ConsumerGroup) *types.ConsumerGroup {
+	out := *group
+	out.Partitions = append([]int32(nil), group.Partitions...)
+	out.CommittedOffsets = make(map[int32]int64, len(group.CommittedOffsets))
+	for partitionID, offset := range group.CommittedOffsets {
+		out.CommittedOffsets[partitionID] = offset
+	}
+	out.MemberOffsets = make(map[string]int64, len(group.MemberOffsets))
+	for memberID, offset := range group.MemberOffsets {
+		out.MemberOffsets[memberID] = offset
+	}
+	out.Members = make(map[string]*types.ConsumerMember, len(group.Members))
+	for memberID, member := range group.Members {
+		if member != nil {
+			memberCopy := *member
+			member = &memberCopy
+		}
+		out.Members[memberID] = member
+	}
+	return &out
 }
 
 // Close releases any persistent resources held by the group manager, including
@@ -158,6 +221,9 @@ func (g *GroupManager) JoinGroup(groupID, memberID, address, topic string, parti
 		}
 		group.CommittedOffsets[partitionID] = -1
 		g.groups[groupID] = group
+	}
+	if group.Topic != topic {
+		return fmt.Errorf("consumer group belongs to a different topic")
 	}
 
 	// Re-join/update existing member instead of failing hard.
@@ -332,6 +398,9 @@ func (g *GroupManager) CommitOffset(groupID string, partitionID int64, offset in
 		return fmt.Errorf("invalid partition %d", partitionID)
 	}
 
+	if offset < group.CommittedOffsets[int32(partitionID)] {
+		return fmt.Errorf("committed offset cannot move backwards")
+	}
 	group.CommittedOffsets[int32(partitionID)] = offset
 	group.UpdatedTS = time.Now().UnixMilli()
 
@@ -373,14 +442,14 @@ func (g *GroupManager) GetCommittedOffset(groupID string, partitionID int32) (in
 	return -1, nil // Beginning of partition
 }
 
-// ListGroups returns all known consumer groups.
+// ListGroups returns a copy of every known consumer group.
 func (g *GroupManager) ListGroups() []*types.ConsumerGroup {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 
 	groups := make([]*types.ConsumerGroup, 0, len(g.groups))
 	for _, group := range g.groups {
-		groups = append(groups, group)
+		groups = append(groups, copyGroup(group))
 	}
 
 	return groups
@@ -424,6 +493,9 @@ func (g *GroupManager) Subscribe(req *types.SubscribeRequest) (*Subscription, er
 
 // Ack acknowledges event processing by committing the next offset encoded in the delivery ID.
 func (g *GroupManager) Ack(req *types.AckRequest) error {
+	if !req.GetSuccess() {
+		return fmt.Errorf("unsuccessful acknowledgments cannot commit offsets")
+	}
 	if req.DeliveryId == "" {
 		return fmt.Errorf("delivery_id is required")
 	}

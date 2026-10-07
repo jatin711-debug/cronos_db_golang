@@ -40,7 +40,7 @@ $ go test ./internal/api/ \
 
 ### 1. `FsyncBatch` is now a true per-request group commit
 
-The old implementation treated `batch` and `periodic` identically: both relied on the background flush loop. After Tier 3 #12, `batch` performs the buffer flush under the WAL lock and the expensive `fsync` outside the lock. This means:
+The old implementation treated `batch` and `periodic` identically: both relied on the background flush loop. After Tier 3 #12, `batch` syncs on every append. Since 2026-10-06 the flush and the `fsync` both happen after the WAL lock is released, and writers that append while a sync is in flight share the next one; the numbers below predate that change. This means:
 
 * `batch=1` is now event-level durable (like `every_event`) and is much slower than the old `batch=1` number, which was not actually syncing.
 * `batch` and `periodic` are no longer comparable; `periodic` remains the highest-throughput mode with a small loss window, while `batch` is the recommended durable-high-throughput mode and is now the default.
@@ -76,7 +76,7 @@ Recent production-hardening changes add durability and correctness metadata but 
 
 * WAL v2 stores an 8-byte Raft term and a 4-byte trailing checksum per record. The extra bytes are appended outside the fsync lock and checksum verification happens on recovery and replication, not on the append fast path.
 * The retention enforcer runs as a background loop and reads only the 64-byte segment header to decide eligibility; it does not scan record contents.
-* CDC uses a bounded worker pool (`DefaultCDCWorkers=4`, queue size 10,000) with non-blocking `Emit`; slow sinks drop events rather than stall the WAL append path.
+* CDC and cross-region replication read a per-partition change feed behind the accepted watermark; nothing runs on the append path. A slow sink makes its feed lag; it neither drops events nor slows publishes. With no sink and no region configured, publishes are not tracked for the feed at all.
 
 ## WAL Plaintext Baseline (4 KB payload, par=1)
 
@@ -144,7 +144,7 @@ Representative median values after Tier 3 #15:
 | # | Optimization | Expected delta | Measured delta | Primary benchmark |
 |---|--------------|----------------|----------------|-------------------|
 | 12 | Real `FsyncBatch` group commit | True per-request durability; `batch`≡`periodic` removed | `batch` now durable per request; large batches faster than `every_event` | `BenchmarkWAL_AppendBatch_Matrix/fsync=batch/...` |
-| 13 | Cache AES-GCM AEAD + counter nonce | Fewer allocs, lower CPU per record | Allocs reduced; throughput neutral-to-slightly-better at par=1 | `BenchmarkWAL_AppendBatch_Encrypted_Matrix/...` |
+| 13 | Cache AES-GCM AEAD + random 12-byte nonce per record (cipher v2) | Fewer allocs, lower CPU per record | Allocs reduced; throughput neutral-to-slightly-better at par=1. **Note:** v2 uses a fresh random nonce per record, not a counter nonce — the counter nonce survives only for legacy v1 decryption (see §2) | `BenchmarkWAL_AppendBatch_Encrypted_Matrix/...` |
 | 14 | Decouple index fsync from WAL lock | Lower p99, higher par=16 throughput | par=1 unchanged; high-concurrency p99 expected to improve | `BenchmarkWAL_AppendBatch_Matrix/.../par=16` |
 | 15 | PublishBatch pooling + batched dedup | Lower allocs/op in gRPC path | ~11% geomean latency reduction, ~13% geomean throughput gain (count=3) | `BenchmarkPublishBatch_EndToEnd_Matrix/...` |
 | 16 | Vectorized CRC + mmap growth tuning | TBD; only swap if `benchstat` wins | No change; stdlib already hardware-accelerated; mmap policy unchanged | `BenchmarkWAL_AppendBatch_Matrix/...` |

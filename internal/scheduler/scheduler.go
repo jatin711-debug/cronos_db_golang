@@ -286,7 +286,7 @@ func (s *Scheduler) ScheduleBatch(events []*types.Event) error {
 }
 
 // GetReadyEvents drains and returns events ready for execution.
-// The caller owns the returned slice; the internal queue is reset in place.
+// The caller owns the returned slice and its backing array.
 func (s *Scheduler) GetReadyEvents() []*types.Event {
 	s.readyMu.Lock()
 	defer s.readyMu.Unlock()
@@ -297,7 +297,7 @@ func (s *Scheduler) GetReadyEvents() []*types.Event {
 	}
 
 	events := s.readyQueue
-	s.readyQueue = s.readyQueue[:0]
+	s.readyQueue = nil
 	return events
 }
 
@@ -554,7 +554,7 @@ func (s *Scheduler) adaptHydratorInterval(hydrated int, scanDuration time.Durati
 // It returns the number of events successfully hydrated.
 func (s *Scheduler) hydrate() int {
 	now := time.Now().UnixMilli()
-	startTS := now + s.hotWindowMs
+	startTS := int64(0) // Include overdue entries and entries missed during downtime.
 	// Adaptive lookahead: use the current hydrator interval as the lookahead window
 	// so we naturally scan further ahead when running less frequently.
 	s.mu.RLock()
@@ -563,7 +563,7 @@ func (s *Scheduler) hydrate() int {
 		lookaheadMs = 10000 // minimum 10s lookahead
 	}
 	s.mu.RUnlock()
-	endTS := startTS + lookaheadMs
+	endTS := now + s.hotWindowMs + lookaheadMs
 
 	offsets, err := s.coldStore.ScanRange(startTS, endTS)
 	if err != nil {

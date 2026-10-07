@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"log"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -50,6 +51,16 @@ type Leader struct {
 	quitOnce          sync.Once
 	wal               *storage.WAL
 	tlsConfig         *MTLSConfig // optional mTLS for replication connections
+
+	// progressSource returns the partition's consumer progress and a version
+	// that changes whenever it does. Nil disables progress replication.
+	progressSource func() (uint64, []*types.ConsumerGroupProgress)
+	// quorumObserver is told, on every maintenance tick, how far the log is
+	// replicated to a quorum. Nil when nothing needs to know.
+	quorumObserver func(offset int64)
+	// changeFeedSource returns how far the partition's change feed has got;
+	// known is false when it has none. Nil sends nothing about it.
+	changeFeedSource func() (offset int64, known bool)
 }
 
 // FollowerInfo tracks a follower replica and its gRPC replication client state.
@@ -73,7 +84,42 @@ type FollowerInfo struct {
 	InSync bool
 	conn   *grpc.ClientConn
 	client types.ReplicationServiceClient
+
+	// sendTail is closed when the most recently queued send to this follower
+	// finishes; the next send waits on it so batches reach the follower in
+	// offset order even after Replicate has returned on quorum. Guarded by mu.
+	sendTail chan struct{}
+	// pendingSends counts queued and in-flight sends. Guarded by mu.
+	pendingSends int
+
+	// progressSent is the consumer-progress version this follower last
+	// acknowledged; progressSending marks a send in flight. Guarded by mu.
+	progressSent    uint64
+	progressSentAt  time.Time
+	progressSending bool
+	// feedSent is the change feed position sent with it, feedSentKnown whether
+	// there was one. Guarded by mu.
+	feedSent      int64
+	feedSentKnown bool
+	// progressFailing is set while sends keep failing, so that an unreachable
+	// follower is logged once rather than on every maintenance tick.
+	progressFailing bool
+	// sendFailing does the same for log entries: it is set by the first failed
+	// send and cleared by the next acknowledged append. Guarded by mu.
+	sendFailing bool
+	// logStartSent is the log start this follower was last told and
+	// acknowledged. Guarded by mu.
+	logStartSent int64
 }
+
+// progressResendInterval bounds how long a follower can go without a fresh
+// copy of consumer progress even when nothing changed, which repairs a
+// follower that lost its copy without the leader noticing.
+const progressResendInterval = 30 * time.Second
+
+// maxPendingSendsPerFollower bounds the batches a slow follower may hold in
+// memory. Beyond it the follower is skipped and later caught up from the WAL.
+const maxPendingSendsPerFollower = 4
 
 // NewLeader creates a new leader. minInSyncReplicas is the minimum ISR size
 // (including the leader itself) required to acknowledge a write as durable;
@@ -194,6 +240,7 @@ func (l *Leader) connectFollower(id, address string) {
 	f.conn = conn
 	f.client = client
 	f.Connected = true
+	f.progressSentAt = time.Time{} // a reconnected follower gets progress again
 	f.mu.Unlock()
 
 	log.Printf("[LEADER] Connected to follower %s at %s (gRPC replication)", id, address)
@@ -221,11 +268,13 @@ func (l *Leader) RemoveFollower(id string) error {
 	return nil
 }
 
-// Replicate sends an event batch to all connected followers and returns success
-// once a quorum (min-insync-replicas, counting the leader) has durably acked.
-// events must be contiguous and start at the offset the followers expect; the
-// caller (publish path) serializes appends+replication per partition to keep
-// this ordering. RF=1 (no followers, minISR<=1) is a no-op.
+// Replicate sends an event batch to all connected followers and returns as
+// soon as a quorum (min-insync-replicas, counting the leader) has acked, or as
+// soon as that quorum can no longer be reached. Sends still in flight continue
+// in the background, so one slow follower does not hold every publish for the
+// full replication timeout. events must be contiguous and start at the offset
+// the followers expect; the caller (publish path) serializes appends and
+// replication per partition. RF=1 (no followers, minISR<=1) is a no-op.
 func (l *Leader) Replicate(events []*types.Event) error {
 	if len(events) == 0 {
 		return nil
@@ -262,24 +311,24 @@ func (l *Leader) Replicate(events []*types.Event) error {
 		return nil
 	}
 
-	// Send to all connected followers concurrently.
-	var wg sync.WaitGroup
-	var ackMu sync.Mutex
-	acks := 1 // the leader itself already has the data durably in its WAL
+	// Checksums are filled in once, before any send starts: the per-follower
+	// sends run concurrently and share these events.
+	checksum := computeBatchChecksum(events)
+
+	results := make(chan error, len(connected))
+	queued := 0
 	for _, f := range connected {
-		wg.Add(1)
-		go func(f *FollowerInfo) {
-			defer wg.Done()
-			if err := l.sendToFollower(f, events); err != nil {
-				log.Printf("[LEADER] Replicate to follower %s failed (partition %d): %v", f.ID, l.partitionID, err)
-				return
-			}
-			ackMu.Lock()
-			acks++
-			ackMu.Unlock()
-		}(f)
+		if l.queueSend(f, events, checksum, results) {
+			queued++
+		}
 	}
-	wg.Wait()
+
+	acks := 1 // the leader itself already has the data in its WAL
+	for outstanding := queued; acks < minISR && outstanding > 0 && acks+outstanding >= minISR; outstanding-- {
+		if err := <-results; err == nil {
+			acks++
+		}
+	}
 
 	if acks < minISR {
 		return fmt.Errorf("replication quorum not met: %d of %d required in-sync replicas acked (partition %d, offset %d)",
@@ -288,29 +337,110 @@ func (l *Leader) Replicate(events []*types.Event) error {
 	return nil
 }
 
+// queueSend starts an ordered send of events to one follower and reports its
+// outcome on results. It returns false, without sending, when the follower
+// already has maxPendingSendsPerFollower batches outstanding; that follower is
+// caught up from the WAL by a later send or by the maintenance loop.
+func (l *Leader) queueSend(f *FollowerInfo, events []*types.Event, checksum uint32, results chan<- error) bool {
+	return l.queueFollowerWork(f, results, func() error {
+		err := l.sendToFollower(f, events, checksum)
+		if err != nil {
+			l.logSendFailure(f, "Replicate to", err)
+		}
+		return err
+	})
+}
+
+// logSendFailure reports a failed send to a follower once per outage. A busy
+// leader with a dead follower would otherwise log every batch it publishes
+// and every maintenance tick until the follower returns or is removed.
+func (l *Leader) logSendFailure(f *FollowerInfo, what string, err error) {
+	f.mu.Lock()
+	first := !f.sendFailing
+	f.sendFailing = true
+	f.mu.Unlock()
+	if first {
+		log.Printf("[LEADER] %s follower %s failed (partition %d); further failures are not logged until it acknowledges again: %v", what, f.ID, l.partitionID, err)
+	}
+}
+
+// queueFollowerWork runs work after everything already queued for the
+// follower, so its appends stay in offset order. results may be nil.
+func (l *Leader) queueFollowerWork(f *FollowerInfo, results chan<- error, work func() error) bool {
+	f.mu.Lock()
+	if f.pendingSends >= maxPendingSendsPerFollower {
+		f.InSync = false
+		f.mu.Unlock()
+		return false
+	}
+	f.pendingSends++
+	prev := f.sendTail
+	done := make(chan struct{})
+	f.sendTail = done
+	f.mu.Unlock()
+
+	go func() {
+		if prev != nil {
+			<-prev
+		}
+		err := work()
+		f.mu.Lock()
+		f.pendingSends--
+		f.mu.Unlock()
+		close(done)
+		if results != nil {
+			results <- err
+		}
+	}()
+	return true
+}
+
 // sendToFollower delivers events to one follower, catching it up first if it is
 // behind the batch's starting offset (e.g. a follower that joined after the
-// leader already had data).
-func (l *Leader) sendToFollower(f *FollowerInfo, events []*types.Event) error {
+// leader already had data, or one that was skipped while it was slow).
+func (l *Leader) sendToFollower(f *FollowerInfo, events []*types.Event, checksum uint32) error {
 	startOffset := events[0].Offset
 
-	// Fast path: try a direct append at the expected offset.
-	err := l.appendToFollower(f, events)
+	// A follower that has acked before has reported its own next offset.
+	f.mu.Lock()
+	known := f.LastAckTS > 0 && f.NextOffset >= 0
+	next := f.NextOffset
+	f.mu.Unlock()
+	switch {
+	case !known:
+	case next < startOffset && l.wal != nil:
+		// Behind this batch: the append would only be rejected after shipping
+		// the whole payload, so fill the gap from the WAL first.
+		if err := l.catchUpFollower(f, next, startOffset); err != nil {
+			return err
+		}
+	case next > startOffset:
+		// A catch-up read from the WAL already delivered the start of this
+		// batch, and the follower acknowledged it. Send only what is missing.
+		if next > events[len(events)-1].Offset {
+			return nil
+		}
+		events = events[next-startOffset:]
+		startOffset = next
+		checksum = computeBatchChecksum(events)
+	}
+
+	err := l.appendToFollower(f, events, checksum)
 	if err == nil {
 		return nil
 	}
 
-	// If the follower is behind (its next offset < this batch's start), ship the
-	// missing range from the leader WAL, then retry the batch once.
+	// The follower rejected the append and reported where it actually is. If it
+	// is behind, ship the missing range from the leader WAL, then retry once.
 	f.mu.Lock()
-	next := f.NextOffset
+	next = f.NextOffset
 	client := f.client
 	f.mu.Unlock()
 	if client != nil && next >= 0 && next < startOffset {
 		if cuErr := l.catchUpFollower(f, next, startOffset); cuErr != nil {
 			return cuErr
 		}
-		return l.appendToFollower(f, events)
+		return l.appendToFollower(f, events, checksum)
 	}
 	return err
 }
@@ -325,6 +455,21 @@ func (l *Leader) catchUpFollower(f *FollowerInfo, from, to int64) error {
 	if chunk <= 0 {
 		chunk = 500
 	}
+	if start := l.wal.GetFirstOffset(); from < start {
+		// The follower needs entries this log no longer holds. It is told
+		// where the log starts: if its own ends before that, it restarts there.
+		// Sending then begins at the start of this log, whatever the follower
+		// answered about its own; it compares what it holds from there on
+		// entry by entry.
+		err := l.appendToFollower(f, nil, 0)
+		f.mu.Lock()
+		reachable := f.Connected
+		f.mu.Unlock()
+		if err != nil && !reachable {
+			return err
+		}
+		from = start
+	}
 	for from < to {
 		end := from + chunk
 		if end > to {
@@ -337,19 +482,23 @@ func (l *Leader) catchUpFollower(f *FollowerInfo, from, to int64) error {
 		if len(events) == 0 {
 			break
 		}
-		if err := l.appendToFollower(f, events); err != nil {
+		if err := l.appendToFollower(f, events, computeBatchChecksum(events)); err != nil {
 			return err
 		}
 		f.mu.Lock()
-		from = f.NextOffset
+		next := f.NextOffset
 		f.mu.Unlock()
+		if next <= from {
+			return fmt.Errorf("catch-up for follower %s made no progress at offset %d", f.ID, from)
+		}
+		from = next
 	}
 	return nil
 }
 
 // appendToFollower performs one ReplicationService.Append RPC for a contiguous
 // batch and updates the follower's tracked offsets/in-sync state from the reply.
-func (l *Leader) appendToFollower(f *FollowerInfo, events []*types.Event) error {
+func (l *Leader) appendToFollower(f *FollowerInfo, events []*types.Event, checksum uint32) error {
 	f.mu.Lock()
 	client := f.client
 	f.mu.Unlock()
@@ -358,15 +507,34 @@ func (l *Leader) appendToFollower(f *FollowerInfo, events []*types.Event) error 
 	}
 
 	req := &types.ReplicationAppendRequest{
-		PartitionId:        l.partitionID,
-		Events:             events,
-		ExpectedNextOffset: events[0].Offset,
-		Term:               atomic.LoadInt64(&l.epoch),
-		PrevLogTerm:        l.getPrevLogTerm(events[0].Offset - 1),
-		Checksum:           computeBatchChecksum(events),
+		PartitionId: l.partitionID,
+		Events:      events,
+		Term:        atomic.LoadInt64(&l.epoch),
+		LeaderId:    l.nodeID,
+		Checksum:    checksum,
+	}
+	// Every request names the entry it follows, so the follower can tell
+	// whether its log still agrees with this one there. A request without
+	// events is a probe: it asks about the end of this leader's log.
+	prev, lastSent := int64(-1), int64(-1)
+	if len(events) > 0 {
+		req.ExpectedNextOffset = events[0].Offset
+		prev, lastSent = events[0].Offset-1, events[len(events)-1].Offset
+	} else if l.wal != nil {
+		prev = l.wal.GetLastOffset()
+	}
+	if prev >= 0 {
+		req.HasPrevLog, req.PrevLogOffset, req.PrevLogTerm = true, prev, l.getPrevLogTerm(prev)
+	}
+	if l.wal != nil {
+		req.LogStartOffset = l.wal.GetFirstOffset()
+		// Where this log ends. A follower that holds more, written under
+		// another leader, drops it: a new leader that takes no publishes
+		// would otherwise never send anything that replaces such a tail.
+		req.LeaderLogEnd = max(l.wal.GetNextOffset(), lastSent+1)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), l.replicateTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), l.getReplicateTimeout())
 	defer cancel()
 	resp, err := client.Append(ctx, req)
 	if err != nil {
@@ -379,7 +547,19 @@ func (l *Leader) appendToFollower(f *FollowerInfo, events []*types.Event) error 
 	}
 	if !resp.GetSuccess() {
 		f.mu.Lock()
-		if resp.GetNextOffset() > 0 {
+		switch {
+		case resp.GetLogMismatch():
+			// The follower's log departs from this one at or before prev: it
+			// kept entries written under another leader. Send again from where
+			// the two still agree; the follower replaces what differs. Until
+			// then nothing of its log counts as a copy of this one.
+			f.NextOffset = l.resendFrom(resp.GetConflictTerm(), resp.GetConflictFirstOffset(), prev)
+			f.HighWatermark = -1
+			f.LastAckTS = time.Now().UnixMilli() // it has answered: catch-up may start
+		case resp.GetNextOffset() > 0 || resp.GetLastOffset() < 0:
+			// A rejection reports where the follower's log ends. Next offset 0 is
+			// only believed together with last offset -1, an explicitly empty log;
+			// on its own it is indistinguishable from a reply that carries nothing.
 			f.NextOffset = resp.GetNextOffset()
 		}
 		f.InSync = false
@@ -388,14 +568,37 @@ func (l *Leader) appendToFollower(f *FollowerInfo, events []*types.Event) error 
 		return fmt.Errorf("follower %s rejected append: %s", f.ID, resp.GetError())
 	}
 
+	// The follower's log is known to match this one only as far as this
+	// request reached: through its last entry, or for a probe through prev if
+	// the follower holds that entry. Beyond that the follower may hold entries
+	// of an older leader, which must neither count as replicated nor be taken
+	// for a reason to skip sending.
+	matched := lastSent
+	if len(events) == 0 {
+		matched = -1
+		if resp.GetLastOffset() >= prev {
+			matched = prev
+		}
+	}
+	next := resp.GetNextOffset()
+	if matched >= 0 {
+		next = min(next, matched+1)
+	}
+
 	f.mu.Lock()
-	f.HighWatermark = resp.GetLastOffset()
-	f.NextOffset = resp.GetNextOffset()
-	f.InSync = true
+	f.HighWatermark = min(resp.GetLastOffset(), matched)
+	f.NextOffset = next
+	f.InSync = matched >= 0
 	f.Connected = true
 	f.LastAckTS = time.Now().UnixMilli()
 	f.LastError = nil
+	f.logStartSent = max(f.logStartSent, req.GetLogStartOffset())
+	recovered := f.sendFailing
+	f.sendFailing = false
 	f.mu.Unlock()
+	if recovered {
+		log.Printf("[LEADER] Follower %s acknowledges appends again (partition %d, through offset %d)", f.ID, l.partitionID, resp.GetLastOffset())
+	}
 
 	if l.wal != nil {
 		lag := l.wal.GetHighWatermark() - resp.GetLastOffset()
@@ -407,18 +610,32 @@ func (l *Leader) appendToFollower(f *FollowerInfo, events []*types.Event) error 
 	return nil
 }
 
-// getPrevLogTerm returns the term of the log entry at the given offset, read
-// from the WAL when possible; otherwise the leader's current epoch.
+// getPrevLogTerm returns the term of the log entry at the given offset, or 0
+// when it cannot be read, which tells the follower not to compare.
 func (l *Leader) getPrevLogTerm(offset int64) int64 {
-	if offset < 0 {
+	if offset < 0 || l.wal == nil {
 		return 0
 	}
+	if term, err := l.wal.GetTermForOffset(offset); err == nil && term > 0 {
+		return term
+	}
+	return 0
+}
+
+// resendFrom is where to resume a follower whose entry at prev was written in
+// conflictTerm, a different term than this leader's entry there. If this log
+// has entries of that term the follower may share them, and sending resumes
+// after the last one; otherwise it resumes at the follower's first entry of
+// that term. Either way it resumes no later than prev, so every round goes
+// further back until the logs agree.
+func (l *Leader) resendFrom(conflictTerm, conflictFirstOffset, prev int64) int64 {
+	from := conflictFirstOffset
 	if l.wal != nil {
-		if term, err := l.wal.GetTermForOffset(offset); err == nil && term > 0 {
-			return term
+		if last := l.wal.LastOffsetOfTerm(conflictTerm); last >= 0 {
+			from = last + 1
 		}
 	}
-	return atomic.LoadInt64(&l.epoch)
+	return max(min(from, prev), 0)
 }
 
 // GetHighWatermark returns the minimum high watermark across in-sync followers.
@@ -451,6 +668,54 @@ func (l *Leader) getHighWatermarkLocked() int64 {
 	return minWatermark
 }
 
+// QuorumOffset returns the highest log offset known to be held by
+// min-insync-replicas replicas, counting the leader, or -1 when no offset is.
+// A follower holds everything up to the last offset it acknowledged.
+func (l *Leader) QuorumOffset() int64 {
+	last := int64(-1)
+	if l.wal != nil {
+		last = l.wal.GetLastOffset()
+	}
+
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	need := l.minInSyncReplicas - 1 // followers required besides the leader
+	if need <= 0 {
+		return last
+	}
+	acked := make([]int64, 0, len(l.followers))
+	for _, f := range l.followers {
+		f.mu.Lock()
+		if f.LastAckTS > 0 {
+			acked = append(acked, f.HighWatermark)
+		}
+		f.mu.Unlock()
+	}
+	if len(acked) < need {
+		return -1
+	}
+	sort.Slice(acked, func(i, j int) bool { return acked[i] > acked[j] })
+	return min(acked[need-1], last)
+}
+
+// SetQuorumObserver registers a function the maintenance loop calls with
+// QuorumOffset. The partition uses it to finish publishes whose replication
+// failed at first and was completed later by catch-up.
+func (l *Leader) SetQuorumObserver(observe func(offset int64)) {
+	l.mu.Lock()
+	l.quorumObserver = observe
+	l.mu.Unlock()
+}
+
+func (l *Leader) reportQuorumOffset() {
+	l.mu.RLock()
+	observe := l.quorumObserver
+	l.mu.RUnlock()
+	if observe != nil {
+		observe(l.QuorumOffset())
+	}
+}
+
 // GetInSyncReplicas returns the IDs of followers currently in sync and connected.
 func (l *Leader) GetInSyncReplicas() []string {
 	l.mu.RLock()
@@ -465,6 +730,23 @@ func (l *Leader) GetInSyncReplicas() []string {
 		}
 	}
 	return isr
+}
+
+// SetReplicateTimeout sets the deadline for one Append RPC to a follower.
+// Non-positive values keep the current setting.
+func (l *Leader) SetReplicateTimeout(timeout time.Duration) {
+	if timeout <= 0 {
+		return
+	}
+	l.mu.Lock()
+	l.replicateTimeout = timeout
+	l.mu.Unlock()
+}
+
+func (l *Leader) getReplicateTimeout() time.Duration {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.replicateTimeout
 }
 
 // GetEpoch returns the current epoch.
@@ -508,6 +790,11 @@ func (l *Leader) maintenanceLoop() {
 		select {
 		case <-ticker.C:
 			l.reconnectDeadFollowers()
+			l.probeNewFollowers()
+			l.catchUpIdleFollowers()
+			l.announceLogStart()
+			l.shipConsumerProgress()
+			l.reportQuorumOffset()
 		case <-l.quit:
 			return
 		}
@@ -531,6 +818,218 @@ func (l *Leader) reconnectDeadFollowers() {
 	for _, r := range dead {
 		l.connectFollower(r.id, r.addr)
 	}
+}
+
+// probeNewFollowers asks every follower that has not acknowledged anything yet
+// where its log ends, with an append that carries no entries.
+//
+// Until a follower has answered once the leader knows nothing about it: it is
+// not caught up, and nothing counts as replicated to it. On a partition that
+// takes publishes that resolves itself with the first one. On an idle one,
+// after a failover for instance, a follower that is behind would stay behind,
+// and the offset known to be on a quorum would stay unknown, until somebody
+// published again.
+func (l *Leader) probeNewFollowers() {
+	l.mu.RLock()
+	followers := make([]*FollowerInfo, 0, len(l.followers))
+	for _, f := range l.followers {
+		followers = append(followers, f)
+	}
+	l.mu.RUnlock()
+
+	for _, f := range followers {
+		f.mu.Lock()
+		unknown := f.client != nil && f.pendingSends == 0 && f.LastAckTS == 0
+		f.mu.Unlock()
+		if !unknown {
+			continue
+		}
+		l.queueFollowerWork(f, nil, func() error {
+			err := l.appendToFollower(f, nil, 0)
+			if err != nil {
+				l.logSendFailure(f, "Probe of", err)
+			}
+			return err
+		})
+	}
+}
+
+// catchUpIdleFollowers brings followers that are behind the leader's log, and
+// have nothing queued, up to date from the WAL. Replicate returns on quorum, so
+// a follower that was slow or skipped may otherwise stay behind until the next
+// publish to this partition.
+func (l *Leader) catchUpIdleFollowers() {
+	if l.wal == nil {
+		return
+	}
+	end := l.wal.GetLastOffset() + 1
+
+	l.mu.RLock()
+	followers := make([]*FollowerInfo, 0, len(l.followers))
+	for _, f := range l.followers {
+		followers = append(followers, f)
+	}
+	l.mu.RUnlock()
+
+	for _, f := range followers {
+		f.mu.Lock()
+		behind := f.client != nil && f.pendingSends == 0 && f.LastAckTS > 0 && f.NextOffset >= 0 && f.NextOffset < end
+		f.mu.Unlock()
+		if !behind {
+			continue
+		}
+		l.queueFollowerWork(f, nil, func() error {
+			f.mu.Lock()
+			next := f.NextOffset
+			f.mu.Unlock()
+			to := l.wal.GetLastOffset() + 1
+			if next >= to {
+				return nil
+			}
+			err := l.catchUpFollower(f, next, to)
+			if err != nil {
+				l.logSendFailure(f, "Catch-up of", err)
+			}
+			return err
+		})
+	}
+}
+
+// announceLogStart tells followers that have nothing else coming to them where
+// the log starts now. Every append says it, so a partition that takes
+// publishes needs nothing more; on an idle one the followers would keep what
+// the leader has removed until somebody published.
+func (l *Leader) announceLogStart() {
+	if l.wal == nil {
+		return
+	}
+	start := l.wal.GetFirstOffset()
+	if start <= 0 {
+		return
+	}
+
+	l.mu.RLock()
+	followers := make([]*FollowerInfo, 0, len(l.followers))
+	for _, f := range l.followers {
+		followers = append(followers, f)
+	}
+	l.mu.RUnlock()
+
+	for _, f := range followers {
+		f.mu.Lock()
+		due := f.client != nil && f.pendingSends == 0 && f.LastAckTS > 0 && f.logStartSent < start
+		f.mu.Unlock()
+		if !due {
+			continue
+		}
+		l.queueFollowerWork(f, nil, func() error {
+			err := l.appendToFollower(f, nil, 0)
+			if err != nil {
+				l.logSendFailure(f, "Log start for", err)
+			}
+			return err
+		})
+	}
+}
+
+// SetChangeFeedSource has the change feed's position sent to followers along
+// with the consumer progress. source reports known=false for a partition
+// without a feed.
+func (l *Leader) SetChangeFeedSource(source func() (offset int64, known bool)) {
+	l.mu.Lock()
+	l.changeFeedSource = source
+	l.mu.Unlock()
+}
+
+// SetProgressSource enables consumer-progress replication. source returns the
+// partition's current group progress and a version that changes with it.
+func (l *Leader) SetProgressSource(source func() (uint64, []*types.ConsumerGroupProgress)) {
+	l.mu.Lock()
+	l.progressSource = source
+	l.mu.Unlock()
+}
+
+// shipConsumerProgress sends the partition's consumer progress to every
+// follower that does not have the current version yet. The whole state is
+// sent each time, so a follower that missed rounds, restarted, or was just
+// added converges on the next one.
+func (l *Leader) shipConsumerProgress() {
+	l.mu.RLock()
+	source := l.progressSource
+	feedSource := l.changeFeedSource
+	followers := make([]*FollowerInfo, 0, len(l.followers))
+	for _, f := range l.followers {
+		followers = append(followers, f)
+	}
+	l.mu.RUnlock()
+	if source == nil || len(followers) == 0 {
+		return
+	}
+
+	version, groups := source()
+	var feedOffset int64
+	var feedKnown bool
+	if feedSource != nil {
+		feedOffset, feedKnown = feedSource()
+	}
+	for _, f := range followers {
+		f.mu.Lock()
+		client := f.client
+		current := f.progressSent == version && time.Since(f.progressSentAt) < progressResendInterval &&
+			f.feedSentKnown == feedKnown && (!feedKnown || f.feedSent == feedOffset)
+		if client == nil || current || f.progressSending {
+			f.mu.Unlock()
+			continue
+		}
+		f.progressSending = true
+		f.mu.Unlock()
+
+		go func(f *FollowerInfo) {
+			ctx, cancel := context.WithTimeout(context.Background(), l.getReplicateTimeout())
+			resp, err := client.SyncConsumerProgress(ctx, &types.ReplicationProgressRequest{
+				PartitionId:         l.partitionID,
+				Term:                atomic.LoadInt64(&l.epoch),
+				LeaderId:            l.nodeID,
+				Groups:              groups,
+				HasChangeFeedOffset: feedKnown,
+				ChangeFeedOffset:    feedOffset,
+			})
+			cancel()
+			if err == nil && !resp.GetSuccess() {
+				err = fmt.Errorf("%s", resp.GetError())
+			}
+			f.mu.Lock()
+			f.progressSending = false
+			if err == nil {
+				f.progressSent, f.progressSentAt = version, time.Now()
+				f.feedSent, f.feedSentKnown = feedOffset, feedKnown
+			}
+			firstFailure := err != nil && !f.progressFailing
+			f.progressFailing = err != nil
+			f.mu.Unlock()
+			if firstFailure {
+				log.Printf("[LEADER] Consumer progress to follower %s failed (partition %d), retrying: %v", f.ID, l.partitionID, err)
+			}
+		}(f)
+	}
+}
+
+// QueryPosition asks the replica at addr where its log for a partition ends.
+func QueryPosition(ctx context.Context, addr string, partitionID int32, tlsConfig *MTLSConfig) (*types.ReplicationPositionResponse, error) {
+	var creds credentials.TransportCredentials = insecure.NewCredentials()
+	if tlsConfig != nil && tlsConfig.Enabled {
+		tlsCfg, err := BuildClientTLSConfig(tlsConfig)
+		if err != nil {
+			return nil, err
+		}
+		creds = credentials.NewTLS(tlsCfg)
+	}
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(creds))
+	if err != nil {
+		return nil, fmt.Errorf("dial replica %s: %w", addr, err)
+	}
+	defer conn.Close()
+	return types.NewReplicationServiceClient(conn).Position(ctx, &types.ReplicationPositionRequest{PartitionId: partitionID})
 }
 
 // Stop stops the leader and closes all follower connections. Safe to call

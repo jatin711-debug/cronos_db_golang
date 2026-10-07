@@ -37,7 +37,6 @@ func TestCrossRegionServer_ReplicateEvents_LWW(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to get internal partition: %v", err)
 	}
-	p.Leader = true // Make it a leader so WAL is fully active
 
 	server := NewCrossRegionServer(pm)
 

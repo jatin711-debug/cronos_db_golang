@@ -31,5 +31,5 @@ The auth module handles authentication and authorization policy enforcement befo
 
 ## Related Diagrams
 
-- [system_overview.mmd](../../mermaid/system_overview.mmd)
-- [observability_feedback_loop.mmd](../../mermaid/observability_feedback_loop.mmd)
+- [System overview](../README.md#system-overview)
+- [Observability feedback loop](slo.md#observability-feedback-loop)

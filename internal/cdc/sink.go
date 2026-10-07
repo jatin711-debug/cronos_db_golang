@@ -1,12 +1,16 @@
-// Package cdc implements change data capture: fan-out of WAL append events to
-// pluggable sinks (Kafka, webhooks) via bounded worker pools.
+// Package cdc implements change data capture: it hands the accepted events of
+// each partition to pluggable sinks (Kafka, webhooks).
 //
-// Manager.Emit is called from the WAL append hook. When no sinks are registered,
-// HasSinks is false and callers should skip ChangeEvent allocation entirely.
+// Manager.Deliver is called by a partition's change feed, which supplies the
+// events in log order and offers them again after a failure. Deliver therefore
+// neither queues nor drops: an event a sink did not take is reported back, and
+// the feed for that partition waits. Publishing never waits for a sink.
 package cdc
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -25,6 +29,14 @@ type Sink interface {
 	Close() error
 }
 
+// BatchSink is implemented by sinks that can take several events of one
+// partition in a single call. The call succeeds or fails as a whole.
+type BatchSink interface {
+	Sink
+	// WriteBatch delivers events, which are in log order, keeping that order.
+	WriteBatch(ctx context.Context, events []*ChangeEvent) error
+}
+
 // ChangeEvent represents a WAL change event exported to sinks.
 type ChangeEvent struct {
 	// Timestamp is when the change was observed.
@@ -41,189 +53,47 @@ type ChangeEvent struct {
 	Event *types.Event `json:"event,omitempty"`
 }
 
-const (
-	// DefaultCDCWorkers is the number of goroutines per sink pipeline.
-	DefaultCDCWorkers = 4
-	// DefaultCDCQueueSize is the per-sink buffered queue size.
-	DefaultCDCQueueSize = 10000
-	// DefaultCDCWriteTimeout is the per-write and enqueue wait timeout.
-	DefaultCDCWriteTimeout = 5 * time.Second
-)
+// DefaultCDCWriteTimeout bounds one write to a sink.
+const DefaultCDCWriteTimeout = 5 * time.Second
 
-// sinkPipeline routes events to a single sink with a bounded worker pool.
-type sinkPipeline struct {
-	sink      Sink
-	queue     chan *ChangeEvent
-	quit      chan struct{}
-	wg        sync.WaitGroup
-	workerCnt int
-	dropped   uint64
-	droppedMu sync.Mutex
+// sinkState is a registered sink and how far each partition has got with it.
+type sinkState struct {
+	sink Sink
+
+	// taken is, per partition, the offset of the last event this sink took.
+	// When another sink fails, the feed offers a batch again; this sink skips
+	// what it already has instead of receiving it once per retry. Guarded by mu.
+	mu    sync.Mutex
+	taken map[int32]int64
 }
 
-func newSinkPipeline(sink Sink, queueSize, workers int) *sinkPipeline {
-	if workers <= 0 {
-		workers = DefaultCDCWorkers
-	}
-	if queueSize <= 0 {
-		queueSize = DefaultCDCQueueSize
-	}
-	return &sinkPipeline{
-		sink:      sink,
-		queue:     make(chan *ChangeEvent, queueSize),
-		quit:      make(chan struct{}),
-		workerCnt: workers,
-	}
-}
-
-func (p *sinkPipeline) start() {
-	for i := 0; i < p.workerCnt; i++ {
-		p.wg.Add(1)
-		go p.worker()
-	}
-}
-
-func (p *sinkPipeline) worker() {
-	defer p.wg.Done()
-	for {
-		select {
-		case evt := <-p.queue:
-			if evt == nil {
-				continue
-			}
-			p.write(evt)
-		case <-p.quit:
-			// Drain remaining events before exiting.
-			for {
-				select {
-				case evt := <-p.queue:
-					if evt != nil {
-						p.write(evt)
-					}
-				default:
-					return
-				}
-			}
-		}
-	}
-}
-
-func (p *sinkPipeline) write(evt *ChangeEvent) {
-	// Retry transient write failures up to 3 times with exponential backoff
-	// before giving up. This provides at-least-once semantics for sink writes
-	// without blocking the worker indefinitely.
-	maxRetries := 3
-	backoff := 100 * time.Millisecond
-
-	for attempt := 0; attempt <= maxRetries; attempt++ {
-		ctx, cancel := context.WithTimeout(context.Background(), DefaultCDCWriteTimeout)
-		err := p.sink.Write(ctx, evt)
-		cancel()
-		if err == nil {
-			return
-		}
-		if attempt < maxRetries {
-			slog.Warn("CDC sink write failed, retrying",
-				"sink", p.sink.Name(), "attempt", attempt+1, "error", err)
-			time.Sleep(backoff)
-			backoff *= 2
-		} else {
-			slog.Warn("CDC sink write failed after retries, event lost",
-				"sink", p.sink.Name(), "error", err,
-				"partition", evt.PartitionID, "offset", evt.Offset)
-		}
-	}
-}
-
-// emit sends an event to the sink queue. When the queue is full it blocks up
-// to DefaultCDCWriteTimeout rather than dropping the event, preventing silent
-// data loss under burst loads. If the timeout expires the event is dropped
-// with a warning (last-resort backpressure relief).
-func (p *sinkPipeline) emit(evt *ChangeEvent) {
-	timer := time.NewTimer(DefaultCDCWriteTimeout)
-	defer timer.Stop()
-
-	select {
-	case p.queue <- evt:
-		return
-	case <-p.quit:
-		return
-	case <-timer.C:
-		p.droppedMu.Lock()
-		p.dropped++
-		d := p.dropped
-		p.droppedMu.Unlock()
-		slog.Warn("CDC sink queue full after timeout, dropping event",
-			"sink", p.sink.Name(), "dropped", d,
-			"partition", evt.PartitionID, "offset", evt.Offset)
-	}
-}
-
-func (p *sinkPipeline) stop() error {
-	close(p.quit)
-	p.wg.Wait()
-	if err := p.sink.Close(); err != nil {
-		slog.Warn("CDC sink close failed", "sink", p.sink.Name(), "error", err)
-		return err
-	}
-	return nil
-}
-
-// Manager manages multiple CDC sinks.
+// Manager hands change events to every registered sink.
 type Manager struct {
-	pipelines []*sinkPipeline
-	mu        sync.RWMutex
-	quit      chan struct{}
-	quitOnce  sync.Once
-	// hasSinks is an atomic fast-path flag checked on every Emit call. It lets
-	// the WAL append hook skip ChangeEvent allocation + time.Now() entirely
-	// when no sinks are registered (the common case in dev / load-test mode).
-	// Flips false→true once at registration time and never goes back.
+	mu    sync.RWMutex
+	sinks []*sinkState
+	// hasSinks lets callers skip all work when change data capture is not
+	// configured, which is the common case.
 	hasSinks atomic.Bool
+	closed   bool
 }
+
+// ErrClosed is returned by Deliver after Close.
+var ErrClosed = errors.New("change data capture is shut down")
 
 // NewManager creates a CDC manager.
 func NewManager() *Manager {
-	return &Manager{
-		pipelines: make([]*sinkPipeline, 0),
-		quit:      make(chan struct{}),
-	}
+	return &Manager{}
 }
 
-// RegisterSink adds a sink with a bounded worker pool.
+// RegisterSink adds a sink.
 func (m *Manager) RegisterSink(sink Sink) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	pipeline := newSinkPipeline(sink, DefaultCDCQueueSize, DefaultCDCWorkers)
-	pipeline.start()
-	m.pipelines = append(m.pipelines, pipeline)
-	m.hasSinks.Store(true) // flip the fast-path flag; stays true for the process lifetime
+	m.sinks = append(m.sinks, &sinkState{sink: sink, taken: make(map[int32]int64)})
+	m.hasSinks.Store(true)
 }
 
-// Emit sends an event to all registered sinks.
-func (m *Manager) Emit(ctx context.Context, event *ChangeEvent) {
-	// Atomic fast path: skip the RLock entirely when no sinks are registered.
-	// This is the common case in dev / load-test mode where CDC is not
-	// configured, and Emit is called once per appended WAL event.
-	if !m.hasSinks.Load() {
-		return
-	}
-
-	m.mu.RLock()
-	pipelines := m.pipelines
-	m.mu.RUnlock()
-
-	if len(pipelines) == 0 {
-		return
-	}
-	for _, p := range pipelines {
-		p.emit(event)
-	}
-}
-
-// HasSinks reports whether any sinks are registered. Intended as a lock-free
-// guard so callers (e.g. the WAL append hook) can avoid allocating a
-// ChangeEvent when CDC is inactive.
+// HasSinks reports whether any sinks are registered.
 func (m *Manager) HasSinks() bool {
 	return m.hasSinks.Load()
 }
@@ -232,18 +102,113 @@ func (m *Manager) HasSinks() bool {
 func (m *Manager) SinkCount() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return len(m.pipelines)
+	return len(m.sinks)
 }
 
-// Close shuts down all sinks. Idempotent and safe to call multiple times.
+// Deliver hands the events of one partition, which must be in log order, to
+// every sink and returns once each has taken them or failed. An error means at
+// least one sink has not taken all of them; calling Deliver again with the
+// same events, or with a batch that starts with them, is how to retry. Sinks
+// that already took an event do not get it again.
+//
+// Calls for different partitions may run concurrently. Calls for the same
+// partition must not.
+func (m *Manager) Deliver(ctx context.Context, partitionID int32, events []*types.Event) error {
+	if !m.hasSinks.Load() || len(events) == 0 {
+		return nil
+	}
+	m.mu.RLock()
+	sinks, closed := m.sinks, m.closed
+	m.mu.RUnlock()
+	if closed {
+		// Not delivered: the feed must not move past these events.
+		return ErrClosed
+	}
+
+	now := time.Now()
+	changes := make([]*ChangeEvent, len(events))
+	for i, event := range events {
+		changes[i] = &ChangeEvent{
+			Timestamp:   now,
+			Op:          "append",
+			PartitionID: partitionID,
+			Topic:       event.GetTopic(),
+			Offset:      event.GetOffset(),
+			Event:       event,
+		}
+	}
+
+	if len(sinks) == 1 {
+		return sinks[0].deliver(ctx, partitionID, changes)
+	}
+	// A slow sink should not add its latency to the others.
+	errs := make([]error, len(sinks))
+	var wg sync.WaitGroup
+	for i, s := range sinks {
+		wg.Add(1)
+		go func(i int, s *sinkState) {
+			defer wg.Done()
+			errs[i] = s.deliver(ctx, partitionID, changes)
+		}(i, s)
+	}
+	wg.Wait()
+	return errors.Join(errs...)
+}
+
+func (s *sinkState) deliver(ctx context.Context, partitionID int32, changes []*ChangeEvent) error {
+	s.mu.Lock()
+	last, seen := s.taken[partitionID]
+	s.mu.Unlock()
+	if seen {
+		for len(changes) > 0 && changes[0].Offset <= last {
+			changes = changes[1:]
+		}
+	}
+	if len(changes) == 0 {
+		return nil
+	}
+
+	if batch, ok := s.sink.(BatchSink); ok {
+		writeCtx, cancel := context.WithTimeout(ctx, DefaultCDCWriteTimeout)
+		err := batch.WriteBatch(writeCtx, changes)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("sink %s: partition %d offsets %d-%d: %w",
+				s.sink.Name(), partitionID, changes[0].Offset, changes[len(changes)-1].Offset, err)
+		}
+		s.note(partitionID, changes[len(changes)-1].Offset)
+		return nil
+	}
+
+	for _, change := range changes {
+		writeCtx, cancel := context.WithTimeout(ctx, DefaultCDCWriteTimeout)
+		err := s.sink.Write(writeCtx, change)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("sink %s: partition %d offset %d: %w", s.sink.Name(), partitionID, change.Offset, err)
+		}
+		s.note(partitionID, change.Offset)
+	}
+	return nil
+}
+
+func (s *sinkState) note(partitionID int32, offset int64) {
+	s.mu.Lock()
+	s.taken[partitionID] = offset
+	s.mu.Unlock()
+}
+
+// Close closes all sinks. Idempotent and safe to call multiple times.
 func (m *Manager) Close() error {
-	m.quitOnce.Do(func() { close(m.quit) })
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	sinks := m.sinks
+	m.sinks, m.closed = nil, true
+	m.mu.Unlock()
 
 	var lastErr error
-	for _, p := range m.pipelines {
-		if err := p.stop(); err != nil {
+	for _, s := range sinks {
+		if err := s.sink.Close(); err != nil {
+			slog.Warn("CDC sink close failed", "sink", s.sink.Name(), "error", err)
 			lastErr = err
 		}
 	}

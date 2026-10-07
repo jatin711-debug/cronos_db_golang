@@ -3,6 +3,7 @@ package cluster
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -63,7 +64,43 @@ type Membership struct {
 
 	// droppedEvents counts membership events dropped due to a full event channel.
 	droppedEvents atomic.Uint64
+
+	// heartbeatRound counts heartbeat rounds, to pace how often nodes counted
+	// as dead are tried.
+	heartbeatRound atomic.Uint64
+	// unreachable names the nodes the last heartbeat could not be sent to, so
+	// that the failure is logged once. Guarded by connMu.
+	unreachable map[string]bool
+	// lastDetect is when the failure detector last ran. Guarded by mu.
+	lastDetect time.Time
+	// refusedLogged is when a caller that failed the TLS handshake was last
+	// logged, in Unix nanoseconds. Such callers can come every second.
+	refusedLogged atomic.Int64
+	// clusterFormed says whether this node belongs to a cluster, for nodes
+	// that ask before they create one. Guarded by mu.
+	clusterFormed func() bool
 }
+
+// SetClusterFormed sets what this node answers when another asks whether a
+// cluster exists.
+func (m *Membership) SetClusterFormed(formed func() bool) {
+	m.mu.Lock()
+	m.clusterFormed = formed
+	m.mu.Unlock()
+}
+
+// handleProbe answers a node that asks whether a cluster exists. It changes
+// nothing here: the node that asks is not a member yet.
+func (m *Membership) handleProbe(conn net.Conn) {
+	m.mu.RLock()
+	formed := m.clusterFormed
+	m.mu.RUnlock()
+	json.NewEncoder(conn).Encode(probeAnswer{NodeID: m.localNode.ID, ClusterFormed: formed != nil && formed()})
+}
+
+// deadProbeRounds is how many heartbeat rounds pass between attempts to reach
+// a node that is counted as dead.
+const deadProbeRounds = 5
 
 // MemberEvent represents a membership change event delivered on Events().
 type MemberEvent struct {
@@ -128,6 +165,7 @@ func NewMembership(config *ClusterConfig) (*Membership, error) {
 		localNode:   localNode,
 		nodes:       make(map[string]*Node),
 		gossipConns: make(map[string]net.Conn),
+		unreachable: make(map[string]bool),
 		state: &ClusterState{
 			ClusterID:  config.ClusterID,
 			Nodes:      make(map[string]*Node),
@@ -150,12 +188,16 @@ func (m *Membership) Start(ctx context.Context) error {
 	log.Printf("[MEMBERSHIP] Starting membership manager for node %s", m.localNode.ID)
 
 	// Start gossip listener
-	listener, err := net.Listen("tcp", m.config.BindAddr)
+	listener, err := listenPeers(m.config.BindAddr, m.config.ServerTLS)
 	if err != nil {
 		return fmt.Errorf("start gossip listener on %s: %w", m.config.BindAddr, err)
 	}
 	m.listener = listener
-	log.Printf("[MEMBERSHIP] Gossip listener started on %s", m.config.BindAddr)
+	if m.config.ServerTLS != nil {
+		log.Printf("[MEMBERSHIP] Gossip listener started on %s (mutual TLS)", m.config.BindAddr)
+	} else {
+		log.Printf("[MEMBERSHIP] Gossip listener started on %s", m.config.BindAddr)
+	}
 
 	// Accept incoming connections
 	go m.acceptLoop(ctx)
@@ -218,6 +260,18 @@ func (m *Membership) acceptLoop(ctx context.Context) {
 // handleConnection handles an incoming gossip connection in a loop to allow socket reuse
 func (m *Membership) handleConnection(conn net.Conn) {
 	defer conn.Close()
+	if secured, ok := conn.(*tls.Conn); ok {
+		// Nothing is known about the caller until it has shown a certificate
+		// of this cluster, so it gets little time to do that, and nothing it
+		// sends is read before.
+		ctx, cancel := context.WithTimeout(context.Background(), peerHandshakeTimeout)
+		err := secured.HandshakeContext(ctx)
+		cancel()
+		if err != nil {
+			m.logRefusedPeer(conn.RemoteAddr(), err)
+			return
+		}
+	}
 	scanner := bufio.NewScanner(conn)
 
 	for {
@@ -251,16 +305,43 @@ func (m *Membership) handleConnection(conn net.Conn) {
 		case "node_joined":
 			m.handleNodeJoinedBroadcast(&msg)
 			return
+		case "probe":
+			m.handleProbe(conn)
+			return
 		default:
 			log.Printf("[MEMBERSHIP] Unknown message type: %s", msg.Type)
 		}
 	}
 }
 
+// peerHandshakeTimeout bounds the TLS handshake of a caller, and
+// refusedLogInterval how often a refused caller is logged.
+const (
+	peerHandshakeTimeout = 5 * time.Second
+	refusedLogInterval   = 30 * time.Second
+)
+
+// logRefusedPeer reports a caller that did not get through the TLS
+// handshake: a node of this cluster that runs without TLS or with a
+// certificate of another CA, or something that is not a node at all.
+func (m *Membership) logRefusedPeer(remote net.Addr, err error) {
+	now := time.Now().UnixNano()
+	last := m.refusedLogged.Load()
+	if now-last < int64(refusedLogInterval) || !m.refusedLogged.CompareAndSwap(last, now) {
+		return
+	}
+	log.Printf("[MEMBERSHIP] Refused a connection from %s: it did not complete the mutual TLS handshake (%v). A node of this cluster must use the cluster's certificates on its membership port", remote, err)
+}
+
+// dial connects to the membership port of another node.
+func (m *Membership) dial(ctx context.Context, addr string, timeout time.Duration) (net.Conn, error) {
+	return dialPeer(ctx, addr, timeout, m.config.ClientTLS)
+}
+
 // GossipMessage is the wire format for the custom TCP gossip protocol
-// (join, heartbeat, state, node_joined).
+// (join, heartbeat, state, node_joined, probe).
 type GossipMessage struct {
-	// Type is the message kind: "join", "heartbeat", "state", or "node_joined".
+	// Type is the message kind: "join", "heartbeat", "state", "node_joined" or "probe".
 	Type string `json:"type"`
 	// NodeID is the sender (or subject) node identifier.
 	NodeID string `json:"node_id"`
@@ -276,6 +357,12 @@ type GossipMessage struct {
 
 // handleJoinRequest handles a node join request
 func (m *Membership) handleJoinRequest(conn net.Conn, msg *GossipMessage) {
+	if msg.NodeID == m.localNode.ID {
+		// This node, reached through its own entry in a seed list. Its record
+		// stays as it is; the reply names it alone, which tells the caller so.
+		json.NewEncoder(conn).Encode(map[string]interface{}{"success": true, "nodes": []*Node{m.localNode}})
+		return
+	}
 	node := &Node{
 		ID:         msg.NodeID,
 		Address:    msg.Address,
@@ -311,14 +398,58 @@ func (m *Membership) handleJoinRequest(conn net.Conn, msg *GossipMessage) {
 	json.NewEncoder(conn).Encode(response)
 }
 
-// handleHeartbeatMessage handles a heartbeat
+// handleHeartbeatMessage handles a heartbeat.
+//
+// A heartbeat is also how two nodes that lost each other meet again. Nodes
+// keep sending them to the nodes they count as failed, and each one says where
+// its sender is found, so a node is taken back as soon as it is heard from,
+// and a node that restarted with nothing on its list learns who is there from
+// the heartbeats the others still send it.
 func (m *Membership) handleHeartbeatMessage(msg *GossipMessage) {
+	if msg.NodeID == "" || msg.NodeID == m.localNode.ID {
+		return
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if node, exists := m.nodes[msg.NodeID]; exists {
+	node, exists := m.nodes[msg.NodeID]
+	switch {
+	case exists && movedTo(node, msg):
+		// It restarted somewhere else. The record is replaced, not changed:
+		// others may be reading the old one.
+		moved := *node
+		moved.Address, moved.GossipAddr, moved.RaftAddr = orElse(msg.Address, node.Address), orElse(msg.GossipAddr, node.GossipAddr), orElse(msg.RaftAddr, node.RaftAddr)
+		moved.State, moved.UpdatedAt = NodeStateAlive, time.Now()
+		m.nodes[msg.NodeID] = &moved
+		m.state.Nodes[msg.NodeID] = &moved
+		log.Printf("[MEMBERSHIP] Node %s is now at gossip=%s", msg.NodeID, moved.GossipAddr)
+		m.emitEvent(EventTypeJoin, &moved)
+	case exists:
 		node.UpdatedAt = time.Now()
-		node.State = NodeStateAlive
+		if node.State != NodeStateAlive {
+			node.State = NodeStateAlive
+			log.Printf("[MEMBERSHIP] Node %s is heard from again", msg.NodeID)
+			m.emitEvent(EventTypeJoin, node)
+		}
+	case msg.GossipAddr != "":
+		node = &Node{
+			ID:         msg.NodeID,
+			Address:    msg.Address,
+			GossipAddr: msg.GossipAddr,
+			RaftAddr:   msg.RaftAddr,
+			State:      NodeStateAlive,
+			Role:       NodeRoleFollower,
+			JoinedAt:   time.Now(),
+			UpdatedAt:  time.Now(),
+		}
+		m.nodes[node.ID] = node
+		m.state.Nodes[node.ID] = node
+		m.state.UpdatedAt = time.Now()
+		log.Printf("[MEMBERSHIP] Learned about node %s at gossip=%s from its heartbeat", node.ID, node.GossipAddr)
+		m.emitEvent(EventTypeJoin, node)
+		if m.onJoin != nil {
+			go m.onJoin(node)
+		}
 	}
 
 	// Clock skew detection
@@ -331,6 +462,21 @@ func (m *Membership) handleHeartbeatMessage(msg *GossipMessage) {
 			log.Printf("[MEMBERSHIP] WARNING: Clock skew detected with node %s: %d ms", msg.NodeID, skew)
 		}
 	}
+}
+
+// movedTo reports whether a heartbeat names another address for a node than
+// the one on record.
+func movedTo(node *Node, msg *GossipMessage) bool {
+	return (msg.Address != "" && msg.Address != node.Address) ||
+		(msg.GossipAddr != "" && msg.GossipAddr != node.GossipAddr) ||
+		(msg.RaftAddr != "" && msg.RaftAddr != node.RaftAddr)
+}
+
+func orElse(value, fallback string) string {
+	if value != "" {
+		return value
+	}
+	return fallback
 }
 
 // handleNodeJoinedBroadcast handles notification that a new node joined
@@ -387,7 +533,7 @@ func (m *Membership) broadcastNodeJoined(newNode *Node) {
 
 	for _, node := range nodes {
 		go func(addr string) {
-			conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+			conn, err := m.dial(context.Background(), addr, 2*time.Second)
 			if err != nil {
 				return
 			}
@@ -410,11 +556,20 @@ func (m *Membership) Join(node *Node) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if _, exists := m.nodes[node.ID]; exists {
+	if known, exists := m.nodes[node.ID]; exists {
 		// Update existing node
+		back := known.State != NodeStateAlive && node.State == NodeStateAlive
 		m.nodes[node.ID] = node
 		m.state.Nodes[node.ID] = node
-		m.emitEvent(EventTypeUpdate, node)
+		if back {
+			// It was counted as failed and has announced itself again. Those
+			// who were told that it failed are told that it is back, or they
+			// go on without it: the router took it out of the ring.
+			log.Printf("[MEMBERSHIP] Node %s is back", node.ID)
+			m.emitEvent(EventTypeJoin, node)
+		} else {
+			m.emitEvent(EventTypeUpdate, node)
+		}
 		return nil
 	}
 
@@ -628,14 +783,25 @@ func (m *Membership) heartbeatLoop(ctx context.Context) {
 	}
 }
 
-// sendHeartbeats sends heartbeats to all known nodes
+// sendHeartbeats sends heartbeats to all known nodes.
+//
+// That includes the nodes counted as failed. Two nodes that cannot reach each
+// other for a few seconds each stop hearing from the other, and if they also
+// stopped sending, neither would ever learn that the other is back: the two
+// would stay apart until one of them was restarted, and a node restarted
+// without seeds would stay alone. A node counted as dead is tried less often.
 func (m *Membership) sendHeartbeats() {
+	round := m.heartbeatRound.Add(1)
 	m.mu.RLock()
 	nodes := make([]*Node, 0, len(m.nodes))
 	for _, node := range m.nodes {
-		if node.ID != m.localNode.ID && node.State == NodeStateAlive {
-			nodes = append(nodes, node)
+		if node.ID == m.localNode.ID {
+			continue
 		}
+		if node.State == NodeStateDead && round%deadProbeRounds != 0 {
+			continue
+		}
+		nodes = append(nodes, node)
 	}
 	m.mu.RUnlock()
 
@@ -648,10 +814,12 @@ func (m *Membership) sendHeartbeats() {
 func (m *Membership) sendHeartbeat(node *Node) {
 	// Create heartbeat message
 	hb := &GossipMessage{
-		Type:      "heartbeat",
-		NodeID:    m.localNode.ID,
-		Address:   m.localNode.Address,
-		Timestamp: time.Now().UnixMilli(),
+		Type:       "heartbeat",
+		NodeID:     m.localNode.ID,
+		Address:    m.localNode.Address,
+		GossipAddr: m.localNode.GossipAddr,
+		RaftAddr:   m.localNode.RaftAddr,
+		Timestamp:  time.Now().UnixMilli(),
 	}
 
 	// Use gossip address if available, otherwise fall back to gRPC address
@@ -683,24 +851,34 @@ func (m *Membership) sendHeartbeat(node *Node) {
 	}
 
 	// Establish new connection
-	newConn, err := net.DialTimeout("tcp", targetAddr, 2*time.Second)
-	if err != nil {
-		log.Printf("[MEMBERSHIP] Heartbeat to %s failed: %v", node.ID, err)
-		return
+	newConn, err := m.dial(context.Background(), targetAddr, 2*time.Second)
+	if err == nil {
+		// Send heartbeat on new connection
+		newConn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+		if _, err = newConn.Write(append(data, '\n')); err != nil {
+			newConn.Close()
+		}
 	}
 
-	// Send heartbeat on new connection
-	newConn.SetWriteDeadline(time.Now().Add(2 * time.Second))
-	if _, err := newConn.Write(append(data, '\n')); err != nil {
-		newConn.Close()
-		log.Printf("[MEMBERSHIP] Heartbeat write to %s failed: %v", node.ID, err)
-		return
-	}
-
-	// Cache the connection for future heartbeats
 	m.connMu.Lock()
+	defer m.connMu.Unlock()
+	if err != nil {
+		// The node keeps being tried, so only the change is logged.
+		if !m.unreachable[node.ID] {
+			m.unreachable[node.ID] = true
+			log.Printf("[MEMBERSHIP] Heartbeat to %s failed; it will keep being tried: %v", node.ID, err)
+		}
+		return
+	}
+	if m.unreachable[node.ID] {
+		delete(m.unreachable, node.ID)
+		log.Printf("[MEMBERSHIP] Heartbeat to %s is delivered again", node.ID)
+	}
+	// Cache the connection for future heartbeats
+	if old := m.gossipConns[targetAddr]; old != nil {
+		old.Close()
+	}
 	m.gossipConns[targetAddr] = newConn
-	m.connMu.Unlock()
 }
 
 // failureDetectorLoop detects failed nodes
@@ -728,8 +906,24 @@ func (m *Membership) detectFailures() {
 	timeout := m.config.HeartbeatInterval * 5
 	now := time.Now()
 
+	// This check runs every three heartbeat intervals. When far more time
+	// than that has passed since the last one, this process was not running:
+	// frozen, suspended or starved. What it has on record about when it last
+	// heard from the others is then as old as the pause and says nothing about
+	// them, so they get a full timeout to be heard from before they are
+	// suspected.
+	paused := !m.lastDetect.IsZero() && now.Sub(m.lastDetect) > timeout
+	if paused {
+		log.Printf("[MEMBERSHIP] This node did not run for %v; waiting to hear from the other nodes before judging them", now.Sub(m.lastDetect).Round(time.Millisecond))
+	}
+	m.lastDetect = now
+
 	for _, node := range m.nodes {
 		if node.ID == m.localNode.ID {
+			continue
+		}
+		if paused && node.State == NodeStateAlive {
+			node.UpdatedAt = now
 			continue
 		}
 
@@ -744,25 +938,76 @@ func (m *Membership) detectFailures() {
 	}
 }
 
-// joinSeedNodes attempts to join the cluster via seed nodes
+// seedRetryInterval is how long joinSeedNodes waits between rounds; after
+// seedRetryFastRounds rounds it waits five times as long.
+const (
+	seedRetryInterval   = time.Second
+	seedRetryFastRounds = 30
+)
+
+// joinSeedNodes introduces this node to every seed and keeps trying the ones
+// that do not answer.
+//
+// The nodes of a new cluster start together, so a seed may not be listening
+// yet, and a seed list usually names this node as well. Trying each seed once
+// and stopping at the first answer left a node that started early on its own
+// for good: its own listener answered, it counted that as having joined, and
+// it never became part of the cluster or got a Raft leader. Stopping at the
+// first other node is not enough either: two nodes that find each other
+// before the bootstrap node is up would never reach it.
 func (m *Membership) joinSeedNodes(ctx context.Context) {
-	for _, seedAddr := range m.config.SeedNodes {
-		if err := m.joinViaNode(ctx, seedAddr); err != nil {
-			log.Printf("[MEMBERSHIP] Failed to join via %s: %v", seedAddr, err)
-			continue
+	done := make(map[string]bool, len(m.config.SeedNodes))
+	logged := make(map[string]bool, len(m.config.SeedNodes))
+	for round := 0; ; round++ {
+		pending := 0
+		for _, seedAddr := range m.config.SeedNodes {
+			if done[seedAddr] {
+				continue
+			}
+			if seedAddr == m.localNode.GossipAddr || seedAddr == m.config.BindAddr {
+				done[seedAddr] = true
+				continue
+			}
+			others, err := m.joinViaNode(ctx, seedAddr)
+			switch {
+			case err != nil:
+				pending++
+				if !logged[seedAddr] {
+					logged[seedAddr] = true
+					log.Printf("[MEMBERSHIP] Seed %s is not reachable yet, will keep trying: %v", seedAddr, err)
+				}
+			case others == 0:
+				// Only this node answered: the seed is this node under another name.
+				done[seedAddr] = true
+			default:
+				done[seedAddr] = true
+				log.Printf("[MEMBERSHIP] Successfully joined cluster via %s", seedAddr)
+			}
 		}
-		log.Printf("[MEMBERSHIP] Successfully joined cluster via %s", seedAddr)
-		return
+		if pending == 0 {
+			return
+		}
+		wait := seedRetryInterval
+		if round >= seedRetryFastRounds {
+			wait *= 5
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-m.stopCh:
+			return
+		case <-time.After(wait):
+		}
 	}
-	log.Printf("[MEMBERSHIP] Could not join via any seed node, starting as standalone")
 }
 
-// joinViaNode attempts to join the cluster via a specific node
-func (m *Membership) joinViaNode(ctx context.Context, addr string) error {
-	dialer := &net.Dialer{Timeout: 5 * time.Second}
-	conn, err := dialer.DialContext(ctx, "tcp", addr)
+// joinViaNode introduces this node to the node at addr and registers the
+// members it reports. It returns how many of those are other nodes; none means
+// the node at addr is this one.
+func (m *Membership) joinViaNode(ctx context.Context, addr string) (int, error) {
+	conn, err := m.dial(ctx, addr, 5*time.Second)
 	if err != nil {
-		return fmt.Errorf("connect to %s: %w", addr, err)
+		return 0, fmt.Errorf("connect to %s: %w", addr, err)
 	}
 	defer conn.Close()
 
@@ -776,14 +1021,14 @@ func (m *Membership) joinViaNode(ctx context.Context, addr string) error {
 		Timestamp:  time.Now().UnixMilli(),
 	}
 	if err := json.NewEncoder(conn).Encode(joinMsg); err != nil {
-		return fmt.Errorf("send join request: %w", err)
+		return 0, fmt.Errorf("send join request: %w", err)
 	}
 
 	// Read response
 	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	var response map[string]interface{}
 	if err := json.NewDecoder(conn).Decode(&response); err != nil {
-		return fmt.Errorf("read join response: %w", err)
+		return 0, fmt.Errorf("read join response: %w", err)
 	}
 
 	if success, ok := response["success"].(bool); !ok || !success {
@@ -791,15 +1036,17 @@ func (m *Membership) joinViaNode(ctx context.Context, addr string) error {
 		if e, ok := response["error"].(string); ok {
 			errMsg = e
 		}
-		return fmt.Errorf("join rejected: %s", errMsg)
+		return 0, fmt.Errorf("join rejected: %s", errMsg)
 	}
 
 	// Process nodes from response
+	others := 0
 	if nodes, ok := response["nodes"].([]interface{}); ok {
 		for _, nodeData := range nodes {
 			if nodeMap, ok := nodeData.(map[string]interface{}); ok {
 				nodeID := getString(nodeMap, "id") // lowercase per JSON tag
 				if nodeID != "" && nodeID != m.localNode.ID {
+					others++
 					node := &Node{
 						ID:         nodeID,
 						Address:    getString(nodeMap, "address"),
@@ -820,7 +1067,7 @@ func (m *Membership) joinViaNode(ctx context.Context, addr string) error {
 		}
 	}
 
-	return nil
+	return others, nil
 }
 
 // getString safely extracts a string from a map

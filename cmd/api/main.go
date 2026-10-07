@@ -30,6 +30,7 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/internal/schema"
 	"github.com/jatin711-debug/cronos_db_golang/internal/slo"
 	"github.com/jatin711-debug/cronos_db_golang/internal/storage"
+	"github.com/jatin711-debug/cronos_db_golang/internal/sysmem"
 	"github.com/jatin711-debug/cronos_db_golang/internal/tenant"
 	"github.com/jatin711-debug/cronos_db_golang/internal/tracing"
 	"github.com/jatin711-debug/cronos_db_golang/internal/tx"
@@ -53,12 +54,63 @@ func main() {
 		os.Exit(1)
 	}
 
+	memoryLimit, memorySource := sysmem.Limit(uint64(max(cfg.MemoryLimitBytes, 0)))
+	metrics.SetMemoryLimit(memoryLimit)
+	slog.Info("Memory", "limit_bytes", memoryLimit, "limit_from", memorySource, "refuse_publishes_at_percent", cfg.MaxMemoryUsagePercent)
+
 	slog.Info("Configuration loaded",
 		"auth_enabled", cfg.AuthEnabled,
 		"auth_jwt_secret_set", cfg.AuthJWTSecret != "",
 		"auth_policy_file", cfg.AuthPolicyFile,
 		"auth_explicitly_disabled_by_flag", !cfg.AuthEnabled,
+		"dev", cfg.DevMode,
+		"experimental_features", cfg.ExperimentalFeatures,
+		"partition_count", cfg.PartitionCount,
+		"replication_factor", cfg.ReplicationFactor,
+		"min_in_sync_replicas", cfg.MinInSyncReplicas,
+		"fsync_mode", cfg.FsyncMode,
+		"cluster_enabled", cfg.ClusterEnabled,
+		"cluster_gossip_addr", cfg.ClusterGossipAddr,
+		"cluster_grpc_addr", cfg.ClusterGRPCAddr,
+		"cluster_raft_addr", cfg.ClusterRaftAddr,
 	)
+
+	// Validate authorization before opening data stores or network listeners.
+	var authConfig *auth.Config
+	if cfg.AuthEnabled {
+		authConfig = &auth.Config{
+			Enabled: cfg.AuthEnabled,
+		}
+		if cfg.AuthJWTSecret != "" {
+			authConfig.JWTSecret = []byte(cfg.AuthJWTSecret)
+		}
+		if cfg.AuthJWTPublicKey != "" {
+			pubKey, err := auth.LoadPublicKey(cfg.AuthJWTPublicKey)
+			if err != nil {
+				slog.Error("Failed to load JWT public key", "error", err)
+				os.Exit(1)
+			} else {
+				authConfig.JWTPublicKey = pubKey
+			}
+		}
+		if cfg.AuthPolicyFile != "" {
+			policy, err := auth.NewPolicyFromFile(cfg.AuthPolicyFile)
+			if err != nil {
+				slog.Error("Failed to load auth policy", "error", err)
+				os.Exit(1)
+			} else {
+				authConfig.Policy = policy
+			}
+		} else {
+			slog.Error("Authentication requires an explicit authorization policy")
+			os.Exit(1)
+		}
+	}
+
+	if cfg.PprofAddr != "" {
+		pprofServer := startPprofServer(cfg.PprofAddr)
+		defer pprofServer.Close()
+	}
 
 	// Wrap config for hot reload
 	reloadableCfg := config.NewReloadableConfig(cfg)
@@ -149,6 +201,40 @@ func main() {
 	// Create partition manager with shared cache
 	pm := partition.NewPartitionManagerWithCache(cfg.NodeID, cfg, sharedCache)
 
+	// Change data capture and replication to other regions read the change
+	// feed of every partition: accepted events only, in log order, from the
+	// partition's leader. Set before any partition exists, so that partitions
+	// created later, which in a cluster is nearly all of them, have one too.
+	//
+	// Replication to other regions is experimental: it is asynchronous, drops
+	// events when a region stays unreachable, and settles conflicts by last
+	// write. It is refused outside --dev --experimental-features, not silently
+	// left off, so that nobody believes a second region is being fed.
+	remoteRegions := os.Getenv("CRONOS_REGIONS")
+	if remoteRegions != "" && !cfg.ExperimentalFeatures {
+		slog.Error("CRONOS_REGIONS is set, but replication to other regions is experimental; start with --dev --experimental-features or unset it")
+		os.Exit(1)
+	}
+	crossRegion := remoteRegions != ""
+	if cdcManager.HasSinks() || crossRegion {
+		pm.SetChangeFeed(func(ctx context.Context, partitionID int32, events []*types.Event) error {
+			if err := cdcManager.Deliver(ctx, partitionID, events); err != nil {
+				return err
+			}
+			if crossRegion {
+				for _, event := range events {
+					// Not what arrived from another region: CrossRegionServer tags
+					// those with source_region, and sending them back out would
+					// bounce them between regions for ever.
+					if event.GetMeta()["source_region"] == "" {
+						crossRegionReplicator.ReplicateAsync(event)
+					}
+				}
+			}
+			return nil
+		})
+	}
+
 	// Start disk pressure monitor
 	diskMonitor := partition.NewDiskMonitor(cfg.DataDir, 0.85, func() {
 		slog.Info("Disk pressure detected: triggering emergency compaction")
@@ -161,27 +247,45 @@ func main() {
 	diskMonitor.Start()
 	defer diskMonitor.Stop()
 
-	// Start WAL backup scheduler
-	backupScheduler := storage.NewBackupScheduler(
-		cfg.DataDir+"/wal",
-		cfg.DataDir+"/backups",
-		1*time.Hour,
-		7*24*time.Hour,
+	// Start the backup scheduler: every partition's log, consumer state, dedup
+	// store, dead-letter queue and epoch. Restore with `cronos-admin restore`.
+	backupDir := cfg.BackupDir
+	if backupDir == "" {
+		backupDir = cfg.DataDir + "/backups"
+	}
+	backupScheduler := storage.NewCheckpointBackupScheduler(
+		backupDir,
+		cfg.BackupInterval,
+		cfg.BackupRetention,
+		pm.Backup,
 	)
-	backupScheduler.Start()
+	if cfg.BackupInterval > 0 {
+		backupScheduler.Start()
+	} else {
+		slog.Warn("Scheduled backups are off (--backup-interval=0)")
+	}
 	defer backupScheduler.Stop()
 
 	// Start compliance retention enforcer
-	retentionEnforcer := compliance.NewEnforcer(cfg.DataDir, compliance.RetentionPolicy{
+	retentionEnforcer := compliance.NewManagedEnforcer(cfg.DataDir, compliance.RetentionPolicy{
 		MaxAge:       time.Duration(cfg.RetentionMaxAgeHours) * time.Hour,
 		MaxSizeBytes: cfg.RetentionMaxSizeGB << 30,
-	})
+	}, pm.RemoveRetainedSegment)
+	retentionCtx, stopRetention := context.WithCancel(context.Background())
+	retentionDone := make(chan struct{})
+	defer stopRetention()
 	utils.GoSafe("retention-enforcer", func() {
+		defer close(retentionDone)
 		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()
-		for range ticker.C {
-			if err := retentionEnforcer.Run(context.Background()); err != nil {
-				slog.Warn("Retention enforcement failed", "error", err)
+		for {
+			select {
+			case <-retentionCtx.Done():
+				return
+			case <-ticker.C:
+				if err := retentionEnforcer.Run(retentionCtx); err != nil {
+					slog.Warn("Retention enforcement failed", "error", err)
+				}
 			}
 		}
 	})
@@ -207,20 +311,50 @@ func main() {
 			RaftAddr:          cfg.ClusterRaftAddr,
 			RaftDir:           raftDir,
 			SeedNodes:         cfg.ClusterSeeds,
+			Bootstrap:         cfg.ClusterBootstrap,
 			VirtualNodes:      cfg.VirtualNodes,
 			HeartbeatInterval: cfg.HeartbeatInterval,
 			FailureTimeout:    cfg.FailureTimeout,
 			SuspectTimeout:    cfg.SuspectTimeout,
 			PartitionCount:    cfg.PartitionCount,
 			ReplicationFactor: cfg.ReplicationFactor,
+			MinInSyncReplicas: cfg.MinInSyncReplicas,
+			ExpectedNodes:     cfg.ClusterExpectedNodes,
+			FormationWait:     cfg.ClusterFormationWait,
 			Rack:              cfg.NodeRack,
 			Zone:              cfg.NodeZone,
 			Region:            cfg.NodeRegion,
 		}
 
+		if cfg.ReplicationTLSEnabled {
+			// Membership and Raft decide who belongs to the cluster and who
+			// leads. They use the certificates of the replication channel, so
+			// that all traffic between nodes is one trust domain.
+			peerTLS := &replication.MTLSConfig{
+				Enabled:  true,
+				CAFile:   cfg.ReplicationTLSCAFile,
+				CertFile: cfg.ReplicationTLSCertFile,
+				KeyFile:  cfg.ReplicationTLSKeyFile,
+			}
+			serverTLS, tlsErr := replication.BuildServerTLSConfig(peerTLS)
+			if tlsErr != nil {
+				slog.Error("Failed to load the TLS certificates for membership and Raft", "error", tlsErr)
+				os.Exit(1)
+			}
+			clientTLS, tlsErr := replication.BuildClientTLSConfig(peerTLS)
+			if tlsErr != nil {
+				slog.Error("Failed to load the TLS certificates for membership and Raft", "error", tlsErr)
+				os.Exit(1)
+			}
+			clusterConfig.ServerTLS, clusterConfig.ClientTLS = serverTLS, clientTLS
+		}
+
 		clusterMgr = cluster.NewManager(clusterConfig)
 		// Wire partition state transfer hooks before starting cluster services.
 		clusterMgr.SetPartitionAccessor(pm)
+		// Position replies tell the cluster whether this node still takes
+		// publishes for a partition, which a leadership handoff waits on.
+		pm.SetWritableCheck(clusterMgr.IsPartitionWritable)
 		if err := clusterMgr.Start(); err != nil {
 			slog.Error("Failed to start cluster manager", "error", err)
 			os.Exit(1)
@@ -238,7 +372,7 @@ func main() {
 			}
 		}
 
-		slog.Info("Cluster mode enabled", "gossip_addr", cfg.ClusterGossipAddr, "raft_addr", cfg.ClusterRaftAddr)
+		slog.Info("Cluster mode enabled", "gossip_addr", cfg.ClusterGossipAddr, "raft_addr", cfg.ClusterRaftAddr, "mutual_tls", cfg.ReplicationTLSEnabled)
 	}
 
 	// Create partitions.
@@ -251,49 +385,22 @@ func main() {
 	}
 	for i := int32(0); i < int32(partitionsToCreate); i++ {
 		topic := fmt.Sprintf("partition-%d", i)
-		if err := pm.CreatePartition(i, topic); err != nil {
+		// The cluster may already have created the partition while this node
+		// was taking up its assignment, so an existing one is not an error.
+		if _, err := pm.GetOrCreateInternalPartition(i, topic); err != nil {
 			slog.Warn("Failed to create partition", "partition_id", i, "error", err)
 			continue
+		}
+		if cfg.ClusterEnabled {
+			// The handlers below are built on this partition's stores, so it
+			// stays loaded even when the cluster assigns it to another node.
+			pm.PinPartition(i)
 		}
 		if err := pm.StartPartition(i); err != nil {
 			slog.Warn("Failed to start partition", "partition_id", i, "error", err)
 		} else {
 			slog.Info("Created and started partition", "partition_id", i)
 		}
-	}
-
-	// Wire CDC and cross-region replication hooks into all partitions
-	for i := int32(0); i < int32(cfg.PartitionCount); i++ {
-		p, err := pm.GetInternalPartition(i)
-		if err != nil || p == nil || p.Wal == nil {
-			continue
-		}
-		p.Wal.SetAppendHook(func(event *types.Event) {
-			// Fast path: skip the ChangeEvent allocation + time.Now() syscall
-			// entirely when there are no CDC sinks and no cross-region
-			// replicator configured. This is the common case in dev / load
-			// test mode and avoids per-event heap pressure at 1M+ events/sec.
-			if cdcManager != nil && cdcManager.HasSinks() {
-				cdcManager.Emit(context.Background(), &cdc.ChangeEvent{
-					Timestamp:   time.Now(),
-					Op:          "append",
-					PartitionID: event.PartitionId,
-					Topic:       event.Topic,
-					Offset:      event.Offset,
-					Event:       event,
-				})
-			}
-			if crossRegionReplicator != nil && cfg.NodeRegion != "" {
-				// Do not re-replicate events that arrived FROM another region.
-				// CrossRegionServer.ReplicateEvents tags received events with
-				// source_region; without this guard, appending a received event
-				// fires this hook and ships it straight back out, creating an
-				// infinite cross-region echo loop.
-				if event.GetMeta()["source_region"] == "" {
-					crossRegionReplicator.ReplicateAsync(event)
-				}
-			}
-		})
 	}
 
 	// Get any available partition for handler setup (dedup and consumer group are shared)
@@ -310,34 +417,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Build auth config if enabled
-	var authConfig *auth.Config
-	if cfg.AuthEnabled {
-		authConfig = &auth.Config{
-			Enabled: cfg.AuthEnabled,
-			Policy:  auth.AllowAllPolicy(),
-		}
-		if cfg.AuthJWTSecret != "" {
-			authConfig.JWTSecret = []byte(cfg.AuthJWTSecret)
-		}
-		if cfg.AuthJWTPublicKey != "" {
-			pubKey, err := auth.LoadPublicKey(cfg.AuthJWTPublicKey)
-			if err != nil {
-				slog.Warn("Failed to load JWT public key", "error", err)
-			} else {
-				authConfig.JWTPublicKey = pubKey
-			}
-		}
-		if cfg.AuthPolicyFile != "" {
-			policy, err := auth.NewPolicyFromFile(cfg.AuthPolicyFile)
-			if err != nil {
-				slog.Warn("Failed to load auth policy", "error", err)
-			} else {
-				authConfig.Policy = policy
-			}
-		}
-	}
-
 	// Create version gate for zero-downtime upgrades
 	versionGate := api.NewVersionGate()
 
@@ -350,6 +429,7 @@ func main() {
 	// Create gRPC server
 	grpcConfig := api.DefaultConfig()
 	grpcConfig.Address = cfg.GPRCAddress
+	grpcConfig.ExperimentalFeatures = cfg.ExperimentalFeatures
 	if cfg.TLSEnabled {
 		grpcConfig.TLS = &api.TLSConfig{
 			Enabled:    cfg.TLSEnabled,
@@ -414,15 +494,17 @@ func main() {
 
 	// Create partition metadata service handler
 	partitionHandler := api.NewPartitionServiceHandler(pm, clusterMgr, cfg.NodeID)
+	partitionHandler.SetExperimentalFeatures(cfg.ExperimentalFeatures)
 	// Enforce admin authorization on destructive partition RPCs (Compact,
 	// RunRetention, SplitPartition) when auth is enabled.
 	if authConfig != nil {
 		partitionHandler.SetAuthPolicy(authConfig.Policy)
 	}
 
-	// Create transaction service handler (2PC)
-	transactionHandler := tx.NewHandler(pm)
-	grpcServer.SetTransactionHandler(transactionHandler)
+	if cfg.ExperimentalFeatures {
+		slog.Warn("Experimental transactions, online splitting and cross-region replication enabled; development use only")
+		grpcServer.SetTransactionHandler(tx.NewHandler(pm))
+	}
 
 	// Cross-region replication is registered on the INTERNAL listener below, not
 	// the public client port: it can inject/read arbitrary partition data, so it
@@ -451,7 +533,9 @@ func main() {
 	// Register internal replication and raft metadata services on the internal listener.
 	replicationServer := api.NewReplicationServiceHandler(pm)
 	internalServer.RegisterReplicationServer(replicationServer)
-	internalServer.RegisterCrossRegionServer(crossRegionServer)
+	if cfg.ExperimentalFeatures {
+		internalServer.RegisterCrossRegionServer(crossRegionServer)
+	}
 	if clusterMgr != nil {
 		raftServer := api.NewRaftServiceHandler(clusterMgr, cfg.NodeID)
 		internalServer.RegisterRaftServer(raftServer)
@@ -468,8 +552,8 @@ func main() {
 	grpcServer.RegisterServices(eventHandler, consumerHandler, partitionHandler, adminHandler)
 
 	// Load remote regions from environment
-	if regions := os.Getenv("CRONOS_REGIONS"); regions != "" {
-		for r := range strings.SplitSeq(regions, ",") {
+	if remoteRegions != "" {
+		for r := range strings.SplitSeq(remoteRegions, ",") {
 			parts := strings.SplitN(strings.TrimSpace(r), "=", 2)
 			if len(parts) == 2 {
 				crossRegionReplicator.AddRegion(&replication.RegionConnection{
@@ -612,6 +696,10 @@ func main() {
 							activeSegmentSize = activeSegment.GetSize()
 						}
 						metrics.SetWALMetrics(partitionLabel, len(p.Wal.GetSegments()), activeSegmentSize, p.Wal.GetHighWatermark())
+						metrics.SetLogStart(partitionLabel, p.Wal.GetFirstOffset())
+						if exported, feeding := p.ChangeFeedPosition(); feeding {
+							metrics.SetChangeFeedOffset(partitionLabel, exported)
+						}
 					}
 
 					if p.DedupStore != nil {
@@ -704,6 +792,9 @@ func main() {
 		}
 
 		// 3. Stop all partitions gracefully (drains in-flight deliveries, flushes WAL)
+		stopRetention()
+		<-retentionDone
+		backupScheduler.Stop() // wait for checkpoint readers before closing WALs
 		slog.Info("Shutdown phase 2: Stopping partitions (draining deliveries, flushing WAL)...")
 		if err := pm.Close(); err != nil {
 			slog.Error("Failed to cleanly stop all partitions", "error", err)

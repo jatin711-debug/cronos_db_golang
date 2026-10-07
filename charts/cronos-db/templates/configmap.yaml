@@ -6,6 +6,7 @@ metadata:
     {{- include "cronos-db.labels" . | nindent 4 }}
 data:
   CRONOS_DATA_DIR: {{ .Values.config.dataDir | quote }}
+  CRONOS_RAFT_DIR: {{ printf "%s/raft" .Values.config.dataDir | quote }}
   CRONOS_GRPC_ADDR: "0.0.0.0:{{ .Values.service.grpcPort }}"
   CRONOS_HTTP_ADDR: "0.0.0.0:{{ .Values.service.httpPort }}"
   CRONOS_CLUSTER: "true"
@@ -13,6 +14,7 @@ data:
   CRONOS_CLUSTER_GRPC_ADDR: "0.0.0.0:{{ .Values.headlessService.clusterGRPCPort }}"
   CRONOS_CLUSTER_RAFT_ADDR: "0.0.0.0:{{ .Values.headlessService.raftPort }}"
   CRONOS_CLUSTER_SEEDS: {{ include "cronos-db.clusterSeeds" . | quote }}
+  CRONOS_CLUSTER_EXPECTED_NODES: {{ .Values.replicaCount | quote }}
   CRONOS_PARTITION_COUNT: {{ .Values.config.partitionCount | quote }}
   CRONOS_REPLICATION_FACTOR: {{ .Values.config.replicationFactor | quote }}
   CRONOS_MIN_IN_SYNC_REPLICAS: {{ .Values.config.minInSyncReplicas | default 1 | quote }}

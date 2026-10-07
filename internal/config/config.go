@@ -1,7 +1,7 @@
 // Package config loads, validates, and hot-reloads CronosDB node configuration
 // from command-line flags and environment variables (CRONOS_*).
 //
-// LoadConfig applies defaults, parses flags, then applies env overrides.
+// LoadConfig applies defaults, environment values, then explicit flags.
 // Production mode enforces TLS, auth, encryption, and replication safety unless
 // --dev is set. ReloadableConfig supports SIGHUP-driven updates of a safe
 // subset of runtime tunables.
@@ -10,8 +10,8 @@ package config
 import (
 	"flag"
 	"fmt"
+	"net"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -34,6 +34,9 @@ func LoadConfig() (*types.Config, error) {
 	config.IndexInterval = DefaultIndexInterval
 	config.FsyncMode = DefaultFsyncMode
 	config.FlushIntervalMS = DefaultFlushIntervalMS
+	config.CompactionInterval = DefaultCompactionInterval
+	config.BackupInterval = DefaultBackupInterval
+	config.BackupRetention = DefaultBackupRetention
 	config.RetentionMaxAgeHours = DefaultRetentionMaxAgeHours
 	config.RetentionMaxSizeGB = DefaultRetentionMaxSizeGB
 	config.TickMS = DefaultTickMS
@@ -115,6 +118,7 @@ func LoadConfig() (*types.Config, error) {
 	config.HeartbeatInterval = DefaultHeartbeatInterval
 	config.FailureTimeout = DefaultFailureTimeout
 	config.SuspectTimeout = DefaultSuspectTimeout
+	config.ClusterFormationWait = DefaultClusterFormationWait
 
 	// Node configuration
 	flag.StringVar(&config.NodeID, "node-id", DefaultNodeID, "Unique node ID")
@@ -130,11 +134,16 @@ func LoadConfig() (*types.Config, error) {
 	flag.StringVar(&config.FsyncMode, "fsync-mode", DefaultFsyncMode, "fsync mode: every_event, batch, periodic")
 	var flushInterval int
 	flag.IntVar(&flushInterval, "flush-interval", DefaultFlushIntervalMS, "Flush interval in milliseconds")
+	flag.DurationVar(&config.BackupInterval, "backup-interval", DefaultBackupInterval, "How often the node backs up its partitions, at wall-clock multiples of the interval so that the nodes of a cluster back up at the same moment (0 = no scheduled backups)")
+	flag.DurationVar(&config.BackupRetention, "backup-retention", DefaultBackupRetention, "How long a backup is kept (0 = for good)")
+	flag.StringVar(&config.BackupDir, "backup-dir", "", "Where backups are written (default: backups under --data-dir). A backup on the volume of the data it copies does not survive the loss of that volume")
+	flag.DurationVar(&config.CompactionInterval, "compaction-interval", DefaultCompactionInterval, "How often a partition looks for log segments whose events are all finished and removes them")
 	flag.IntVar(&config.RetentionMaxAgeHours, "retention-max-age-hours", DefaultRetentionMaxAgeHours, "Delete WAL segments older than this many hours (0 = disable)")
 	flag.Int64Var(&config.RetentionMaxSizeGB, "retention-max-size-gb", DefaultRetentionMaxSizeGB, "Keep WAL segments within this many GB by deleting oldest (0 = disable)")
 
 	// Security / dev mode
 	flag.BoolVar(&config.DevMode, "dev", false, "Developer mode: disables production security requirements")
+	flag.BoolVar(&config.ExperimentalFeatures, "experimental-features", false, "Enable unverified transactions, online splitting and cross-region replication (requires --dev)")
 
 	// Scheduler configuration
 	flag.IntVar(&config.TickMS, "tick-ms", DefaultTickMS, "Scheduler tick duration in milliseconds")
@@ -149,10 +158,10 @@ func LoadConfig() (*types.Config, error) {
 	flag.Int64Var(&config.MaxInFlightPerPartition, "max-in-flight", DefaultMaxInFlightPerPartition, "Max in-flight deliveries per partition")
 
 	// Delivery configuration
-	flag.DurationVar(&config.DefaultAckTimeout, "ack-timeout", 30*time.Second, "Default ack timeout")
-	flag.IntVar(&config.MaxRetries, "max-retries", DefaultMaxRetries, "Maximum delivery retries")
-	flag.DurationVar(&config.RetryBackoff, "retry-backoff", 1*time.Second, "Retry backoff")
-	flag.IntVar(&config.MaxDeliveryCredits, "max-credits", DefaultMaxDeliveryCredits, "Maximum delivery credits")
+	flag.DurationVar(&config.DefaultAckTimeout, "ack-timeout", 30*time.Second, "How long a delivery may stay unacknowledged before it is retried")
+	flag.IntVar(&config.MaxRetries, "max-retries", DefaultMaxRetries, "Delivery retries before an event goes to the dead-letter queue")
+	flag.DurationVar(&config.RetryBackoff, "retry-backoff", 1*time.Second, "Delay before a retry, multiplied by the attempt number")
+	flag.IntVar(&config.MaxDeliveryCredits, "max-credits", DefaultMaxDeliveryCredits, "Credit ceiling for a subscription that does not set its own")
 	flag.Float64Var(&config.CircuitBreakerFailureThreshold, "cb-failure-threshold", DefaultCircuitBreakerFailureThreshold, "Circuit breaker failure rate to trip (0.0-1.0)")
 	flag.Int64Var(&config.CircuitBreakerMinAttempts, "cb-min-attempts", DefaultCircuitBreakerMinAttempts, "Min attempts before circuit breaker evaluates")
 	flag.Int64Var(&config.CircuitBreakerOpenDurationMs, "cb-open-duration-ms", DefaultCircuitBreakerOpenDurationMs, "Circuit breaker open duration in milliseconds")
@@ -173,14 +182,17 @@ func LoadConfig() (*types.Config, error) {
 
 	// Cluster configuration
 	flag.BoolVar(&config.ClusterEnabled, "cluster", DefaultClusterEnabled, "Enable cluster mode")
-	flag.StringVar(&config.ClusterGossipAddr, "cluster-gossip-addr", DefaultClusterGossipAddr, "Cluster gossip UDP address")
+	flag.StringVar(&config.ClusterGossipAddr, "cluster-gossip-addr", DefaultClusterGossipAddr, "Cluster membership (gossip) TCP address")
 	flag.StringVar(&config.ClusterGRPCAddr, "cluster-grpc-addr", DefaultClusterGRPCAddr, "Cluster gRPC address")
 	flag.StringVar(&config.ClusterRaftAddr, "cluster-raft-addr", DefaultClusterRaftAddr, "Cluster Raft address")
 	flag.IntVar(&config.VirtualNodes, "virtual-nodes", DefaultVirtualNodes, "Virtual nodes per physical node")
 	flag.DurationVar(&config.HeartbeatInterval, "heartbeat-interval", DefaultHeartbeatInterval, "Cluster heartbeat interval")
 	flag.DurationVar(&config.FailureTimeout, "failure-timeout", DefaultFailureTimeout, "Node failure detection timeout")
 	flag.DurationVar(&config.SuspectTimeout, "suspect-timeout", DefaultSuspectTimeout, "Node suspect timeout")
-	flag.BoolVar(&config.UseMemberlist, "use-memberlist", DefaultUseMemberlist, "Use HashiCorp Memberlist (SWIM) instead of custom TCP gossip")
+	flag.BoolVar(&config.ClusterBootstrap, "cluster-bootstrap", false, "This node creates the cluster, if it has no state and no other node in --cluster-seeds belongs to one. Give it to exactly one node")
+	flag.IntVar(&config.ClusterExpectedNodes, "cluster-expected-nodes", 0, "Nodes a new cluster starts with; first partition leaders are assigned as soon as that many are up (0 = unknown, use --cluster-formation-wait)")
+	flag.DurationVar(&config.ClusterFormationWait, "cluster-formation-wait", DefaultClusterFormationWait, "How long membership must be unchanged before a new cluster assigns first partition leaders when --cluster-expected-nodes is unset or not reached (0 = assign at once)")
+	flag.BoolVar(&config.UseMemberlist, "use-memberlist", DefaultUseMemberlist, "Not supported; the server refuses to start with it")
 	flag.Int64Var(&config.ClockSkewThresholdMs, "clock-skew-threshold-ms", DefaultClockSkewThresholdMs, "Max allowed clock skew from leader in ms (0 = disabled)")
 
 	// TLS flags
@@ -191,10 +203,10 @@ func LoadConfig() (*types.Config, error) {
 	flag.BoolVar(&config.TLSClientAuth, "tls-client-auth", false, "Require client certificates (mTLS)")
 
 	// Internal replication mTLS flags
-	flag.BoolVar(&config.ReplicationTLSEnabled, "replication-tls-enabled", false, "Enable mTLS for internal replication traffic")
-	flag.StringVar(&config.ReplicationTLSCAFile, "replication-tls-ca-file", "", "Path to internal replication CA certificate file")
-	flag.StringVar(&config.ReplicationTLSCertFile, "replication-tls-cert-file", "", "Path to internal replication certificate file")
-	flag.StringVar(&config.ReplicationTLSKeyFile, "replication-tls-key-file", "", "Path to internal replication private key file")
+	flag.BoolVar(&config.ReplicationTLSEnabled, "replication-tls-enabled", false, "Enable mutual TLS for all traffic between nodes: replication, membership and Raft")
+	flag.StringVar(&config.ReplicationTLSCAFile, "replication-tls-ca-file", "", "Path to the CA certificate that signed the certificates of the cluster's nodes")
+	flag.StringVar(&config.ReplicationTLSCertFile, "replication-tls-cert-file", "", "Path to this node's certificate for traffic between nodes")
+	flag.StringVar(&config.ReplicationTLSKeyFile, "replication-tls-key-file", "", "Path to the private key of that certificate")
 
 	// Auth flags
 	flag.BoolVar(&config.AuthEnabled, "auth-enabled", false, "Enable JWT authentication")
@@ -225,8 +237,9 @@ func LoadConfig() (*types.Config, error) {
 	flag.Float64Var(&config.TopicRateLimitBurst, "topic-rate-burst", DefaultTopicRateLimitBurst, "Per-subject per-topic rate limit burst (0 = disabled)")
 
 	// Memory-based backpressure flags
-	flag.Float64Var(&config.MaxMemoryUsagePercent, "max-memory-percent", DefaultMaxMemoryUsagePercent, "Max memory usage %% before rejecting publishes (0 = disabled)")
+	flag.Float64Var(&config.MaxMemoryUsagePercent, "max-memory-percent", DefaultMaxMemoryUsagePercent, "Publishes are refused while this process holds this share of its memory limit or more (0 = never)")
 	flag.Int64Var(&config.MemoryCheckIntervalMs, "memory-check-interval", DefaultMemoryCheckIntervalMs, "Memory check interval in milliseconds")
+	flag.Int64Var(&config.MemoryLimitBytes, "memory-limit", 0, "Memory this process may use, in bytes (0 = the container's limit, or the machine's memory)")
 
 	// Ingest rate limiting per partition
 	flag.Int64Var(&config.MaxIngestRatePerPartition, "max-ingest-rate", DefaultMaxIngestRatePerPartition, "Max events/sec per partition (0 = unlimited)")
@@ -241,7 +254,26 @@ func LoadConfig() (*types.Config, error) {
 	flag.StringVar(&config.TracingOTLPEndpoint, "tracing-otlp-endpoint", DefaultTracingOTLPEndpoint, "OTLP gRPC endpoint (host:port)")
 	flag.Float64Var(&config.TracingSampleRatio, "tracing-sample-ratio", DefaultTracingSampleRatio, "Tracing sample ratio from 0.0 to 1.0")
 	flag.BoolVar(&config.TracingInsecure, "tracing-insecure", DefaultTracingInsecure, "Use insecure OTLP connection (no TLS)")
+	flag.StringVar(&config.PprofAddr, "pprof-addr", "", "Serve runtime profiles (net/http/pprof) on this address; empty disables")
 
+	// All registered flags accept the matching CRONOS_* environment variable.
+	// Parse explicit flags afterward so command-line arguments take precedence.
+	aliases := map[string]string{"dedup-ttl": "CRONOS_DEDUP_TTL_HOURS", "min-insync-replicas": "CRONOS_MIN_IN_SYNC_REPLICAS"}
+	var envErr error
+	flag.VisitAll(func(f *flag.Flag) {
+		key := "CRONOS_" + strings.ToUpper(strings.ReplaceAll(f.Name, "-", "_"))
+		if alias, ok := aliases[f.Name]; ok {
+			key = alias
+		}
+		if value, ok := os.LookupEnv(key); ok && value != "" {
+			if err := flag.Set(f.Name, value); err != nil {
+				envErr = fmt.Errorf("invalid %s: %w", key, err)
+			}
+		}
+	})
+	if envErr != nil {
+		return nil, envErr
+	}
 	flag.Parse()
 	config.FlushIntervalMS = int32(flushInterval)
 
@@ -251,147 +283,6 @@ func LoadConfig() (*types.Config, error) {
 		for i, seed := range config.ClusterSeeds {
 			config.ClusterSeeds[i] = strings.TrimSpace(seed)
 		}
-	}
-
-	// Environment variable overrides
-	if nodeID := os.Getenv("CRONOS_NODE_ID"); nodeID != "" && config.NodeID == DefaultNodeID {
-		config.NodeID = nodeID
-	}
-	if dataDir := os.Getenv("CRONOS_DATA_DIR"); dataDir != "" && config.DataDir == DefaultDataDir {
-		config.DataDir = dataDir
-	}
-	if grpcAddr := os.Getenv("CRONOS_GRPC_ADDR"); grpcAddr != "" && config.GPRCAddress == DefaultGRPCAddress {
-		config.GPRCAddress = grpcAddr
-	}
-	if httpAddr := os.Getenv("CRONOS_HTTP_ADDR"); httpAddr != "" && config.HTTPAddress == DefaultHTTPAddress {
-		config.HTTPAddress = httpAddr
-	}
-	if devMode := os.Getenv("CRONOS_DEV"); devMode != "" {
-		if parsed, err := strconv.ParseBool(devMode); err == nil {
-			config.DevMode = parsed
-		}
-	}
-	if clusterEnabled := os.Getenv("CRONOS_CLUSTER"); clusterEnabled == "true" {
-		config.ClusterEnabled = true
-	}
-	if seeds := os.Getenv("CRONOS_CLUSTER_SEEDS"); seeds != "" && len(config.ClusterSeeds) == 0 {
-		config.ClusterSeeds = strings.Split(seeds, ",")
-		for i, seed := range config.ClusterSeeds {
-			config.ClusterSeeds[i] = strings.TrimSpace(seed)
-		}
-	}
-	if tracingEnabled := os.Getenv("CRONOS_TRACING_ENABLED"); tracingEnabled != "" {
-		if parsed, err := strconv.ParseBool(tracingEnabled); err == nil {
-			config.TracingEnabled = parsed
-		}
-	}
-	if tracingExporter := os.Getenv("CRONOS_TRACING_EXPORTER"); tracingExporter != "" {
-		config.TracingExporter = strings.TrimSpace(tracingExporter)
-	}
-	if tracingEndpoint := os.Getenv("CRONOS_TRACING_OTLP_ENDPOINT"); tracingEndpoint != "" {
-		config.TracingOTLPEndpoint = strings.TrimSpace(tracingEndpoint)
-	}
-	if tracingRatio := os.Getenv("CRONOS_TRACING_SAMPLE_RATIO"); tracingRatio != "" {
-		if parsed, err := strconv.ParseFloat(tracingRatio, 64); err == nil {
-			config.TracingSampleRatio = parsed
-		}
-	}
-	if tracingInsecure := os.Getenv("CRONOS_TRACING_INSECURE"); tracingInsecure != "" {
-		if parsed, err := strconv.ParseBool(tracingInsecure); err == nil {
-			config.TracingInsecure = parsed
-		}
-	}
-
-	// TLS environment overrides
-	if tlsEnabled := os.Getenv("CRONOS_TLS_ENABLED"); tlsEnabled != "" {
-		if parsed, err := strconv.ParseBool(tlsEnabled); err == nil {
-			config.TLSEnabled = parsed
-		}
-	}
-	if caFile := os.Getenv("CRONOS_TLS_CA_FILE"); caFile != "" {
-		config.TLSCAFile = caFile
-	}
-	if certFile := os.Getenv("CRONOS_TLS_CERT_FILE"); certFile != "" {
-		config.TLSCertFile = certFile
-	}
-	if keyFile := os.Getenv("CRONOS_TLS_KEY_FILE"); keyFile != "" {
-		config.TLSKeyFile = keyFile
-	}
-
-	// Internal replication mTLS environment overrides
-	if replicationTLSEnabled := os.Getenv("CRONOS_REPLICATION_TLS_ENABLED"); replicationTLSEnabled != "" {
-		if parsed, err := strconv.ParseBool(replicationTLSEnabled); err == nil {
-			config.ReplicationTLSEnabled = parsed
-		}
-	}
-	if caFile := os.Getenv("CRONOS_REPLICATION_TLS_CA_FILE"); caFile != "" {
-		config.ReplicationTLSCAFile = caFile
-	}
-	if certFile := os.Getenv("CRONOS_REPLICATION_TLS_CERT_FILE"); certFile != "" {
-		config.ReplicationTLSCertFile = certFile
-	}
-	if keyFile := os.Getenv("CRONOS_REPLICATION_TLS_KEY_FILE"); keyFile != "" {
-		config.ReplicationTLSKeyFile = keyFile
-	}
-
-	// Auth environment overrides. We only honor CRONOS_AUTH_ENABLED when the
-	// --auth-enabled flag was not explicitly provided on the command line, so
-	// that flags always take precedence over environment variables.
-	authEnabledExplicit := false
-	flag.Visit(func(f *flag.Flag) {
-		if f.Name == "auth-enabled" {
-			authEnabledExplicit = true
-		}
-	})
-	if !authEnabledExplicit {
-		if authEnabled := os.Getenv("CRONOS_AUTH_ENABLED"); authEnabled != "" {
-			if parsed, err := strconv.ParseBool(authEnabled); err == nil {
-				config.AuthEnabled = parsed
-			}
-		}
-	}
-	if jwtSecret := os.Getenv("CRONOS_AUTH_JWT_SECRET"); jwtSecret != "" {
-		config.AuthJWTSecret = jwtSecret
-	}
-
-	// Replication environment overrides
-	if minISR := os.Getenv("CRONOS_MIN_IN_SYNC_REPLICAS"); minISR != "" {
-		if parsed, err := strconv.Atoi(minISR); err == nil {
-			config.MinInSyncReplicas = parsed
-		}
-	}
-	if snapshotThreshold := os.Getenv("CRONOS_SNAPSHOT_CATCHUP_THRESHOLD"); snapshotThreshold != "" {
-		if parsed, err := strconv.ParseInt(snapshotThreshold, 10, 64); err == nil {
-			config.SnapshotCatchupThreshold = parsed
-		}
-	}
-
-	// Exactly-once commits
-	if eo := os.Getenv("CRONOS_EXACTLY_ONCE_COMMITS"); eo != "" {
-		if parsed, err := strconv.ParseBool(eo); err == nil {
-			config.ExactlyOnceCommits = parsed
-		}
-	}
-
-	// Encryption at rest environment overrides
-	if encEnabled := os.Getenv("CRONOS_ENCRYPTION_ENABLED"); encEnabled != "" {
-		if parsed, err := strconv.ParseBool(encEnabled); err == nil {
-			config.EncryptionEnabled = parsed
-		}
-	}
-	if encKeyFile := os.Getenv("CRONOS_ENCRYPTION_KEY_FILE"); encKeyFile != "" {
-		config.EncryptionKeyFile = encKeyFile
-	}
-
-	// Topology environment overrides
-	if rack := os.Getenv("CRONOS_NODE_RACK"); rack != "" {
-		config.NodeRack = rack
-	}
-	if zone := os.Getenv("CRONOS_NODE_ZONE"); zone != "" {
-		config.NodeZone = zone
-	}
-	if region := os.Getenv("CRONOS_NODE_REGION"); region != "" {
-		config.NodeRegion = region
 	}
 
 	// Validate required configuration
@@ -432,6 +323,12 @@ func ValidateConfig(c *types.Config) error {
 	if c.MinInSyncReplicas < 0 {
 		return fmt.Errorf("min-insync-replicas must be >= 0")
 	}
+	if c.ClusterExpectedNodes < 0 {
+		return fmt.Errorf("cluster-expected-nodes must be >= 0")
+	}
+	if c.ClusterFormationWait < 0 {
+		return fmt.Errorf("cluster-formation-wait must be >= 0")
+	}
 	if c.MinInSyncReplicas > c.ReplicationFactor {
 		return fmt.Errorf("min-insync-replicas (%d) cannot exceed replication-factor (%d)", c.MinInSyncReplicas, c.ReplicationFactor)
 	}
@@ -447,10 +344,41 @@ func ValidateConfig(c *types.Config) error {
 	if c.FlushIntervalMS <= 0 {
 		return fmt.Errorf("flush-interval must be > 0")
 	}
+	if c.CompactionInterval < 0 {
+		return fmt.Errorf("compaction-interval must be >= 0")
+	}
+	if c.MemoryLimitBytes < 0 || c.MaxMemoryUsagePercent < 0 || c.MaxMemoryUsagePercent > 100 {
+		return fmt.Errorf("memory-limit must be >= 0 and max-memory-percent between 0 and 100")
+	}
+	if c.BackupInterval < 0 || c.BackupRetention < 0 {
+		return fmt.Errorf("backup-interval and backup-retention must be >= 0")
+	}
+	if c.UseMemberlist {
+		// The flag was accepted and did nothing: the server never used the
+		// memberlist adapter. Saying so is better than a cluster whose
+		// operator believes it runs a protocol it does not run.
+		return fmt.Errorf("use-memberlist is not supported: the server uses its own membership protocol; remove the flag")
+	}
+	if c.ReplicationTLSEnabled {
+		// Mutual TLS between nodes needs all three: without the CA a node
+		// could not tell a member of the cluster from anyone else.
+		if c.ReplicationTLSCAFile == "" || c.ReplicationTLSCertFile == "" || c.ReplicationTLSKeyFile == "" {
+			return fmt.Errorf("replication-tls-enabled requires replication-tls-ca-file, replication-tls-cert-file and replication-tls-key-file")
+		}
+	}
 
 	// Production hardening: require TLS, auth, encryption, and replication safety
 	// unless the operator explicitly opts into developer mode.
 	if !c.DevMode {
+		if c.ExperimentalFeatures {
+			return fmt.Errorf("experimental-features requires --dev; transactions, online splitting and cross-region replication are not supported in production")
+		}
+		if c.ExactlyOnceCommits {
+			return fmt.Errorf("exactly-once-commits is not supported in production; use per-event at-least-once completion")
+		}
+		if c.PprofAddr != "" && !isLoopbackAddr(c.PprofAddr) {
+			return fmt.Errorf("pprof-addr must be a loopback address in production (use --dev to bypass)")
+		}
 		if c.ReplicationFactor < 3 {
 			return fmt.Errorf("production mode requires replication-factor >= 3 (use --dev to bypass)")
 		}
@@ -479,13 +407,38 @@ func ValidateConfig(c *types.Config) error {
 		if !c.EncryptionEnabled {
 			return fmt.Errorf("production mode requires encryption at rest to be enabled (use --dev to bypass)")
 		}
+		if c.FsyncMode != "batch" && c.FsyncMode != "every_event" {
+			// A replica acknowledges after syncing in these two modes, so an
+			// acknowledged publish is on disk on min-insync replicas. In
+			// periodic mode it is only in memory there until the next flush.
+			return fmt.Errorf("production mode requires fsync-mode batch or every_event; with %q a power loss can lose acknowledged events (use --dev to bypass)", c.FsyncMode)
+		}
 		if c.EncryptionKeyFile == "" {
 			return fmt.Errorf("production mode requires encryption-key-file")
 		}
 		if !c.ReplicationTLSEnabled {
 			return fmt.Errorf("production mode requires replication TLS to be enabled (use --dev to bypass)")
 		}
+		if c.ClusterEnabled && len(c.ClusterSeeds) == 0 {
+			// A node without seeds creates a cluster whenever it has no
+			// state, which is right once and wrong after its disk was lost.
+			return fmt.Errorf("production mode requires cluster-seeds on every node; give exactly one node cluster-bootstrap (use --dev to bypass)")
+		}
 	}
 
 	return nil
+}
+
+// isLoopbackAddr reports whether a host:port listen address binds only the
+// local machine. An empty host (":6060") binds every interface.
+func isLoopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil || host == "" {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -40,12 +39,7 @@ func NewRaftNode(config *ClusterConfig) (*RaftNode, error) {
 	fsm := NewClusterFSM()
 
 	// Create transport
-	addr, err := net.ResolveTCPAddr("tcp", config.RaftAddr)
-	if err != nil {
-		return nil, fmt.Errorf("resolve raft addr: %w", err)
-	}
-
-	transport, err := raft.NewTCPTransport(config.RaftAddr, addr, 3, 10*time.Second, os.Stderr)
+	transport, err := newRaftTransport(config)
 	if err != nil {
 		return nil, fmt.Errorf("create transport: %w", err)
 	}
@@ -177,6 +171,12 @@ func (n *RaftNode) Leave(nodeID string) error {
 	return nil
 }
 
+// HasState reports whether this node belongs to a cluster: it created one or
+// was added to one, and has the log or a snapshot to show for it.
+func (n *RaftNode) HasState() bool {
+	return n.raft.LastIndex() > 0
+}
+
 // IsLeader returns true if this node is the Raft leader
 func (n *RaftNode) IsLeader() bool {
 	return n.raft.State() == raft.Leader
@@ -261,6 +261,36 @@ func (n *RaftNode) GetState() *ClusterState {
 	return n.fsm.GetState()
 }
 
+// Partition returns the committed assignment of one partition.
+func (n *RaftNode) Partition(id int32) (PartitionInfo, bool) {
+	return n.fsm.Partition(id)
+}
+
+// Partitions returns every committed partition assignment.
+func (n *RaftNode) Partitions() map[int32]PartitionInfo {
+	return n.fsm.Partitions()
+}
+
+// SetOnPartitionChange registers a non-blocking callback that runs whenever a
+// partition assignment is applied on this node.
+func (n *RaftNode) SetOnPartitionChange(fn func()) {
+	n.fsm.SetOnPartitionChange(fn)
+}
+
+// ProposePartition commits a partition assignment. assign creates the entry;
+// otherwise it updates an existing one, which also raises its epoch.
+func (n *RaftNode) ProposePartition(info *PartitionInfo, assign bool) error {
+	payload, err := json.Marshal(info)
+	if err != nil {
+		return fmt.Errorf("marshal partition info: %w", err)
+	}
+	cmdType := CommandTypeUpdatePartition
+	if assign {
+		cmdType = CommandTypeAssignPartition
+	}
+	return n.Apply(&Command{Type: cmdType, Payload: payload})
+}
+
 // WaitForLeader blocks until a Raft leader is known or timeout elapses.
 func (n *RaftNode) WaitForLeader(timeout time.Duration) error {
 	ticker := time.NewTicker(100 * time.Millisecond)
@@ -281,10 +311,19 @@ func (n *RaftNode) WaitForLeader(timeout time.Duration) error {
 	}
 }
 
-// Shutdown cleanly shuts down the Raft instance.
+// Shutdown cleanly shuts down the Raft instance, and closes its port and its
+// store, which Raft leaves to their owner.
 func (n *RaftNode) Shutdown() error {
-	future := n.raft.Shutdown()
-	return future.Error()
+	err := n.raft.Shutdown().Error()
+	if closeErr := n.transport.Close(); err == nil {
+		err = closeErr
+	}
+	if store, ok := n.logStore.(io.Closer); ok {
+		if closeErr := store.Close(); err == nil {
+			err = closeErr
+		}
+	}
+	return err
 }
 
 // Command is a Raft-replicated mutation applied to ClusterFSM.
@@ -315,6 +354,41 @@ const (
 type ClusterFSM struct {
 	mu    sync.RWMutex
 	state *ClusterState
+	// onPartitionChange is called after a partition assignment is applied. It
+	// runs on Raft's apply path and must not block.
+	onPartitionChange func()
+}
+
+// SetOnPartitionChange registers a non-blocking callback for applied
+// partition assignment changes.
+func (f *ClusterFSM) SetOnPartitionChange(fn func()) {
+	f.mu.Lock()
+	f.onPartitionChange = fn
+	f.mu.Unlock()
+}
+
+// Partition returns a copy of the committed assignment of one partition.
+func (f *ClusterFSM) Partition(id int32) (PartitionInfo, bool) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	info, ok := f.state.Partitions[id]
+	if !ok || info == nil {
+		return PartitionInfo{}, false
+	}
+	return info.clone(), true
+}
+
+// Partitions returns copies of every committed partition assignment.
+func (f *ClusterFSM) Partitions() map[int32]PartitionInfo {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	out := make(map[int32]PartitionInfo, len(f.state.Partitions))
+	for id, info := range f.state.Partitions {
+		if info != nil {
+			out[id] = info.clone()
+		}
+	}
+	return out
 }
 
 // NewClusterFSM creates an empty ClusterFSM with initialized maps.
@@ -409,10 +483,19 @@ func (f *ClusterFSM) applyAssignPartition(payload json.RawMessage) interface{} {
 		return err
 	}
 
+	// An assignment creates the entry. Applying one for a partition that
+	// already has an entry would reset its leader and epoch, so it is ignored;
+	// later changes go through updates.
+	if _, exists := f.state.Partitions[info.ID]; exists {
+		return nil
+	}
 	f.state.Partitions[info.ID] = &info
 	f.state.UpdatedAt = time.Now()
 
 	log.Printf("[FSM] Assigned partition %d to leader %s", info.ID, info.LeaderID)
+	if f.onPartitionChange != nil {
+		f.onPartitionChange()
+	}
 	return nil
 }
 
@@ -427,7 +510,12 @@ func (f *ClusterFSM) applyUpdatePartition(payload json.RawMessage) interface{} {
 		existing.Replicas = info.Replicas
 		existing.ISR = info.ISR
 		existing.State = info.State
-		existing.Epoch++
+		existing.TransferTo = info.TransferTo
+		existing.TransferStartedMs = info.TransferStartedMs
+		// Every change raises the epoch. A proposal may ask for a higher one:
+		// replicas restored from a backup have accepted epochs this cluster
+		// never issued, and would refuse a leader below them.
+		existing.Epoch = max(existing.Epoch+1, info.Epoch)
 		// Preserve replica offsets across the update. Dropping them here left the
 		// map nil, so failover election (electNewLeader) saw offset 0 for every
 		// candidate and picked the alphabetically-first replica — an unclean
@@ -441,6 +529,9 @@ func (f *ClusterFSM) applyUpdatePartition(payload json.RawMessage) interface{} {
 	}
 
 	f.state.UpdatedAt = time.Now()
+	if f.onPartitionChange != nil {
+		f.onPartitionChange()
+	}
 	return nil
 }
 
