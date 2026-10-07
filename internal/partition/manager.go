@@ -315,7 +315,7 @@ func NewPartitionManager(nodeID string, config *types.Config) *PartitionManager 
 		nodeID:          nodeID,
 		config:          config,
 		splitting:       make(map[int32]bool),
-		backpressureMgr: NewBackpressureManager(config.MaxMemoryUsagePercent, config.MemoryCheckIntervalMs),
+		backpressureMgr: NewBackpressureManager(config.MaxMemoryUsagePercent, config.MemoryCheckIntervalMs, uint64(max(config.MemoryLimitBytes, 0))),
 	}
 	if config.FlushIntervalMS > 0 {
 		pm.fsyncCoalescer = storage.NewFsyncCoalescer(time.Duration(config.FlushIntervalMS) * time.Millisecond)

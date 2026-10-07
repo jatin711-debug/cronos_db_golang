@@ -1310,6 +1310,7 @@ flowchart TD
 | **Dedup** | `cronos_dedup_check_latency_seconds{partition, path}`, `cronos_dedup_bloom_memory_bytes{partition}`, `cronos_dedup_bloom_false_positive_rate{partition}` |
 | **Delivery** | `cronos_dispatch_latency_seconds{partition}`, `cronos_consumer_group_lag{group, partition}`, `cronos_delivery_lateness_seconds{partition}` (time between an event's scheduled time and its first delivery) |
 | **Accounting** | `cronos_events_accepted_total{partition}`, `cronos_events_duplicate_total{partition}`, `cronos_events_delivered_total{partition, attempt}` (`first` or `retry`), `cronos_events_acknowledged_total{partition, result}`, `cronos_events_delivery_timeouts_total{partition}`, `cronos_events_dead_lettered_total{partition}` |
+| **Memory** | `cronos_memory_held_bytes`, `cronos_memory_limit_bytes` | What the process holds and cannot hand back, and what it may use. Publishes are refused at `--max-memory-percent` of the limit |
 | **Log** | `cronos_wal_log_start_offset{partition}`, `cronos_wal_segments_removed_total{partition}`, `cronos_change_feed_offset{partition}` |
 | **Admission** | `cronos_admission_rejected_total{partition}` |
 | **Cluster** | `cronos_cluster_nodes_alive`, `cronos_cluster_partitions_leader`, `cronos_replication_lag{partition, follower}` (in events), `cronos_clock_skew_ms{source_node, target_node}` |

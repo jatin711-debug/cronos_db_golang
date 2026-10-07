@@ -30,6 +30,7 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/internal/schema"
 	"github.com/jatin711-debug/cronos_db_golang/internal/slo"
 	"github.com/jatin711-debug/cronos_db_golang/internal/storage"
+	"github.com/jatin711-debug/cronos_db_golang/internal/sysmem"
 	"github.com/jatin711-debug/cronos_db_golang/internal/tenant"
 	"github.com/jatin711-debug/cronos_db_golang/internal/tracing"
 	"github.com/jatin711-debug/cronos_db_golang/internal/tx"
@@ -52,6 +53,10 @@ func main() {
 		slog.Error("Failed to load config", "error", err)
 		os.Exit(1)
 	}
+
+	memoryLimit, memorySource := sysmem.Limit(uint64(max(cfg.MemoryLimitBytes, 0)))
+	metrics.SetMemoryLimit(memoryLimit)
+	slog.Info("Memory", "limit_bytes", memoryLimit, "limit_from", memorySource, "refuse_publishes_at_percent", cfg.MaxMemoryUsagePercent)
 
 	slog.Info("Configuration loaded",
 		"auth_enabled", cfg.AuthEnabled,

@@ -609,8 +609,9 @@ flag-only).
 | `-encryption-key-file` | *(empty)* | Path to 32-byte encryption key file |
 | `-topic-rate-limit` | `0` | Per-subject per-topic rate limit (events/sec, 0 = disabled) |
 | `-topic-rate-burst` | `0` | Per-subject per-topic rate limit burst (0 = disabled) |
-| `-max-memory-percent` | `0` | Max memory usage % before rejecting publishes (0 = disabled) |
-| `-memory-check-interval` | `5000` | Memory check interval in milliseconds |
+| `-max-memory-percent` | `80` | Publishes are refused while the process holds this share of its memory limit or more (0 = never) |
+| `-memory-limit` | `0` | Memory the process may use, in bytes. `0` = the container's limit, or the machine's memory |
+| `-memory-check-interval` | `1000` | How long a memory measurement is used, in milliseconds |
 | `-max-ingest-rate` | `0` | Max events/sec per partition (0 = unlimited) |
 | `-ingest-burst-size` | `0` | Token bucket burst size for ingest rate limit |
 | `-tracing-enabled` | `false` | Enable OpenTelemetry tracing |

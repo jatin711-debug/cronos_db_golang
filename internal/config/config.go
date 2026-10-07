@@ -237,8 +237,9 @@ func LoadConfig() (*types.Config, error) {
 	flag.Float64Var(&config.TopicRateLimitBurst, "topic-rate-burst", DefaultTopicRateLimitBurst, "Per-subject per-topic rate limit burst (0 = disabled)")
 
 	// Memory-based backpressure flags
-	flag.Float64Var(&config.MaxMemoryUsagePercent, "max-memory-percent", DefaultMaxMemoryUsagePercent, "Max memory usage %% before rejecting publishes (0 = disabled)")
+	flag.Float64Var(&config.MaxMemoryUsagePercent, "max-memory-percent", DefaultMaxMemoryUsagePercent, "Publishes are refused while this process holds this share of its memory limit or more (0 = never)")
 	flag.Int64Var(&config.MemoryCheckIntervalMs, "memory-check-interval", DefaultMemoryCheckIntervalMs, "Memory check interval in milliseconds")
+	flag.Int64Var(&config.MemoryLimitBytes, "memory-limit", 0, "Memory this process may use, in bytes (0 = the container's limit, or the machine's memory)")
 
 	// Ingest rate limiting per partition
 	flag.Int64Var(&config.MaxIngestRatePerPartition, "max-ingest-rate", DefaultMaxIngestRatePerPartition, "Max events/sec per partition (0 = unlimited)")
@@ -345,6 +346,9 @@ func ValidateConfig(c *types.Config) error {
 	}
 	if c.CompactionInterval < 0 {
 		return fmt.Errorf("compaction-interval must be >= 0")
+	}
+	if c.MemoryLimitBytes < 0 || c.MaxMemoryUsagePercent < 0 || c.MaxMemoryUsagePercent > 100 {
+		return fmt.Errorf("memory-limit must be >= 0 and max-memory-percent between 0 and 100")
 	}
 	if c.BackupInterval < 0 || c.BackupRetention < 0 {
 		return fmt.Errorf("backup-interval and backup-retention must be >= 0")

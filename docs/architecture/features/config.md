@@ -147,8 +147,9 @@ Defaults from `internal/config/defaults.go` unless noted. Flags marked **env** h
 | `--load-shedding-threshold` | `0.0` | Load shedding threshold 0.0–1.0 (0 = disabled) (**reload-only env**) |
 | `--topic-rate-limit` | `0.0` | Per-subject per-topic events/sec (0 = disabled) |
 | `--topic-rate-burst` | `0.0` | Topic rate limiter burst (0 = disabled) |
-| `--max-memory-percent` | `0.0` | Reject publishes above this process RSS ratio (0 = disabled) |
-| `--memory-check-interval` | `5000` | Memory sampling interval (ms) |
+| `--max-memory-percent` | `80` | Publishes are refused while the process holds this share of its memory limit or more (0 = never) |
+| `--memory-limit` | `0` | Memory the process may use, in bytes. `0` = the container's (cgroup) limit, or the machine's memory when there is none |
+| `--memory-check-interval` | `1000` | How long a memory measurement is used (ms) |
 | `--max-ingest-rate` | `0` | Max events/sec per partition (0 = unlimited) |
 | `--ingest-burst-size` | `0` | Ingest token-bucket burst size |
 | `--follower-reads` | `false` | Allow followers to serve Replay reads |

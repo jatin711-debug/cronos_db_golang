@@ -133,7 +133,37 @@ names another place. A backup on the volume it copies does not survive the
 loss of that volume, and the chart mounts no other: copy backups off the
 node, or mount a second volume and point `--backup-dir` at it.
 
-Before release, also require bounded overload
-behavior, and a scan of the image that is actually published: CI scans the
+## Memory and overload
+
+A node keeps in memory, payload included, every event that is due within the
+hot window (`--hot-window-minutes`, 60 by default) and every event that is due
+and not yet delivered. Events due later are kept on disk as references. So the
+memory a partition's leader needs grows with what producers schedule for the
+next hour and with how far consumers are behind.
+
+Publishes are refused, with `ResourceExhausted`, while the process holds
+`--max-memory-percent` (80) of its memory limit. The limit is the container's
+when there is one, otherwise the machine's memory, or `--memory-limit`. The
+Go client reports the refusal as an error of kind `overloaded` and does not
+retry it: the application should send less. A node at that point keeps
+delivering, and takes publishes again when consumers have worked the backlog
+off. `cronos_memory_held_bytes` and `cronos_memory_limit_bytes` show where a
+node stands, and the chart alerts when a node has been refusing for two
+minutes. The `fault-campaign` job tests this (`TestOverloadIsRefusedAndSurvived`):
+producers flood a cluster that has a small limit and no consumer; the nodes
+refuse, none dies, and everything that was acknowledged is delivered once a
+consumer starts.
+
+What this does not bound: a node that restarts reads its undelivered backlog
+back into memory whatever its size, because the refusal applies to publishes
+and not to recovery. A node whose backlog alone exceeds its memory limit is
+killed on every start. Give nodes memory for the backlog you allow, alert on
+the two gauges, and keep consumers running. The queues themselves are still
+bounded by event count (`--max-ready-queue`, `--max-timing-wheel-size`,
+`--max-in-flight`), not by bytes. Sustained load at production sizes has not
+been measured.
+
+Before release, also require
+a scan of the image that is actually published: CI scans the
 image it builds from the same Dockerfile, not the published one. Set and measure explicit throughput, payload,
 retention, delay, and crash-loss targets. See the audit acceptance contract.
