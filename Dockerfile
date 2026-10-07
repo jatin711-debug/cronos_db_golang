@@ -68,8 +68,10 @@ RUN go build -trimpath -ldflags="-linkmode=external" -o /cronos-api ./cmd/api
 # =============================================================================
 FROM debian:bookworm-slim
 
-# Install runtime dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Install runtime dependencies. The upgrade takes the security fixes Debian has
+# published since the base image was built: the image scan in CI fails on a
+# known vulnerability that has a fix, and the base image lags behind them.
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
     ca-certificates \
     tzdata \
     curl \

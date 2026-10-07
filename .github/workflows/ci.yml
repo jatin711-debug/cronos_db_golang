@@ -117,6 +117,18 @@ jobs:
           version: v3.17.3
       - name: Build the shipped image
         run: docker build -t cronos-db:ci .
+      # Known vulnerabilities in what is shipped: the packages of the base
+      # image and the libraries compiled into the binary. One that has a fix
+      # fails the build. The action is pinned to a commit, not a tag.
+      - name: Scan the shipped image for known vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: cronos-db:ci
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          version: v0.75.0
       - name: Create isolated Kubernetes cluster
         run: |
           go install sigs.k8s.io/kind@v0.33.0
