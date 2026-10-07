@@ -3,6 +3,7 @@ package consumer
 import (
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -64,11 +65,17 @@ func (s *OffsetStore) groupMetaKey(groupID string) []byte {
 	return append([]byte(groupMetaKeyPrefix), []byte(groupID)...)
 }
 
-// PersistGroup saves group metadata to the pending flush queue.
+// PersistGroup saves group metadata to the pending flush queue. The group is
+// encoded here, while the caller still holds its lock: the flush loop runs
+// later on another goroutine and must not read the live maps.
 func (s *OffsetStore) PersistGroup(group *types.ConsumerGroup) error {
+	data, err := json.Marshal(group)
+	if err != nil {
+		return fmt.Errorf("encode group %s: %w", group.GroupID, err)
+	}
 	s.groupMu.Lock()
 	s.groups[group.GroupID] = group
-	s.pendingGroups[group.GroupID] = group
+	s.pendingGroups[group.GroupID] = data
 	delete(s.pendingGroupDels, group.GroupID)
 	s.groupMu.Unlock()
 	s.dirty.Store(true)
@@ -116,6 +123,12 @@ type OffsetStore struct {
 	quit        chan struct{}
 	wg          sync.WaitGroup
 
+	// closeMu lets callers that race with Close (an ack or a redelivery scan
+	// still in flight at shutdown) fail cleanly; Pebble panics when used after
+	// it is closed.
+	closeMu sync.RWMutex
+	closed  bool
+
 	pendingMu sync.RWMutex
 	pending   map[offsetKey]int64 // offset >= 0 is a commit. offset == -2 means deleted.
 
@@ -130,7 +143,7 @@ type OffsetStore struct {
 
 	groupMu          sync.RWMutex
 	groups           map[string]*types.ConsumerGroup
-	pendingGroups    map[string]*types.ConsumerGroup
+	pendingGroups    map[string][]byte // encoded group records awaiting flush
 	pendingGroupDels map[string]struct{}
 }
 
@@ -163,11 +176,11 @@ func NewOffsetStore(dataDir string, partitionID int32, cache *pebble.Cache) (*Of
 		quit:              make(chan struct{}),
 		pending:           make(map[offsetKey]int64),
 		recentCommits:     make(map[string]struct{}),
-		commitQueue:       make([]string, 0, 1_000_000),
+		commitQueue:       make([]string, 0, 1024), // grows with use, up to commitIDCapacity
 		pendingCommitIDs:  make(map[string]struct{}),
 		pendingCommitDels: make(map[string]struct{}),
 		groups:            make(map[string]*types.ConsumerGroup),
-		pendingGroups:     make(map[string]*types.ConsumerGroup),
+		pendingGroups:     make(map[string][]byte),
 		pendingGroupDels:  make(map[string]struct{}),
 	}
 
@@ -310,7 +323,7 @@ func (s *OffsetStore) flushPending() {
 
 	s.groupMu.Lock()
 	toGroups := s.pendingGroups
-	s.pendingGroups = make(map[string]*types.ConsumerGroup)
+	s.pendingGroups = make(map[string][]byte)
 	toGroupDels := s.pendingGroupDels
 	s.pendingGroupDels = make(map[string]struct{})
 	s.groupMu.Unlock()
@@ -338,12 +351,7 @@ func (s *OffsetStore) flushPending() {
 	for id := range toCommitDels {
 		_ = batch.Delete(s.commitIDKey(id), pebble.NoSync)
 	}
-	for id, group := range toGroups {
-		data, err := json.Marshal(group)
-		if err != nil {
-			fmt.Printf("[OFFSET_STORE] Failed to marshal group %s: %v\n", id, err)
-			continue
-		}
+	for id, data := range toGroups {
 		_ = batch.Set(s.groupMetaKey(id), data, pebble.NoSync)
 	}
 	for id := range toGroupDels {
@@ -436,17 +444,23 @@ func (s *OffsetStore) GetOffset(groupID string, partitionID int32) (int64, error
 		return val, nil
 	}
 
-	dbKey := s.buildKey(groupID, partitionID)
-	value, closer, err := s.db.Get(dbKey)
-	if err == pebble.ErrNotFound {
-		return -1, nil // No committed offset
-	}
+	offset := int64(-1) // No committed offset
+	err := s.withDB(func(db *pebble.DB) error {
+		value, closer, err := db.Get(s.buildKey(groupID, partitionID))
+		if err == pebble.ErrNotFound {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		defer closer.Close()
+		offset, err = s.parseValue(value)
+		return err
+	})
 	if err != nil {
 		return 0, fmt.Errorf("get offset: %w", err)
 	}
-	defer closer.Close()
-
-	return s.parseValue(value)
+	return offset, nil
 }
 
 // DeleteOffset removes the committed offset for groupID on partitionID.
@@ -508,7 +522,23 @@ func (s *OffsetStore) Close() error {
 	close(s.quit)
 	s.wg.Wait()
 	s.flushPending()
+	s.closeMu.Lock()
+	s.closed = true
+	s.closeMu.Unlock()
 	return s.db.Close()
+}
+
+var errOffsetStoreClosed = errors.New("consumer offset store is closed")
+
+// withDB runs fn against the open database, or reports that the store has
+// been closed. Close waits for calls that are already inside fn.
+func (s *OffsetStore) withDB(fn func(db *pebble.DB) error) error {
+	s.closeMu.RLock()
+	defer s.closeMu.RUnlock()
+	if s.closed || s.db == nil {
+		return errOffsetStoreClosed
+	}
+	return fn(s.db)
 }
 
 // Checkpoint creates a PebbleDB checkpoint of the offset store at destDir.
