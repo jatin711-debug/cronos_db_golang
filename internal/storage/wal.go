@@ -911,16 +911,23 @@ func (w *WAL) rotateSegment() error {
 // ReadEvents reads events in the inclusive offset range [startOffset, endOffset]
 // across all segments that overlap the range.
 func (w *WAL) ReadEvents(startOffset, endOffset int64) ([]*types.Event, error) {
-	// Only the segment list needs the WAL lock. Reading under it would hold up
-	// every append to this partition for the length of the read; each segment
-	// guards its own data.
+	// Only the segment list and where each segment ends need the WAL lock.
+	// Reading under it would hold up every append to this partition for the
+	// length of the read; each segment guards its own data. The ends are noted
+	// here because an append moves the active segment's while holding this
+	// lock, and looking again after releasing it would race with that.
+	type span struct {
+		segment     *Segment
+		first, last int64
+	}
 	w.mu.RLock()
-	segments := make([]*Segment, 0, 2)
+	spans := make([]span, 0, 2)
 	for _, segment := range w.segments {
-		if segment.GetLastOffset() < startOffset || segment.GetFirstOffset() > endOffset {
+		first, last := segment.GetFirstOffset(), segment.GetLastOffset()
+		if last < startOffset || first > endOffset {
 			continue
 		}
-		segments = append(segments, segment)
+		spans = append(spans, span{segment, first, last})
 	}
 	w.mu.RUnlock()
 
@@ -935,10 +942,11 @@ func (w *WAL) ReadEvents(startOffset, endOffset int64) ([]*types.Event, error) {
 	}
 	result := make([]*types.Event, 0, estimated)
 
-	for _, segment := range segments {
+	for _, sp := range spans {
+		segment := sp.segment
 		// Read events from this segment
-		readOffset := max(startOffset, segment.GetFirstOffset())
-		endForSegment := min(endOffset, segment.GetLastOffset())
+		readOffset := max(startOffset, sp.first)
+		endForSegment := min(endOffset, sp.last)
 
 		events, err := segment.ReadEventsByOffsetRange(readOffset, endForSegment)
 		if err != nil {
