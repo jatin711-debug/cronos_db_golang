@@ -151,7 +151,9 @@ by the first deduplicated publish to the partition.
 
 **Cluster formation.** Leadership now comes only from Raft-committed
 assignments, and partitions that never had a leader are assigned five seconds
-after membership last changed. Without that wait the first node of a new
+after membership last changed (since 2026-10-07: as soon as
+`--cluster-expected-nodes` nodes are up, with the wait as the fallback).
+Without that wait the first node of a new
 cluster led every partition and handed most of them over as the others
 joined, refusing publishes for those partitions meanwhile. A node also unloads
 a partition once it is neither its leader nor a replica. `/health/ready`

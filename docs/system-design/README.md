@@ -553,11 +553,16 @@ Short notes on the parts that surround the data path.
   overloaded server answers `ResourceExhausted` early instead of queueing
   until it falls over.
 - **Change data capture and cross-region replication**
-  ([`internal/cdc`](../../internal/cdc/sink.go),
-  [`region.go`](../../internal/replication/region.go)) are best-effort side
-  channels fed from the log: they must never slow the write path, so they have
-  bounded queues and drop under pressure. A CDC sink can currently see an
-  event before its publish is accepted; that is an open item in the audit.
+  ([`changefeed.go`](../../internal/partition/changefeed.go),
+  [`internal/cdc`](../../internal/cdc/sink.go),
+  [`region.go`](../../internal/replication/region.go)) read a per-partition
+  *change feed*: one goroutine that follows the log behind the accepted
+  watermark and hands events over in order, on the leader only. It replaced a
+  hook on the append path, which fired before a publish was accepted and once
+  per replica. A sink that fails makes the feed wait and retry; publishing
+  never waits for it, and nothing is dropped. The feed's position is stored
+  and sent to followers, so restarts and failovers continue it. The general
+  pattern: *derive side outputs from the log, not from the write path*.
 - **Experimental: transactions and online split**
   ([`internal/tx`](../../internal/tx/coordinator.go),
   [`split.go`](../../internal/partition/split.go)). Two-phase commit across

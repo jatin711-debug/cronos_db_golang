@@ -76,7 +76,7 @@ Recent production-hardening changes add durability and correctness metadata but 
 
 * WAL v2 stores an 8-byte Raft term and a 4-byte trailing checksum per record. The extra bytes are appended outside the fsync lock and checksum verification happens on recovery and replication, not on the append fast path.
 * The retention enforcer runs as a background loop and reads only the 64-byte segment header to decide eligibility; it does not scan record contents.
-* CDC uses a bounded worker pool (`DefaultCDCWorkers=4`, queue size 10,000) with non-blocking `Emit`; slow sinks drop events rather than stall the WAL append path.
+* CDC and cross-region replication read a per-partition change feed behind the accepted watermark; nothing runs on the append path. A slow sink makes its feed lag; it neither drops events nor slows publishes. With no sink and no region configured, publishes are not tracked for the feed at all.
 
 ## WAL Plaintext Baseline (4 KB payload, par=1)
 

@@ -25,7 +25,10 @@ Storage module provides durable append-only event persistence with indexed reads
 4. Segment rotation keeps prior segments **readable**; compaction and retention reclaim space.
 5. The backup scheduler periodically checkpoints every partition, including
    the active segment. A checkpoint pauses appends only while it notes where
-   each file ends; the bytes are copied while appends continue.
+   each file ends; the bytes are copied while appends continue. A backup cuts
+   the logs of all partitions at one instant and starts at wall-clock
+   multiples of the interval, so every node of a cluster takes its backup at
+   the same moment.
 
 ## Production Decisions
 

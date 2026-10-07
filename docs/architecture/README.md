@@ -16,8 +16,9 @@ subsystem docs independently.
 - **Scheduler recovery** rebases ticks from wall clock; timers matured during
   downtime are delivered immediately (not dropped).
 - **2PC handler injects PartitionManager** so prepare/commit write durable markers.
-- **Bounded CDC worker pool** (`DefaultCDCWorkers=4`, queue 10000) with
-  bounded-blocking `Emit` (drops after 5s) and graceful `Close`.
+- **Change feed for CDC and cross-region replication**: accepted events only,
+  in log order, from the partition's leader, with a position that survives
+  restarts and failovers. A failing sink makes its feed lag; nothing is dropped.
 - **Retention enforcer** protects active segments/system dirs and deletes aged
   or size-eligible segments plus matching `.index` files.
 - **Listener split:**
