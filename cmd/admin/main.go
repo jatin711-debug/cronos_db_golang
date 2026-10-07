@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/jatin711-debug/cronos_db_golang/internal/auth"
+	"github.com/jatin711-debug/cronos_db_golang/internal/storage"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
@@ -77,6 +78,7 @@ func main() {
 		adminCmd(),
 		debugCmd(),
 		generateTokenCmd(),
+		restoreCmd(),
 	)
 
 	if err := rootCmd.Execute(); err != nil {
@@ -334,6 +336,51 @@ func debugCmd() *cobra.Command {
 	}
 
 	cmd.AddCommand(publishCmd)
+	return cmd
+}
+
+// restoreCmd restores a backup into the data directory of a stopped node. It
+// works on files only and never contacts a server.
+func restoreCmd() *cobra.Command {
+	var backupDir, dataDir, keyFile string
+	cmd := &cobra.Command{
+		Use:   "restore",
+		Short: "Restore a backup into an empty data directory (run with the node stopped)",
+		Long: "Copies one backup generation (a backups/backup-* directory) into a data\n" +
+			"directory, checking every file against the backup's manifest. The data\n" +
+			"directory must not already hold the partitions being restored. Start the\n" +
+			"node on it afterwards; timers are rebuilt from the restored log.\n\n" +
+			"A backup of an encrypted log is restored as ciphertext and holds no key:\n" +
+			"the node needs the key the backup was taken with. Pass that key with\n" +
+			"--encryption-key-file to have it checked before anything is restored.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			manifest, err := storage.RestoreBackup(backupDir, dataDir, storage.RestoreOptions{EncryptionKeyFile: keyFile})
+			if err != nil {
+				return err
+			}
+			fmt.Printf("Restored backup taken %s into %s\n", manifest.Created.Format(time.RFC3339), dataDir)
+			if !manifest.CutAt.IsZero() {
+				fmt.Printf("  every partition log is as of %s\n", manifest.CutAt.Format(time.RFC3339Nano))
+			}
+			for _, partition := range manifest.Partitions {
+				fmt.Printf("  partition %d: log through offset %d, %d files (%s)\n",
+					partition.PartitionID, partition.LastOffset, len(partition.Files), strings.Join(append([]string{"log"}, partition.Components...), ", "))
+			}
+			switch {
+			case manifest.Encryption == nil:
+			case keyFile != "":
+				fmt.Println("  the logs are encrypted; the given key matches")
+			default:
+				fmt.Printf("  the logs are encrypted: start the node with the key whose check value is %s (not verified here; pass --encryption-key-file to check)\n", manifest.Encryption.KeyCheck)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&backupDir, "from", "", "Backup directory to restore (contains backup.json)")
+	cmd.Flags().StringVar(&dataDir, "data-dir", "", "Data directory to restore into")
+	cmd.Flags().StringVar(&keyFile, "encryption-key-file", "", "Master key of an encrypted backup, checked before restoring")
+	_ = cmd.MarkFlagRequired("from")
+	_ = cmd.MarkFlagRequired("data-dir")
 	return cmd
 }
 

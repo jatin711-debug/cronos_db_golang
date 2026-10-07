@@ -102,6 +102,11 @@ func main() {
 		}
 	}
 
+	if cfg.PprofAddr != "" {
+		pprofServer := startPprofServer(cfg.PprofAddr)
+		defer pprofServer.Close()
+	}
+
 	// Wrap config for hot reload
 	reloadableCfg := config.NewReloadableConfig(cfg)
 	reloadableCfg.StartSIGHUPListener(context.Background())
@@ -203,12 +208,13 @@ func main() {
 	diskMonitor.Start()
 	defer diskMonitor.Stop()
 
-	// Start WAL backup scheduler
+	// Start the backup scheduler: every partition's log, consumer state, dedup
+	// store, dead-letter queue and epoch. Restore with `cronos-admin restore`.
 	backupScheduler := storage.NewCheckpointBackupScheduler(
 		cfg.DataDir+"/backups",
 		1*time.Hour,
 		7*24*time.Hour,
-		pm.BackupWALs,
+		pm.Backup,
 	)
 	backupScheduler.Start()
 	defer backupScheduler.Stop()
@@ -264,6 +270,9 @@ func main() {
 			SuspectTimeout:    cfg.SuspectTimeout,
 			PartitionCount:    cfg.PartitionCount,
 			ReplicationFactor: cfg.ReplicationFactor,
+			MinInSyncReplicas: cfg.MinInSyncReplicas,
+			ExpectedNodes:     cfg.ClusterExpectedNodes,
+			FormationWait:     cfg.ClusterFormationWait,
 			Rack:              cfg.NodeRack,
 			Zone:              cfg.NodeZone,
 			Region:            cfg.NodeRegion,
@@ -272,6 +281,9 @@ func main() {
 		clusterMgr = cluster.NewManager(clusterConfig)
 		// Wire partition state transfer hooks before starting cluster services.
 		clusterMgr.SetPartitionAccessor(pm)
+		// Position replies tell the cluster whether this node still takes
+		// publishes for a partition, which a leadership handoff waits on.
+		pm.SetWritableCheck(clusterMgr.IsPartitionWritable)
 		if err := clusterMgr.Start(); err != nil {
 			slog.Error("Failed to start cluster manager", "error", err)
 			os.Exit(1)
@@ -302,9 +314,16 @@ func main() {
 	}
 	for i := int32(0); i < int32(partitionsToCreate); i++ {
 		topic := fmt.Sprintf("partition-%d", i)
-		if err := pm.CreatePartition(i, topic); err != nil {
+		// The cluster may already have created the partition while this node
+		// was taking up its assignment, so an existing one is not an error.
+		if _, err := pm.GetOrCreateInternalPartition(i, topic); err != nil {
 			slog.Warn("Failed to create partition", "partition_id", i, "error", err)
 			continue
+		}
+		if cfg.ClusterEnabled {
+			// The handlers below are built on this partition's stores, so it
+			// stays loaded even when the cluster assigns it to another node.
+			pm.PinPartition(i)
 		}
 		if err := pm.StartPartition(i); err != nil {
 			slog.Warn("Failed to start partition", "partition_id", i, "error", err)

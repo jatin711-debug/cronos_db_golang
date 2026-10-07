@@ -56,7 +56,7 @@ func TestMaintenanceBackupsRestoreEveryPartitionAndActiveTail(t *testing.T) {
 					appendMaintenanceEvent(t, p, fmt.Sprintf("closed-%d-%d", p.ID, generation), "a", time.Now(), 2048)
 					appendMaintenanceEvent(t, p, fmt.Sprintf("tail-%d-%d", p.ID, generation), "a", time.Now().Add(time.Hour), 32)
 				}
-				if err := pm.BackupWALs(dest); err != nil {
+				if err := pm.Backup(dest); err != nil {
 					t.Fatal(err)
 				}
 				if _, err := os.Stat(filepath.Join(dest, "backup.json")); err != nil {
@@ -194,7 +194,7 @@ func TestMaintenanceCheckpointDuringAppendsRestoresContiguousPrefix(t *testing.T
 		errors <- nil
 	}()
 	dest := t.TempDir()
-	backupErr := pm.BackupWALs(dest)
+	backupErr := pm.Backup(dest)
 	if err := <-errors; err != nil {
 		t.Fatal(err)
 	}
