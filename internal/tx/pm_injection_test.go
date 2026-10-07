@@ -33,7 +33,6 @@ func TestBeginInjectsPartitionManager(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetInternalPartition: %v", err)
 	}
-	part.Leader = true
 
 	c := NewCoordinator(30*time.Second, t.TempDir())
 	defer c.Stop()

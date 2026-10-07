@@ -89,7 +89,7 @@ func TestAuditSingleReplicaPromotionKeepsFastPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.ReplLeader != nil || !p.Leader || p.Epoch != 1 {
-		t.Fatalf("RF=1 promotion created replication leader or wrong epoch: leader=%v epoch=%d repl=%v", p.Leader, p.Epoch, p.ReplLeader)
+	if p.ReplLeader != nil || !p.IsLeader() || p.Epoch() != 1 {
+		t.Fatalf("RF=1 promotion created replication leader or wrong epoch: leader=%v epoch=%d repl=%v", p.IsLeader(), p.Epoch(), p.ReplLeader)
 	}
 }

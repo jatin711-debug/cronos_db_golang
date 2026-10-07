@@ -33,8 +33,8 @@ func TestSnapshot_InstalledReplicaCanTakeOver(t *testing.T) {
 		t.Fatalf("replica log has %d entries after the snapshot, want 12", got)
 	}
 	// The replica is fenced at the epoch of the log it installed, durably.
-	if replica.p.Epoch != 4 {
-		t.Fatalf("replica epoch = %d after installing a snapshot written at epoch 4", replica.p.Epoch)
+	if replica.p.Epoch() != 4 {
+		t.Fatalf("replica epoch = %d after installing a snapshot written at epoch 4", replica.p.Epoch())
 	}
 	if stale := replica.send("node-z", 3, entries("stale", 3, 12, 12)); stale.GetSuccess() {
 		t.Fatal("replica accepted an append from epoch 3 after installing a snapshot from epoch 4")

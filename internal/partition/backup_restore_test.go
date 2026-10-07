@@ -181,8 +181,8 @@ func TestBackupRestoresWholePartitionState(t *testing.T) {
 		}
 
 		// Fencing.
-		if p.Epoch != 7 || p.EpochLeader != "node-1" {
-			t.Errorf("partition %d: restored epoch %d held by %q, want 7 held by node-1", p.ID, p.Epoch, p.EpochLeader)
+		if p.Epoch() != 7 || p.EpochLeader() != "node-1" {
+			t.Errorf("partition %d: restored epoch %d held by %q, want 7 held by node-1", p.ID, p.Epoch(), p.EpochLeader())
 		}
 
 		// Timers are not in a backup; they come back from the log.

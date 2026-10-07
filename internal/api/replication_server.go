@@ -32,10 +32,10 @@ type ReplicationServiceHandler struct {
 // acceptLeader applies the fencing rules for a request from leaderID at term.
 // The caller holds p.ReplicateMu.
 func (h *ReplicationServiceHandler) acceptLeader(p *partition.Partition, term int64, leaderID string) error {
-	if term <= 0 || term < p.Epoch {
-		return fmt.Errorf("invalid or stale term %d; current %d", term, p.Epoch)
+	if term <= 0 || term < p.Epoch() {
+		return fmt.Errorf("invalid or stale term %d; current %d", term, p.Epoch())
 	}
-	if term > p.Epoch && p.Leader {
+	if term > p.Epoch() && p.IsLeader() {
 		// A newer leader exists. Stop leading before taking its writes, so this
 		// node cannot keep acknowledging publishes under the old term.
 		if err := h.partitionManager.DemoteFromLeader(p.ID); err != nil {
@@ -78,10 +78,10 @@ func (h *ReplicationServiceHandler) Append(ctx context.Context, req *types.Repli
 	p.ReplicateMu.Lock()
 	defer p.ReplicateMu.Unlock()
 	reject := func(reason string) (*types.ReplicationAppendResponse, error) {
-		return &types.ReplicationAppendResponse{Success: false, Error: reason, LastOffset: p.Wal.GetLastOffset(), NextOffset: p.Wal.GetNextOffset(), Term: p.Epoch}, nil
+		return &types.ReplicationAppendResponse{Success: false, Error: reason, LastOffset: p.Wal.GetLastOffset(), NextOffset: p.Wal.GetNextOffset(), Term: p.Epoch()}, nil
 	}
-	if req.GetTerm() <= 0 || req.GetTerm() < p.Epoch {
-		return reject(fmt.Sprintf("invalid or stale term %d; current %d", req.GetTerm(), p.Epoch))
+	if req.GetTerm() <= 0 || req.GetTerm() < p.Epoch() {
+		return reject(fmt.Sprintf("invalid or stale term %d; current %d", req.GetTerm(), p.Epoch()))
 	}
 	events := req.GetEvents()
 	if len(events) > 0 {
@@ -168,7 +168,7 @@ func (h *ReplicationServiceHandler) Append(ctx context.Context, req *types.Repli
 		Success:    true,
 		LastOffset: p.Wal.GetLastOffset(),
 		NextOffset: p.Wal.GetNextOffset(),
-		Term:       p.Epoch,
+		Term:       p.Epoch(),
 	}, nil
 }
 
@@ -381,7 +381,7 @@ func (h *ReplicationServiceHandler) Snapshot(req *types.ReplicationSnapshotReque
 						Success:    false,
 						Error:      fmt.Sprintf("snapshot exceeded max_bytes limit %d", maxBytes),
 						LastOffset: lastOffset,
-						Epoch:      p.Epoch,
+						Epoch:      p.Epoch(),
 					},
 				},
 			})
@@ -437,7 +437,7 @@ func (h *ReplicationServiceHandler) Snapshot(req *types.ReplicationSnapshotReque
 			Trailer: &types.ReplicationSnapshotTrailer{
 				Success:    true,
 				LastOffset: lastOffset,
-				Epoch:      p.Epoch,
+				Epoch:      p.Epoch(),
 			},
 		},
 	})

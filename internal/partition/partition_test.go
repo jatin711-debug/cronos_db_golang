@@ -180,7 +180,7 @@ func TestPartitionManager_GetStats(t *testing.T) {
 	}
 
 	pm.CreatePartition(0, "topic-0")
-	pm.partitions[0].Leader = true
+	pm.partitions[0].leader.Store(true)
 
 	stats = pm.GetStats()
 	if stats.TotalPartitions != 1 {
