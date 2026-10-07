@@ -569,10 +569,11 @@ flag-only).
 | `-raft-dir` | `./raft` | Raft data directory |
 | `-raft-join` | *(empty)* | Raft cluster join address |
 | `-cluster` | `false` | Enable cluster mode |
-| `-cluster-gossip-addr` | `:7946` | Cluster gossip UDP listen address |
+| `-cluster-gossip-addr` | `:7946` | Cluster membership (gossip) TCP address; other nodes reach this node by it |
 | `-cluster-grpc-addr` | `:7947` | Cluster internal gRPC listener (`InternalGRPCServer`, replication + Raft) |
 | `-cluster-raft-addr` | `:7948` | Cluster Raft listen address |
-| `-cluster-seeds` | *(empty)* | Comma-separated seed node addresses |
+| `-cluster-seeds` | *(empty)* | Comma-separated membership addresses of the cluster's nodes. Name every node, on every node |
+| `-cluster-bootstrap` | `false` | This node creates the cluster, if it has no state and no other node in `-cluster-seeds` belongs to one. Give it to exactly one node |
 | `-cluster-expected-nodes` | `0` | Nodes a new cluster starts with; partitions get their first leaders as soon as that many are up (`1` for a single-node cluster). `0` = unknown |
 | `-cluster-formation-wait` | `5s` | With the expected nodes unknown or not all up: how long membership must be unchanged before first leaders are assigned; publishes are refused with a retryable error until then. `0` assigns at once |
 | `-virtual-nodes` | `2048` | Virtual nodes per physical node in hash ring |
@@ -630,6 +631,7 @@ other flags are flag-only. The variables registered in `internal/config/config.g
 | `CRONOS_DEV` | `-dev` |
 | `CRONOS_CLUSTER` | `-cluster` |
 | `CRONOS_CLUSTER_SEEDS` | `-cluster-seeds` |
+| `CRONOS_CLUSTER_BOOTSTRAP` | `-cluster-bootstrap` |
 | `CRONOS_TLS_ENABLED` | `-tls-enabled` |
 | `CRONOS_TLS_CA_FILE` | `-tls-ca-file` |
 | `CRONOS_TLS_CERT_FILE` | `-tls-cert-file` |
