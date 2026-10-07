@@ -131,6 +131,15 @@ func (h *HealthChecker) handleReady(w http.ResponseWriter, r *http.Request) {
 		} else {
 			checks["cluster"] = HealthCheck{Status: "up", Detail: fmt.Sprintf("%d/%d nodes alive", clusterStats.AliveNodes, clusterStats.TotalNodes), Healthy: true}
 		}
+		// Ready means publishes are served, not merely that the process is up:
+		// partitions without a leader, or still being loaded on this node,
+		// refuse them.
+		if ready, detail := h.ClusterMgr.LeadershipReady(); ready {
+			checks["leadership"] = HealthCheck{Status: "up", Detail: detail, Healthy: true}
+		} else {
+			checks["leadership"] = HealthCheck{Status: "down", Detail: detail, Healthy: false}
+			healthy = false
+		}
 	}
 
 	resp := DeepHealthResponse{
