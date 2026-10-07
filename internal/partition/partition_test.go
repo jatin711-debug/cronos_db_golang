@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jatin711-debug/cronos_db_golang/internal/delivery"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 )
@@ -351,5 +352,37 @@ func TestWalDiskSize_Empty(t *testing.T) {
 	}
 	if size != 0 {
 		t.Errorf("expected size 0, got %d", size)
+	}
+}
+
+// The delivery settings an operator configures reach the dispatcher. They
+// were parsed and then ignored: every partition ran on built-in defaults.
+func TestDeliveryConfigComesFromTheServerConfiguration(t *testing.T) {
+	defaults := delivery.DefaultConfig()
+	if got := deliveryConfig(&types.Config{}); *got != *defaults {
+		t.Fatalf("an unset configuration gives %+v, want the defaults %+v", *got, *defaults)
+	}
+
+	got := deliveryConfig(&types.Config{
+		DefaultAckTimeout:              2 * time.Second,
+		MaxRetries:                     9,
+		RetryBackoff:                   250 * time.Millisecond,
+		MaxDeliveryCredits:             64,
+		CircuitBreakerFailureThreshold: 0.9,
+		CircuitBreakerMinAttempts:      3,
+		CircuitBreakerOpenDurationMs:   1500,
+	})
+	want := delivery.Config{
+		MaxRetries:                     9,
+		DefaultAckTimeout:              2 * time.Second,
+		MaxDeliveryCredits:             64,
+		RetryBackoff:                   250 * time.Millisecond,
+		MaxInFlightEvents:              defaults.MaxInFlightEvents,
+		CircuitBreakerFailureThreshold: 0.9,
+		CircuitBreakerOpenDurationMs:   1500,
+		CircuitBreakerMinAttempts:      3,
+	}
+	if *got != want {
+		t.Fatalf("delivery configuration = %+v, want %+v", *got, want)
 	}
 }
