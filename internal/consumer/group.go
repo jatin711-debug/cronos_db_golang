@@ -134,13 +134,42 @@ func (g *GroupManager) CreateGroup(groupID, topic string, partitions []int32) er
 	return nil
 }
 
-// GetGroup returns the consumer group with groupID, if it exists.
+// GetGroup returns a copy of the consumer group with groupID, if it exists.
 func (g *GroupManager) GetGroup(groupID string) (*types.ConsumerGroup, bool) {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 
 	group, exists := g.groups[groupID]
-	return group, exists
+	if !exists {
+		return nil, false
+	}
+	return copyGroup(group), true
+}
+
+// copyGroup returns a copy of a group that shares nothing with it. The
+// manager's own group objects change under its lock, their maps included, so
+// handing one out would let a reader race with a commit: reading a map while
+// it is written ends the process.
+func copyGroup(group *types.ConsumerGroup) *types.ConsumerGroup {
+	out := *group
+	out.Partitions = append([]int32(nil), group.Partitions...)
+	out.CommittedOffsets = make(map[int32]int64, len(group.CommittedOffsets))
+	for partitionID, offset := range group.CommittedOffsets {
+		out.CommittedOffsets[partitionID] = offset
+	}
+	out.MemberOffsets = make(map[string]int64, len(group.MemberOffsets))
+	for memberID, offset := range group.MemberOffsets {
+		out.MemberOffsets[memberID] = offset
+	}
+	out.Members = make(map[string]*types.ConsumerMember, len(group.Members))
+	for memberID, member := range group.Members {
+		if member != nil {
+			memberCopy := *member
+			member = &memberCopy
+		}
+		out.Members[memberID] = member
+	}
+	return &out
 }
 
 // Close releases any persistent resources held by the group manager, including
@@ -410,14 +439,14 @@ func (g *GroupManager) GetCommittedOffset(groupID string, partitionID int32) (in
 	return -1, nil // Beginning of partition
 }
 
-// ListGroups returns all known consumer groups.
+// ListGroups returns a copy of every known consumer group.
 func (g *GroupManager) ListGroups() []*types.ConsumerGroup {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 
 	groups := make([]*types.ConsumerGroup, 0, len(g.groups))
 	for _, group := range g.groups {
-		groups = append(groups, group)
+		groups = append(groups, copyGroup(group))
 	}
 
 	return groups
