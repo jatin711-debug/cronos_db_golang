@@ -1,9 +1,12 @@
 name: production-checks
 
+# Runs for pull requests and for what reaches main. A commit of another
+# branch is checked on request:
+#   gh workflow run ci.yml --ref <branch>
 on:
   pull_request:
   push:
-    branches: [main, developement]
+    branches: [main]
   workflow_dispatch:
 
 permissions:

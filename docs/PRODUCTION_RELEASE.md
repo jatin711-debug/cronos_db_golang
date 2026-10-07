@@ -95,7 +95,11 @@ resulting application image digest for a release deployment.
 Rust tests, dashboard tests/build, Go/npm vulnerability checks, Helm assertions,
 a scan of the built image for known vulnerabilities, a fault campaign against
 three server processes, and a disposable kind cluster running the production
-chart with security enabled.
+chart with security enabled. It runs for pull requests and for pushes to
+`main`. Work on the development branch is not checked as it is pushed; a
+commit there is checked on request with
+`gh workflow run ci.yml --ref developement`, which is done for every commit a
+release is cut from.
 Make these jobs required in repository branch protection before treating them as
 enforced merge gates. A vulnerability finding fails its job; it is not silently
 waived.
@@ -165,7 +169,8 @@ been measured.
 
 ## What a release promises, and what that rests on
 
-Each promise below is checked on every push by the test named with it. The
+Each promise below is checked by the test named with it, in CI: for every pull
+request, for every push to `main`, and for the commit of a release. The
 tests run three server processes on one machine at about 60 small events a
 second; the last column says what they do not show.
 
@@ -187,7 +192,10 @@ measured on production hardware.
 ## Before a final release
 
 Release candidates are cut from the development branch when CI is green on
-the commit. The next is `v0.6.0-rc.3`. A final `v0.6.0` still needs:
+the commit. The current one is `v0.6.0-rc.3`. It is published as the latest
+release and as the `latest` image, in place of v0.5.0 and v0.4.0, which have
+defects it fixes; it is a release candidate all the same. A final `v0.6.0`
+still needs:
 
 - The five CI jobs made required in branch protection. Today a red run does
   not stop a merge:
