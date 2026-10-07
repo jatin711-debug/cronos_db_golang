@@ -72,10 +72,10 @@ The runtime is composed in `cmd/api/main.go` in this order:
 
 1. Load config (includes production validation unless `--dev`) and install hot-reload listener.
 2. Initialize guardrails (`audit`, `schema`, `tenant`, `cdc`, `slo`, `tracing`).
-3. Initialize partition manager with shared Pebble cache.
+3. Initialize partition manager with shared Pebble cache, and give it the change feed for CDC and cross-region replication before any partition exists.
 4. Start operational loops (`disk_pressure`, `backup_scheduler`, retention enforcer).
 5. If cluster mode: start cluster manager (`raft` + membership + router), join seeds.
-6. Create initial partitions (standalone: all; cluster: partition 0 then lazy-create) and wire WAL append hooks (CDC + cross-region with `source_region` echo guard).
+6. Create initial partitions (standalone: all; cluster: partition 0 then lazy-create). Each partition created, now or later, starts its change feed.
 7. Build **public** gRPC (`:9000`): Event, ConsumerGroup, Partition, Admin + Transaction handler (PM-injected).
 8. Build **internal** gRPC (`:7947`): Replication, Raft, CrossRegion (optional replication mTLS).
 9. Start HTTP (`:8080`): health, metrics, embedded dashboard `/ui/`, `/api/admin/*`.
@@ -102,6 +102,7 @@ sequenceDiagram
     Main->>Main: --dev relaxes production security gates
     Main->>Guard: Init audit, schema, tenant, CDC sinks, tracing, SLO
     Main->>PM: NewPartitionManagerWithCache(shared Pebble cache)
+    Main->>PM: SetChangeFeed (CDC sinks + cross-region, echo guard)
     Main->>BG: Disk monitor, backup scheduler, retention ticker
     alt cluster enabled
         Main->>Cluster: NewManager + SetPartitionAccessor
@@ -109,7 +110,6 @@ sequenceDiagram
         Main->>Cluster: JoinCluster seeds when provided
     end
     Main->>PM: Create/start partitions<br/>(standalone: all, cluster: partition 0 then lazy)
-    Main->>PM: Wire WAL appendHook CDC + cross-region echo guard
     Main->>Pub: NewGRPCServer + interceptors
     Main->>Pub: SetTransactionHandler (PM-injected 2PC)
     Main->>Pub: RegisterServices: Event, ConsumerGroup, Partition, Admin, Transaction
@@ -432,7 +432,7 @@ flowchart TB
       BFollower[Follower]
     end
 
-    ALeader -->|Append hook batch| BIngress
+    ALeader -->|Change feed batch| BIngress
     BIngress -->|PublishBatch| BLeader
     BLeader -->|Replication Append| BFollower
     ALeader -->|Replication Append| AFollower1
@@ -523,13 +523,12 @@ stateDiagram-v2
   - `internal/cdc/kafka_sink.go`
   - `internal/cdc/webhook_sink.go`
 - Main flow:
-  - WAL append hook emits change events to the CDC manager.
-  - A bounded worker pool (`DefaultCDCWorkers=4`, queue size 10,000) fans out asynchronously to configured sinks.
-  - `Emit` is non-blocking and drops events when the queue is full to protect the primary write path.
-  - `Close` drains in-flight work gracefully before exiting.
+  - Each partition's change feed (`internal/partition/changefeed.go`) reads the log behind the accepted watermark and hands events over in log order, on the partition's leader only.
+  - `cdc.Manager.Deliver` writes each batch to every sink in order and reports failure; the feed then offers the same events again.
+  - The feed's position is stored per partition and sent to followers, so restarts and failovers continue it.
 - Reliability decisions:
-  - Sink failures are isolated and do not block primary write path.
-  - Bounded concurrency and queue limits bound memory and goroutine growth under backpressure.
+  - Publishing never waits for a sink: a failing sink makes its partition's feed lag, and nothing is dropped.
+  - Nothing queues in memory; events stay in the log until they are handed over.
 
 ### 6.19 Auth and Audit
 

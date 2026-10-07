@@ -337,14 +337,14 @@ Check "order-123":
 ```
 
 **Math**:
-- 100M items, 1% false positive rate → ~12MB memory
-- 0.1% FPR → ~17MB
+- 1% false positive rate needs about 10 bits per item: 100M items → ~120MB memory
+- 0.1% FPR needs about 15 bits per item → ~180MB
 - Check time: O(K) = ~7 hash operations = ~40 nanoseconds
 
 **Why this is perfect for dedup**:
 - 99% of checks: "definitely new" → skip disk entirely
 - 1% of checks: "maybe" → check disk to confirm
-- 100M items in 12MB instead of 6.4GB
+- 100M items in ~120MB instead of 6.4GB
 
 ### 4.3 Two-Tier Deduplication
 
@@ -976,7 +976,7 @@ Segment 2 fills up → Instant swap to Segment 3 (already ready)
 | Sparse index | Every 1000 events | O(log N) lookup without full index memory |
 | Timing wheel | Hierarchical circular buffers | O(1) timer ops for millions of events |
 | Cold store | PebbleDB LSM tree | Range scans + compaction + bounded memory |
-| Bloom filter | Rust FFI + AtomicU64 | 40ns checks, lock-free, 12MB for 100M items |
+| Bloom filter | Rust FFI + AtomicU64 | 40ns checks, lock-free, ~120MB for 100M items |
 | PebbleDB fallback | LSM tree with TTL | Exact dedup + automatic expiration |
 | 32-shard dispatcher | Sharded hash maps | Lock contention ÷ 32 |
 | Credit flow control | Atomic CAS counters | Lock-free backpressure |

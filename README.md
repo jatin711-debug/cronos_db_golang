@@ -38,7 +38,7 @@ Ryzen 7 6800H host. See the [measurement settings and baseline comparison](docs/
 - **Configurable Fsync** — `every_event` | `batch` (default) | `periodic` modes
 - **Automatic Compaction** — Removes closed standalone WAL segments only after every relevant consumer group has completed every event
 - **Retention Enforcer** — Age/size policies use the same completion checks and preserve future timers and active segments; clustered/replicated pruning is disabled pending durable cluster-wide completion and handoff watermarks
-- **Backups** — Hourly independent backups of every loaded partition: event log including the active segment, consumer progress, dedup store, dead-letter queue and epoch, with per-file checksums; `cronos-admin restore` verifies and restores one into an empty data directory (see [maintenance validation](docs/MAINTENANCE_VALIDATION_2026-09-29.md))
+- **Backups** — Hourly independent backups of every loaded partition: event log including the active segment, consumer progress, dedup store, dead-letter queue and epoch, with per-file checksums and all logs cut at one instant; `cronos-admin restore` verifies and restores one into an empty data directory, and can check the encryption key first (see [maintenance validation](docs/MAINTENANCE_VALIDATION_2026-09-29.md))
 - **Hierarchical Timing Wheel** — O(1) timer add/remove/tick for millions of events
 - **Two-Tier Cold/Hot Scheduler** — PebbleDB cold store for far-future events (>1hr); adaptive hydrator adjusts scan frequency based on load (5s–5min). Keeps hot memory bounded.
 - **Absolute Time Tracking** — No drift across overflow wheel cascades
@@ -54,7 +54,7 @@ Ryzen 7 6800H host. See the [measurement settings and baseline comparison](docs/
 - **Credit-Based Flow Control** — Backpressure prevents consumer overload
 - **Non-Blocking Retry Heap** — Min-heap by `retryAt` keeps `timeoutLoop` responsive; no inline `time.Sleep`
 - **Per-Subscription Circuit Breaker** — Atomic state machine (Closed→Open→HalfOpen) skips dead subscribers automatically
-- **At-Least-Once Semantics** — Ack-based with configurable retry + exponential backoff
+- **At-Least-Once Semantics** — Ack-based, with configurable retries whose delay grows with each attempt (`-retry-backoff` × attempt)
 - **Dead Letter Queue** — Append-only binary segments (CRC32, 64MB rotation) for inspection/replay
 - **32-Shard Dispatcher** — Reduced lock contention under high concurrency
 
@@ -555,7 +555,7 @@ flag-only).
 | `-max-in-flight` | `500000` | Max in-flight deliveries per partition (admission control) |
 | `-ack-timeout` | `30s` | Default delivery ack timeout |
 | `-max-retries` | `5` | Maximum delivery retry attempts |
-| `-retry-backoff` | `1s` | Initial retry backoff |
+| `-retry-backoff` | `1s` | Delay before a retry, multiplied by the attempt number |
 | `-max-credits` | `1000` | Max delivery credits per subscriber |
 | `-cb-failure-threshold` | `0.5` | Circuit breaker failure rate to trip (0.0–1.0) |
 | `-cb-min-attempts` | `10` | Min attempts before circuit breaker evaluates |

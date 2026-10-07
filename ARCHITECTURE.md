@@ -285,7 +285,7 @@ sequenceDiagram
     gRPC->>CG: CommitOffset(group, partition, offset)
 
     alt Ack timeout after 30s
-        DSP->>DSP: Retry with exponential backoff
+        DSP->>DSP: Retry after attempt × backoff
     end
 
     alt Max retries exceeded
@@ -608,7 +608,7 @@ graph TB
 - XxHash64 double hashing
 - AtomicU64 bit arrays (lock-free)
 - Rayon parallel batch check for 100+ keys
-- ~12MB per 100M items at 1% false positive rate
+- About 10 bits per ID at a 1% false positive rate: ~120 MB for the default capacity of 100M IDs, allocated on first use
 
 **Tier 2 - PebbleDB (Persistent):**
 - 64MB memtable (vs 4MB default)
@@ -891,21 +891,32 @@ sequenceDiagram
 
 ## Change Data Capture
 
-CDC forwards committed WAL events to external sinks using a bounded worker pool for predictable resource usage.
+CDC hands every accepted event to external sinks. It reads a per-partition
+**change feed** from the log; nothing runs on the append path.
 
 ```mermaid
 graph LR
-    WAL[WAL Commit] -->|New event| CDC[CDC Dispatcher]
-    CDC --> Q[Bounded Queue - size 10000]
-    Q --> W[Worker Pool - DefaultCDCWorkers=4]
-    W --> S1[Sink A]
-    W --> S2[Sink B]
+    WAL[Partition log] -->|behind the accepted watermark| Feed[Change feed<br/>one per partition, leader only]
+    Feed -->|batches in log order| CDC[cdc.Manager.Deliver]
+    CDC --> S1[Kafka sink]
+    CDC --> S2[Webhook sink]
+    Feed -->|same events| XR[Cross-region replicator]
+    Feed -.->|position, at most once a second| Pos[changefeed.json<br/>+ sent to followers]
 ```
 
 **Behavior:**
-- `Emit` blocks for up to `DefaultCDCWriteTimeout` (5s) waiting for queue capacity.
-- Events are dropped with a warning if the queue is still full after that timeout.
-- `Close` drains workers and sinks gracefully.
+- An event is handed over only once its publish is accepted: not while the
+  publish is in flight, not while it is held after failing past the append,
+  and, on a replicated partition, not before it is on `min-insync-replicas`
+  replicas.
+- Events leave in log order, from the partition's leader only.
+- A sink that fails is offered the same events again (100 ms to 5 s apart).
+  Nothing is dropped and nothing queues in memory; the feed lags instead, and
+  publishing never waits for it.
+- The feed's position survives restarts and is handed to followers, so a new
+  leader continues it. Delivery to sinks is at least once.
+
+Details and limits: [docs/architecture/features/cdc.md](docs/architecture/features/cdc.md).
 
 ---
 

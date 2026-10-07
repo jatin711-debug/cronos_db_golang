@@ -58,7 +58,10 @@ A follower with more than four batches outstanding is skipped for new
 batches instead of queueing without bound; it is caught up from the WAL by
 its next send, or by the leader's maintenance loop (every 500 ms) when the
 partition is otherwise idle. A follower whose log is empty is caught up from
-offset 0 the same way.
+offset 0 the same way. A follower that has not acknowledged anything yet is
+first asked where its log ends, with an append that carries no entries;
+without that, an idle partition would neither catch it up nor learn what is on
+a quorum after a failover until somebody published.
 For very long catch-up ranges the leader may also serve
 `ReplicationService.Sync`, a server-streaming RPC that returns
 `ReplicationSyncResponse` chunks of decoded events.
@@ -78,7 +81,11 @@ Newly joined replicas or freshly wiped followers are initialized via
    `ReplicationSnapshotChunk` data frames.
 3. The follower stages files under
    `<dataDir>/snapshot-staging/{segments,index}/`, computing a running
-   CRC32 over each file as it lands.
+   CRC32 over each file as it lands. If the transfer breaks, the files that
+   arrived stay staged: the next attempt lists them with their sizes and
+   checksums, and the leader sends only the files that are missing or
+   different, answering the others with a header marked `reuse`. Staged files
+   the leader no longer has are removed.
 4. Each file's size and CRC32 are checked against its header as it
    completes. The trailer carries the source's epoch: a source behind the
    epoch this replica has accepted was superseded as leader, and its snapshot
@@ -125,7 +132,14 @@ paused only while it notes where each file ends.
   remaining replicas where their logs end (`ReplicationService.Position`) and
   elects the most complete one. It needs `replicas - minISR + 1` answers to be
   sure every acknowledged write is on a replica that answered; with fewer it
-  waits, except when the leader alone acknowledged writes (`minISR` 1).
+  waits, except when the leader alone acknowledged writes (`minISR` 1). The
+  new epoch is above every epoch the replicas report, not just above the
+  cluster's own count.
+- **First assignment.** A partition's first leader is chosen the same way:
+  the Raft leader asks the replicas what they hold. A restored cluster thereby
+  continues from its backups, led by the most complete replica at an epoch
+  above the ones stored with the data, without needing Raft metadata from the
+  cluster that took the backups.
 - **Handoff.** When the ring prefers another live replica, the Raft leader
   commits the intent first. The current leader then refuses publishes; once it
   reports that none is in flight and the target's log ends at the same entry,
@@ -134,7 +148,9 @@ paused only while it notes where each file ends.
 - **Consumer progress.** The leader sends each consumer group's completed work
   to its followers (`ReplicationService.SyncConsumerProgress`) whenever it
   changes and at least every 30 seconds, so a promoted follower does not
-  redeliver it.
+  redeliver it. The same message carries the position of the partition's
+  change feed, so a promoted follower continues exporting where the old
+  leader stopped (see [cdc.md](cdc.md)).
 
 ## Publishes that fail after the append
 
@@ -252,7 +268,7 @@ flowchart TB
       ALeader[Leader partition]
       AFollower1[Follower 1]
       AFollower2[Follower 2]
-      AHook[WAL appendHook]
+      AHook["Change feed: accepted events, leader only"]
     end
     subgraph RegionB
       BInternal["Internal gRPC :7947<br/>CrossRegionService"]

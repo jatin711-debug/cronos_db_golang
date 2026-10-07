@@ -28,8 +28,22 @@ hardening changes were preserved.
   directory and provide the original key for encrypted data; timers are rebuilt
   from the log. Tests restore plaintext and encrypted logs after later source
   writes, a whole partition's state into a fresh node, and damaged, incomplete
-  and misplaced backups. Outside a backup's scope: Raft metadata, encryption
-  keys, credentials, and consistency across partitions.
+  and misplaced backups.
+- Since 2026-10-07 the logs of all partitions on a node are cut at one
+  instant, recorded as `cut_at` in the manifest, and scheduled backups start at
+  wall-clock multiples of the interval, so the nodes of a cluster take theirs
+  at the same moment as far as their clocks agree. For an encrypted log the
+  manifest carries a value that identifies the key without containing it;
+  `cronos-admin restore --encryption-key-file` checks the key against it before
+  anything is written, and a wrong key leaves the data directory untouched.
+- A backup holds no key material, credentials or Raft metadata. It does not
+  need the last: when a restored cluster forms, placement is recomputed, each
+  partition is first led by the replica with the most complete log, and epochs
+  continue above those stored with the data. The backups of different nodes
+  remain separate copies that agree only as closely as the schedule and the
+  clocks do, which is why the most complete replica leads. This path is
+  tested with stand-in replicas; a restore of a real multi-node cluster has
+  not been run.
 - Automatic compaction and both admin APIs use the live WAL's deletion lock.
   Every event must be past due and have a per-event completion record in every
   matching assigned consumer group. No matching group means keep the event.
@@ -57,8 +71,9 @@ reopen and a ledger of all accepted IDs. The gRPC pipeline regression publishes,
 delivers and ACKs 64 unique events, checks durable completion, takes a checkpoint,
 prunes completed records, and verifies that a future timer remains readable.
 
-The CDC error test now waits for worker shutdown and checks the implemented
-initial attempt plus three retries; its former 100 ms sleep raced the first retry.
+The CDC tests were rewritten on 2026-10-07 for ordered, retryable delivery:
+order across sinks, a failing sink resuming without the others receiving
+anything twice, and refusal after shutdown.
 
 ## Throughput method
 

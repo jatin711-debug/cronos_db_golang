@@ -23,9 +23,13 @@ The cluster module provides node membership, partition routing, leader assignmen
 2. Router computes partition placement, and the leader it would prefer, via
    the consistent hash ring.
 3. The Raft leader commits each partition's assignment. A partition that has
-   never had a leader gets one five seconds after membership last changed, so
-   a cluster whose nodes start one after another is assigned once, across all
-   of them.
+   never had a leader gets one as soon as `--cluster-expected-nodes` nodes are
+   up, or once membership has been unchanged for `--cluster-formation-wait`
+   (5 s), so a cluster whose nodes start one after another is assigned once,
+   across all of them. It first asks the partition's replicas what they
+   already hold: in a new cluster nothing, and the ring's choice stands; after
+   a restore the replica with the most complete log leads, at an epoch above
+   any a replica has accepted.
 4. Each node acts on the committed assignments only: it leads what is
    committed to it, follows what it is a replica of, and unloads what it no
    longer holds. A partition with no committed assignment has no leader.
@@ -36,6 +40,8 @@ The cluster module provides node membership, partition routing, leader assignmen
 ## Production Decisions
 
 - Production clusters require `--replication-factor>=3` and `--min-insync-replicas>=2`.
+- A node skips its own entry in the seed list, introduces itself to every other seed and keeps retrying the ones that do not answer. Nodes that start together therefore find each other in any order; a node that cannot reach its cluster stays not ready.
+- A node asked where a partition's log ends answers from disk if the partition is not loaded, which is the state of every partition after a restart. Elections and first assignments would otherwise take a restarted replica for an empty one.
 - Replication traffic is secured with mTLS via `--replication-tls-*` in production (see [replication.md](replication.md)).
 - Configurable virtual nodes improve partition leadership balance (default `2048`, raised from the older `150` because sparse vnode counts produced severe ownership skew in small clusters).
 - Consensus metadata is persisted with Raft and Bolt-backed storage.
