@@ -205,10 +205,7 @@ func TestOverloadIsRefusedAndSurvived(t *testing.T) {
 		}
 		time.Sleep(time.Second)
 	}
-	events.mu.Lock()
-	early := events.early
-	events.mu.Unlock()
-	if len(early) > 0 {
+	if early := events.tooEarly(); len(early) > 0 {
 		t.Errorf("%d deliveries arrived before their scheduled time:\n  %s", len(early), sample(early, 15))
 	}
 }

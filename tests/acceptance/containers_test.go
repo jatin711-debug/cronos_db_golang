@@ -3,11 +3,14 @@
 package acceptance
 
 import (
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -144,10 +147,28 @@ func (c *cluster) startContainer(n *node) {
 	if n.created {
 		c.docker("start", n.container)
 	} else {
-		args := []string{"run", "-d", "--name", n.container, "--network", c.network,
-			"-p", n.grpcAddr + ":9000", "-p", n.httpAddr + ":8080",
-			"-v", c.certDir + ":/certs:ro", c.image}
-		c.docker(append(args, c.args(n)...)...)
+		// The ports this machine reaches the node through were free when they
+		// were chosen. Docker binds them a moment later, and can be slow to
+		// give back those of containers it has just removed; then others are
+		// chosen. Nothing knows a node's ports before it has started.
+		for attempt := 1; ; attempt++ {
+			args := []string{"run", "-d", "--name", n.container, "--network", c.network,
+				"-p", n.grpcAddr + ":9000", "-p", n.httpAddr + ":8080",
+				"-v", c.certDir + ":/certs:ro", c.image}
+			out, err := docker(append(args, c.args(n)...)...)
+			if err == nil {
+				break
+			}
+			// A container that could not start exists all the same.
+			_, _ = docker("rm", "-f", "-v", n.container)
+			taken := strings.Contains(out, "address already in use") || strings.Contains(out, "port is already allocated")
+			if !taken || attempt == 5 {
+				c.t.Fatalf("docker run %s: %v\n%s", n.container, err, out)
+			}
+			ports := freePorts(c.t, 2)
+			n.grpcAddr, n.httpAddr = fmt.Sprintf("127.0.0.1:%d", ports[0]), fmt.Sprintf("127.0.0.1:%d", ports[1])
+			c.note(n, "a port was taken; starting with others")
+		}
 		n.created = true
 	}
 	n.up, n.frozen = true, false
@@ -221,6 +242,58 @@ func (c *cluster) heal() {
 			c.note(n, "links restored")
 		}
 	}
+}
+
+// watchClocks measures, for as long as the test runs, how far the nodes'
+// clocks are ahead of this machine's, and returns where the most it has seen
+// is kept, in milliseconds.
+//
+// Containers do not always run on this machine's clock: where Docker keeps
+// them in a virtual machine, that machine has its own, and the two differ by
+// milliseconds, by a different number from one moment to the next. A node
+// delivers by its clock and the test judges by this one's, so the test has to
+// know the difference, and one measurement does not tell it.
+//
+// Each node is asked for its time again and again. A node stamps its answer
+// after the question was sent, so its time less the time the question was
+// sent is the most its clock can be ahead; it is too much by however long
+// the question took to arrive, which is why slow answers are left out.
+func (c *cluster) watchClocks() *atomic.Int64 {
+	most := &atomic.Int64{}
+	stop := make(chan struct{})
+	c.t.Cleanup(func() { close(stop) })
+	go func() {
+		httpClient := http.Client{Timeout: 2 * time.Second}
+		for {
+			for _, n := range c.nodes {
+				if !n.running() {
+					continue
+				}
+				asked := time.Now()
+				resp, err := httpClient.Get("http://" + n.httpAddr + "/health/deep")
+				if err != nil {
+					continue
+				}
+				var health struct {
+					Timestamp int64 `json:"timestamp"`
+				}
+				err = json.NewDecoder(resp.Body).Decode(&health)
+				_ = resp.Body.Close()
+				if err != nil || health.Timestamp == 0 || time.Since(asked) > 25*time.Millisecond {
+					continue
+				}
+				if ahead := health.Timestamp - asked.UnixMilli(); ahead > most.Load() {
+					most.Store(ahead)
+				}
+			}
+			select {
+			case <-stop:
+				return
+			case <-time.After(300 * time.Millisecond):
+			}
+		}
+	}()
+	return most
 }
 
 // others returns the nodes that are not n.

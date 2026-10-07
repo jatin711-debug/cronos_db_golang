@@ -124,9 +124,19 @@ acknowledged event was not delivered, if one arrived before its time, or if
 the replicas of a partition do not end with the same log. Its nodes speak
 mutual TLS with each other, as production nodes do. Run it locally with
 `go test -tags acceptance -count=1 -timeout 20m ./tests/acceptance/`; it needs
-about 500 MB of memory. It stops and kills processes. It does not cut network
-links, and it publishes about 60 events a second, so it says nothing about
-network partitions or behavior under load.
+about 500 MB of memory. It stops and kills processes, and it publishes about
+60 events a second, so it says nothing about behavior under load.
+
+Processes on one machine cannot be cut off from one another, so the network
+is failed in a test of its own. `TestNetworkPartitions` runs three containers
+of the image on a network of their own and drops what chosen nodes send each
+other, without a word, as a failed link does, while all three keep running
+and applications still reach every one of them: the leader of a partition on
+its own, one link down between two nodes that both still reach the third,
+each node on its own in turn, and every link down. The same checks apply as
+for the other faults. It runs in the `production-chart-startup` job, which
+has built the image, and locally with
+`CRONOS_IMAGE=<image> go test -tags acceptance -run TestNetworkPartitions ./tests/acceptance/`.
 
 The same job restores a whole cluster from backups
 (`TestClusterRestoredFromBackups`): three nodes back up while publishes
@@ -180,7 +190,8 @@ second; the last column says what they do not show.
 
 | Promise | Checked by | Not shown |
 |---|---|---|
-| A publish that was acknowledged survives the loss of any one node (replication factor 3, two in-sync replicas, fsync `batch` or `every_event`) | `TestFaultCampaign`: a leader killed, a follower killed, a leader frozen and released, every node restarted, a node replaced with an empty one and killed while it is refilled, the whole cluster killed | Two nodes' disks lost together; network partitions; loss of power on a real machine (the tests kill processes) |
+| A publish that was acknowledged survives the loss of any one node (replication factor 3, two in-sync replicas, fsync `batch` or `every_event`) | `TestFaultCampaign`: a leader killed, a follower killed, a leader frozen and released, every node restarted, a node replaced with an empty one and killed while it is refilled, the whole cluster killed | Two nodes' disks lost together; loss of power on a real machine (the tests kill processes) |
+| The same holds when the network between the nodes fails while all of them keep running, and a node that is cut off acknowledges nothing | `TestNetworkPartitions`: links cut between three containers of the image: a leader alone, one link down, each node alone in turn, every link down | Slow or lossy links, as opposed to dead ones; outages longer than a minute; more than one machine |
 | Every acknowledged event is delivered at least once, and never before its time | The ledger of the same test, and of the restore and overload tests | Exactly once: after a failover some events are delivered again |
 | The replicas of a partition hold the same log | `TestFaultCampaign` compares them entry for entry | |
 | A partition takes publishes again within 90 seconds of its leader's death | The bound the campaign enforces | Typical times; behavior under load |
@@ -206,8 +217,8 @@ still needs:
   `gh api -X PUT repos/<owner>/<repo>/branches/main/protection` with
   `required_status_checks.contexts` set to `go`, `fault-campaign`,
   `dashboard-and-chart`, `go-security` and `production-chart-startup`.
-- A run on more than one machine, with links cut between them. Everything
-  above was shown with processes on one host.
+- A run on more than one machine. Everything above was shown on one host,
+  with processes or with containers; links were cut between containers.
 - A replica refilled from a partition larger than 1 GiB. The transfer has no
   size limit and resumes file by file, and has a ten minute deadline; it has
   only been run on megabytes.
