@@ -184,6 +184,18 @@ func (d *DeadLetterQueue) writeTombstone(deliveryID string) error {
 	return d.writer.WriteEntry(data)
 }
 
+// Checkpoint copies the queue's segment files into destDir for a backup. The
+// copy includes the tombstones of removed and retried entries, so a queue
+// opened on it holds exactly the entries this one does now.
+func (d *DeadLetterQueue) Checkpoint(destDir string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.writer == nil {
+		return nil
+	}
+	return d.writer.Checkpoint(destDir)
+}
+
 // Count returns the number of in-memory DLQ entries.
 func (d *DeadLetterQueue) Count() int {
 	d.mu.RLock()

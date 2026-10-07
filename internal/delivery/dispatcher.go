@@ -120,8 +120,18 @@ type Dispatcher struct {
 	// (successful ack or DLQ). The tenantID is extracted from Event.Meta.
 	OnDeliveryComplete func(tenantID string)
 	IsCompleted        func(group string, offset int64) bool
-	dispatchMu         sync.Mutex
-	pending            sync.Map
+	// OnDeadLettered is called once a delivery's events are safely in the DLQ so
+	// their final disposition can be recorded; they are then not re-driven.
+	OnDeadLettered func(group string, events []*types.Event)
+	dispatchMu     sync.Mutex
+
+	// pending holds, per consumer group, the offsets handed to a subscriber
+	// and not yet acked or abandoned.
+	pendingMu sync.Mutex
+	pending   map[string]map[int64]struct{}
+
+	redriveMu      sync.RWMutex
+	redriveCursors map[*RedriveCursor]struct{}
 }
 
 // DispatcherShard holds a subset of subscriptions and their in-flight deliveries.
@@ -403,15 +413,22 @@ func (d *Dispatcher) Unsubscribe(subscriptionID string) error {
 
 	partitionID := sub.Partition.ID
 
+	var abandoned offsetSpan
 	for deliveryID, active := range shard.activeDeliveries {
 		if active.Subscription != nil && active.Subscription.ID == subscriptionID {
 			if err := d.decInFlight(1); err != nil {
 				log.Printf("[DISPATCHER] in-flight underflow: %v", err)
 			}
-			d.releasePending(sub.ConsumerGroup, deliveryEvents(active.Delivery))
+			events := deliveryEvents(active.Delivery)
+			d.releasePending(sub.ConsumerGroup, events)
+			abandoned.add(events...)
 			delete(shard.activeDeliveries, deliveryID)
 			shard.expiry.remove(deliveryID)
 		}
+	}
+	if abandoned.set {
+		// Unacked work goes back to the group's remaining subscribers.
+		d.RequestRedrive(sub.ConsumerGroup, abandoned.low, abandoned.high)
 	}
 
 	delete(shard.subscriptions, subscriptionID)
@@ -598,21 +615,25 @@ func (d *Dispatcher) DispatchBatch(events []*types.Event) error {
 }
 
 func (d *Dispatcher) dispatchPartitionBatch(partitionID int32, events []*types.Event) error {
-	return d.dispatchGroupBatch(partitionID, events, "")
+	_, _, err := d.dispatchGroupBatch(partitionID, events, "")
+	return err
 }
 
+// DispatchGroup offers events to a single consumer group.
 func (d *Dispatcher) DispatchGroup(group string, events []*types.Event) error {
 	if len(events) == 0 {
 		return nil
 	}
-	return d.dispatchGroupBatch(events[0].PartitionId, events, group)
+	_, _, err := d.dispatchGroupBatch(events[0].PartitionId, events, group)
+	return err
 }
 
-func pendingKey(group string, offset int64) string {
-	return fmt.Sprintf("%d:%s:%d", len(group), group, offset)
-}
-
-func (d *Dispatcher) dispatchGroupBatch(partitionID int32, events []*types.Event, onlyGroup string) error {
+// dispatchGroupBatch assigns events to subscribers and sends them. dispatched
+// counts events handed to a subscriber; blocked reports that an eligible event
+// was held back by flow control or a failed send. On the push path (onlyGroup
+// empty) held-back events are queued for redrive; a redrive caller keeps its
+// own position and retries instead.
+func (d *Dispatcher) dispatchGroupBatch(partitionID int32, events []*types.Event, onlyGroup string) (dispatched int, blocked bool, err error) {
 	d.dispatchMu.Lock()
 	defer d.dispatchMu.Unlock()
 	start := time.Now()
@@ -625,8 +646,32 @@ func (d *Dispatcher) dispatchGroupBatch(partitionID int32, events []*types.Event
 	d.partitionsMu.RUnlock()
 
 	if len(allSubs) == 0 {
-		return nil
+		return 0, false, nil
 	}
+
+	// heldBack records, per group, the offsets this pass could not hand to a
+	// subscriber.
+	var heldBack map[string]*offsetSpan
+	holdBack := func(group string, events ...*types.Event) {
+		blocked = true
+		if onlyGroup != "" {
+			return
+		}
+		span := heldBack[group]
+		if span == nil {
+			if heldBack == nil {
+				heldBack = make(map[string]*offsetSpan, 1)
+			}
+			span = &offsetSpan{}
+			heldBack[group] = span
+		}
+		span.add(events...)
+	}
+	defer func() {
+		for group, span := range heldBack {
+			d.RequestRedrive(group, span.low, span.high)
+		}
+	}()
 
 	consumerGroupSubs := groupSubscriptionsByConsumer(allSubs)
 	defer releaseGroupSubsMap(consumerGroupSubs)
@@ -657,21 +702,27 @@ func (d *Dispatcher) dispatchGroupBatch(partitionID int32, events []*types.Event
 			}
 			// Validate every recipient: concurrent subscription registration may
 			// briefly expose different topic scopes under the same group name.
-			eligible := make([]*Subscription, 0, len(groupSubs))
-			for _, sub := range groupSubs {
+			// The usual case is that every member matches, which needs no copy.
+			for i, sub := range groupSubs {
 				if sub.Topic == "" || sub.Topic == event.Topic {
-					eligible = append(eligible, sub)
+					continue
 				}
+				eligible := append(make([]*Subscription, 0, len(groupSubs)), groupSubs[:i]...)
+				for _, rest := range groupSubs[i+1:] {
+					if rest.Topic == "" || rest.Topic == event.Topic {
+						eligible = append(eligible, rest)
+					}
+				}
+				groupSubs = eligible
+				break
 			}
-			groupSubs = eligible
-			if d.IsCompleted != nil && d.IsCompleted(groupID, event.Offset) {
-				continue
-			}
-			if _, exists := d.pending.Load(pendingKey(groupID, event.Offset)); exists {
-				continue
-			}
-
 			if len(groupSubs) == 0 {
+				continue
+			}
+			if d.isPending(groupID, event.Offset) {
+				continue
+			}
+			if d.IsCompleted != nil && d.IsCompleted(groupID, event.Offset) {
 				continue
 			}
 
@@ -682,14 +733,14 @@ func (d *Dispatcher) dispatchGroupBatch(partitionID int32, events []*types.Event
 			selectedSub := d.pickSubscriber(groupSubs, start)
 			if selectedSub == nil {
 				// No subscriber in this group currently has credits. The event is
-				// not delivered on this pass; surface it as backpressure rather than
-				// dropping silently. It remains durable in the WAL and is re-driven
-				// when the consumer reconnects from its committed offset.
+				// not delivered on this pass; it remains durable in the WAL and is
+				// re-driven from there once the group has credits again.
 				metrics.IncDispatcherBackpressureSkip(strconv.FormatInt(int64(partitionID), 10), "no_credits", 1)
+				holdBack(groupID, event)
 				continue
 			}
 
-			d.pending.Store(pendingKey(groupID, event.Offset), struct{}{})
+			d.markPending(groupID, event.Offset)
 			batchesBySub[selectedSub] = append(batchesBySub[selectedSub], event)
 		}
 	}
@@ -723,6 +774,7 @@ func (d *Dispatcher) dispatchGroupBatch(partitionID int32, events []*types.Event
 			// Credits were consumed per event while assigning.
 			d.releaseCredits(sub, int32(len(batchEvents)))
 			metrics.IncDispatcherBackpressureSkip(strconv.FormatInt(int64(partitionID), 10), "in_flight_cap", len(batchEvents))
+			holdBack(sub.ConsumerGroup, batchEvents...)
 			dispatchErr = fmt.Errorf("in-flight limit exceeded")
 			continue
 		}
@@ -730,6 +782,7 @@ func (d *Dispatcher) dispatchGroupBatch(partitionID int32, events []*types.Event
 		d.trackDelivery(delivery, sub)
 		if err := sub.Stream.Send(delivery); err != nil {
 			d.releasePending(sub.ConsumerGroup, batchEvents)
+			holdBack(sub.ConsumerGroup, batchEvents...)
 			shard := d.getShard(sub.ID)
 			shard.mu.Lock()
 			_, tracked := shard.activeDeliveries[delivery.DeliveryID]
@@ -758,9 +811,10 @@ func (d *Dispatcher) dispatchGroupBatch(partitionID int32, events []*types.Event
 		if sub.circuitBreaker != nil {
 			sub.circuitBreaker.RecordSuccess()
 		}
+		dispatched += len(batchEvents)
 	}
 
-	return dispatchErr
+	return dispatched, blocked, dispatchErr
 }
 
 // trackDelivery tracks an active delivery.
@@ -1061,6 +1115,7 @@ func (d *Dispatcher) HandleAck(deliveryID string, success bool, nextOffset int64
 		d.releasePending(active.Subscription.ConsumerGroup, deliveryEvents(active.Delivery))
 		atomic.StoreInt64(&active.Subscription.NextOffset, nextOffset)
 		d.releaseCredits(active.Subscription, active.CreditsConsumed)
+		d.wakeRedrive(active.Subscription.ConsumerGroup)
 		if active.Subscription.circuitBreaker != nil {
 			active.Subscription.circuitBreaker.RecordSuccess()
 		}
@@ -1098,12 +1153,6 @@ func deliveryEvents(msg *DeliveryMessage) []*types.Event {
 	return msg.Batch
 }
 
-func (d *Dispatcher) releasePending(group string, events []*types.Event) {
-	for _, event := range events {
-		d.pending.Delete(pendingKey(group, event.Offset))
-	}
-}
-
 func (d *Dispatcher) notifyDeliveryComplete(active *ActiveDelivery) {
 	if d.OnDeliveryComplete == nil || active == nil || active.Delivery == nil {
 		return
@@ -1120,23 +1169,40 @@ func (d *Dispatcher) sendToDLQ(active *ActiveDelivery, reason string) {
 		return
 	}
 	events := deliveryEvents(active.Delivery)
+	group, subscriber := "", ""
 	if active.Subscription != nil {
-		d.releasePending(active.Subscription.ConsumerGroup, events)
+		group, subscriber = active.Subscription.ConsumerGroup, active.Subscription.ID
+	}
+	// The events stay marked in flight until their disposition is recorded, so
+	// a concurrent redrive cannot hand them out again in between.
+	release := func(redeliver bool) {
+		if active.Subscription == nil {
+			return
+		}
+		d.releasePending(group, events)
+		if redeliver {
+			d.requestRedriveOf(group, events)
+		} else {
+			d.wakeRedrive(group) // the caller returned this delivery's credits
+		}
 	}
 	if d.dlq == nil {
 		log.Printf("[DISPATCHER] DLQ unavailable: %s", reason)
+		release(false)
 		return
-	}
-	subscriber := ""
-	if active.Subscription != nil {
-		subscriber = active.Subscription.ID
 	}
 	for _, event := range events {
 		if err := d.dlq.Add(event, active.Delivery.DeliveryID, active.Attempt, reason, subscriber); err != nil {
+			// Not dead-lettered, so not final: leave it to be delivered again.
 			log.Printf("[DISPATCHER] DLQ write failed: %v", err)
+			release(true)
 			return
 		}
 	}
+	if d.OnDeadLettered != nil && active.Subscription != nil {
+		d.OnDeadLettered(group, events)
+	}
+	release(false)
 	d.notifyDeliveryComplete(active)
 }
 
