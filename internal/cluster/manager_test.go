@@ -13,6 +13,20 @@ type MockPartitionAccessor struct {
 	demoteCalls   map[int32]bool
 	offsets       map[int32]map[string]int64
 	isr           map[int32][]string
+	releaseCalls  map[int32]int
+}
+
+// GetPartitionEpoch reports the epoch this node was last promoted at.
+func (m *MockPartitionAccessor) GetPartitionEpoch(partitionID int32) int64 {
+	return m.promoteCalls[partitionID]
+}
+
+func (m *MockPartitionAccessor) ReleasePartition(partitionID int32) error {
+	if m.releaseCalls == nil {
+		m.releaseCalls = make(map[int32]int)
+	}
+	m.releaseCalls[partitionID]++
+	return nil
 }
 
 func (m *MockPartitionAccessor) SyncPartitionFromLeader(partitionID int32, leaderAddr string) error {
