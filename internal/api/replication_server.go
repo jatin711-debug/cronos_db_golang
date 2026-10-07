@@ -114,6 +114,11 @@ func (h *ReplicationServiceHandler) Append(ctx context.Context, req *types.Repli
 	if err := h.acceptLeader(p, req.GetTerm(), req.GetLeaderId()); err != nil {
 		return reject(err.Error())
 	}
+	// The accepted leader says where its log starts. Following it comes first:
+	// it can change where this replica's own log ends.
+	if err := p.FollowLogStart(req.GetLogStartOffset()); err != nil {
+		return reject(fmt.Sprintf("follow log start %d: %v", req.GetLogStartOffset(), err))
+	}
 	if mismatch := logMismatch(p, req); mismatch != nil {
 		return mismatch, nil
 	}

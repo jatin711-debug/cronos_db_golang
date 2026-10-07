@@ -107,6 +107,9 @@ type FollowerInfo struct {
 	// sendFailing does the same for log entries: it is set by the first failed
 	// send and cleared by the next acknowledged append. Guarded by mu.
 	sendFailing bool
+	// logStartSent is the log start this follower was last told and
+	// acknowledged. Guarded by mu.
+	logStartSent int64
 }
 
 // progressResendInterval bounds how long a follower can go without a fresh
@@ -452,6 +455,21 @@ func (l *Leader) catchUpFollower(f *FollowerInfo, from, to int64) error {
 	if chunk <= 0 {
 		chunk = 500
 	}
+	if start := l.wal.GetFirstOffset(); from < start {
+		// The follower needs entries this log no longer holds. It is told
+		// where the log starts: if its own ends before that, it restarts there.
+		// Sending then begins at the start of this log, whatever the follower
+		// answered about its own; it compares what it holds from there on
+		// entry by entry.
+		err := l.appendToFollower(f, nil, 0)
+		f.mu.Lock()
+		reachable := f.Connected
+		f.mu.Unlock()
+		if err != nil && !reachable {
+			return err
+		}
+		from = start
+	}
 	for from < to {
 		end := from + chunk
 		if end > to {
@@ -507,6 +525,9 @@ func (l *Leader) appendToFollower(f *FollowerInfo, events []*types.Event, checks
 	}
 	if prev >= 0 {
 		req.HasPrevLog, req.PrevLogOffset, req.PrevLogTerm = true, prev, l.getPrevLogTerm(prev)
+	}
+	if l.wal != nil {
+		req.LogStartOffset = l.wal.GetFirstOffset()
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), l.getReplicateTimeout())
@@ -567,6 +588,7 @@ func (l *Leader) appendToFollower(f *FollowerInfo, events []*types.Event, checks
 	f.Connected = true
 	f.LastAckTS = time.Now().UnixMilli()
 	f.LastError = nil
+	f.logStartSent = max(f.logStartSent, req.GetLogStartOffset())
 	recovered := f.sendFailing
 	f.sendFailing = false
 	f.mu.Unlock()
@@ -766,6 +788,7 @@ func (l *Leader) maintenanceLoop() {
 			l.reconnectDeadFollowers()
 			l.probeNewFollowers()
 			l.catchUpIdleFollowers()
+			l.announceLogStart()
 			l.shipConsumerProgress()
 			l.reportQuorumOffset()
 		case <-l.quit:
@@ -862,6 +885,43 @@ func (l *Leader) catchUpIdleFollowers() {
 			err := l.catchUpFollower(f, next, to)
 			if err != nil {
 				l.logSendFailure(f, "Catch-up of", err)
+			}
+			return err
+		})
+	}
+}
+
+// announceLogStart tells followers that have nothing else coming to them where
+// the log starts now. Every append says it, so a partition that takes
+// publishes needs nothing more; on an idle one the followers would keep what
+// the leader has removed until somebody published.
+func (l *Leader) announceLogStart() {
+	if l.wal == nil {
+		return
+	}
+	start := l.wal.GetFirstOffset()
+	if start <= 0 {
+		return
+	}
+
+	l.mu.RLock()
+	followers := make([]*FollowerInfo, 0, len(l.followers))
+	for _, f := range l.followers {
+		followers = append(followers, f)
+	}
+	l.mu.RUnlock()
+
+	for _, f := range followers {
+		f.mu.Lock()
+		due := f.client != nil && f.pendingSends == 0 && f.LastAckTS > 0 && f.logStartSent < start
+		f.mu.Unlock()
+		if !due {
+			continue
+		}
+		l.queueFollowerWork(f, nil, func() error {
+			err := l.appendToFollower(f, nil, 0)
+			if err != nil {
+				l.logSendFailure(f, "Log start for", err)
 			}
 			return err
 		})

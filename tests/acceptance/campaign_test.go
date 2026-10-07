@@ -193,20 +193,33 @@ func checkLogs(t *testing.T, c *cluster, w *workload) {
 		offset    int64
 	}
 	places := make(map[string][]place)
+	starts := make([]int64, partitionCount)
+	removed := int64(0)
 	for partition, log := range logs {
+		if len(log) > 0 {
+			starts[partition] = log[0].GetOffset()
+		}
+		removed += starts[partition]
 		for _, event := range log {
 			places[event.GetMessageId()] = append(places[event.GetMessageId()], place{int32(partition), event.GetOffset()})
 		}
 	}
+	// The nodes remove log entries that every consumer has finished. An
+	// acknowledged event may therefore be gone from the log, if it was
+	// delivered and was acknowledged below where its partition's log starts
+	// now.
 	var wrong []string
 	for id, event := range w.ledger.snapshot() {
 		at := places[id]
 		switch {
 		case len(at) > 1:
 			wrong = append(wrong, fmt.Sprintf("%s is in the log %d times: %v", id, len(at), at))
-		case event.accepted && len(at) == 0:
-			wrong = append(wrong, fmt.Sprintf("%s was acknowledged and is not in the log", id))
-		case event.accepted && event.offset >= 0 && (at[0].partition != event.partition || at[0].offset != event.offset):
+		case event.accepted && len(at) == 0 && event.offset >= 0 && event.offset >= starts[event.partition]:
+			wrong = append(wrong, fmt.Sprintf("%s was acknowledged at partition %d offset %d and is not in the log, which starts at offset %d",
+				id, event.partition, event.offset, starts[event.partition]))
+		case event.accepted && len(at) == 0 && event.deliveries == 0:
+			wrong = append(wrong, fmt.Sprintf("%s was acknowledged, is not in the log and was never delivered", id))
+		case event.accepted && len(at) == 1 && event.offset >= 0 && (at[0].partition != event.partition || at[0].offset != event.offset):
 			wrong = append(wrong, fmt.Sprintf("%s was acknowledged at partition %d offset %d and is at partition %d offset %d",
 				id, event.partition, event.offset, at[0].partition, at[0].offset))
 		}
@@ -214,12 +227,27 @@ func checkLogs(t *testing.T, c *cluster, w *workload) {
 	if len(wrong) > 0 {
 		t.Errorf("%d events are not where their producers were told:\n  %s", len(wrong), sample(wrong, 25))
 	}
+	if removed == 0 {
+		t.Errorf("no partition removed anything from its log; the logs start at offsets %v", starts)
+	}
 }
 
-// agreedLog waits until the replicas of a partition hold logs of the same
-// length, checks that the logs are the same entry for entry, and returns it.
+// agreedLog waits until the replicas of a partition hold logs that end at the
+// same offset, checks that the logs are the same entry for entry from the
+// point where all of them have entries, and returns the log from there.
+//
+// The replicas need not start at the same offset. The leader removes whole
+// segments from the start of its log and tells the others where its log
+// starts; they remove the segments of theirs that lie wholly below that, and
+// their segments need not end where the leader's do.
 func agreedLog(t *testing.T, c *cluster, partition int32, topic string) []*types.Event {
 	t.Helper()
+	end := func(log []*types.Event) int64 {
+		if len(log) == 0 {
+			return -1
+		}
+		return log[len(log)-1].GetOffset()
+	}
 	deadline := time.Now().Add(60 * time.Second)
 	var logs [][]*types.Event
 	for {
@@ -235,7 +263,7 @@ func agreedLog(t *testing.T, c *cluster, partition int32, topic string) []*types
 				break
 			}
 			logs = append(logs, log)
-			same = same && len(log) == len(logs[0])
+			same = same && end(log) == end(logs[0])
 		}
 		if same || time.Now().After(deadline) {
 			break
@@ -243,11 +271,24 @@ func agreedLog(t *testing.T, c *cluster, partition int32, topic string) []*types
 		time.Sleep(500 * time.Millisecond)
 	}
 
+	start := int64(0)
+	for _, log := range logs {
+		if len(log) > 0 {
+			start = max(start, log[0].GetOffset())
+		}
+	}
+	for i, log := range logs {
+		for len(log) > 0 && log[0].GetOffset() < start {
+			log = log[1:]
+		}
+		logs[i] = log
+	}
+
 	reference := logs[0]
 	for i, log := range logs[1:] {
 		other := c.nodes[i+1]
 		if len(log) != len(reference) {
-			t.Errorf("partition %d: %s holds %d entries and %s holds %d", partition, c.nodes[0].id, len(reference), other.id, len(log))
+			t.Errorf("partition %d: from offset %d on, %s holds %d entries and %s holds %d", partition, start, c.nodes[0].id, len(reference), other.id, len(log))
 		}
 		for j := 0; j < min(len(log), len(reference)); j++ {
 			a, b := reference[j], log[j]
@@ -260,11 +301,11 @@ func agreedLog(t *testing.T, c *cluster, partition int32, topic string) []*types
 		}
 	}
 	for j, event := range reference {
-		if event.GetOffset() != int64(j) {
-			t.Errorf("partition %d: entry %d has offset %d", partition, j, event.GetOffset())
+		if event.GetOffset() != start+int64(j) {
+			t.Errorf("partition %d: entry %d after offset %d has offset %d", partition, j, start, event.GetOffset())
 			break
 		}
 	}
-	t.Logf("partition %d: %d entries on every replica", partition, len(reference))
+	t.Logf("partition %d: offsets %d to %d on every replica", partition, start, end(reference))
 	return reference
 }

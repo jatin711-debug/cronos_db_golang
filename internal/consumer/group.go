@@ -40,6 +40,9 @@ type GroupManager struct {
 	// floors holds each group's completion floor per partition, keyed by
 	// completionPrefix: every offset below it is complete. Guarded by mu.
 	floors map[string]int64
+	// logStart holds, per partition, where its log starts (see SetLogStart).
+	// Guarded by mu.
+	logStart map[int32]int64
 
 	// completedMax caches, per group and partition, the highest offset known
 	// complete. Guarded by completedMaxMu, which is never held while waiting

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
@@ -46,6 +47,9 @@ type Segment struct {
 	index           *Index // sparse index for fast seeking by offset/timestamp
 	recordBuf       []byte // reusable buffer for serialization
 	cipher          *SegmentCipher
+
+	// deleted is set by Delete: the segment has left the log.
+	deleted atomic.Bool
 }
 
 const defaultSegmentPreallocSize = 64 * 1024 * 1024
@@ -1604,6 +1608,7 @@ func (s *Segment) closeLocked() error {
 // Delete permanently removes the segment and its index files from disk after
 // closing open handles.
 func (s *Segment) Delete() error {
+	s.deleted.Store(true)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.flushMu.Lock()

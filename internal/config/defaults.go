@@ -26,6 +26,10 @@ const (
 	// DefaultFlushIntervalMS is the periodic flush interval when using batch/periodic fsync.
 	DefaultFlushIntervalMS = 1000
 
+	// DefaultCompactionInterval is how often a partition looks for log
+	// segments whose events are all finished.
+	DefaultCompactionInterval = 10 * time.Minute
+
 	// DefaultRetentionMaxAgeHours is max WAL segment age before deletion (7 days).
 	DefaultRetentionMaxAgeHours = 168 // 7 days
 	// DefaultRetentionMaxSizeGB is max total WAL size in GB; 0 disables size retention.

@@ -34,6 +34,7 @@ func LoadConfig() (*types.Config, error) {
 	config.IndexInterval = DefaultIndexInterval
 	config.FsyncMode = DefaultFsyncMode
 	config.FlushIntervalMS = DefaultFlushIntervalMS
+	config.CompactionInterval = DefaultCompactionInterval
 	config.RetentionMaxAgeHours = DefaultRetentionMaxAgeHours
 	config.RetentionMaxSizeGB = DefaultRetentionMaxSizeGB
 	config.TickMS = DefaultTickMS
@@ -131,6 +132,7 @@ func LoadConfig() (*types.Config, error) {
 	flag.StringVar(&config.FsyncMode, "fsync-mode", DefaultFsyncMode, "fsync mode: every_event, batch, periodic")
 	var flushInterval int
 	flag.IntVar(&flushInterval, "flush-interval", DefaultFlushIntervalMS, "Flush interval in milliseconds")
+	flag.DurationVar(&config.CompactionInterval, "compaction-interval", DefaultCompactionInterval, "How often a partition looks for log segments whose events are all finished and removes them")
 	flag.IntVar(&config.RetentionMaxAgeHours, "retention-max-age-hours", DefaultRetentionMaxAgeHours, "Delete WAL segments older than this many hours (0 = disable)")
 	flag.Int64Var(&config.RetentionMaxSizeGB, "retention-max-size-gb", DefaultRetentionMaxSizeGB, "Keep WAL segments within this many GB by deleting oldest (0 = disable)")
 
@@ -334,6 +336,9 @@ func ValidateConfig(c *types.Config) error {
 	}
 	if c.FlushIntervalMS <= 0 {
 		return fmt.Errorf("flush-interval must be > 0")
+	}
+	if c.CompactionInterval < 0 {
+		return fmt.Errorf("compaction-interval must be >= 0")
 	}
 
 	// Production hardening: require TLS, auth, encryption, and replication safety

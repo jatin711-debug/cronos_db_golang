@@ -264,6 +264,13 @@ message ReplicationAppendRequest {
   // asks whether the follower's log matches there.
   bool has_prev_log = 8;
   int64 prev_log_offset = 9;
+
+  // Offset of the first entry the leader's log still holds; 0 when nothing
+  // has been removed from it. The leader removes entries from the start of
+  // its log once they are no longer needed, and a follower follows: it
+  // removes what lies below this offset, and if its own log ends before it,
+  // it restarts its log there.
+  int64 log_start_offset = 10;
 }
 
 message ReplicationAppendResponse {
