@@ -311,3 +311,110 @@ func TestRestoreRefusesWhatItCannotVouchFor(t *testing.T) {
 		t.Fatalf("restore of the good backup: %v", err)
 	}
 }
+
+// A backup of an encrypted log says which key it needs without containing it.
+// Restore can check a key against that before it touches the data directory:
+// the wrong key is refused there, not found out when the node first reads.
+func TestBackupOfEncryptedLogIdentifiesItsKey(t *testing.T) {
+	writeKey := func(text string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "master.key")
+		if err := os.WriteFile(path, []byte(text), 0600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	const keyText = "0123456789abcdef0123456789abcdef"
+	keyFile, wrongKeyFile := writeKey(keyText), writeKey("ffffffffffffffffffffffffffffffff")
+
+	start := func(dataDir string) *PartitionManager {
+		t.Helper()
+		cfg := backupTestConfig(dataDir)
+		cfg.PartitionCount = 1
+		cfg.EncryptionEnabled, cfg.EncryptionKeyFile = true, keyFile
+		pm := NewPartitionManager("node-1", cfg)
+		t.Cleanup(func() { pm.Close() })
+		if err := pm.CreatePartition(0, "orders"); err != nil {
+			t.Fatal(err)
+		}
+		if err := pm.StartPartition(0); err != nil {
+			t.Fatal(err)
+		}
+		return pm
+	}
+	source := start(t.TempDir())
+	p, _ := source.GetInternalPartition(0)
+	want := populate(t, p)
+
+	backup := filepath.Join(t.TempDir(), "backup")
+	if err := source.Backup(backup); err != nil {
+		t.Fatalf("backup: %v", err)
+	}
+	manifest, err := storage.ReadBackupManifest(backup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := storage.LoadMasterKey(keyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Encryption == nil || manifest.Encryption.KeyCheck != storage.KeyCheckValue(key) {
+		t.Fatalf("manifest of an encrypted backup identifies its key as %+v", manifest.Encryption)
+	}
+	if manifest.CutAt.IsZero() || manifest.CutAt.Before(manifest.Created) {
+		t.Fatalf("manifest says the logs were cut at %v, the backup having started at %v", manifest.CutAt, manifest.Created)
+	}
+	// Nothing in the backup holds the key or the payloads in the clear.
+	err = filepath.Walk(backup, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return err
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if strings.Contains(string(data), keyText) {
+			t.Errorf("%s contains the encryption key", path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	target := t.TempDir()
+	if _, err := storage.RestoreBackup(backup, target, storage.RestoreOptions{EncryptionKeyFile: wrongKeyFile}); err == nil || !strings.Contains(err.Error(), "not the key") {
+		t.Fatalf("restore with the wrong key: %v", err)
+	}
+	if entries, _ := os.ReadDir(target); len(entries) != 0 {
+		t.Fatalf("a restore that was refused left %d entries in the data directory", len(entries))
+	}
+	if _, err := storage.RestoreBackup(backup, target, storage.RestoreOptions{EncryptionKeyFile: keyFile}); err != nil {
+		t.Fatalf("restore with the right key: %v", err)
+	}
+	restored := start(target)
+	rp, _ := restored.GetInternalPartition(0)
+	got, err := rp.Wal.ReadEvents(0, rp.Wal.GetLastOffset())
+	if err != nil || len(got) != len(want) {
+		t.Fatalf("restored log has %d readable events, want %d (err=%v)", len(got), len(want), err)
+	}
+	for i := range want {
+		if got[i].MessageId != want[i].MessageId || string(got[i].Payload) != string(want[i].Payload) {
+			t.Fatalf("restored event %d is %q, want %q", i, got[i].MessageId, want[i].MessageId)
+		}
+	}
+
+	// A key offered for a backup that is not encrypted is a mistake worth
+	// stopping for: it is probably the wrong backup.
+	plain := startBackupTestNode(t, t.TempDir())
+	plainBackup := filepath.Join(t.TempDir(), "backup")
+	if err := plain.Backup(plainBackup); err != nil {
+		t.Fatal(err)
+	}
+	if plainManifest, err := storage.ReadBackupManifest(plainBackup); err != nil || plainManifest.Encryption != nil {
+		t.Fatalf("manifest of an unencrypted backup names a key: %+v (err=%v)", plainManifest, err)
+	}
+	if _, err := storage.RestoreBackup(plainBackup, t.TempDir(), storage.RestoreOptions{EncryptionKeyFile: keyFile}); err == nil || !strings.Contains(err.Error(), "not encrypted") {
+		t.Fatalf("restore of an unencrypted backup with a key: %v", err)
+	}
+}
