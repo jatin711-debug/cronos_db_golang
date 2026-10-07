@@ -122,6 +122,7 @@ nav:
       - Overview: ARCHITECTURE.md
       - Technical Deep Dive: TECHNICAL_DEEP_DIVE.md
       - Developer Guide: DEVELOPER_ARCHITECTURE_GUIDE.md
+      - Learn System Design: system-design/README.md
       - By Feature:
           - Index: architecture/README.md
           - API Layer: architecture/features/api.md

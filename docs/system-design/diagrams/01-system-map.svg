@@ -1,0 +1,159 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 774" width="1000" height="774" role="img" aria-labelledby="title desc" font-family="'Segoe UI', system-ui, -apple-system, BlinkMacSystemFont, Roboto, 'Helvetica Neue', Arial, sans-serif">
+  <title id="title">CronosDB at a glance — what runs inside one node</title>
+  <desc id="desc">Clients reach a node through a public gRPC port and an HTTP port; nodes reach each other through an internal gRPC port, a gossip port and a Raft port. Inside the node a data plane (dedup, event log, scheduler, delivery, consumer state, dead-letter queue) exists once per partition, and a control plane (membership, hash ring, Raft metadata, leadership reconcile) exists once per node.</desc>
+  <defs>
+    <marker id="ah-57606a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8.5" markerHeight="8.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0.9 L9.6 5 L0 9.1 z" fill="#57606a"/></marker>
+    <marker id="ah-7c4ddb" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8.5" markerHeight="8.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0.9 L9.6 5 L0 9.1 z" fill="#7c4ddb"/></marker>
+  </defs>
+
+  <!-- card: the diagram brings its own background so it reads on light and dark pages -->
+  <rect x="0.5" y="0.5" width="999" height="773" rx="14" fill="#ffffff" stroke="#d0d7de"/>
+  <text x="28" y="37" font-size="20" font-weight="700" fill="#1f2328">CronosDB at a glance — what runs inside one node</text>
+  <text x="28" y="58" font-size="12.5" fill="#57606a">Every node runs the same binary. Colour shows the responsibility; the grey line in each box is the technology behind it.</text>
+
+  <!-- who talks to a node -->
+  <rect x="40" y="78" width="142" height="54" rx="8" fill="#e4f6f4" stroke="#1f9d94" stroke-width="1.3"/>
+  <text x="111" y="101.2" font-size="13.5" fill="#0d524d" text-anchor="middle" font-weight="600">Producer</text>
+  <text x="111" y="118.8" font-size="10.5" fill="#57606a" text-anchor="middle">Publish · PublishBatch</text>
+  <rect x="198" y="78" width="142" height="54" rx="8" fill="#e4f6f4" stroke="#1f9d94" stroke-width="1.3"/>
+  <text x="269" y="101.2" font-size="13.5" fill="#0d524d" text-anchor="middle" font-weight="600">Consumer</text>
+  <text x="269" y="118.8" font-size="10.5" fill="#57606a" text-anchor="middle">Subscribe · Ack · Replay</text>
+  <rect x="355" y="78" width="170" height="54" rx="8" fill="#e4f6f4" stroke="#1f9d94" stroke-width="1.3"/>
+  <text x="440" y="101.2" font-size="13.5" fill="#0d524d" text-anchor="middle" font-weight="600">Operator</text>
+  <text x="440" y="118.8" font-size="10.5" fill="#57606a" text-anchor="middle">cronos-admin CLI · dashboard</text>
+  <rect x="540" y="78" width="420" height="54" rx="8" fill="#f4f5f7" stroke="#8b949e" stroke-width="1.3"/>
+  <text x="750" y="101.2" font-size="13.5" fill="#24292f" text-anchor="middle" font-weight="600">Other nodes of the cluster</text>
+  <text x="750" y="118.8" font-size="10.5" fill="#57606a" text-anchor="middle">same binary, same three internal ports</text>
+
+  <!-- the node -->
+  <rect x="24" y="205" width="952" height="553" rx="14" fill="#fbfcfd" stroke="#afb8c1" stroke-width="1.4"/>
+  <text x="40" y="256" font-size="10.5" fill="#57606a" font-weight="700" letter-spacing="0.04em">ONE CRONOSDB NODE  ·  cmd/api</text>
+
+  <!-- ports sit on the edge of the node -->
+  <rect x="40" y="176" width="300" height="58" rx="8" fill="#eaf2fe" stroke="#3b78d8" stroke-width="1.3"/>
+  <text x="190" y="194.2" font-size="13.5" fill="#0b3a7e" text-anchor="middle" font-weight="600">Public gRPC :9000</text>
+  <text x="190" y="211.8" font-size="10.5" fill="#57606a" text-anchor="middle">Event · ConsumerGroup · Partition · Admin</text>
+  <text x="190" y="225.8" font-size="10.5" fill="#57606a" text-anchor="middle">TLS + JWT in production</text>
+  <rect x="355" y="176" width="170" height="58" rx="8" fill="#f4f5f7" stroke="#8b949e" stroke-width="1.3"/>
+  <text x="440" y="194.2" font-size="13.5" fill="#24292f" text-anchor="middle" font-weight="600">HTTP :8080</text>
+  <text x="440" y="211.8" font-size="10.5" fill="#57606a" text-anchor="middle">health · /metrics</text>
+  <text x="440" y="225.8" font-size="10.5" fill="#57606a" text-anchor="middle">dashboard UI</text>
+  <rect x="540" y="176" width="170" height="58" rx="8" fill="#e7f6ed" stroke="#2e8b57" stroke-width="1.3"/>
+  <text x="625" y="194.2" font-size="13.5" fill="#145232" text-anchor="middle" font-weight="600">Internal gRPC :7947</text>
+  <text x="625" y="211.8" font-size="10.5" fill="#57606a" text-anchor="middle">replication · snapshots</text>
+  <text x="625" y="225.8" font-size="10.5" fill="#57606a" text-anchor="middle">mTLS in production</text>
+  <rect x="725" y="176" width="110" height="58" rx="8" fill="#e4f6f4" stroke="#1f9d94" stroke-width="1.3"/>
+  <text x="780" y="200.8" font-size="12.5" fill="#0d524d" text-anchor="middle" font-weight="600">Gossip :7946</text>
+  <text x="780" y="218.2" font-size="10.5" fill="#57606a" text-anchor="middle">heartbeats</text>
+  <rect x="850" y="176" width="110" height="58" rx="8" fill="#f2ecfd" stroke="#7c4ddb" stroke-width="1.3"/>
+  <text x="905" y="200.8" font-size="12.5" fill="#3d1f85" text-anchor="middle" font-weight="600">Raft :7948</text>
+  <text x="905" y="218.2" font-size="10.5" fill="#57606a" text-anchor="middle">metadata log</text>
+  <path d="M111 132 L111 174.6" fill="none" stroke="#57606a" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#ah-57606a)"/>
+  <path d="M269 132 L269 174.6" fill="none" stroke="#57606a" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#ah-57606a)"/>
+  <path d="M440 132 L440 174.6" fill="none" stroke="#57606a" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#ah-57606a)"/>
+  <path d="M625 132 L625 174.6" fill="none" stroke="#57606a" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#ah-57606a)"/>
+  <path d="M780 132 L780 174.6" fill="none" stroke="#57606a" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#ah-57606a)"/>
+  <path d="M905 132 L905 174.6" fill="none" stroke="#57606a" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#ah-57606a)"/>
+
+  <!-- public requests pass the interceptor chain first -->
+  <rect x="40" y="268" width="460" height="32" rx="8" fill="#f4f5f7" stroke="#8b949e" stroke-width="1.3"/>
+  <text x="270" y="287.9" font-size="11" fill="#1f2328" text-anchor="middle">Interceptors:  tracing → SLO → version → auth → rate limit → audit → metrics</text>
+  <path d="M190 234 L190 266.6" fill="none" stroke="#57606a" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#ah-57606a)"/>
+  <path d="M190 300 L190 314.6" fill="none" stroke="#57606a" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#ah-57606a)"/>
+  <path d="M625 234 L625 314.6" fill="none" stroke="#57606a" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#ah-57606a)"/>
+  <text x="617" y="262" font-size="10.8" fill="#57606a" text-anchor="end" paint-order="stroke" stroke="#fbfcfd" stroke-width="4" stroke-linejoin="round">replication</text>
+  <path d="M780 234 L780 266.6" fill="none" stroke="#57606a" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#ah-57606a)"/>
+  <path d="M905 234 L905 266.6" fill="none" stroke="#57606a" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#ah-57606a)"/>
+
+  <!-- data plane: one set per partition -->
+  <rect x="40" y="316" width="600" height="300" rx="12" fill="#eaf2fe" stroke="#3b78d8" stroke-width="1.2" stroke-dasharray="5 4" fill-opacity="0.45"/>
+  <text x="54" y="334" font-size="10.5" fill="#0b3a7e" font-weight="700" letter-spacing="0.04em">DATA PLANE  ·  one set per partition  ·  wired together in internal/partition</text>
+  <rect x="56" y="346" width="176" height="106" rx="8" fill="#eaf2fe" stroke="#3b78d8" stroke-width="1.3"/>
+  <text x="144" y="380.5" font-size="13.5" fill="#0b3a7e" text-anchor="middle" font-weight="600">Dedup</text>
+  <text x="144" y="398.4" font-size="10.8" fill="#1f2328" text-anchor="middle" font-style="italic">“Seen this message_id?”</text>
+  <text x="144" y="412.9" font-size="10.8" fill="#57606a" text-anchor="middle">bloom filter + Pebble</text>
+  <text x="144" y="427.4" font-size="10.8" fill="#1f2328" text-anchor="middle" font-family="ui-monospace, 'Cascadia Mono', 'SF Mono', Consolas, Menlo, monospace">internal/dedup</text>
+  <rect x="252" y="346" width="176" height="106" rx="8" fill="#e7f6ed" stroke="#2e8b57" stroke-width="1.3"/>
+  <text x="340" y="380.5" font-size="13.5" fill="#145232" text-anchor="middle" font-weight="600">Event log (WAL)</text>
+  <text x="340" y="398.4" font-size="10.8" fill="#1f2328" text-anchor="middle" font-style="italic">“What happened, in order?”</text>
+  <text x="340" y="412.9" font-size="10.8" fill="#57606a" text-anchor="middle">segmented append-only files</text>
+  <text x="340" y="427.4" font-size="10.8" fill="#1f2328" text-anchor="middle" font-family="ui-monospace, 'Cascadia Mono', 'SF Mono', Consolas, Menlo, monospace">internal/storage</text>
+  <rect x="448" y="346" width="176" height="106" rx="8" fill="#fff4d9" stroke="#c98a00" stroke-width="1.3"/>
+  <text x="536" y="380.5" font-size="13.5" fill="#6b4700" text-anchor="middle" font-weight="600">Scheduler</text>
+  <text x="536" y="398.4" font-size="10.8" fill="#1f2328" text-anchor="middle" font-style="italic">“What is due now?”</text>
+  <text x="536" y="412.9" font-size="10.8" fill="#57606a" text-anchor="middle">timing wheel + cold store</text>
+  <text x="536" y="427.4" font-size="10.8" fill="#1f2328" text-anchor="middle" font-family="ui-monospace, 'Cascadia Mono', 'SF Mono', Consolas, Menlo, monospace">internal/scheduler</text>
+  <rect x="56" y="486" width="176" height="106" rx="8" fill="#e7f6ed" stroke="#2e8b57" stroke-width="1.3"/>
+  <text x="144" y="520.5" font-size="13.5" fill="#145232" text-anchor="middle" font-weight="600">Consumer state</text>
+  <text x="144" y="538.4" font-size="10.8" fill="#1f2328" text-anchor="middle" font-style="italic">“Which group finished what?”</text>
+  <text x="144" y="552.9" font-size="10.8" fill="#57606a" text-anchor="middle">Pebble</text>
+  <text x="144" y="567.4" font-size="10.8" fill="#1f2328" text-anchor="middle" font-family="ui-monospace, 'Cascadia Mono', 'SF Mono', Consolas, Menlo, monospace">internal/consumer</text>
+  <rect x="252" y="486" width="176" height="106" rx="8" fill="#eaf2fe" stroke="#3b78d8" stroke-width="1.3"/>
+  <text x="340" y="520.5" font-size="13.5" fill="#0b3a7e" text-anchor="middle" font-weight="600">Delivery</text>
+  <text x="340" y="538.4" font-size="10.8" fill="#1f2328" text-anchor="middle" font-style="italic">“Push it, retry it, park it”</text>
+  <text x="340" y="552.9" font-size="10.8" fill="#57606a" text-anchor="middle">credits · retry heap · breaker</text>
+  <text x="340" y="567.4" font-size="10.8" fill="#1f2328" text-anchor="middle" font-family="ui-monospace, 'Cascadia Mono', 'SF Mono', Consolas, Menlo, monospace">internal/delivery</text>
+  <rect x="448" y="486" width="176" height="106" rx="8" fill="#fdecea" stroke="#cf3a30" stroke-width="1.3"/>
+  <text x="536" y="520.5" font-size="13.5" fill="#8a1f17" text-anchor="middle" font-weight="600">Dead-letter queue</text>
+  <text x="536" y="538.4" font-size="10.8" fill="#1f2328" text-anchor="middle" font-style="italic">“What could nobody process?”</text>
+  <text x="536" y="552.9" font-size="10.8" fill="#57606a" text-anchor="middle">append-only segment files</text>
+  <text x="536" y="567.4" font-size="10.8" fill="#1f2328" text-anchor="middle" font-family="ui-monospace, 'Cascadia Mono', 'SF Mono', Consolas, Menlo, monospace">internal/delivery/dlq.go</text>
+  <path d="M232 399 L250.6 399" fill="none" stroke="#57606a" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#ah-57606a)"/>
+  <path d="M428 399 L446.6 399" fill="none" stroke="#57606a" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#ah-57606a)"/>
+  <path d="M536 452 L536 469 L340 469 L340 484.6" fill="none" stroke="#57606a" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#ah-57606a)"/>
+  <text x="438" y="464" font-size="10.8" fill="#57606a" text-anchor="middle" paint-order="stroke" stroke="#f3f8fe" stroke-width="4" stroke-linejoin="round">when due</text>
+  <path d="M252 539 L233.4 539" fill="none" stroke="#57606a" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#ah-57606a)"/>
+  <path d="M428 539 L446.6 539" fill="none" stroke="#57606a" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#ah-57606a)"/>
+
+  <!-- control plane: one per node -->
+  <rect x="664" y="268" width="296" height="348" rx="12" fill="#f2ecfd" stroke="#7c4ddb" stroke-width="1.2" stroke-dasharray="5 4" fill-opacity="0.45"/>
+  <text x="678" y="286" font-size="10.5" fill="#3d1f85" font-weight="700" letter-spacing="0.04em">CONTROL PLANE  ·  one per node  ·  internal/cluster</text>
+  <rect x="680" y="298" width="264" height="62" rx="8" fill="#e4f6f4" stroke="#1f9d94" stroke-width="1.3"/>
+  <text x="812" y="317.6" font-size="13" fill="#0d524d" text-anchor="middle" font-weight="600">Membership</text>
+  <text x="812" y="335.4" font-size="10.8" fill="#1f2328" text-anchor="middle" font-style="italic">“Who is alive?”</text>
+  <text x="812" y="349.8" font-size="10.8" fill="#57606a" text-anchor="middle">TCP heartbeats, or memberlist (SWIM)</text>
+  <rect x="680" y="378" width="264" height="62" rx="8" fill="#f2ecfd" stroke="#7c4ddb" stroke-width="1.3"/>
+  <text x="812" y="397.6" font-size="13" fill="#3d1f85" text-anchor="middle" font-weight="600">Hash-ring router</text>
+  <text x="812" y="415.4" font-size="10.8" fill="#1f2328" text-anchor="middle" font-style="italic">“Where should replicas live?”</text>
+  <text x="812" y="429.8" font-size="10.8" fill="#57606a" text-anchor="middle">SHA-256 ring · 2,048 virtual nodes</text>
+  <path d="M812 360 L812 376.6" fill="none" stroke="#57606a" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#ah-57606a)"/>
+  <rect x="680" y="458" width="264" height="62" rx="8" fill="#f2ecfd" stroke="#7c4ddb" stroke-width="1.3"/>
+  <text x="812" y="477.6" font-size="13" fill="#3d1f85" text-anchor="middle" font-weight="600">Raft metadata</text>
+  <text x="812" y="495.4" font-size="10.8" fill="#1f2328" text-anchor="middle" font-style="italic">“Who leads what, at which epoch?”</text>
+  <text x="812" y="509.8" font-size="10.8" fill="#57606a" text-anchor="middle">hashicorp/raft · BoltDB log</text>
+  <path d="M812 440 L812 456.6" fill="none" stroke="#57606a" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#ah-57606a)"/>
+  <rect x="680" y="538" width="264" height="62" rx="8" fill="#f2ecfd" stroke="#7c4ddb" stroke-width="1.3"/>
+  <text x="812" y="557.6" font-size="13" fill="#3d1f85" text-anchor="middle" font-weight="600">Leadership reconcile</text>
+  <text x="812" y="575.4" font-size="10.8" fill="#1f2328" text-anchor="middle" font-style="italic">“Make this node match what Raft says”</text>
+  <text x="812" y="589.8" font-size="10.8" fill="#57606a" text-anchor="middle">promote · demote · follow · release</text>
+  <path d="M812 520 L812 536.6" fill="none" stroke="#57606a" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#ah-57606a)"/>
+  <path d="M680 569 L641.4 569" fill="none" stroke="#7c4ddb" stroke-width="1.8" stroke-linejoin="round" marker-end="url(#ah-7c4ddb)"/>
+
+  <!-- cross-cutting concerns -->
+  <rect x="40" y="632" width="920" height="110" rx="12" fill="#f4f5f7" stroke="#8b949e" stroke-width="1.2" stroke-dasharray="5 4" fill-opacity="0.45"/>
+  <text x="54" y="650" font-size="10.5" fill="#24292f" font-weight="700" letter-spacing="0.04em">CROSS-CUTTING  ·  wraps both planes</text>
+  <rect x="54" y="660" width="140" height="66" rx="8" fill="#ffffff" stroke="#c9d1d9" stroke-width="1.3"/>
+  <text x="124" y="681.8" font-size="12.5" fill="#24292f" text-anchor="middle" font-weight="600">Auth</text>
+  <text x="124" y="699.1" font-size="10.5" fill="#57606a" text-anchor="middle">JWT bearer tokens</text>
+  <text x="124" y="713.2" font-size="10.5" fill="#57606a" text-anchor="middle">RBAC policy per topic</text>
+  <rect x="204.4" y="660" width="140" height="66" rx="8" fill="#ffffff" stroke="#c9d1d9" stroke-width="1.3"/>
+  <text x="274.4" y="681.8" font-size="12.5" fill="#24292f" text-anchor="middle" font-weight="600">Schema registry</text>
+  <text x="274.4" y="699.1" font-size="10.5" fill="#57606a" text-anchor="middle">Avro · Protobuf · JSON</text>
+  <text x="274.4" y="713.2" font-size="10.5" fill="#57606a" text-anchor="middle">compatibility checks</text>
+  <rect x="354.8" y="660" width="140" height="66" rx="8" fill="#ffffff" stroke="#c9d1d9" stroke-width="1.3"/>
+  <text x="424.8" y="681.8" font-size="12.5" fill="#24292f" text-anchor="middle" font-weight="600">Tenant quotas</text>
+  <text x="424.8" y="699.1" font-size="10.5" fill="#57606a" text-anchor="middle">token buckets</text>
+  <text x="424.8" y="713.2" font-size="10.5" fill="#57606a" text-anchor="middle">per-tenant limits</text>
+  <rect x="505.2" y="660" width="140" height="66" rx="8" fill="#ffffff" stroke="#c9d1d9" stroke-width="1.3"/>
+  <text x="575.2" y="681.8" font-size="12.5" fill="#24292f" text-anchor="middle" font-weight="600">Observability</text>
+  <text x="575.2" y="699.1" font-size="10.5" fill="#57606a" text-anchor="middle">Prometheus metrics</text>
+  <text x="575.2" y="713.2" font-size="10.5" fill="#57606a" text-anchor="middle">OpenTelemetry traces</text>
+  <rect x="655.6" y="660" width="140" height="66" rx="8" fill="#ffffff" stroke="#c9d1d9" stroke-width="1.3"/>
+  <text x="725.6" y="681.8" font-size="12.5" fill="#24292f" text-anchor="middle" font-weight="600">Encryption at rest</text>
+  <text x="725.6" y="699.1" font-size="10.5" fill="#57606a" text-anchor="middle">AES-256-GCM</text>
+  <text x="725.6" y="713.2" font-size="10.5" fill="#57606a" text-anchor="middle">random nonce per record</text>
+  <rect x="806" y="660" width="140" height="66" rx="8" fill="#ffffff" stroke="#c9d1d9" stroke-width="1.3"/>
+  <text x="876" y="681.8" font-size="12.5" fill="#24292f" text-anchor="middle" font-weight="600">Backup + retention</text>
+  <text x="876" y="699.1" font-size="10.5" fill="#57606a" text-anchor="middle">point-in-time copies</text>
+  <text x="876" y="713.2" font-size="10.5" fill="#57606a" text-anchor="middle">age / size limits</text>
+</svg>

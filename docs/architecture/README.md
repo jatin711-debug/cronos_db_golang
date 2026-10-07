@@ -45,6 +45,7 @@ Details and mermaid: [ARCHITECTURE.md § Known Limitations](../../ARCHITECTURE.m
 
 - Composition root: [cmd/api/main.go](../../cmd/api/main.go)
 - Narrative guide: [docs/DEVELOPER_ARCHITECTURE_GUIDE.md](../DEVELOPER_ARCHITECTURE_GUIDE.md)
+- Why it is built this way, and what each choice costs: [docs/system-design/README.md](../system-design/README.md)
 - Full architecture: [ARCHITECTURE.md](../../ARCHITECTURE.md)
 - Diagrams: embedded inline (see [Diagram Index](#diagram-index)) so they render on GitHub
 
