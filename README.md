@@ -383,13 +383,10 @@ import client "github.com/jatin711-debug/cronos_db_golang/pkg/client"
 ```go
 ctx := context.Background()
 
+// Name the nodes; the client finds each partition's leader among them and
+// remembers it. (NodeIDToAddress can map node IDs to addresses up front.)
 cfg := client.DefaultConfig("127.0.0.1:9000", "127.0.0.1:9001", "127.0.0.1:9002")
 cfg.Security.Insecure = true
-cfg.NodeIDToAddress = map[string]string{
-    "node1": "127.0.0.1:9000",
-    "node2": "127.0.0.1:9001",
-    "node3": "127.0.0.1:9002",
-}
 
 c, err := client.Dial(ctx, cfg)
 if err != nil {
