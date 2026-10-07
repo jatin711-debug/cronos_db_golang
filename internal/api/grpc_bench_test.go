@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -10,24 +11,6 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/pkg/client"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 )
-
-// benchNoopDedup is a DedupManager that never reports duplicates and adds no
-// I/O to the publish path. It isolates WAL/dispatcher overhead in the
-// end-to-end benchmark.
-type benchNoopDedup struct{}
-
-func (benchNoopDedup) IsDuplicate(messageID string, offset int64) (bool, error) {
-	return false, nil
-}
-
-func (benchNoopDedup) IsDuplicateBatch(messageIDs []string, offsets []int64) ([]bool, error) {
-	out := make([]bool, len(messageIDs))
-	return out, nil
-}
-
-func (benchNoopDedup) RollbackBatch(messageIDs []string) error {
-	return nil
-}
 
 // startBenchServer starts an in-process gRPC server on localhost:0 and returns
 // the server, its address, and a cleanup function.
@@ -39,8 +22,18 @@ func startBenchServer(b *testing.B, fsyncMode string) (*GRPCServer, string, func
 		PartitionCount:  8,
 		FsyncMode:       fsyncMode,
 		FlushIntervalMS: 10,
+		TickMS:          10,
+		WheelSize:       1024,
+		DedupTTLHours:   24,
+		BloomCapacity:   1000000,
 	}
 	pm := partition.NewPartitionManager("bench-node", cfg)
+	for id := int32(0); id < int32(cfg.PartitionCount); id++ {
+		if err := pm.CreatePartition(id, "bench"); err != nil {
+			pm.Close()
+			b.Fatalf("CreatePartition: %v", err)
+		}
+	}
 
 	serverCfg := DefaultConfig()
 	serverCfg.Address = "localhost:0"
@@ -50,7 +43,7 @@ func startBenchServer(b *testing.B, fsyncMode string) (*GRPCServer, string, func
 		b.Fatalf("NewGRPCServer: %v", err)
 	}
 
-	handler := NewEventServiceHandler(pm, &benchNoopDedup{}, nil)
+	handler := NewEventServiceHandler(pm, nil, nil)
 	partitionHandler := NewPartitionServiceHandler(pm, nil, "bench-node")
 	grpcServer.RegisterServices(handler, nil, partitionHandler, nil)
 
@@ -65,7 +58,7 @@ func startBenchServer(b *testing.B, fsyncMode string) (*GRPCServer, string, func
 
 	cleanup := func() {
 		grpcServer.Stop()
-		pm.StopAllPartitions()
+		pm.Close()
 	}
 	return grpcServer, addr, cleanup
 }
@@ -76,6 +69,7 @@ func BenchmarkPublishBatch_EndToEnd_Matrix(b *testing.B) {
 	for _, fsyncMode := range []string{"every_event", "batch", "periodic"} {
 		for payloadName, payloadSize := range map[string]int{
 			"64B":  64,
+			"256B": 256,
 			"4KB":  4096,
 			"64KB": 64 * 1024,
 		} {
@@ -111,23 +105,35 @@ func BenchmarkPublishBatch_EndToEnd_Matrix(b *testing.B) {
 
 						b.ResetTimer()
 						b.SetBytes(int64(batchSize * payloadSize))
+						b.SetParallelism(par) // workers = par * GOMAXPROCS
+						var nextID atomic.Uint64
 
 						b.RunParallel(func(pb *testing.PB) {
 							msgs := make([]client.Message, batchSize)
 							for pb.Next() {
+								base := nextID.Add(uint64(batchSize))
 								for i := 0; i < batchSize; i++ {
 									msgs[i] = client.Message{
+										MessageID:    fmt.Sprintf("bench-%d", base+uint64(i)),
 										Topic:        "bench",
 										PartitionKey: "bench",
 										Payload:      payload,
-										ScheduleTS:   time.Now().Add(time.Hour).UnixMilli(),
+										ScheduleTS:   time.Now().Add(30 * time.Minute).UnixMilli(),
 									}
 								}
-								if _, err := producer.SendBatch(context.Background(), msgs); err != nil {
-									b.Fatalf("SendBatch: %v", err)
+								result, err := producer.SendBatch(ctx, msgs)
+								if err != nil {
+									b.Errorf("SendBatch: %v", err)
+									return
+								}
+								if result.PublishedCount != int32(batchSize) || result.ErrorCount != 0 || result.DuplicateCount != 0 {
+									b.Errorf("incomplete batch: published=%d duplicates=%d errors=%d", result.PublishedCount, result.DuplicateCount, result.ErrorCount)
+									return
 								}
 							}
 						})
+						b.StopTimer()
+						b.ReportMetric(float64(b.N*batchSize)/b.Elapsed().Seconds(), "events/s")
 					})
 				}
 			}

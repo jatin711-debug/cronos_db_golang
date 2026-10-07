@@ -7,7 +7,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 [![Status](https://img.shields.io/badge/status-Beta-yellow.svg)](#status)
 
-> **Production Readiness:** The core storage, scheduling, replication, and consumer-group paths are implemented and tested. Production deployments require TLS, auth, encryption at rest, replication mTLS, RF≥3, and minISR≥2. Use `--dev` only for local development/CI. Run production workloads only after configuring all security controls.
+> **Production Readiness:** Production hardening is in progress. Security configuration and passing unit tests do not establish safe failover, recovery, or retention. See the [audit and open findings](docs/PRODUCTION_AUDIT_2026-09-27.md) and [release requirements](docs/PRODUCTION_RELEASE.md). Transactions and online partition splitting are disabled by default and require `--dev --experimental-features`; they are unsupported in production. End-to-end exactly-once delivery is not supported.
 
 CronosDB is a distributed database purpose-built for **timestamp-triggered event processing**. Publish events with a future timestamp — CronosDB stores them durably and delivers them precisely when the time arrives.
 
@@ -15,20 +15,18 @@ It combines the durability of a write-ahead log, the precision of a hierarchical
 
 ## Key Numbers
 
-All numbers below are from single-machine benchmarks (3 nodes on one host, AMD Ryzen 7 6800H, NVMe SSD) and depend heavily on fsync mode, payload size, and batch size.
+Recent numbers below are accepted publish rates from three nodes on one AMD
+Ryzen 7 6800H host. See the [measurement settings and baseline comparison](docs/CLUSTER_PERFORMANCE_VALIDATION_2026-09-29.md).
 
 | Metric | Value |
 |--------|-------|
-| **Cluster Throughput (max)** | **~790K events/sec** — `make loadtest-max`: RF=1, `periodic` fsync, 256B, batch=4000, 96 publishers, 19.2M events, 100% success |
-| **Standard batch profile** | **~767K events/sec** — `make loadtest-batch`: RF=1, 72 publishers, batch=4000, 7.2M events |
-| **Replicated durable (RF=3, minISR=2)** | **~200K events/sec** — synchronous quorum: every write blocks until a follower acks (batch=4000 amortizes the round-trip) |
-| **Publish Latency (RF=1, `periodic`, batch)** | **P50 ~150µs · P95 ~400µs · P99 ~540µs** (max observed ~800µs — sub-millisecond tail) |
-| **Publish Latency (RF=3, minISR=2)** | **P50 ~890µs · P99 ~1.3ms** (includes the quorum replication round-trip) |
-| **Success Rate** | **100%** across batch benchmark profiles |
+| **RF=1 raw publish, current branch** | **~612K events/sec median** — Go fallback, dedup bypassed, 32 partitions, 4.8M events; 16.4% below matched v0.5.0 median |
+| **RF=3, minISR=2, current branch** | **~111K events/sec** — native Rust/CGO, dedup enabled, 16 partitions, 960K events; one sample |
+| **Reported publish errors** | **0** in the listed completed profiles; delivery and failover are separate checks |
 | **Timer Precision** | 10ms tick default (`-tick-ms`; configurable) |
 | **Dedup False Positive Rate** | <1% (Rust bloom filter) |
 
-> Benchmarked on a **single machine** running all 3 cluster nodes simultaneously (AMD Ryzen 7 6800H). The ~790K figure is the throughput ceiling — RF=1 with `periodic` fsync (least durable). Replicated durability (RF=3 / minISR=2) runs ~200K with batch=4000 (~4× lower) because each write blocks on quorum replication; that is the honest production-durability number. Real networks and higher-latency storage will lower both.
+> Earlier ~790K RF=1, ~200K RF=3, and 1M+ claims used different conditions or lack preserved evidence. They are not current production capacity targets. The `v0.6.0-rc.1` tag also has an RF=3 quorum acknowledgement defect; the current branch fixes the fail-open path, but release blockers remain.
 
 ---
 
@@ -38,8 +36,10 @@ All numbers below are from single-machine benchmarks (3 nodes on one host, AMD R
 - **Append-Only WAL v2** — Segmented logs (512MB), per-entry Raft term + CRC32 integrity, sparse indexing. Upgrading from earlier builds requires a clean data directory.
 - **Memory-Mapped Reads** — Zero-copy segment reads on Linux/Windows
 - **Configurable Fsync** — `every_event` | `batch` (default) | `periodic` modes
-- **Automatic Compaction** — Removes segments below min consumer offset
-- **Retention Enforcer** — Time-based and size-based cleanup preserving the active segment per partition
+- **Damage Detection** — A log that holds unreadable bytes anywhere but at its end refuses to open instead of dropping what follows; `cronos-admin check-log` reports and repairs offline
+- **Automatic Compaction** — Removes closed WAL segments only after every relevant consumer group has completed every event. In a cluster the partition's leader removes them from the start of the log and the other replicas follow
+- **Retention Enforcer** — Age/size policies use the same completion checks and preserve future timers and active segments
+- **Backups** — Independent backups of every loaded partition, hourly by default (`-backup-interval`, `-backup-dir`): event log including the active segment, consumer progress, dedup store, dead-letter queue and epoch, with per-file checksums and all logs cut at one instant; `cronos-admin restore` verifies and restores one into an empty data directory, and can check the encryption key first (see [maintenance validation](docs/MAINTENANCE_VALIDATION_2026-09-29.md))
 - **Hierarchical Timing Wheel** — O(1) timer add/remove/tick for millions of events
 - **Two-Tier Cold/Hot Scheduler** — PebbleDB cold store for far-future events (>1hr); adaptive hydrator adjusts scan frequency based on load (5s–5min). Keeps hot memory bounded.
 - **Absolute Time Tracking** — No drift across overflow wheel cascades
@@ -55,14 +55,15 @@ All numbers below are from single-machine benchmarks (3 nodes on one host, AMD R
 - **Credit-Based Flow Control** — Backpressure prevents consumer overload
 - **Non-Blocking Retry Heap** — Min-heap by `retryAt` keeps `timeoutLoop` responsive; no inline `time.Sleep`
 - **Per-Subscription Circuit Breaker** — Atomic state machine (Closed→Open→HalfOpen) skips dead subscribers automatically
-- **At-Least-Once Semantics** — Ack-based with configurable retry + exponential backoff
+- **At-Least-Once Semantics** — Ack-based, with configurable retries whose delay grows with each attempt (`-retry-backoff` × attempt)
 - **Dead Letter Queue** — Append-only binary segments (CRC32, 64MB rotation) for inspection/replay
 - **32-Shard Dispatcher** — Reduced lock contention under high concurrency
 
 ### Distributed
 - **Multi-Node Clustering** — 3+ nodes with automatic partition distribution
 - **Raft Consensus** — Metadata consistency (HashiCorp Raft)
-- **Pluggable Gossip** — Choose custom TCP heartbeats or HashiCorp Memberlist (SWIM protocol) via config
+- **Membership** — TCP heartbeats between all nodes; a node counted as failed keeps being tried and is taken back when it answers
+- **Mutual TLS Between Nodes** — Replication, membership and Raft accept only callers that hold a certificate of the cluster's CA
 - **Consistent Hashing** — SHA-256 placement ring with virtual nodes (`-virtual-nodes`, default 2048); partition ID routing uses FNV-1a
 - **Leader-follower replication over dedicated internal gRPC** — `InternalGRPCServer` on a separate listener (default `:7947`) with optional cluster-only mTLS. Replication traffic is isolated from the public API on `:9000`.
 - **Bulk snapshot install** — `ReplicationService.Snapshot` streams segment + sparse-index files with per-file IEEE CRC32; follower stages under `<dataDir>/snapshot-staging/{segments,index}`, verifies, and atomically swaps into place via `WAL.ReloadSegments()`. Used for new-node bootstrap and follower-wipe recovery.
@@ -71,7 +72,7 @@ All numbers below are from single-machine benchmarks (3 nodes on one host, AMD R
 ### API
 - **gRPC Streaming** — Bidirectional subscribe, streaming replay
 - **Batch Publish** — 100-4000 events per call for maximum throughput
-- **Consumer Groups** — Kafka-style offset tracking with persistent PebbleDB store for offsets, group metadata, and exactly-once commit IDs
+- **Consumer Groups** — Persistent PebbleDB offsets, group metadata, and per-event completion records; progress across failover remains under validation
 - **Replay Engine** — Time-range or offset-based historical replay
 
 ---
@@ -104,7 +105,7 @@ graph TB
 
     subgraph "Cluster"
         RAFT["Raft<br/>Metadata"]
-        GOSSIP["Gossip<br/>TCP Heartbeats or Memberlist/SWIM"]
+        GOSSIP["Membership<br/>TCP Heartbeats"]
         REPL["Replication<br/>gRPC Internal :7947"]
     end
 
@@ -121,7 +122,7 @@ graph TB
 
 > For the full architecture with Mermaid diagrams, sequence diagrams, and deep-dive explanations, see **[ARCHITECTURE.md](ARCHITECTURE.md)** (includes a **[Known Limitations](ARCHITECTURE.md#known-limitations)** section for deferred gaps such as mid-flight lag snapshots, admin rebalance soft-stub, and deep delivery requeue).
 >
-> For per-feature architecture docs and standalone Mermaid source files, see **[docs/architecture/README.md](docs/architecture/README.md)** and **[docs/mermaid](docs/mermaid)**.
+> For per-feature architecture docs with inline-rendered Mermaid diagrams, see **[docs/architecture/README.md](docs/architecture/README.md)** (diagrams are embedded directly in the feature docs — see its [Diagram Index](docs/architecture/README.md#diagram-index)).
 
 ---
 
@@ -311,7 +312,7 @@ Do **not** use `--dev` for production. A production-ready configuration requires
 | gRPC TLS | `--tls-enabled`, `--tls-cert-file`, `--tls-key-file` | Enabled |
 | Authentication | `--auth-enabled`, `--auth-jwt-secret` or `--auth-jwt-public-key` | Enabled |
 | Encryption at rest | `--encryption-enabled`, `--encryption-key-file` | Enabled |
-| Replication mTLS | `--replication-tls-enabled`, `--replication-tls-*` | Enabled |
+| Mutual TLS between nodes (replication, membership, Raft) | `--replication-tls-enabled`, `--replication-tls-ca-file`, `--replication-tls-cert-file`, `--replication-tls-key-file` | Enabled, all three files |
 | Fsync mode | `--fsync-mode` | `batch` or `every_event` |
 
 Example production startup:
@@ -332,6 +333,7 @@ Example production startup:
   --encryption-enabled \
   --encryption-key-file=/etc/cronos/encryption/master.key \
   --replication-tls-enabled \
+  --replication-tls-ca-file=/etc/cronos/replication-tls/ca.crt \
   --replication-tls-cert-file=/etc/cronos/replication-tls/tls.crt \
   --replication-tls-key-file=/etc/cronos/replication-tls/tls.key
 ```
@@ -384,13 +386,10 @@ import client "github.com/jatin711-debug/cronos_db_golang/pkg/client"
 ```go
 ctx := context.Background()
 
+// Name the nodes; the client finds each partition's leader among them and
+// remembers it. (NodeIDToAddress can map node IDs to addresses up front.)
 cfg := client.DefaultConfig("127.0.0.1:9000", "127.0.0.1:9001", "127.0.0.1:9002")
 cfg.Security.Insecure = true
-cfg.NodeIDToAddress = map[string]string{
-    "node1": "127.0.0.1:9000",
-    "node2": "127.0.0.1:9001",
-    "node3": "127.0.0.1:9002",
-}
 
 c, err := client.Dial(ctx, cfg)
 if err != nil {
@@ -422,6 +421,9 @@ if err != nil {
 ### Consumer example (auto-ack)
 
 ```go
+// PartitionID defaults to -1: one stream per partition, so the consumer sees
+// the whole topic however publishers key their events. The handler then runs
+// concurrently across partitions.
 cons := client.DefaultConsumerConfig("orders", "order-processors")
 cons.AckMode = client.AckModeAuto
 
@@ -463,30 +465,19 @@ Use `-addr` to target a different node. Run `make demo` if a node is already up.
 
 ### Benchmarks (3-Node Cluster on Single Machine)
 
-Measured on a 3-node cluster on one host (AMD Ryzen 7 6800H, NVMe SSD):
+Measured on a 3-node cluster on one host (AMD Ryzen 7 6800H, NVMe SSD) with 256-byte payloads and periodic fsync:
 
 | Profile | Throughput | Notes |
 |--------|------------|-------|
-| `make loadtest-max` | **~790K events/sec** | RF=1, `periodic` fsync, batch 4000, 32 publishers/node (96 total), 19.2M events, P99 ~540µs |
-| `make loadtest-batch` | **~767K events/sec** | RF=1, batch 4000, 24 publishers/node (72 total), 7.2M events, P99 ~416µs |
-| Replicated (RF=3, minISR=2) | **~200K events/sec** | Synchronous quorum durability, batch=4000, 16 partitions; P99 ~1.3ms; `replication_lag=0` (followers fully caught up) |
-| Single-event mode | ~10K events/sec | One event per RPC (no batching) |
+| RF=1 raw publish, current branch | **612K events/sec median** | Three runs; dedup bypassed, 32 partitions, 128 MiB segments, batch 4000, 4.8M events each, Go fallback |
+| RF=1 raw publish, v0.5.0 | **733K events/sec median** | Matched three-run baseline; 16.4% faster |
+| RF=3, minISR=2, current branch | **111K events/sec** | Native Rust/CGO, dedup enabled, 16 partitions, batch 4000, 960K events, one run |
 
-Representative latency at the RF=1 ceiling (`periodic` fsync, batch mode): **P50 ~150µs, P95 ~400µs, P99 ~540µs** — sub-millisecond tail across all nodes.
-
-> Throughput varies by CPU, disk, scheduler settings, and payload size. Re-run the provided load tests in your environment for production sizing.
+The [validation record](docs/CLUSTER_PERFORMANCE_VALIDATION_2026-09-29.md) includes the native/CGO baseline pair, additional RF=3 workloads, and measurement limits. Re-run with your storage, network, and durability settings before sizing a deployment.
 
 ### Durability & Fault Tolerance
 
-With replication enabled (`--replication-factor=3 --min-insync-replicas=2`), every publish blocks until a **quorum** of replicas (leader + at least one follower) has the data. Each partition leader streams its WAL to followers over gRPC and only acknowledges the write once `minISR` replicas ack — so an acknowledged write survives a node loss, and a write that *cannot* reach quorum is **rejected rather than silently accepted**.
-
-Measured on a 3-node RF=3 / minISR=2 cluster (16 partitions, batch=4000):
-
-| Cluster state | Result | Behavior |
-|---------------|--------|----------|
-| **All 3 nodes up** | ✅ 100% success, ~200K events/sec, `replication_lag=0` | Every write replicated to both followers |
-| **1 node down** | ✅ **100% success** | Leader + 1 surviving follower still meet minISR=2 — stays available |
-| **2 nodes down** | 🛑 **Writes fail-closed** | Quorum impossible (1 < 2); publishes are **rejected**, not lost |
+With replication enabled (`--replication-factor=3 --min-insync-replicas=2`), the publish path waits for a follower acknowledgement before returning success. The current branch rejects writes when no replication leader is ready. The three-node completed runs reported zero errors and zero follower lag at the end. A fault campaign must still prove accepted-ID survival through node loss, restart, and leader replacement; see the [production audit](docs/PRODUCTION_AUDIT_2026-09-27.md).
 
 The fail-closed rejection is explicit, e.g.:
 
@@ -494,9 +485,9 @@ The fail-closed rejection is explicit, e.g.:
 replication for partition 13: not enough replicas: min-insync-replicas=2 but no connected followers
 ```
 
-This is the intended safety property: the system refuses to acknowledge a write it cannot make durable, avoiding silent data loss or split-brain. Confirm replication health any time via the `cronos_replication_lag` metric (`curl http://<node>:8080/metrics | grep replication_lag`) — `0` means followers are fully caught up.
+Inspect replication health via the `cronos_replication_lag` metric (`curl http://<node>:8080/metrics | grep replication_lag`). A zero gauge alone does not establish failover safety.
 
-> RF=1 (the default in the `make node*` / benchmark profiles) is the fast, **non-replicated** path used for throughput numbers. Enable RF≥3 + minISR≥2 for the durability guarantees above.
+> RF=1 (the default in the `make node*` / benchmark profiles) uses one replica. RF≥3 + minISR≥2 is required for quorum acknowledgements, but production recovery remains under validation.
 
 ### What Makes It Fast
 
@@ -534,9 +525,10 @@ This is the intended safety property: the system refuses to acknowledge a write 
 
 ### Flags
 
-Defaults are sourced from `internal/config/defaults.go`. Every flag has an
-equivalent `CRONOS_*` environment variable override (see [Environment
-Variables](#environment-variables)).
+Defaults are sourced from `internal/config/defaults.go`. A subset of flags has
+equivalent `CRONOS_*` environment variable overrides (see [Environment
+Variables](#environment-variables) for the exact list — flags not listed there are
+flag-only).
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -550,6 +542,9 @@ Variables](#environment-variables)).
 | `-index-interval` | `1000` | Sparse index interval (events per entry) |
 | `-fsync-mode` | `batch` | `every_event` \| `batch` \| `periodic` — `batch` is the durable default, `periodic` is the throughput ceiling |
 | `-flush-interval` | `1000` | Background flush interval (ms) |
+| `-backup-interval` | `1h` | How often the node backs up its partitions, at wall-clock multiples of the interval, so the nodes of a cluster back up at the same moment. `0` = no scheduled backups |
+| `-backup-retention` | `168h` | How long a backup is kept. `0` = for good |
+| `-backup-dir` | *(empty)* | Where backups go; default `backups` under `-data-dir`. A backup on the volume of the data it copies does not survive the loss of that volume |
 | `-retention-max-age-hours` | `168` | Delete WAL segments older than this many hours (0 = disable) |
 | `-retention-max-size-gb` | `0` | Keep WAL segments within this many GB by deleting oldest (0 = disable) |
 | `-dev` | `false` | Developer mode: disables production security requirements |
@@ -563,7 +558,7 @@ Variables](#environment-variables)).
 | `-max-in-flight` | `500000` | Max in-flight deliveries per partition (admission control) |
 | `-ack-timeout` | `30s` | Default delivery ack timeout |
 | `-max-retries` | `5` | Maximum delivery retry attempts |
-| `-retry-backoff` | `1s` | Initial retry backoff |
+| `-retry-backoff` | `1s` | Delay before a retry, multiplied by the attempt number |
 | `-max-credits` | `1000` | Max delivery credits per subscriber |
 | `-cb-failure-threshold` | `0.5` | Circuit breaker failure rate to trip (0.0–1.0) |
 | `-cb-min-attempts` | `10` | Min attempts before circuit breaker evaluates |
@@ -571,21 +566,24 @@ Variables](#environment-variables)).
 | `-dedup-ttl` | `168` | Dedup TTL in hours (7 days) |
 | `-bloom-capacity` | `100000000` | Bloom filter capacity per partition (100M items) |
 | `-replication-batch` | `100` | Replication batch size |
-| `-replication-timeout` | `10s` | Replication RPC timeout |
+| `-replication-timeout` | `10s` | Deadline for one replication Append RPC to a follower |
 | `-min-insync-replicas` | `1` | Minimum in-sync replicas (incl. leader) required to ack a write; production target ≥2 |
-| `-snapshot-catchup-threshold` | `10000` | Replication lag (events) above which a follower would request a full snapshot; **automatic lag-driven trigger not yet wired** — currently invoked only by `SyncPartitionFromLeader` on node join |
+| `-snapshot-catchup-threshold` | `10000` | Intended: replication lag (events) above which a follower requests a full snapshot. **Currently a dead config key** — parsed but never read; snapshot install is unconditional on the join/`SyncPartitionFromLeader` path and no lag-driven trigger is wired |
 | `-raft-dir` | `./raft` | Raft data directory |
 | `-raft-join` | *(empty)* | Raft cluster join address |
 | `-cluster` | `false` | Enable cluster mode |
-| `-cluster-gossip-addr` | `:7946` | Cluster gossip UDP listen address |
+| `-cluster-gossip-addr` | `:7946` | Cluster membership (gossip) TCP address; other nodes reach this node by it |
 | `-cluster-grpc-addr` | `:7947` | Cluster internal gRPC listener (`InternalGRPCServer`, replication + Raft) |
 | `-cluster-raft-addr` | `:7948` | Cluster Raft listen address |
-| `-cluster-seeds` | *(empty)* | Comma-separated seed node addresses |
+| `-cluster-seeds` | *(empty)* | Comma-separated membership addresses of the cluster's nodes. Name every node, on every node |
+| `-cluster-bootstrap` | `false` | This node creates the cluster, if it has no state and no other node in `-cluster-seeds` belongs to one. Give it to exactly one node |
+| `-cluster-expected-nodes` | `0` | Nodes a new cluster starts with; partitions get their first leaders as soon as that many are up (`1` for a single-node cluster). `0` = unknown |
+| `-cluster-formation-wait` | `5s` | With the expected nodes unknown or not all up: how long membership must be unchanged before first leaders are assigned; publishes are refused with a retryable error until then. `0` assigns at once |
 | `-virtual-nodes` | `2048` | Virtual nodes per physical node in hash ring |
 | `-heartbeat-interval` | `1s` | Cluster heartbeat interval |
 | `-failure-timeout` | `5s` | Node failure detection timeout |
 | `-suspect-timeout` | `3s` | Node suspect timeout |
-| `-use-memberlist` | `false` | Use HashiCorp Memberlist (SWIM) instead of custom TCP gossip |
+| `-use-memberlist` | `false` | Not supported; the server refuses to start with it |
 | `-clock-skew-threshold-ms` | `5000` | Max allowed clock skew from leader in ms (0 = disabled) |
 | `-node-rack` | *(empty)* | Rack / AZ label for topology-aware placement |
 | `-node-zone` | *(empty)* | Zone label for topology-aware placement |
@@ -595,23 +593,25 @@ Variables](#environment-variables)).
 | `-tls-cert-file` | *(empty)* | Path to TLS certificate for public gRPC |
 | `-tls-key-file` | *(empty)* | Path to TLS private key for public gRPC |
 | `-tls-client-auth` | `false` | Require client certificates on public gRPC (mTLS) |
-| `-replication-tls-enabled` | `false` | Enable CA-pinned mTLS for internal replication traffic |
-| `-replication-tls-ca-file` | *(empty)* | Path to internal replication CA certificate |
-| `-replication-tls-cert-file` | *(empty)* | Path to internal replication certificate |
-| `-replication-tls-key-file` | *(empty)* | Path to internal replication private key |
+| `-replication-tls-enabled` | `false` | Mutual TLS for all traffic between nodes: replication, membership and Raft. Needs the three files below |
+| `-replication-tls-ca-file` | *(empty)* | CA that signed the certificates of the cluster's nodes |
+| `-replication-tls-cert-file` | *(empty)* | This node's certificate, valid for the address other nodes reach it by, for server and client use |
+| `-replication-tls-key-file` | *(empty)* | Private key of that certificate |
 | `-auth-enabled` | `false` | Enable JWT authentication |
 | `-auth-jwt-secret` | *(empty)* | HMAC secret for JWT verification |
 | `-auth-jwt-public-key` | *(empty)* | Path to Ed25519/RSA public key for JWT verification |
 | `-auth-policy-file` | *(empty)* | Path to RBAC policy JSON file |
-| `-exactly-once-commits` | `false` | Enable exactly-once consumer offset commits (forward-only monotonic) |
+| `-experimental-features` | `false` | Enable unverified transactions and online splitting; requires `--dev` |
+| `-exactly-once-commits` | `false` | Experimental commit-ID storage; rejected in production, does not provide end-to-end exactly-once delivery |
 | `-follower-reads` | `false` | Allow follower nodes to serve replay reads |
 | `-load-shedding-threshold` | `0.0` | Load shedding threshold (0.0-1.0, 0 = disabled) |
 | `-encryption-enabled` | `false` | Enable AES-256-GCM encryption at rest for WAL segments |
 | `-encryption-key-file` | *(empty)* | Path to 32-byte encryption key file |
 | `-topic-rate-limit` | `0` | Per-subject per-topic rate limit (events/sec, 0 = disabled) |
 | `-topic-rate-burst` | `0` | Per-subject per-topic rate limit burst (0 = disabled) |
-| `-max-memory-percent` | `0` | Max memory usage % before rejecting publishes (0 = disabled) |
-| `-memory-check-interval` | `5000` | Memory check interval in milliseconds |
+| `-max-memory-percent` | `80` | Publishes are refused while the process holds this share of its memory limit or more (0 = never) |
+| `-memory-limit` | `0` | Memory the process may use, in bytes. `0` = the container's limit, or the machine's memory |
+| `-memory-check-interval` | `1000` | How long a memory measurement is used, in milliseconds |
 | `-max-ingest-rate` | `0` | Max events/sec per partition (0 = unlimited) |
 | `-ingest-burst-size` | `0` | Token bucket burst size for ingest rate limit |
 | `-tracing-enabled` | `false` | Enable OpenTelemetry tracing |
@@ -619,11 +619,12 @@ Variables](#environment-variables)).
 | `-tracing-otlp-endpoint` | `127.0.0.1:4317` | OTLP gRPC endpoint for trace export |
 | `-tracing-sample-ratio` | `0.01` | Sampling ratio (0.0-1.0); lower keeps overhead low |
 | `-tracing-insecure` | `true` | Disable TLS when exporting via OTLP |
+| `-pprof-addr` | *(empty)* | Serve `net/http/pprof` (CPU, block, mutex profiles) on this address; empty disables. Must be a loopback address outside `--dev` |
 
 ### Environment Variables
 
-Every flag in the table above has an equivalent `CRONOS_*` environment
-variable. The variables registered in `internal/config/config.go` are:
+Only the flags listed below have `CRONOS_*` environment variable overrides; all
+other flags are flag-only. The variables registered in `internal/config/config.go` are:
 
 | Variable | Overrides |
 |----------|-----------|
@@ -634,6 +635,7 @@ variable. The variables registered in `internal/config/config.go` are:
 | `CRONOS_DEV` | `-dev` |
 | `CRONOS_CLUSTER` | `-cluster` |
 | `CRONOS_CLUSTER_SEEDS` | `-cluster-seeds` |
+| `CRONOS_CLUSTER_BOOTSTRAP` | `-cluster-bootstrap` |
 | `CRONOS_TLS_ENABLED` | `-tls-enabled` |
 | `CRONOS_TLS_CA_FILE` | `-tls-ca-file` |
 | `CRONOS_TLS_CERT_FILE` | `-tls-cert-file` |
@@ -725,7 +727,7 @@ cronos_db/
 | **ReplicationService** | `Append`, `Sync`, `Snapshot` | Internal replication (intra-cluster, internal listener) |
 | **RaftService** | `Join`, `Leave`, `Status` | Internal cluster (intra-cluster, internal listener) |
 | **CrossRegionService** | `ReplicateEvents`, `FetchEvents` | Cross-region replication |
-| **TransactionService** | `BeginTransaction`, `PrepareTransaction`, `CommitTransaction`, `AbortTransaction` | 2PC distributed transactions |
+| **TransactionService** | `BeginTransaction`, `PrepareTransaction`, `CommitTransaction`, `AbortTransaction` | Experimental 2PC; registered only with `--dev --experimental-features` |
 
 ### Key RPCs
 
@@ -775,8 +777,9 @@ See [proto/events.proto](proto/events.proto) for the complete specification.
 - [x] Bulk segment snapshot install over gRPC for new node bootstrap / far-behind followers
 - [x] Partition leader election on failure
 
-### Performance ✅ Optimized (single-machine)
-- [x] ~790K events/sec (`periodic` fsync, RF=1, batch mode, single machine — measured)
+### Performance 🔄 Under validation (single machine)
+- [x] Find the RF=1 regression against v0.5.0: an fsynced epoch write under the partition-manager lock on every 5 s leadership reconcile (see the [validation record](docs/CLUSTER_PERFORMANCE_VALIDATION_2026-09-29.md#follow-up--2026-10-06))
+- [ ] Re-run the full 4.8M-event matched comparison on an idle host before setting a production target
 - [x] Durable throughput validated with `batch` fsync
 - [x] Lock-free Rust bloom filter via CGO FFI
 - [x] sync.Pool for timers, record buffers, transport buffers
@@ -806,7 +809,7 @@ See [proto/events.proto](proto/events.proto) for the complete specification.
 - [x] Non-blocking retry heap (min-heap by retry deadline)
 - [x] Admission control (readyQueue / timingWheel / in-flight limits)
 - [x] Per-subscription circuit breaker (Closed→Open→HalfOpen)
-- [x] Pluggable memberlist gossip (HashiCorp Memberlist / SWIM)
+- [ ] Memberlist (SWIM) membership: an adapter is in the code, the server does not use it
 - [x] Append-only DLQ segments (binary format, CRC32, rotation)
 - [x] Clock skew detection (cross-node heartbeat comparison)
 - [x] TLS/mTLS support (enable in production)
@@ -841,13 +844,18 @@ See [proto/events.proto](proto/events.proto) for the complete specification.
 
 ## Documentation
 
+The full docs site (MkDocs Material — search, dark mode, zoomable diagrams) builds with
+`make docs-serve` (local preview at http://127.0.0.1:8000) and deploys to GitHub Pages
+automatically on every docs change via `.github/workflows/docs.yml`.
+
 | Document | Description |
 |----------|-------------|
+| **[mkdocs.yml](mkdocs.yml)** | MkDocs Material site config — root docs are injected at build time by `docs/hooks/github_source_links.py` (single source of truth) |
 | **[ARCHITECTURE.md](ARCHITECTURE.md)** | Deep-dive with 30+ Mermaid diagrams — data flows, sequence diagrams, state machines |
-| **[docs/architecture/README.md](docs/architecture/README.md)** | Architecture split by feature (cluster, compliance, dedup, delivery, schema, slo, storage, and more) |
-| **[docs/mermaid](docs/mermaid)** | Standalone Mermaid diagram source files (.mmd) for architecture and runtime flows |
+| **[docs/architecture/README.md](docs/architecture/README.md)** | Architecture split by feature (cluster, compliance, dedup, delivery, schema, slo, storage, and more) — all diagrams embedded inline so they render on GitHub |
 | [docs/DEVELOPER_ARCHITECTURE_GUIDE.md](docs/DEVELOPER_ARCHITECTURE_GUIDE.md) | Comprehensive developer-oriented architecture and navigation guide |
-| [proto/events.proto](proto/events.proto) | Complete gRPC API specification (5 services, 30+ message types) |
+| **[docs/system-design/README.md](docs/system-design/README.md)** | Learn system design from this codebase: what is used where, why, and at what cost — with nine SVG diagrams, trade-off tables and the lessons from the audit |
+| [proto/events.proto](proto/events.proto) | Complete gRPC API specification (7 services, 60+ message types) |
 | [pkg/client](pkg/client) | Production Go SDK (producer/consumer/replay/metadata routing) |
 | [pkg.go.dev/client page](https://pkg.go.dev/github.com/jatin711-debug/cronos_db_golang/pkg/client) | Generated API reference and package docs |
 | [examples/pubsub_demo/main.go](examples/pubsub_demo/main.go) | Runnable publish+subscribe demo with scheduled delivery |

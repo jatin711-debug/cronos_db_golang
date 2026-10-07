@@ -21,7 +21,7 @@ COPY internal/dedup/rust/Cargo.toml ./
 COPY internal/dedup/rust/Cargo.lock ./
 
 # Build release library for the host target (x86_64-unknown-linux-gnu)
-RUN cargo build --release
+RUN cargo build --release --locked
 
 # Copy output to known location
 RUN cp target/release/libcronos_dedup.so /build/libcronos_dedup.so
@@ -29,7 +29,14 @@ RUN cp target/release/libcronos_dedup.so /build/libcronos_dedup.so
 # -----------------------------------------------------------------------------
 # Stage 2: Build Go application
 # -----------------------------------------------------------------------------
-FROM golang:1.25-bookworm AS go-builder
+FROM node:24-bookworm-slim AS dashboard-builder
+WORKDIR /build/dashboard
+COPY web/dashboard/package.json web/dashboard/package-lock.json ./
+RUN npm ci
+COPY web/dashboard/ ./
+RUN npm run build
+
+FROM golang:1.26.7-bookworm AS go-builder
 
 # Install build dependencies for cgo
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -45,6 +52,7 @@ RUN go mod download
 
 # Copy source code
 COPY . .
+COPY --from=dashboard-builder /build/dashboard/dist/ ./internal/api/web/dist/
 
 # Copy pre-built Rust library with correct name
 COPY --from=rust-builder /build/libcronos_dedup.so /build/go-app/libcronos_dedup.so
@@ -53,15 +61,22 @@ ENV CGO_ENABLED=1
 ENV CGO_LDFLAGS="-L/build/go-app -lcronos_dedup"
 
 # Build the main binary
-RUN go build -ldflags="-linkmode=external" -o /cronos-api ./cmd/api/main.go
+RUN go build -trimpath -ldflags="-linkmode=external" -o /cronos-api ./cmd/api
+
+# The administration tool. It restores backups and checks logs on the volume
+# of a stopped node, which in a cluster means from a pod of this image. It
+# uses none of the native library.
+RUN CGO_ENABLED=0 go build -trimpath -o /cronos-admin ./cmd/admin
 
 # -----------------------------------------------------------------------------
 # Stage 3: Final runtime image (Debian for glibc compatibility)
 # =============================================================================
 FROM debian:bookworm-slim
 
-# Install runtime dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Install runtime dependencies. The upgrade takes the security fixes Debian has
+# published since the base image was built: the image scan in CI fails on a
+# known vulnerability that has a fix, and the base image lags behind them.
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
     ca-certificates \
     tzdata \
     curl \
@@ -73,8 +88,9 @@ RUN groupadd -g 1000 cronos && \
 
 WORKDIR /app
 
-# Copy binary from go-builder
+# Copy binaries from go-builder
 COPY --from=go-builder /cronos-api /app/cronos-api
+COPY --from=go-builder /cronos-admin /app/cronos-admin
 
 # Copy Rust library (must be in same directory as binary or in library path)
 COPY --from=rust-builder /build/libcronos_dedup.so /app/libcronos_dedup.so

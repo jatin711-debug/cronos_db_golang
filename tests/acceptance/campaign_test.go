@@ -1,0 +1,310 @@
+//go:build acceptance
+
+package acceptance
+
+import (
+	"bytes"
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
+)
+
+const (
+	campaignTopic = "campaign"
+	campaignGroup = "campaign-workers"
+)
+
+// The fault campaign. Producers and a consumer group work against a three-node
+// cluster while its nodes are killed, frozen and restarted, one fault after
+// another. Nothing a producer was told is stored may be missing afterwards.
+func TestFaultCampaign(t *testing.T) {
+	c := newCluster(t)
+	c.startAll()
+	observer := c.dial()
+	w := startWorkload(t, c, campaignTopic, campaignGroup, 3, 20, 2)
+	accepted := func() int64 { return w.ledger.accepted.Load() }
+	delivered := func() int64 { return w.ledger.delivered.Load() }
+	acceptedOn := func(partition int32) func() int64 {
+		return func() int64 { return w.ledger.acceptedByPartition[partition].Load() }
+	}
+
+	// The cluster works before anything is done to it.
+	w.waitProgress(accepted, 100, 60*time.Second, "publishes accepted by the healthy cluster")
+	w.waitProgress(delivered, 50, 60*time.Second, "events delivered by the healthy cluster")
+
+	// settle waits until the cluster is whole again and both directions flow.
+	settle := func() {
+		t.Helper()
+		c.waitReady(c.nodes...)
+		w.waitProgress(accepted, 60, 60*time.Second, "publishes accepted after the fault")
+		w.waitProgress(delivered, 60, 60*time.Second, "events delivered after the fault")
+	}
+	killed := map[string]bool{}
+	crash := func(n *node) {
+		c.kill(n)
+		killed[n.id] = true
+	}
+
+	// The leader of a partition is killed. The partition must be served by
+	// another replica, without the node.
+	leader := c.leaderOf(observer, 0)
+	step(t, "killing %s, which leads partition 0", leader.id)
+	crash(leader)
+	w.waitProgress(acceptedOn(0), 30, 90*time.Second, "publishes accepted on partition 0 without its old leader")
+	c.start(leader)
+	settle()
+
+	// A follower is killed.
+	leader = c.leaderOf(observer, 0)
+	follower := c.nodes[(leader.index+1)%len(c.nodes)]
+	step(t, "killing %s, a follower of partition 0 (led by %s)", follower.id, leader.id)
+	crash(follower)
+	w.waitProgress(accepted, 150, 90*time.Second, "publishes accepted with one replica down")
+	c.start(follower)
+	settle()
+
+	// A leader is frozen and comes back. The node does not know it stopped:
+	// when it runs again it still believes it leads, with whatever it had
+	// appended and not replicated.
+	leader = c.leaderOf(observer, 0)
+	step(t, "freezing %s, which leads partition 0", leader.id)
+	c.freeze(leader)
+	w.waitProgress(acceptedOn(0), 30, 90*time.Second, "publishes accepted on partition 0 while its old leader is frozen")
+	step(t, "letting %s run again", leader.id)
+	c.thaw(leader)
+	settle()
+
+	// One of the group's two consumers goes away. What it had been given and
+	// not acknowledged goes to the one that is left.
+	step(t, "one of the two consumers leaves")
+	w.leave(1)
+	settle()
+
+	// Every node has been killed once, the one that created the cluster too.
+	for _, n := range c.nodes {
+		if killed[n.id] {
+			continue
+		}
+		step(t, "killing %s", n.id)
+		crash(n)
+		w.waitProgress(accepted, 150, 90*time.Second, "publishes accepted with "+n.id+" down")
+		c.start(n)
+		settle()
+	}
+
+	// A node loses its disk and is replaced: it comes back under its name
+	// with nothing, and is killed once more while it is being filled.
+	replaced := c.nodes[(c.leaderOf(observer, 0).index+1)%len(c.nodes)]
+	step(t, "replacing %s with an empty node", replaced.id)
+	c.kill(replaced)
+	c.wipe(replaced)
+	c.start(replaced)
+	time.Sleep(1500 * time.Millisecond)
+	step(t, "killing %s while it is being filled", replaced.id)
+	c.kill(replaced)
+	w.waitProgress(accepted, 60, 90*time.Second, "publishes accepted while "+replaced.id+" is down")
+	c.start(replaced)
+	settle()
+
+	// The whole cluster is killed at once.
+	step(t, "killing every node")
+	for _, n := range c.nodes {
+		c.kill(n)
+	}
+	time.Sleep(2 * time.Second)
+	for _, n := range c.nodes {
+		c.start(n)
+	}
+	settle()
+
+	step(t, "faults done; waiting for the remaining deliveries")
+	w.stopPublishers()
+	checkDelivery(t, w)
+	w.stopConsumers()
+	checkLogs(t, c, w.topic, w.ledger, true)
+}
+
+// step logs what the campaign does next, with the time, so that it can be
+// matched with the node logs.
+func step(t *testing.T, format string, a ...any) {
+	t.Helper()
+	t.Logf("%s  %s", time.Now().Format("15:04:05.000"), fmt.Sprintf(format, a...))
+}
+
+// checkDelivery waits until every acknowledged event has been delivered and
+// reports the ones that were not, and everything that was delivered wrongly.
+func checkDelivery(t *testing.T, w *workload) {
+	t.Helper()
+	deadline := w.ledger.latestSchedule().Add(90 * time.Second)
+	for len(w.ledger.undelivered()) > 0 && time.Now().Before(deadline) {
+		if stopped, err := w.consumerStopped(); stopped {
+			t.Fatalf("a consumer stopped by itself: %v", err)
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+
+	events := w.ledger.snapshot()
+	acceptedCount, unknownOutcome, redelivered := 0, 0, 0
+	for _, event := range events {
+		if event.accepted {
+			acceptedCount++
+		} else {
+			unknownOutcome++
+		}
+		if event.deliveries > 1 {
+			redelivered++
+		}
+	}
+	t.Logf("published %d events: %d acknowledged, %d with unknown outcome; %d delivered more than once",
+		len(events), acceptedCount, unknownOutcome, redelivered)
+
+	if missing := w.ledger.undelivered(); len(missing) > 0 {
+		t.Errorf("%d acknowledged events were never delivered:\n  %s", len(missing), sample(missing, 25))
+	}
+	w.ledger.mu.Lock()
+	early, unknown := w.ledger.early, w.ledger.unknown
+	w.ledger.mu.Unlock()
+	if len(early) > 0 {
+		t.Errorf("%d deliveries arrived before their scheduled time:\n  %s", len(early), sample(early, 25))
+	}
+	if len(unknown) > 0 {
+		t.Errorf("%d deliveries were of events nobody published:\n  %s", len(unknown), sample(unknown, 25))
+	}
+}
+
+// checkLogs compares the log of every partition across its replicas, and the
+// log with what producers were told. With pruned set, the nodes must have
+// removed something from their logs during the run.
+func checkLogs(t *testing.T, c *cluster, topic string, sent *ledger, pruned bool) {
+	t.Helper()
+	logs := make([][]*types.Event, partitionCount)
+	starts := make([]int64, partitionCount)
+	for partition := int32(0); partition < partitionCount; partition++ {
+		logs[partition], starts[partition] = agreedLog(t, c, partition, topic)
+	}
+
+	type place struct {
+		partition int32
+		offset    int64
+	}
+	places := make(map[string][]place)
+	removed := int64(0)
+	for partition, log := range logs {
+		removed += starts[partition]
+		for _, event := range log {
+			places[event.GetMessageId()] = append(places[event.GetMessageId()], place{int32(partition), event.GetOffset()})
+		}
+	}
+	// The nodes remove log entries that every consumer has finished. An
+	// acknowledged event may therefore be gone from the log, if it was
+	// delivered and was acknowledged below where its partition's log starts
+	// now.
+	var wrong []string
+	for id, event := range sent.snapshot() {
+		at := places[id]
+		switch {
+		case len(at) > 1:
+			wrong = append(wrong, fmt.Sprintf("%s is in the log %d times: %v", id, len(at), at))
+		case event.accepted && len(at) == 0 && event.offset >= 0 && event.offset >= starts[event.partition]:
+			wrong = append(wrong, fmt.Sprintf("%s was acknowledged at partition %d offset %d and is not in the log, which starts at offset %d",
+				id, event.partition, event.offset, starts[event.partition]))
+		case event.accepted && len(at) == 0 && event.deliveries == 0:
+			wrong = append(wrong, fmt.Sprintf("%s was acknowledged, is not in the log and was never delivered", id))
+		case event.accepted && len(at) == 1 && event.offset >= 0 && (at[0].partition != event.partition || at[0].offset != event.offset):
+			wrong = append(wrong, fmt.Sprintf("%s was acknowledged at partition %d offset %d and is at partition %d offset %d",
+				id, event.partition, event.offset, at[0].partition, at[0].offset))
+		}
+	}
+	if len(wrong) > 0 {
+		t.Errorf("%d events are not where their producers were told:\n  %s", len(wrong), sample(wrong, 25))
+	}
+	if pruned && removed == 0 {
+		t.Errorf("no partition removed anything from its log; the logs start at offsets %v", starts)
+	}
+}
+
+// agreedLog waits until the replicas of a partition hold logs that end at the
+// same offset, checks that the logs are the same entry for entry from the
+// point where all of them have entries, and returns the log from there and
+// the offset of that point.
+//
+// The replicas need not start at the same offset. The leader removes whole
+// segments from the start of its log and tells the others where its log
+// starts; they remove the segments of theirs that lie wholly below that, and
+// their segments need not end where the leader's do. A log may also hold
+// nothing at all, when everything in it was finished and its last segment
+// was full: it then starts where its next entry will go.
+func agreedLog(t *testing.T, c *cluster, partition int32, topic string) ([]*types.Event, int64) {
+	t.Helper()
+	deadline := time.Now().Add(60 * time.Second)
+	var logs [][]*types.Event
+	var start, end int64
+	for {
+		logs = logs[:0]
+		start, end = 0, -1
+		same := true
+		for i, n := range c.nodes {
+			log, err := c.readLog(n, partition, topic)
+			first, last := int64(0), int64(-1)
+			if err == nil {
+				first, last, err = c.logBounds(n, partition)
+			}
+			if err != nil {
+				same = false
+				if time.Now().After(deadline) {
+					t.Fatalf("read the log of partition %d on %s: %v", partition, n.id, err)
+				}
+				break
+			}
+			logs = append(logs, log)
+			if i == 0 {
+				end = last
+			}
+			start, same = max(start, first), same && last == end
+		}
+		if same || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if len(logs) != len(c.nodes) {
+		t.Fatalf("partition %d: could not read the log of every node", partition)
+	}
+	for i, log := range logs {
+		for len(log) > 0 && log[0].GetOffset() < start {
+			log = log[1:]
+		}
+		logs[i] = log
+	}
+
+	reference := logs[0]
+	for i, log := range logs[1:] {
+		other := c.nodes[i+1]
+		if len(log) != len(reference) {
+			t.Errorf("partition %d: from offset %d on, %s holds %d entries and %s holds %d", partition, start, c.nodes[0].id, len(reference), other.id, len(log))
+		}
+		for j := 0; j < min(len(log), len(reference)); j++ {
+			a, b := reference[j], log[j]
+			if a.GetOffset() != b.GetOffset() || a.GetTerm() != b.GetTerm() || a.GetMessageId() != b.GetMessageId() ||
+				a.GetScheduleTs() != b.GetScheduleTs() || !bytes.Equal(a.GetPayload(), b.GetPayload()) {
+				t.Errorf("partition %d: the logs differ at entry %d:\n  %s: offset %d term %d id %s\n  %s: offset %d term %d id %s",
+					partition, j, c.nodes[0].id, a.GetOffset(), a.GetTerm(), a.GetMessageId(), other.id, b.GetOffset(), b.GetTerm(), b.GetMessageId())
+				break
+			}
+		}
+	}
+	for j, event := range reference {
+		if event.GetOffset() != start+int64(j) {
+			t.Errorf("partition %d: entry %d after offset %d has offset %d", partition, j, start, event.GetOffset())
+			break
+		}
+	}
+	if len(reference) == 0 {
+		t.Logf("partition %d: every replica has removed everything below offset %d and holds nothing after it", partition, start)
+	} else {
+		t.Logf("partition %d: offsets %d to %d on every replica", partition, start, reference[len(reference)-1].GetOffset())
+	}
+	return reference, start
+}

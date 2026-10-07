@@ -21,8 +21,10 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` won't-fix/
   4.2 cross-region off public port, 4.3 require policy file in prod, 4.4 HTTP timeouts.
 - **Phase 5 (client SDK): DONE** — 5.1 CB threshold-0 disabled, 5.2 hedging first-success,
   5.3 capability probes round-trip, 5.4 async send/close race hardened (RWMutex).
-- **Phase 6 (observability/CI): largely done** — CI restored on `main`/`developement`;
-  remaining optional: flaky client test stabilization, lag-driven snapshot auto-trigger.
+- **Phase 6 (observability/CI): partially done** — 6.1 metrics/alert fixes landed; CI was
+  restored (0868cbc) but **removed again** in `0861b0a` — `.github/workflows` is currently
+  absent on both `main` and `developement`, so **6.2 is open again**.
+  Remaining: restore CI, flaky client test stabilization, lag-driven snapshot auto-trigger.
 
 Known pre-existing flaky test: `pkg/client` →
 `TestSendAsyncContextCancellation` fails intermittently in some full-suite runs.
@@ -129,6 +131,9 @@ touches the hot path, it must be gated so RF=1 / no-encryption / no-cluster stay
   `expiredCount` ([manager.go:678-688](internal/partition/manager.go:678)).
 - **Fix:** For `ScheduleTs <= now` during replay, **enqueue for immediate delivery** (fire-now)
   rather than discard. Preserve dedup/ordering. Add a metric `scheduler_matured_on_recovery_total`.
+- **Status:** behavior landed (matured-during-downtime events are enqueued for immediate
+  delivery, manager.go:790-810). The metric was **not** added — recovery currently emits a log
+  line only (manager.go:809).
 - **Verify:** test: schedule near-future timer, stop before fire, restart after fire-time →
   delivered once.
 
@@ -349,6 +354,7 @@ touches the hot path, it must be gated so RF=1 / no-encryption / no-cluster stay
 - **Verify:** `/metrics` exposes the referenced series; alert expression evaluates non-empty.
 
 ### [ ] 6.2 — Restore CI with a chaos gate
+> **Update:** CI was restored (0868cbc) but removed again in `0861b0a`. This item is open.
 - **Symptom:** No CI (`.github/workflows` deleted in `ecf8668`); regressions like the above go
   unnoticed. `--dev` skips metrics/SLO interceptors and all compose nodes run `--dev`.
 - **Fix:** Add a CI workflow: build (cgo/MinGW note), `make test-unit`, `go vet`, gofmt check, and

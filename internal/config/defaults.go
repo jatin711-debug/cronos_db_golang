@@ -26,6 +26,14 @@ const (
 	// DefaultFlushIntervalMS is the periodic flush interval when using batch/periodic fsync.
 	DefaultFlushIntervalMS = 1000
 
+	// DefaultBackupInterval is how often a node backs up its partitions, and
+	// DefaultBackupRetention how long it keeps a backup.
+	DefaultBackupInterval  = time.Hour
+	DefaultBackupRetention = 7 * 24 * time.Hour
+	// DefaultCompactionInterval is how often a partition looks for log
+	// segments whose events are all finished.
+	DefaultCompactionInterval = 10 * time.Minute
+
 	// DefaultRetentionMaxAgeHours is max WAL segment age before deletion (7 days).
 	DefaultRetentionMaxAgeHours = 168 // 7 days
 	// DefaultRetentionMaxSizeGB is max total WAL size in GB; 0 disables size retention.
@@ -128,6 +136,10 @@ const (
 	// DefaultSuspectTimeout is how long a node stays suspect before failure.
 	DefaultSuspectTimeout = 3 * time.Second
 
+	// DefaultClusterFormationWait is how long membership must be unchanged
+	// before a new cluster gives its partitions their first leaders, unless
+	// the expected number of nodes is known and present sooner.
+	DefaultClusterFormationWait = 5 * time.Second
 	// DefaultUseMemberlist uses custom TCP gossip unless HashiCorp Memberlist is enabled.
 	DefaultUseMemberlist = false // Default to custom gossip for backward compatibility
 
@@ -141,10 +153,11 @@ const (
 	// DefaultTopicRateLimitBurst is the token-bucket burst for topic rate limits; 0 disables.
 	DefaultTopicRateLimitBurst = 0.0
 
-	// DefaultMaxMemoryUsagePercent rejects publishes above this process RSS ratio; 0 disables.
-	DefaultMaxMemoryUsagePercent = 0.0 // Disabled by default
+	// DefaultMaxMemoryUsagePercent refuses publishes while the process holds
+	// this share of its memory limit or more; 0 disables.
+	DefaultMaxMemoryUsagePercent = 80.0
 	// DefaultMemoryCheckIntervalMs is how often memory usage is sampled.
-	DefaultMemoryCheckIntervalMs = 5000 // 5 seconds
+	DefaultMemoryCheckIntervalMs = 1000
 
 	// DefaultMaxIngestRatePerPartition is max events/sec per partition; 0 is unlimited.
 	DefaultMaxIngestRatePerPartition = 0 // Unlimited by default

@@ -162,6 +162,9 @@ func (r *ReplayEngine) ReplayStream(ctx context.Context, req *ReplayRequest, eve
 	defer sendTimer.Stop()
 
 	for i, event := range events {
+		if req.Topic != "" && event.GetTopic() != req.Topic {
+			continue
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -200,7 +203,7 @@ func (r *ReplayEngine) ReplayStream(ctx context.Context, req *ReplayRequest, eve
 
 // ReplayRequest describes a time-based or offset-based replay operation.
 type ReplayRequest struct {
-	// Topic is the logical topic being replayed (informational for multi-topic setups).
+	// Topic restricts returned records to this topic. Public callers must set it.
 	Topic string
 	// PartitionID is the partition whose WAL is replayed.
 	PartitionID int32

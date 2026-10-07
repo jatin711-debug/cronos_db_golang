@@ -1,0 +1,147 @@
+name: production-checks
+
+# Runs for pull requests and for what reaches main. A commit of another
+# branch is checked on request:
+#   gh workflow run ci.yml --ref <branch>
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      CGO_ENABLED: "1"
+      LD_LIBRARY_PATH: ${{ github.workspace }}/internal/dedup/rust/target/release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Build and test Rust dependency
+        working-directory: internal/dedup/rust
+        run: |
+          cargo build --release --locked
+          cargo test --locked
+      - name: Formatting
+        run: test -z "$(gofmt -l internal pkg cmd tests/acceptance)"
+      - name: Vet and build
+        run: |
+          go vet ./internal/... ./pkg/... ./cmd/...
+          go vet -tags acceptance ./tests/acceptance/
+          go build ./cmd/...
+      - name: Race and regression suite
+        run: go test -race -count=1 ./internal/... ./pkg/... ./cmd/... -timeout 180s
+
+  # Three server processes form a cluster and are killed, frozen and restarted
+  # while producers and a consumer group work. Every acknowledged publish must
+  # be delivered, none before its time, and the replicas must end up with the
+  # same logs.
+  fault-campaign:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CGO_ENABLED: "1"
+      LD_LIBRARY_PATH: ${{ github.workspace }}/internal/dedup/rust/target/release
+      CRONOS_ACCEPTANCE_ARTIFACTS: ${{ github.workspace }}/build/acceptance-logs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: cargo build --release --locked --manifest-path internal/dedup/rust/Cargo.toml
+      - name: Fault campaign on a three-node cluster
+        run: go test -tags acceptance -count=1 -timeout 25m -v ./tests/acceptance/
+      - name: Keep the node logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fault-campaign-node-logs
+          path: build/acceptance-logs
+          retention-days: 7
+
+  dashboard-and-chart:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/dashboard/package-lock.json
+      - working-directory: web/dashboard
+        run: |
+          npm ci
+          npm test
+          npm run build
+          npm audit --audit-level=high
+      - uses: azure/setup-helm@v5.0.0
+        with:
+          version: v3.17.3
+      - run: python -m pip install PyYAML==6.0.2
+      - run: python scripts/check-production-chart.py
+
+  go-security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CGO_ENABLED: "1"
+      LD_LIBRARY_PATH: ${{ github.workspace }}/internal/dedup/rust/target/release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: cargo build --release --locked --manifest-path internal/dedup/rust/Cargo.toml
+      - run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - run: govulncheck ./internal/... ./pkg/... ./cmd/...
+
+  production-chart-startup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - uses: azure/setup-helm@v5.0.0
+        with:
+          version: v3.17.3
+      - name: Build the shipped image
+        run: docker build -t cronos-db:ci .
+      # Known vulnerabilities in what is shipped: the packages of the base
+      # image and the libraries compiled into the binary. One that has a fix
+      # fails the build. The action is pinned to a commit, not a tag.
+      - name: Scan the shipped image for known vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: cronos-db:ci
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          version: v0.75.0
+      - name: Create isolated Kubernetes cluster
+        run: |
+          go install sigs.k8s.io/kind@v0.33.0
+          kind create cluster --name cronos-ci --wait 120s
+          kind load docker-image cronos-db:ci --name cronos-ci
+      - name: Exercise production chart with TLS, auth and encryption
+        run: bash scripts/production-chart-smoke.sh
+      - name: Collect startup diagnostics
+        if: always()
+        run: |
+          kubectl --context kind-cronos-ci -n cronos-ci get pods -o wide || true
+          kubectl --context kind-cronos-ci -n cronos-ci get events --sort-by=.lastTimestamp || true
+          kubectl --context kind-cronos-ci -n cronos-ci logs -l app.kubernetes.io/instance=cronos --all-containers --tail=150 --prefix || true

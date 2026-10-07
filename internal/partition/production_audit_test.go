@@ -1,0 +1,95 @@
+package partition
+
+import (
+	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
+	"testing"
+	"time"
+)
+
+func TestAuditSnapshotRestoresPendingTimer(t *testing.T) {
+	cfg := &types.Config{DataDir: t.TempDir(), PartitionCount: 1, TickMS: 10, WheelSize: 100, SegmentSizeBytes: 1 << 20, IndexInterval: 1, FsyncMode: "batch", FlushIntervalMS: 100, DedupTTLHours: 24, BloomCapacity: 1000}
+	pm := NewPartitionManager("audit", cfg)
+	if err := pm.CreatePartition(0, "audit"); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := pm.GetInternalPartition(0)
+	ev := &types.Event{MessageId: "pending", Topic: "audit", Payload: []byte("payload"), ScheduleTs: time.Now().Add(30 * time.Minute).UnixMilli()}
+	if err := p.Wal.AppendEvent(ev); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Scheduler.Schedule(ev); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewSnapshotManager(p.DataDir, 0).CreateSnapshot(p); err != nil {
+		t.Fatal(err)
+	}
+	if err := pm.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for restart := 1; restart <= 3; restart++ {
+		pm2 := NewPartitionManager("audit", cfg)
+		closed := false
+		t.Cleanup(func() {
+			if !closed {
+				pm2.Close()
+			}
+		})
+		if err := pm2.CreatePartition(0, "audit"); err != nil {
+			t.Fatal(err)
+		}
+		if err := pm2.StartPartition(0); err != nil {
+			t.Fatal(err)
+		}
+		restored, _ := pm2.GetInternalPartition(0)
+		if n := restored.Scheduler.GetTimingWheelDepth(); n != 1 {
+			t.Fatalf("pending timer lost after restart %d: got %d, want 1", restart, n)
+		}
+		if err := NewSnapshotManager(restored.DataDir, 0).CreateSnapshot(restored); err != nil {
+			t.Fatal(err)
+		}
+		if err := pm2.Close(); err != nil {
+			t.Fatal(err)
+		}
+		closed = true
+	}
+}
+
+func TestAuditPromotionSchedulesReplicatedEvents(t *testing.T) {
+	cfg := &types.Config{DataDir: t.TempDir(), PartitionCount: 1, ReplicationFactor: 2, TickMS: 10, WheelSize: 100, SegmentSizeBytes: 1 << 20, IndexInterval: 1, FsyncMode: "batch", FlushIntervalMS: 100, BloomCapacity: 1000, MinInSyncReplicas: 1}
+	pm := NewPartitionManager("audit", cfg)
+	defer pm.Close()
+	if err := pm.CreatePartition(0, "audit"); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := pm.GetInternalPartition(0)
+	ev := &types.Event{MessageId: "replicated", Topic: "audit", Payload: []byte("payload"), Offset: 0, ScheduleTs: time.Now().Add(30 * time.Minute).UnixMilli()}
+	if err := p.Wal.AppendReplicatedBatch([]*types.Event{ev}); err != nil {
+		t.Fatal(err)
+	}
+	if err := pm.PromoteToLeader(0, 2); err != nil {
+		t.Fatal(err)
+	}
+	defer p.ReplLeader.Stop()
+	if n := p.Scheduler.GetTimingWheelDepth(); n != 1 {
+		t.Fatalf("promotion left replicated event unscheduled: got %d timers, want 1", n)
+	}
+}
+
+func TestAuditSingleReplicaPromotionKeepsFastPath(t *testing.T) {
+	cfg := &types.Config{DataDir: t.TempDir(), PartitionCount: 1, ReplicationFactor: 1, TickMS: 10, WheelSize: 100, SegmentSizeBytes: 1 << 20, IndexInterval: 1, FsyncMode: "batch", FlushIntervalMS: 100, BloomCapacity: 1000}
+	pm := NewPartitionManager("audit", cfg)
+	defer pm.Close()
+	if err := pm.CreatePartition(0, "audit"); err != nil {
+		t.Fatal(err)
+	}
+	if err := pm.PromoteToLeader(0, 1); err != nil {
+		t.Fatal(err)
+	}
+	p, err := pm.GetInternalPartition(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.ReplLeader != nil || !p.IsLeader() || p.Epoch() != 1 {
+		t.Fatalf("RF=1 promotion created replication leader or wrong epoch: leader=%v epoch=%d repl=%v", p.IsLeader(), p.Epoch(), p.ReplLeader)
+	}
+}

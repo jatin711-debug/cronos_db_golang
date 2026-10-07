@@ -31,5 +31,5 @@ Replay serves historical data from WAL by time or offset, enabling debugging, ba
 
 ## Related Diagrams
 
-- [publish_flow.mmd](../../mermaid/publish_flow.mmd)
-- [system_overview.mmd](../../mermaid/system_overview.mmd)
+- [Publish flow](api.md#publish-flow)
+- [System overview](../README.md#system-overview)

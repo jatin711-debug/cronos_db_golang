@@ -278,6 +278,7 @@ func (p *Producer) Send(ctx context.Context, msg Message) (*SendResult, error) {
 			})
 			if hedgeErr == nil && hedgeRes.resp != nil {
 				if hedgeRes.resp.GetSuccess() {
+					p.client.noteServed(partitionID, hedgeRes.addr)
 					return &SendResult{
 						MessageID:   msg.MessageID,
 						PartitionID: hedgeRes.resp.GetPartitionId(),
@@ -314,11 +315,20 @@ func (p *Producer) Send(ctx context.Context, msg Message) (*SendResult, error) {
 			}
 			if err != nil {
 				lastErr = err
-				if errs.IsLeaderRelated(err) {
-					p.client.MarkMetadataStale()
-					shouldRetry = true
+				if errs.IsOverloaded(err) {
+					// The node that leads the partition has no room. No other
+					// node can take the publish, and the caller has to know
+					// that this is why.
+					return nil, p.wrapErr("producer.send", ErrorKindOverloaded, err)
 				}
-				if errs.IsRetryable(err) {
+				p.client.noteRefused(partitionID, addr)
+				// A node that does not lead the partition says so, and the
+				// next candidate may be the one that does.
+				elsewhere := errs.IsLeaderRelated(err)
+				if elsewhere {
+					p.client.MarkMetadataStale()
+				}
+				if elsewhere || errs.IsRetryable(err) {
 					shouldRetry = true
 					continue
 				}
@@ -330,6 +340,7 @@ func (p *Producer) Send(ctx context.Context, msg Message) (*SendResult, error) {
 				continue
 			}
 			if resp.GetSuccess() {
+				p.client.noteServed(partitionID, addr)
 				return &SendResult{
 					MessageID:   msg.MessageID,
 					PartitionID: resp.GetPartitionId(),
@@ -342,6 +353,7 @@ func (p *Producer) Send(ctx context.Context, msg Message) (*SendResult, error) {
 
 			lastErr = errors.New(resp.GetError())
 			if isLeaderRelatedMessage(resp.GetError()) {
+				p.client.noteRefused(partitionID, addr)
 				p.client.MarkMetadataStale()
 				shouldRetry = true
 				continue
@@ -373,6 +385,11 @@ func (p *Producer) tryPublish(ctx context.Context, addr string, event *types.Eve
 		Event:          event,
 		AllowDuplicate: allowDuplicate,
 	})
+	// Preserve the standard context cause when gRPC encodes cancellation as
+	// a status error, so callers and the circuit breaker can recognize it.
+	if err != nil && reqCtx.Err() != nil {
+		err = reqCtx.Err()
+	}
 	p.client.observeRequest("event.publish", addr, start, err)
 	return resp, err
 }
@@ -388,7 +405,12 @@ func (p *Producer) tryPublishWithBreaker(ctx context.Context, addr string, event
 	}
 	resp, err := p.tryPublish(ctx, addr, event, allowDuplicate)
 	if err != nil {
-		if cb != nil && !errors.Is(err, context.Canceled) {
+		// A node that answers that it does not lead the partition is healthy.
+		// Counting that against it would close it off for the moment it takes
+		// the partition over. A node that answers that it has no room is
+		// healthy too; with its breaker open the publishes that follow went
+		// to the other nodes and came back as "not the leader".
+		if cb != nil && !errors.Is(err, context.Canceled) && !errs.IsLeaderRelated(err) && !errs.IsOverloaded(err) {
 			cb.RecordFailure()
 		}
 		return resp, err, false
@@ -406,7 +428,7 @@ func (p *Producer) SendBatch(ctx context.Context, msgs []Message) (*BatchSendRes
 	}
 
 	type batchGroup struct {
-		addr           string
+		candidates     []string
 		allowDuplicate bool
 		partitionID    int32
 		leaderID       string
@@ -449,7 +471,7 @@ func (p *Producer) SendBatch(ctx context.Context, msgs []Message) (*BatchSendRes
 		group, exists := groups[key]
 		if !exists {
 			group = &batchGroup{
-				addr:           addr,
+				candidates:     route.CandidateAddresses,
 				allowDuplicate: allowDuplicate,
 				partitionID:    partitionID,
 				leaderID:       route.LeaderID,
@@ -463,37 +485,15 @@ func (p *Producer) SendBatch(ctx context.Context, msgs []Message) (*BatchSendRes
 	}
 
 	for _, group := range groups {
-		client, err := p.client.eventClientForAddress(group.addr)
-		if err != nil {
-			for _, msg := range group.msgs {
-				sendRes, sendErr := p.Send(ctx, msg)
-				if sendErr == nil {
-					result.PublishedCount++
-					result.Results = append(result.Results, sendRes)
-				} else {
-					result.ErrorCount++
-				}
-			}
-			continue
-		}
-
-		reqCtx, cancel := p.client.requestContext(ctx)
-		start := time.Now()
-		resp, err := client.PublishBatch(reqCtx, &types.PublishBatchRequest{
-			Events:         group.events,
-			AllowDuplicate: group.allowDuplicate,
-		})
-		cancel()
-		p.client.observeRequest("event.publish_batch", group.addr, start, err)
-
-		// A non-nil response is authoritative. PublishBatch returns counts for
-		// logical duplicates and validation failures; those results must not be
-		// converted into N single-event RPCs. Retrying the whole batch here used
-		// to turn one duplicate into a throughput collapse.
-		if err != nil || resp == nil {
-			if err != nil && errs.IsLeaderRelated(err) {
-				p.client.MarkMetadataStale()
-			}
+		// An answer that says what became of the events is authoritative.
+		// PublishBatch returns counts for logical duplicates and validation
+		// failures; those results must not be converted into N single-event
+		// RPCs. Retrying the whole batch here used to turn one duplicate into a
+		// throughput collapse.
+		resp, servedBy := p.publishBatchTo(ctx, group.partitionID, group.candidates, group.events, group.allowDuplicate)
+		if resp == nil {
+			// No node took the batch. Sent one by one, its messages wait for
+			// a leader and are retried.
 			for _, msg := range group.msgs {
 				sendRes, sendErr := p.Send(ctx, msg)
 				if sendErr != nil {
@@ -523,7 +523,7 @@ func (p *Producer) SendBatch(ctx context.Context, msgs []Message) (*BatchSendRes
 			sr := &SendResult{
 				MessageID:   msg.MessageID,
 				PartitionID: group.partitionID,
-				NodeAddress: group.addr,
+				NodeAddress: servedBy,
 				ScheduleTS:  resolveScheduleTS(msg),
 				LeaderID:    group.leaderID,
 			}
@@ -535,6 +535,56 @@ func (p *Producer) SendBatch(ctx context.Context, msgs []Message) (*BatchSendRes
 	}
 
 	return result, nil
+}
+
+// publishBatchTo offers one partition's batch to the candidates in turn. It
+// returns the first answer that says what became of the events, and the
+// address it came from, or nil when no node gave one.
+//
+// A node that does not lead the partition refuses the batch as a whole,
+// before it has looked at a single event, so the next node is asked. With
+// three replicas on three nodes every node holds every partition and two of
+// them answer this way.
+func (p *Producer) publishBatchTo(ctx context.Context, partitionID int32, candidates []string, events []*types.Event, allowDuplicate bool) (*types.PublishBatchResponse, string) {
+	for _, addr := range candidates {
+		if ctx.Err() != nil {
+			break
+		}
+		client, err := p.client.eventClientForAddress(addr)
+		if err != nil {
+			continue
+		}
+		reqCtx, cancel := p.client.requestContext(ctx)
+		start := time.Now()
+		resp, err := client.PublishBatch(reqCtx, &types.PublishBatchRequest{
+			Events:         events,
+			AllowDuplicate: allowDuplicate,
+		})
+		cancel()
+		p.client.observeRequest("event.publish_batch", addr, start, err)
+
+		switch {
+		case err == nil && resp != nil && !refusedAsAWhole(resp):
+			if resp.GetPublishedCount() > 0 {
+				p.client.noteServed(partitionID, addr)
+			}
+			return resp, addr
+		case err != nil && !errs.IsLeaderRelated(err) && !errs.IsRetryable(err):
+			// Another node would say the same.
+			p.client.noteRefused(partitionID, addr)
+			return nil, ""
+		}
+		p.client.noteRefused(partitionID, addr)
+		p.client.MarkMetadataStale()
+	}
+	return nil, ""
+}
+
+// refusedAsAWhole reports whether a node turned a batch away because it does
+// not serve the partition, as opposed to having processed its events.
+func refusedAsAWhole(resp *types.PublishBatchResponse) bool {
+	return resp.GetPublishedCount() == 0 && resp.GetDuplicateCount() == 0 &&
+		resp.GetErrorCount() > 0 && isLeaderRelatedMessage(resp.GetError())
 }
 
 // SendAsync publishes asynchronously and returns a future.

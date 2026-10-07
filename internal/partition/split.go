@@ -60,7 +60,7 @@ func (sm *SplitManager) SplitPartition(sourceID int32, newID int32, splitOffset 
 	// Capture original state for rollback
 	oldMinKey := source.MinKey
 	oldMaxKey := source.MaxKey
-	oldEpoch := source.Epoch
+	oldEpoch := source.Epoch()
 
 	// Create new partition (CreatePartition + StartPartition must be called together)
 	if err = sm.pm.CreatePartition(newID, source.Topic); err != nil {
@@ -87,7 +87,7 @@ func (sm *SplitManager) SplitPartition(sourceID int32, newID int32, splitOffset 
 			}
 			// Revert source partition bounds & epoch
 			_ = sm.pm.SetPartitionBounds(sourceID, oldMinKey, oldMaxKey)
-			source.Epoch = oldEpoch
+			source.epoch.Store(oldEpoch)
 		}
 	}()
 
@@ -180,12 +180,12 @@ func (sm *SplitManager) SplitPartition(sourceID int32, newID int32, splitOffset 
 	}
 
 	// Bump epochs on both partitions
-	source.Epoch = oldEpoch + 1
-	newPart.Epoch = oldEpoch + 1
+	source.epoch.Store(oldEpoch + 1)
+	newPart.epoch.Store(oldEpoch + 1)
 
 	// Propagate updates to Raft consensus via callback if registered
 	if sm.OnSplitComplete != nil {
-		if err = sm.OnSplitComplete(sourceID, newID, source.Epoch, newPart.Epoch); err != nil {
+		if err = sm.OnSplitComplete(sourceID, newID, source.Epoch(), newPart.Epoch()); err != nil {
 			return fmt.Errorf("propagate split to cluster: %w", err)
 		}
 	}
@@ -196,7 +196,7 @@ func (sm *SplitManager) SplitPartition(sourceID int32, newID int32, splitOffset 
 		"split_key", splitKey,
 		"events_moved", totalMoved,
 		"source_hw", sourceHW,
-		"new_epoch", source.Epoch)
+		"new_epoch", source.Epoch())
 
 	return nil
 }

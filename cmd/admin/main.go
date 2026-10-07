@@ -12,11 +12,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jatin711-debug/cronos_db_golang/internal/auth"
+	"github.com/jatin711-debug/cronos_db_golang/internal/storage"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
@@ -77,6 +80,8 @@ func main() {
 		adminCmd(),
 		debugCmd(),
 		generateTokenCmd(),
+		restoreCmd(),
+		checkLogCmd(),
 	)
 
 	if err := rootCmd.Execute(); err != nil {
@@ -334,6 +339,147 @@ func debugCmd() *cobra.Command {
 	}
 
 	cmd.AddCommand(publishCmd)
+	return cmd
+}
+
+// restoreCmd restores a backup into the data directory of a stopped node. It
+// works on files only and never contacts a server.
+func restoreCmd() *cobra.Command {
+	var backupDir, dataDir, keyFile string
+	cmd := &cobra.Command{
+		Use:   "restore",
+		Short: "Restore a backup into an empty data directory (run with the node stopped)",
+		Long: "Copies one backup generation (a backups/backup-* directory) into a data\n" +
+			"directory, checking every file against the backup's manifest. The data\n" +
+			"directory must not already hold the partitions being restored. Start the\n" +
+			"node on it afterwards; timers are rebuilt from the restored log.\n\n" +
+			"A backup of an encrypted log is restored as ciphertext and holds no key:\n" +
+			"the node needs the key the backup was taken with. Pass that key with\n" +
+			"--encryption-key-file to have it checked before anything is restored.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			manifest, err := storage.RestoreBackup(backupDir, dataDir, storage.RestoreOptions{EncryptionKeyFile: keyFile})
+			if err != nil {
+				return err
+			}
+			fmt.Printf("Restored backup taken %s into %s\n", manifest.Created.Format(time.RFC3339), dataDir)
+			if !manifest.CutAt.IsZero() {
+				fmt.Printf("  every partition log is as of %s\n", manifest.CutAt.Format(time.RFC3339Nano))
+			}
+			for _, partition := range manifest.Partitions {
+				fmt.Printf("  partition %d: log through offset %d, %d files (%s)\n",
+					partition.PartitionID, partition.LastOffset, len(partition.Files), strings.Join(append([]string{"log"}, partition.Components...), ", "))
+			}
+			switch {
+			case manifest.Encryption == nil:
+			case keyFile != "":
+				fmt.Println("  the logs are encrypted; the given key matches")
+			default:
+				fmt.Printf("  the logs are encrypted: start the node with the key whose check value is %s (not verified here; pass --encryption-key-file to check)\n", manifest.Encryption.KeyCheck)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&backupDir, "from", "", "Backup directory to restore (contains backup.json)")
+	cmd.Flags().StringVar(&dataDir, "data-dir", "", "Data directory to restore into")
+	cmd.Flags().StringVar(&keyFile, "encryption-key-file", "", "Master key of an encrypted backup, checked before restoring")
+	_ = cmd.MarkFlagRequired("from")
+	_ = cmd.MarkFlagRequired("data-dir")
+	return cmd
+}
+
+// checkLogCmd reads the partition logs of a stopped node and reports where
+// they are damaged. It works on files only and never contacts a server.
+func checkLogCmd() *cobra.Command {
+	var dataDir, keyFile string
+	var partitionID int
+	var repair bool
+	cmd := &cobra.Command{
+		Use:   "check-log",
+		Short: "Check the partition logs of a stopped node for damage, and optionally cut it out",
+		Long: "Reads every record of every log segment under a data directory and reports\n" +
+			"what each partition's log holds and where bytes are not valid records.\n\n" +
+			"Such bytes at the end of a log are what a crash leaves behind; a node cuts\n" +
+			"them off by itself when it starts. Anywhere else they are damage, and a\n" +
+			"node refuses to open that partition. What to do then depends on whether\n" +
+			"the partition has other replicas:\n\n" +
+			"  In a cluster, remove the partition's directory (partitions/<id>) while\n" +
+			"  the node is stopped. The node rejoins the partition with nothing and the\n" +
+			"  leader fills it again. Nothing is lost.\n\n" +
+			"  Without another replica, restore a backup, or run this command with\n" +
+			"  --repair --partition <id>. That cuts the damaged segment after its last\n" +
+			"  valid record. The events it reports as unreadable are given up: they are\n" +
+			"  not delivered and cannot be replayed.\n\n" +
+			"Run it with the node stopped.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if repair && partitionID < 0 {
+				return fmt.Errorf("--repair needs --partition: it gives up events, one partition at a time")
+			}
+			var key []byte
+			if keyFile != "" {
+				loaded, err := storage.LoadMasterKey(keyFile)
+				if err != nil {
+					return err
+				}
+				key = loaded
+			}
+			entries, err := os.ReadDir(filepath.Join(dataDir, "partitions"))
+			if err != nil {
+				return fmt.Errorf("read partitions of %s: %w", dataDir, err)
+			}
+			var ids []int
+			for _, entry := range entries {
+				if id, err := strconv.Atoi(entry.Name()); err == nil && entry.IsDir() && (partitionID < 0 || id == partitionID) {
+					ids = append(ids, id)
+				}
+			}
+			sort.Ints(ids)
+			if len(ids) == 0 {
+				return fmt.Errorf("no matching partition under %s", filepath.Join(dataDir, "partitions"))
+			}
+
+			damaged := 0
+			for _, id := range ids {
+				var cipher *storage.SegmentCipher
+				if key != nil {
+					if cipher, err = storage.NewSegmentCipher(key, int32(id)); err != nil {
+						return err
+					}
+				}
+				check, err := storage.CheckLog(filepath.Join(dataDir, "partitions", strconv.Itoa(id)), cipher, repair)
+				if err != nil {
+					return fmt.Errorf("partition %d: %w", id, err)
+				}
+				if check.Events == 0 {
+					fmt.Printf("partition %d: empty, %d segment files\n", id, check.Segments)
+				} else {
+					fmt.Printf("partition %d: %d events at offsets %d to %d in %d segment files\n", id, check.Events, check.FirstOffset, check.LastOffset, check.Segments)
+				}
+				for _, damage := range check.Damage {
+					switch {
+					case damage.EndOfLog:
+						fmt.Printf("  %s: %s at byte %d, after the last event (offset %d). An interrupted write; the node cuts it off when it starts.\n",
+							damage.Segment, damage.Found, damage.Position, damage.AfterOffset)
+					case damage.Repaired:
+						fmt.Printf("  %s: REPAIRED. It held %s at byte %d. Offsets %d to %d are given up.\n",
+							damage.Segment, damage.Found, damage.Position, damage.AfterOffset+1, damage.NextOffset-1)
+					default:
+						damaged++
+						fmt.Printf("  %s: DAMAGED. It holds %s at byte %d. Offsets %d to %d cannot be read.\n",
+							damage.Segment, damage.Found, damage.Position, damage.AfterOffset+1, damage.NextOffset-1)
+					}
+				}
+			}
+			if damaged > 0 {
+				return fmt.Errorf("%d damaged segments; the node will not open their partitions (see --help for how to repair)", damaged)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&dataDir, "data-dir", "", "Data directory of the stopped node")
+	cmd.Flags().IntVar(&partitionID, "partition", -1, "Check only this partition (required with --repair)")
+	cmd.Flags().StringVar(&keyFile, "encryption-key-file", "", "Master key, when the logs are encrypted")
+	cmd.Flags().BoolVar(&repair, "repair", false, "Cut damaged segments after their last valid record, giving up the events that cannot be read")
+	_ = cmd.MarkFlagRequired("data-dir")
 	return cmd
 }
 

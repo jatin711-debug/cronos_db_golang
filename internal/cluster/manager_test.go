@@ -13,6 +13,20 @@ type MockPartitionAccessor struct {
 	demoteCalls   map[int32]bool
 	offsets       map[int32]map[string]int64
 	isr           map[int32][]string
+	releaseCalls  map[int32]int
+}
+
+// GetPartitionEpoch reports the epoch this node was last promoted at.
+func (m *MockPartitionAccessor) GetPartitionEpoch(partitionID int32) int64 {
+	return m.promoteCalls[partitionID]
+}
+
+func (m *MockPartitionAccessor) ReleasePartition(partitionID int32) error {
+	if m.releaseCalls == nil {
+		m.releaseCalls = make(map[int32]int)
+	}
+	m.releaseCalls[partitionID]++
+	return nil
 }
 
 func (m *MockPartitionAccessor) SyncPartitionFromLeader(partitionID int32, leaderAddr string) error {
@@ -107,6 +121,9 @@ func TestClusterRouter_Assignments(t *testing.T) {
 
 	// Verify partitions are assigned to node-1 (since it is the only alive node in the ring)
 	for i := int32(0); i < 4; i++ {
+		if epoch := router.GetPartitionEpoch(i); epoch != 1 {
+			t.Errorf("partition %d initial epoch = %d, want 1", i, epoch)
+		}
 		leader, err := router.GetPartitionLeader(i)
 		if err != nil {
 			t.Fatalf("GetPartitionLeader failed for partition %d: %v", i, err)

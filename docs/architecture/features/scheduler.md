@@ -33,7 +33,22 @@ The scheduler controls when events become deliverable, using a hot timing wheel 
 - Hydration lag / recovery: [internal/scheduler/scheduler.go](../../../internal/scheduler/scheduler.go)
 - Partition WAL timer replay: [internal/partition/manager.go](../../../internal/partition/manager.go)
 
-## Related Diagrams
+## Diagrams
 
-- [scheduler_hot_cold_flow.mmd](../../mermaid/scheduler_hot_cold_flow.mmd)
-- [publish_flow.mmd](../../mermaid/publish_flow.mmd)
+### Scheduler hot-cold path
+
+```mermaid
+flowchart LR
+    Publish[Publish event] --> Decision{Within hot window?}
+    Decision -- yes --> HotWheel[Hot timing wheel]
+    Decision -- no --> ColdStore[Cold store]
+    ColdStore --> Hydrator[Hydrator scan]
+    Hydrator --> HotWheel
+    HotWheel --> Tick[Scheduler tick]
+    Tick --> Ready[Ready queue]
+    Ready --> Worker[Delivery worker]
+```
+
+### Related diagrams
+
+- [Publish flow](api.md#publish-flow)

@@ -223,8 +223,8 @@ func NewBloomPebbleStore(dataDir string, partitionID int32, ttlHours int32, expe
 		return nil, err
 	}
 
-	// Create bloom filter
-	bloom := NewBloomFilter(expectedItems, falsePositiveRate)
+	// The filter is built when the first ID is claimed; see lazyBloom.
+	bloom := newLazyBloom(func() BloomFilter { return NewBloomFilter(expectedItems, falsePositiveRate) })
 
 	store := &BloomPebbleStore{
 		bloom:               bloom,
@@ -272,6 +272,10 @@ func (s *BloomPebbleStore) unlockClaimStripes(stripes []int) {
 // rebuildBloom prevents a restart from treating every existing ID as new.
 // Claim stripes are held for the snapshot so no concurrent check-and-store can
 // create an entry between the Pebble scan and publishing bloomReady=true.
+//
+// The same scan drops claims abandoned by an earlier run. Without that, an ID
+// whose publish was cut off before it reached the log would be refused as
+// "in progress" on every retry until its TTL expired.
 func (s *BloomPebbleStore) rebuildBloom() {
 	defer s.rebuildWG.Done()
 	for i := 0; i < bloomClaimStripeCount; i++ {
@@ -295,8 +299,13 @@ func (s *BloomPebbleStore) rebuildBloom() {
 	}
 	defer iter.Close()
 
+	var abandoned [][]byte
 	s.bloomMu.Lock()
 	for iter.First(); iter.Valid(); iter.Next() {
+		if s.pebble.isAbandonedClaim(iter.Value()) {
+			abandoned = append(abandoned, append([]byte(nil), iter.Key()...))
+			continue
+		}
 		s.bloom.Add(string(iter.Key()))
 	}
 	s.pebble.pendingMu.RLock()
@@ -308,6 +317,20 @@ func (s *BloomPebbleStore) rebuildBloom() {
 	if err := iter.Error(); err != nil {
 		log.Printf("[DEDUP-%d] bloom rebuild failed: %v", s.pebble.partitionID, err)
 		return
+	}
+	if len(abandoned) > 0 {
+		batch := s.pebble.db.NewBatch()
+		for _, key := range abandoned {
+			_ = batch.Delete(key, nil)
+		}
+		err := batch.Commit(pebble.NoSync)
+		batch.Close()
+		if err != nil {
+			// The IDs stay refused, which is safe; they are just not retryable.
+			log.Printf("[DEDUP-%d] dropping %d abandoned claims failed: %v", s.pebble.partitionID, len(abandoned), err)
+		} else {
+			log.Printf("[DEDUP-%d] dropped %d claims abandoned by an earlier run", s.pebble.partitionID, len(abandoned))
+		}
 	}
 	s.bloomReady.Store(true)
 }
@@ -511,6 +534,15 @@ func (s *BloomPebbleStore) RollbackBatch(messageIDs []string) error {
 	return s.pebble.RollbackClaim(messageIDs)
 }
 
+// DeleteIf removes messageID only while its stored offset is still stored. As
+// with RollbackBatch, the bloom bit stays set and only costs a Pebble lookup.
+func (s *BloomPebbleStore) DeleteIf(messageID string, stored int64) (bool, error) {
+	stripe := bloomClaimStripe(messageID)
+	s.claimLocks[stripe].Lock()
+	defer s.claimLocks[stripe].Unlock()
+	return s.pebble.DeleteIf(messageID, stored)
+}
+
 // GetOffset returns the stored WAL offset for messageID, using the bloom fast path.
 func (s *BloomPebbleStore) GetOffset(messageID string) (int64, bool, error) {
 	if !s.bloomReady.Load() {
@@ -564,13 +596,32 @@ func (s *BloomPebbleStore) GetTimestamp(messageID string) (time.Time, bool, erro
 
 // Put inserts or overwrites an entry in Pebble, then publishes the bloom bit.
 func (s *BloomPebbleStore) Put(messageID string, offset int64, createdTS int64) error {
-	// Persist first, then publish the Bloom bit. This preserves the rebuild
-	// lock order (Pebble claim -> Bloom lock) and avoids a Put/rebuild deadlock.
 	if err := s.pebble.Put(messageID, offset, createdTS); err != nil {
 		return err
 	}
 	s.bloomMu.Lock()
 	s.bloom.Add(messageID)
+	s.bloomMu.Unlock()
+	return nil
+}
+
+// PutBatch persists accepted offsets before publishing their Bloom bits.
+func (s *BloomPebbleStore) PutBatch(messageIDs []string, offsets, createdTS []int64) error {
+	if len(messageIDs) != len(offsets) || len(messageIDs) != len(createdTS) {
+		return fmt.Errorf("dedup completion batch lengths differ")
+	}
+	if len(messageIDs) == 0 {
+		return nil
+	}
+	stripes := s.lockClaimStripes(messageIDs)
+	defer s.unlockClaimStripes(stripes)
+	if err := s.pebble.PutBatch(messageIDs, offsets, createdTS); err != nil {
+		return err
+	}
+	s.bloomMu.Lock()
+	for _, id := range messageIDs {
+		s.bloom.Add(id)
+	}
 	s.bloomMu.Unlock()
 	return nil
 }

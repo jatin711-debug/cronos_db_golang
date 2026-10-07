@@ -117,8 +117,8 @@ func TestEnforcer_Run_Size(t *testing.T) {
 	if _, err := os.Stat(file1); !os.IsNotExist(err) {
 		t.Error("oldest non-active file should be deleted")
 	}
-	if _, err := os.Stat(file2); os.IsNotExist(err) {
-		t.Error("newer non-active file should still exist")
+	if _, err := os.Stat(file2); !os.IsNotExist(err) {
+		t.Error("both closed segments must be deleted to include the active segment in the 150-byte budget")
 	}
 	if _, err := os.Stat(file3); os.IsNotExist(err) {
 		t.Error("active segment should still exist")
@@ -258,12 +258,14 @@ func TestEnforcer_SafeExclusions(t *testing.T) {
 	raftDb := filepath.Join(raftDir, "raft.db")
 	sstFile := filepath.Join(pebbleDir, "000012.sst")
 	idxFile := filepath.Join(indexDir, "00000000000000000001.index")
+	unrelatedIdxFile := filepath.Join(indexDir, "00000000000000000003.index")
 	txLog := filepath.Join(tmpDir, "tx_log.json")
 	checkpoint := filepath.Join(tmpDir, "timer_replay_checkpoint.json")
 
 	os.WriteFile(raftDb, []byte("raft"), 0644)
 	os.WriteFile(sstFile, []byte("pebble sst"), 0644)
 	os.WriteFile(idxFile, []byte("index"), 0644)
+	os.WriteFile(unrelatedIdxFile, []byte("unrelated index"), 0644)
 	os.WriteFile(txLog, []byte("tx log"), 0644)
 	os.WriteFile(checkpoint, []byte("checkpoint"), 0644)
 
@@ -273,6 +275,7 @@ func TestEnforcer_SafeExclusions(t *testing.T) {
 	os.Chtimes(raftDb, oldTime, oldTime)
 	os.Chtimes(sstFile, oldTime, oldTime)
 	os.Chtimes(idxFile, oldTime, oldTime)
+	os.Chtimes(unrelatedIdxFile, oldTime, oldTime)
 	os.Chtimes(txLog, oldTime, oldTime)
 	os.Chtimes(checkpoint, oldTime, oldTime)
 
@@ -291,15 +294,19 @@ func TestEnforcer_SafeExclusions(t *testing.T) {
 		t.Error("WAL log file should be deleted")
 	}
 
-	// 5. Verify results: Protected system metadata files MUST NOT be deleted
+	// 5. A deleted WAL segment takes its sparse index with it. Other system
+	// metadata, including unrelated index files, must be preserved.
 	if _, err := os.Stat(raftDb); os.IsNotExist(err) {
 		t.Error("raft.db was deleted!")
 	}
 	if _, err := os.Stat(sstFile); os.IsNotExist(err) {
 		t.Error("pebble sst file was deleted!")
 	}
-	if _, err := os.Stat(idxFile); os.IsNotExist(err) {
-		t.Error("index file was deleted!")
+	if _, err := os.Stat(idxFile); !os.IsNotExist(err) {
+		t.Error("deleted WAL segment's sparse index should be deleted")
+	}
+	if _, err := os.Stat(unrelatedIdxFile); os.IsNotExist(err) {
+		t.Error("unrelated index file was deleted!")
 	}
 	if _, err := os.Stat(txLog); os.IsNotExist(err) {
 		t.Error("tx_log.json was deleted!")

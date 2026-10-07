@@ -1,0 +1,21 @@
+--- FAIL: TestAuditDLQRetainsEntryAfterRestart (0.06s)
+    production_audit_test.go:22: durable DLQ entry missing after reopen: got 0, want 1
+FAIL
+FAIL	github.com/jatin711-debug/cronos_db_golang/internal/delivery	1.067s
+--- FAIL: TestAuditUnorderedTimestampsRemainQueryable (0.02s)
+    production_audit_test.go:12: time-range lookup missed out-of-order event: got 0, want 1
+2026/09/27 16:29:13 [SEGMENT] Decrypt failed at position 64: cipher: message authentication failed, truncating file
+2026/09/27 16:29:13 [WAL-0] Loaded 1 segments, nextOffset=0
+--- FAIL: TestAuditWrongEncryptionKeyFailsClosed (0.03s)
+    production_audit_test.go:22: wrong key opened populated WAL as writable: nextOffset=0
+FAIL
+FAIL	github.com/jatin711-debug/cronos_db_golang/internal/storage	1.065s
+--- FAIL: TestAuditDeploymentEnvironmentIsHonored (0.00s)
+    production_audit_test.go:13: deployment env ignored: partitions=1 replicationFactor=1 fsync=batch clusterAddr=:7947
+FAIL
+FAIL	github.com/jatin711-debug/cronos_db_golang/internal/config	1.182s
+--- FAIL: TestAuditConsumerReturnsAfterStreamFailure (0.26s)
+    production_audit_test.go:25: consumer stuck after subscribe failure; reconnect cannot run until outer context cancels
+FAIL
+FAIL	github.com/jatin711-debug/cronos_db_golang/pkg/client	1.284s
+FAIL

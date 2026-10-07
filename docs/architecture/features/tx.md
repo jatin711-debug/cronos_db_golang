@@ -29,7 +29,33 @@ Transaction module coordinates prepare and commit phases for multi-step consiste
 - State transition bugs: [internal/tx/coordinator.go](../../../internal/tx/coordinator.go)
 - RPC mapping and validation: [internal/tx/transaction_handler.go](../../../internal/tx/transaction_handler.go)
 
-## Related Diagrams
+## Diagrams
 
-- [transaction_state_machine.mmd](../../mermaid/transaction_state_machine.mmd)
-- [system_overview.mmd](../../mermaid/system_overview.mmd)
+### Transaction state machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> Pending : BeginTransaction
+    Pending --> Prepared : PrepareTransaction - all participants vote yes
+    Pending --> Aborted : any vote no / AbortTransaction / recovery timeout
+    Pending --> Committing : CommitTransaction auto-prepares when Pending
+    Prepared --> Committing : CommitTransaction
+    Prepared --> Aborted : AbortTransaction
+    Committing --> Committed : all participant commit markers written
+    Committing --> Committing : commit callback failure - stays Committing, recovery loop retries with backoff
+    Committed --> [*]
+    Aborted --> [*]
+
+    note right of Committing
+        Coordinator statuses are exactly: Pending, Prepared,
+        Committing, Committed, Aborted. There are no
+        FailedCommit or Recovering states: the recovery loop
+        (30s ticker) re-drives Commit for Prepared/Committing
+        transactions and only aborts Pending transactions
+        that exceeded their timeout.
+    end note
+```
+
+### Related diagrams
+
+- [System overview](../README.md#system-overview)

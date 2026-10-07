@@ -29,5 +29,5 @@ Tracing module adds request-level and flow-level telemetry for diagnostics acros
 
 ## Related Diagrams
 
-- [observability_feedback_loop.mmd](../../mermaid/observability_feedback_loop.mmd)
-- [startup_sequence.mmd](../../mermaid/startup_sequence.mmd)
+- [Observability feedback loop](slo.md#observability-feedback-loop)
+- [Startup lifecycle](../../DEVELOPER_ARCHITECTURE_GUIDE.md#42-startup-and-shutdown-sequence)

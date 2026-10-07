@@ -28,7 +28,22 @@ Schema module provides topic schema registration and compatibility checks to red
 - Registration failures: [internal/schema/registry.go](../../../internal/schema/registry.go)
 - Compatibility rejections: [internal/schema/compatibility.go](../../../internal/schema/compatibility.go)
 
-## Related Diagrams
+## Diagrams
 
-- [schema_validation_flow.mmd](../../mermaid/schema_validation_flow.mmd)
-- [publish_flow.mmd](../../mermaid/publish_flow.mmd)
+### Schema validation
+
+```mermaid
+flowchart LR
+    Propose[New schema version] --> Parse[Parse schema]
+    Parse --> Compat[Compatibility check]
+    Compat --> Result{Compatible?}
+    Result -- yes --> Register[Register next version]
+    Result -- no --> Reject[Reject schema update]
+    Register --> PublishValidate[Validate publish payloads]
+    PublishValidate --> Accept[Accept request]
+    Reject --> Fix[Revise schema]
+```
+
+### Related diagrams
+
+- [Publish flow](api.md#publish-flow)

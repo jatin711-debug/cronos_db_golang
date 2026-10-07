@@ -47,6 +47,15 @@ type Config struct {
 	DeliveryPollMS int
 	// DedupTTLHours is how long message IDs are retained in the dedup store.
 	DedupTTLHours int
+	// BackupInterval is how often the node backs up its partitions; zero
+	// turns scheduled backups off. BackupRetention is how long a backup is
+	// kept, and BackupDir where backups go (empty: backups under DataDir).
+	BackupInterval  time.Duration
+	BackupRetention time.Duration
+	BackupDir       string
+	// CompactionInterval is how often a partition looks for log segments that
+	// can be removed. Zero means the default of ten minutes.
+	CompactionInterval time.Duration
 	// BloomCapacity is the expected item capacity for the per-partition bloom filter.
 	BloomCapacity uint64
 	// ReplicationBatchSize is the max events per replication Append batch to followers.
@@ -79,6 +88,8 @@ type Config struct {
 	TracingSampleRatio float64
 	// TracingInsecure disables TLS when exporting OTLP traces (dev only).
 	TracingInsecure bool
+	// PprofAddr serves net/http/pprof on a dedicated listener when non-empty.
+	PprofAddr string
 
 	// HotWindowMinutes is the scheduler hot window: events further in the future
 	// than this many minutes go to the cold store. 0 disables the cold path.
@@ -115,6 +126,18 @@ type Config struct {
 	ClusterGRPCAddr string
 	// ClusterSeeds is the list of seed nodes used to join an existing cluster.
 	ClusterSeeds []string
+	// ClusterBootstrap names this node as the one that creates the cluster.
+	// It does so only when it has no state and every other seed has said it
+	// belongs to no cluster.
+	ClusterBootstrap bool
+	// ClusterExpectedNodes is how many nodes a new cluster starts with. Its
+	// partitions get their first leaders as soon as that many are up. Zero
+	// means unknown: wait for ClusterFormationWait instead.
+	ClusterExpectedNodes int
+	// ClusterFormationWait is how long membership must be unchanged before a
+	// new cluster assigns first leaders when the expected nodes are not all
+	// present. Zero assigns at once.
+	ClusterFormationWait time.Duration
 	// ClusterRaftAddr is the Raft transport bind address.
 	ClusterRaftAddr string
 	// VirtualNodes is the number of virtual nodes per physical node on the hash ring.
@@ -172,6 +195,8 @@ type Config struct {
 
 	// DevMode disables production security requirements for local development and CI.
 	DevMode bool
+	// ExperimentalFeatures exposes transactions and online splitting only in dev mode.
+	ExperimentalFeatures bool
 
 	// RetentionMaxAgeHours deletes WAL segments older than this many hours (0 = disabled).
 	RetentionMaxAgeHours int
@@ -201,6 +226,9 @@ type Config struct {
 	MaxMemoryUsagePercent float64
 	// MemoryCheckIntervalMs is how often memory usage is sampled in ms.
 	MemoryCheckIntervalMs int64
+	// MemoryLimitBytes is the memory this process may use. Zero means the
+	// container's limit, or the machine's memory when there is none.
+	MemoryLimitBytes int64
 
 	// MaxIngestRatePerPartition caps events/sec accepted per partition (0 = unlimited).
 	MaxIngestRatePerPartition int64

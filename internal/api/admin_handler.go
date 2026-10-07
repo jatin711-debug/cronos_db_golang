@@ -12,6 +12,7 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/internal/compliance"
 	"github.com/jatin711-debug/cronos_db_golang/internal/partition"
 	"github.com/jatin711-debug/cronos_db_golang/internal/schema"
+	"github.com/jatin711-debug/cronos_db_golang/internal/storage"
 	"github.com/jatin711-debug/cronos_db_golang/internal/tenant"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 	"google.golang.org/grpc/codes"
@@ -536,16 +537,8 @@ func (h *AdminServiceHandler) GetConsumerGroupLag(
 // RunRetention (RBAC-gated mutating)
 // ---------------------------------------------------------------------------
 
-// RunRetention runs age/size-based retention once. partition_id=0 means
-// all local partitions; otherwise the request is scoped to one
-// partition. The Enforcer is constructed from dataDir + the supplied
-// policy and Run() is called once per scope.
-//
-// Note: the existing compliance.Enforcer.Run returns only error; it does
-// not report segments_deleted or bytes_freed. Those counters stay at 0
-// here until we add a RunWithStats helper. Adding that helper is a small
-// follow-up; doing it now would be a new package export outside step 2's
-// "light composition" scope.
+// RunRetention plans age/size retention and delegates deletion to live WALs.
+// partition_id=0 selects all local partitions. Completion checks always apply.
 func (h *AdminServiceHandler) RunRetention(
 	ctx context.Context,
 	req *types.RunRetentionRequest,
@@ -558,12 +551,14 @@ func (h *AdminServiceHandler) RunRetention(
 		MaxAge:       time.Duration(req.GetMaxAgeHours()) * time.Hour,
 		MaxSizeBytes: req.GetMaxSizeBytes(),
 	}
-	enforcer := compliance.NewEnforcer(h.dataDir, policy)
+	enforcer := compliance.NewManagedEnforcer(h.dataDir, policy, h.pm.RemoveRetainedSegment)
 
 	resp := &types.RunRetentionResponse{Success: true}
 	pid := req.GetPartitionId()
 	if pid == 0 {
-		if err := enforcer.Run(ctx); err != nil {
+		stats, err := enforcer.RunWithStats(ctx)
+		resp.SegmentsDeleted, resp.BytesFreed = stats.SegmentsDeleted, stats.BytesFreed
+		if err != nil {
 			resp.Success = false
 			resp.Error = err.Error()
 			return resp, nil
@@ -580,8 +575,10 @@ func (h *AdminServiceHandler) RunRetention(
 			resp.Error = fmt.Sprintf("partition %d has no DataDir", pid)
 			return resp, nil
 		}
-		scoped := compliance.NewEnforcer(p.DataDir, policy)
-		if err := scoped.Run(ctx); err != nil {
+		scoped := compliance.NewManagedEnforcer(p.DataDir, policy, h.pm.RemoveRetainedSegment)
+		stats, err := scoped.RunWithStats(ctx)
+		resp.SegmentsDeleted, resp.BytesFreed = stats.SegmentsDeleted, stats.BytesFreed
+		if err != nil {
 			resp.Success = false
 			resp.Error = err.Error()
 			return resp, nil
@@ -594,13 +591,9 @@ func (h *AdminServiceHandler) RunRetention(
 // RunCompaction (RBAC-gated mutating)
 // ---------------------------------------------------------------------------
 
-// RunCompaction runs consumer-offset-bounded compaction once. The
-// existing partition.RunCompaction() operates per-partition and uses
-// the min committed offset across all consumer groups; the
-// `before_offset` field in the request is ignored in v1.
-//
-// partition_id=0 returns an error because there is no aggregation
-// primitive — RunCompaction is per-partition.
+// RunCompaction removes only segments whose events are durably completed by
+// every matching group. Partition zero remains reserved for aggregate requests
+// in this admin API; use PartitionService for explicit partition zero.
 func (h *AdminServiceHandler) RunCompaction(
 	ctx context.Context,
 	req *types.RunCompactionRequest,
@@ -623,7 +616,9 @@ func (h *AdminServiceHandler) RunCompaction(
 			Error:   fmt.Sprintf("partition %d not found: %v", pid, err),
 		}, nil
 	}
-	p.RunCompaction()
+	if _, err := p.PruneWAL(ctx, storage.PruneOptions{AllCompleted: true}); err != nil {
+		return &types.RunCompactionResponse{Success: false, Error: err.Error()}, nil
+	}
 	return &types.RunCompactionResponse{Success: true}, nil
 }
 

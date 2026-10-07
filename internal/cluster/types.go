@@ -3,6 +3,7 @@
 package cluster
 
 import (
+	"crypto/tls"
 	"time"
 )
 
@@ -144,6 +145,26 @@ type PartitionInfo struct {
 	State PartitionState `json:"state"`
 	// ReplicaOffsets maps replica node ID to its known high-watermark offset.
 	ReplicaOffsets map[string]int64 `json:"replica_offsets"`
+	// TransferTo names the replica that leadership is being handed to. While it
+	// is set the leader accepts no publishes, so the target can be shown to
+	// hold the whole log before it takes over.
+	TransferTo string `json:"transfer_to,omitempty"`
+	// TransferStartedMs is when the handoff began (Unix ms), for timing it out.
+	TransferStartedMs int64 `json:"transfer_started_ms,omitempty"`
+}
+
+// clone returns a copy that shares no slices or maps with the receiver.
+func (p PartitionInfo) clone() PartitionInfo {
+	p.Replicas = append([]string(nil), p.Replicas...)
+	p.ISR = append([]string(nil), p.ISR...)
+	if p.ReplicaOffsets != nil {
+		offsets := make(map[string]int64, len(p.ReplicaOffsets))
+		for id, offset := range p.ReplicaOffsets {
+			offsets[id] = offset
+		}
+		p.ReplicaOffsets = offsets
+	}
+	return p
 }
 
 // PartitionState represents the operational state of a partition.
@@ -199,8 +220,27 @@ type Config struct {
 	PartitionCount int
 	// ReplicationFactor is the desired number of replicas per partition.
 	ReplicationFactor int
+	// MinInSyncReplicas is how many replicas, leader included, acknowledge a
+	// write. It decides how many replicas an election must hear from.
+	MinInSyncReplicas int
+	// ExpectedNodes is how many nodes a new cluster starts with; partitions
+	// that never had a leader are assigned as soon as that many are alive.
+	// Zero means unknown.
+	ExpectedNodes int
+	// FormationWait is how long membership must be unchanged before first
+	// leaders are assigned when ExpectedNodes is zero or not reached. Zero
+	// assigns at once.
+	FormationWait time.Duration
 	// UseMemberlist enables HashiCorp Memberlist (SWIM) instead of custom TCP gossip.
 	UseMemberlist bool
+	// ServerTLS and ClientTLS put the membership and Raft ports behind mutual
+	// TLS: the first is what this node listens with, the second what it dials
+	// other nodes with. Both or neither.
+	ServerTLS *tls.Config
+	ClientTLS *tls.Config
+	// Bootstrap names this node as the one that creates the cluster, which it
+	// does only when it has no state and no other seed belongs to a cluster.
+	Bootstrap bool
 	// Rack is this node's rack topology label.
 	Rack string
 	// Zone is this node's availability-zone topology label.
@@ -240,12 +280,24 @@ type ClusterConfig struct {
 	SuspectTimeout time.Duration `json:"suspect_timeout"`
 	// ReplicationFactor is the desired replica count per partition.
 	ReplicationFactor int `json:"replication_factor"`
+	// MinInSyncReplicas is how many replicas, leader included, acknowledge a write.
+	MinInSyncReplicas int `json:"min_in_sync_replicas"`
+	// ExpectedNodes and FormationWait decide when a new cluster assigns its
+	// first partition leaders; see Config.
+	ExpectedNodes int           `json:"expected_nodes"`
+	FormationWait time.Duration `json:"formation_wait"`
 	// NumPartitions is the total number of partitions.
 	NumPartitions int `json:"num_partitions"`
 	// VirtualNodes is the hash-ring virtual-node count per physical node.
 	VirtualNodes int `json:"virtual_nodes"`
 	// UseMemberlist enables HashiCorp Memberlist for membership.
 	UseMemberlist bool `json:"use_memberlist"`
+	// ServerTLS and ClientTLS put the membership and Raft ports behind mutual
+	// TLS; see Config.
+	ServerTLS *tls.Config `json:"-"`
+	ClientTLS *tls.Config `json:"-"`
+	// Bootstrap names this node as the one that creates the cluster; see Config.
+	Bootstrap bool `json:"bootstrap"`
 	// Rack is this node's rack topology label.
 	Rack string `json:"rack,omitempty"`
 	// Zone is this node's availability-zone topology label.

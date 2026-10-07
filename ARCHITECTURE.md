@@ -7,7 +7,7 @@
 Quick navigation:
 
 - Feature-by-feature architecture docs: [docs/architecture/README.md](docs/architecture/README.md)
-- Standalone Mermaid source files: [docs/mermaid](docs/mermaid)
+- Inline-rendered diagrams live in the feature docs (see the [Diagram Index](docs/architecture/README.md#diagram-index))
 - Comprehensive developer walkthrough: [docs/DEVELOPER_ARCHITECTURE_GUIDE.md](docs/DEVELOPER_ARCHITECTURE_GUIDE.md)
 - **Known limitations (intentionally deferred):** [Known Limitations](#known-limitations)
 
@@ -82,7 +82,7 @@ graph TB
 
     subgraph "Cluster Layer"
         RAFT[Raft Consensus<br/>HashiCorp Raft]
-        GOSSIP[Gossip Protocol<br/>TCP Heartbeats or Memberlist/SWIM]
+        GOSSIP[Membership<br/>TCP Heartbeats]
         REPL[Replication<br/>gRPC Internal :7947]
     end
 
@@ -285,7 +285,7 @@ sequenceDiagram
     gRPC->>CG: CommitOffset(group, partition, offset)
 
     alt Ack timeout after 30s
-        DSP->>DSP: Retry with exponential backoff
+        DSP->>DSP: Retry after attempt × backoff
     end
 
     alt Max retries exceeded
@@ -321,27 +321,27 @@ graph LR
     subgraph Record Format v2
         RF1[Length - 4B]
         RF2[CRC32 - 4B]
-        RF3[Offset - 8B]
-        RF4[Raft Term - 8B]
+        RF3[Raft Term - 8B]
+        RF4[Offset - 8B]
         RF5[Schedule TS - 8B]
         RF6[MsgID Len + Data]
         RF7[Topic Len + Data]
         RF8[Payload Len + Data]
-        RF9[Meta Count + Entries]
-        RF10[Trailing Checksum - 4B]
+        RF9[Payload Checksum - 4B]
+        RF10[Meta Count + Entries]
     end
 ```
 
 ### Record Binary Format
 
-WAL records use **format v2**. Each record carries an 8-byte Raft term and a 4-byte trailing checksum in addition to the existing fields. Upgrading from older builds requires a clean `--data-dir`.
+WAL records use **format v2**. Each record carries an 8-byte Raft term and a 4-byte payload checksum (written immediately after the payload, before the metadata entries) in addition to the existing fields. Upgrading from older builds requires a clean `--data-dir`.
 
 | Field | Size | Description |
 |-------|------|-------------|
 | Length | 4 bytes | Total record size including this field |
-| CRC32 | 4 bytes | IEEE CRC32 of all bytes after this field (up to trailing checksum) |
-| Offset | 8 bytes | Monotonically increasing event offset |
+| CRC32 | 4 bytes | IEEE CRC32 of all bytes after the Length field |
 | Raft Term | 8 bytes | Raft term of the leader that authored the record |
+| Offset | 8 bytes | Monotonically increasing event offset |
 | Schedule TS | 8 bytes | Unix millisecond timestamp for trigger |
 | MsgID Len | 2 bytes | Length of message_id string |
 | MsgID | N bytes | Unique message identifier |
@@ -349,9 +349,9 @@ WAL records use **format v2**. Each record carries an 8-byte Raft term and a 4-b
 | Topic | N bytes | Topic/channel name |
 | Payload Len | 4 bytes | Length of payload |
 | Payload | N bytes | Arbitrary event data |
+| Payload Checksum | 4 bytes | IEEE CRC32 covering the payload only |
 | Meta Count | 2 bytes | Number of metadata key-value pairs |
 | Meta Entries | Variable | key_len(2) + key + val_len(2) + val per entry |
-| Trailing Checksum | 4 bytes | IEEE CRC32 covering the full record for end-to-end integrity |
 
 **Upgrade note:** WAL v2 is not backward-compatible with older segment files. Remove or move the old `--data-dir` before starting a newer binary.
 
@@ -375,7 +375,7 @@ graph TB
 
     subgraph Flush Modes
         FM1[every_event - fsync per write]
-        FM2[batch - group-commit per batch (default)]
+        FM2["batch - group-commit per batch (default)"]
         FM3[periodic - background flush loop]
     end
 
@@ -426,13 +426,16 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    A[Compaction Timer - every 10 min] --> B{Active consumers?}
-    B -->|No| Z[Skip]
-    B -->|Yes| C[Find min committed offset across all groups]
-    C --> D{min_offset > 0?}
-    D -->|No| Z
-    D -->|Yes| E[Delete segments where last_offset less than min_offset]
-    E --> F[Never delete active segment]
+    A[Compaction timer - every --compaction-interval] --> B{Replicated partition?}
+    B -->|Yes, not the leader| Z[Skip: follow the leader's log start]
+    B -->|Yes, leader| P[Oldest closed segment first, stop at the first that stays]
+    B -->|No| Q[Every closed segment]
+    P --> C{Every event due, taken by a group, finished by every group that takes it, exported by the change feed?}
+    Q --> C
+    C -->|No| K[Keep]
+    C -->|Yes| E[Delete segment and index]
+    E --> F[Raise consumer floors to the new log start]
+    F --> G[Leader: next append tells followers where the log starts]
 ```
 
 ---
@@ -473,9 +476,9 @@ graph TB
 
 **Wheel Parameters:**
 - Level 0 (default): 10ms tick, 600 slots = 6 second window
-- Level 1: 6s tick, 60 slots = 360 second window
-- Level 2: 360s tick, 60 slots = 6 hour window
-- Max levels: 10 (configurable)
+- Level 1: 6s tick, 600 slots = 3600 second (60 min) window
+- Level 2: 3600s tick, 600 slots = 25 day window
+- Max levels: 10 (hardcoded; only `--tick-ms` and `--wheel-size` are configurable)
 
 ### Timer Lifecycle
 
@@ -566,7 +569,7 @@ flowchart TD
     A[Publish event] --> B{schedule_ts <= now + hotWindow?}
     B -->|Yes| C[Add to Timing Wheel]
     B -->|No| D[Store offset in Cold Store]
-    D --> E[PebbleDB key: [schedule_ts:be64][offset:be64]]
+    D --> E["PebbleDB key: [schedule_ts:be64][offset:be64]"]
 
     F[Hydrator Loop adaptive interval] --> G[Scan Cold Store range]
     G --> H[now+hotWindow to now+hotWindow+adaptiveLookahead]
@@ -608,7 +611,7 @@ graph TB
 - XxHash64 double hashing
 - AtomicU64 bit arrays (lock-free)
 - Rayon parallel batch check for 100+ keys
-- ~12MB per 100M items at 1% false positive rate
+- About 10 bits per ID at a 1% false positive rate: ~120 MB for the default capacity of 100M IDs, allocated on first use
 
 **Tier 2 - PebbleDB (Persistent):**
 - 64MB memtable (vs 4MB default)
@@ -854,7 +857,7 @@ graph TB
 
     subgraph Offset Commit Pipeline
         PEN[Pending Map - in-memory buffer]
-        FL[Flush Loop - every 50ms]
+        FL[Flush Loop - every 200ms]
         DB[PebbleDB Batch Write]
     end
 
@@ -891,21 +894,32 @@ sequenceDiagram
 
 ## Change Data Capture
 
-CDC forwards committed WAL events to external sinks using a bounded worker pool for predictable resource usage.
+CDC hands every accepted event to external sinks. It reads a per-partition
+**change feed** from the log; nothing runs on the append path.
 
 ```mermaid
 graph LR
-    WAL[WAL Commit] -->|New event| CDC[CDC Dispatcher]
-    CDC --> Q[Bounded Queue - size 10000]
-    Q --> W[Worker Pool - DefaultCDCWorkers=4]
-    W --> S1[Sink A]
-    W --> S2[Sink B]
+    WAL[Partition log] -->|behind the accepted watermark| Feed[Change feed<br/>one per partition, leader only]
+    Feed -->|batches in log order| CDC[cdc.Manager.Deliver]
+    CDC --> S1[Kafka sink]
+    CDC --> S2[Webhook sink]
+    Feed -->|same events| XR[Cross-region replicator]
+    Feed -.->|position, at most once a second| Pos[changefeed.json<br/>+ sent to followers]
 ```
 
 **Behavior:**
-- `Emit` is non-blocking.
-- Events are dropped with a warning if the queue is full.
-- `Close` drains workers and sinks gracefully.
+- An event is handed over only once its publish is accepted: not while the
+  publish is in flight, not while it is held after failing past the append,
+  and, on a replicated partition, not before it is on `min-insync-replicas`
+  replicas.
+- Events leave in log order, from the partition's leader only.
+- A sink that fails is offered the same events again (100 ms to 5 s apart).
+  Nothing is dropped and nothing queues in memory; the feed lags instead, and
+  publishing never waits for it.
+- The feed's position survives restarts and is handed to followers, so a new
+  leader continues it. Delivery to sinks is at least once.
+
+Details and limits: [docs/architecture/features/cdc.md](docs/architecture/features/cdc.md).
 
 ---
 
@@ -947,33 +961,37 @@ graph TB
     N1R <-->|Raft consensus| N3R
 ```
 
-### Pluggable Gossip Layer
+### Membership
 
-CronosDB supports two gossip implementations behind a common `MembershipService` interface:
+Every node sends a heartbeat to every other node it knows over TCP
+(`internal/cluster/membership.go`). A node that is not heard from is suspected
+and then counted as dead; it keeps being sent heartbeats, less often, and is
+taken back as soon as it answers or announces itself. Membership decides who
+is alive. It does not decide who leads: that is committed through Raft.
 
-| Implementation | Protocol | Best For |
-|---------------|----------|----------|
-| **Custom TCP Gossip** | TCP heartbeats, custom wire format | Simple deployments, minimal dependencies |
-| **HashiCorp Memberlist** | SWIM protocol over UDP | Production clusters, faster failure detection, encryption support |
+**Traffic between nodes.** Nodes talk to each other on three ports:
+replication (gRPC), membership and Raft. With `--replication-tls-enabled` all
+three speak mutual TLS with one set of certificates
+(`internal/cluster/transport.go`, `internal/replication/mtls.go`). A caller
+must present a certificate signed by the CA in `--replication-tls-ca-file`
+before anything it sends is read, and a node checks that the certificate of
+the node it calls is valid for the address it called. Production mode
+requires this. Without it the membership and Raft ports are plain TCP, and
+whoever can reach them can join the cluster as a node and vote.
 
-Toggle via config: `UseMemberlist: true`.
-
-**Memberlist features:**
-- UDP-based SWIM gossip with indirect pings
-- Configurable gossip interval, suspicion multiplier, probe timeout
-- Metadata delegates carry gRPC/HTTP/Raft addresses
-- Event delegates for join/leave/update callbacks
-- Merge delegates for cluster merge conflict resolution
+`internal/cluster/memberlist_adapter.go` implements the same interface on
+HashiCorp Memberlist (SWIM over UDP). The server does not use it, and refuses
+to start with `--use-memberlist`.
 
 ### Consistent Hashing Ring
 
 ```mermaid
 graph TB
-    subgraph Hash Ring - SHA-256 with 150 vnodes per node
+    subgraph Hash Ring - SHA-256 with 2048 vnodes per node
         RING[Ring space: 0 to 2 pow 64]
-        VN1[Node1 - 150 virtual positions]
-        VN2[Node2 - 150 virtual positions]
-        VN3[Node3 - 150 virtual positions]
+        VN1[Node1 - 2048 virtual positions]
+        VN2[Node2 - 2048 virtual positions]
+        VN3[Node3 - 2048 virtual positions]
     end
 
     subgraph Partition Assignment
@@ -1105,7 +1123,7 @@ via `--cluster-grpc-addr`). It registers **ReplicationService**, **RaftService**
 and **CrossRegionService** — no public client EventService surface is exposed
 on this socket. Cross-region traffic is intentionally peer-plane only so
 arbitrary event inject/fetch stays off `:9000`. See
-[Cross-Region Replication](#cross-region-replication).
+[Replication Protocol](#replication-protocol).
 
 ### `ReplicationService` RPCs
 
@@ -1181,7 +1199,7 @@ sequenceDiagram
     F->>F: rename segments → segments.old, index → index.old
     F->>F: rename snapshot-staging/segments → segments, snapshot-staging/index → index
     F->>F: rm *.old
-    F->>F: WAL.ReloadSegments(); update nextOffset + epoch from trailer
+    F->>F: WAL.ReloadSegments(), update nextOffset + epoch from trailer
 ```
 
 Trigger policy:
@@ -1213,11 +1231,12 @@ intentional for `--dev`, refused in production by the validation in
   WAL closed first; WAL `ReloadSegments` rebuilds the in-memory segment
   list and sparse index from the newly-staged files.
 - **Quorum**: `Leader.Replicate` returns success only after
-  `min-insync-replicas` followers have appended. Default is 1 (leader-only);
-  production target is RF=3 / minISR=2 (see [Durability & Fault
-  Tolerance](#durability--fault-tolerance)).
-- **Trigger gap**: `--snapshot-catchup-threshold` is applied on **join /
-  `SyncPartitionFromLeader`**. There is still **no mid-flight** lag watcher that
+  `min-insync-replicas` replicas **including the leader** have appended. Default
+  is 1 (leader-only); production target is RF=3 / minISR=2 (see
+  [Consistency and Guarantees](#consistency-and-guarantees)).
+- **Trigger gap**: `--snapshot-catchup-threshold` is a **dead config key** —
+  parsed but never read; `SyncPartitionFromLeader` installs a snapshot
+  unconditionally on join. There is still **no mid-flight** lag watcher that
   automatically switches a connected follower from incremental catch-up to
   `InstallSnapshot`. See [Known Limitations](#known-limitations).
 
@@ -1289,9 +1308,23 @@ flowchart TD
 | **WAL** | `cronos_wal_append_latency_seconds{partition}`, `cronos_wal_segment_count{partition}`, `cronos_wal_high_watermark{partition}` |
 | **Scheduler** | `cronos_scheduler_ready_events{partition}`, `cronos_scheduler_active_timers{partition}`, `cronos_timing_wheel_overflow_level{partition}`, `cronos_scheduler_cold_store_entries{partition}`, `cronos_scheduler_hydrated_events_total{partition}`, `cronos_scheduler_hydrator_interval_ms{partition}`, `cronos_scheduler_hydrator_scan_duration_seconds{partition}` |
 | **Dedup** | `cronos_dedup_check_latency_seconds{partition, path}`, `cronos_dedup_bloom_memory_bytes{partition}`, `cronos_dedup_bloom_false_positive_rate{partition}` |
-| **Delivery** | `cronos_dispatch_latency_seconds{partition}`, `cronos_consumer_group_lag{group, partition}` |
+| **Delivery** | `cronos_dispatch_latency_seconds{partition}`, `cronos_consumer_group_lag{group, partition}`, `cronos_delivery_lateness_seconds{partition}` (time between an event's scheduled time and its first delivery) |
+| **Accounting** | `cronos_events_accepted_total{partition}`, `cronos_events_duplicate_total{partition}`, `cronos_events_delivered_total{partition, attempt}` (`first` or `retry`), `cronos_events_acknowledged_total{partition, result}`, `cronos_events_delivery_timeouts_total{partition}`, `cronos_events_dead_lettered_total{partition}` |
+| **Memory** | `cronos_memory_held_bytes`, `cronos_memory_limit_bytes` | What the process holds and cannot hand back, and what it may use. Publishes are refused at `--max-memory-percent` of the limit |
+| **Log** | `cronos_wal_log_start_offset{partition}`, `cronos_wal_segments_removed_total{partition}`, `cronos_change_feed_offset{partition}` |
 | **Admission** | `cronos_admission_rejected_total{partition}` |
 | **Cluster** | `cronos_cluster_nodes_alive`, `cronos_cluster_partitions_leader`, `cronos_replication_lag{partition, follower}` (in events), `cronos_clock_skew_ms{source_node, target_node}` |
+
+The accounting counters follow an event from the acknowledged publish to the
+acknowledged delivery, on the partition's leader. Rates that do not add up
+show where events are: accepted faster than delivered means events are waiting
+for their time or for a consumer; delivered faster than acknowledged, with
+timeouts, means consumers are not keeping up; `attempt="retry"` and dead
+letters mean deliveries are failing. The counters start at zero when a node
+starts and move with leadership, so compare rates summed over the nodes, not
+totals. `cronos_wal_high_watermark - cronos_wal_log_start_offset` is how many
+events a partition's log holds; `cronos_wal_high_watermark -
+cronos_change_feed_offset` is the change feed's lag.
 
 ### Metrics Architecture
 
@@ -1300,14 +1333,22 @@ graph LR
     APP[CronosDB Node] -->|:8080/metrics| PROM[Prometheus Scraper]
     APP --> HEALTH[:8080/health]
 
-    subgraph Interceptor Chain
-        I1[Rate Limit Interceptor]
-        I2[Metrics Interceptor]
-        I3[Tracing Interceptor]
+    subgraph IC["Interceptor Chain - unary, in order"]
+        I1[Tracing]
+        I2[SLO]
+        I3[Version Gate]
+        I4[JWT Auth]
+        I5[Topic Rate Limit]
+        I6[Audit]
+        I7[Metrics]
+        I8[Per-IP Rate Limit]
     end
 
-    I1 --> I2 --> I3
+    I1 --> I2 --> I3 --> I4 --> I5 --> I6 --> I7 --> I8
 ```
+
+In `--dev` mode (auth disabled) the SLO, Metrics, and Per-IP Rate Limit interceptors are
+skipped, so `cronos_api_grpc_*` and `cronos_slo_*` series stay empty in dev installs.
 
 ### Tracing - OpenTelemetry
 
@@ -1421,19 +1462,11 @@ flowchart TD
 
 ### Benchmarks
 
-| Metric | Single Node | 3-Node Cluster | Notes |
-|--------|-------------|----------------|-------|
-| **Throughput (batch)** | ~180K ev/sec | **1,010,933 ev/sec** | Batch 4000, 32 pub/node, single machine |
-| **Throughput (single)** | ~10K ev/sec | ~30K ev/sec | One event per RPC |
-| **Latency P50** | ~60us | **105us** | Batch publish |
-| **Latency P95** | ~180us | **337us** | Batch publish |
-| **Latency P99** | ~250us | **468us** | Batch publish |
-| **Latency Min** | - | **5us** | Best case |
-| **Latency Max** | - | **900us** | Worst case under sustained load |
-| **Success Rate** | 100% | **100%** | Zero errors across 96M events |
-| **Total Events** | - | **96,000,000** | Completed in 1 min 35 sec |
-
-> All 3 nodes running on the **same physical machine** sharing CPU, memory, and disk I/O.
+The historical claim of 1,010,933 events/s across 96 million events has no
+preserved benchmark artifact or durability verification. The current
+[three-node validation](docs/CLUSTER_PERFORMANCE_VALIDATION_2026-09-29.md)
+reports the exact workloads, accepted-event rates, baseline comparison, and
+remaining correctness limits. All three nodes ran on one physical machine.
 
 ### Optimization Techniques
 
@@ -1511,11 +1544,12 @@ flowchart TD
 | Replication | `--replication-tls-cert-file` | `` | Replication mTLS certificate |
 | Replication | `--replication-tls-key-file` | `` | Replication mTLS key |
 | Replication | `--replication-tls-ca-file` | `` | Replication mTLS CA |
-| Replication | `--snapshot-catchup-threshold` | `10000` | Lag (events) above which join path may request Snapshot; 0 disables (not auto mid-flight) |
+| Replication | `--snapshot-catchup-threshold` | `10000` | **Dead config key** — parsed, never read; snapshot install is unconditional on join (not auto mid-flight) |
 | Cluster | `-cluster` | `false` | Enable cluster mode |
-| Cluster | `-cluster-seeds` | empty | Comma-separated seed nodes |
+| Cluster | `-cluster-seeds` | empty | Comma-separated membership addresses of the cluster's nodes; name every node, on every node |
+| Cluster | `-cluster-bootstrap` | `false` | This node creates the cluster, if it has no state and no other seed belongs to one. Exactly one node |
 | Cluster | `-virtual-nodes` | `2048` | Virtual nodes per physical node on the placement ring |
-| Cluster | `-use-memberlist` | `false` | Use HashiCorp Memberlist (SWIM) instead of custom TCP gossip |
+| Cluster | `-use-memberlist` | `false` | Not supported; the server refuses to start with it |
 | Cluster | `-heartbeat-interval` | `1s` | Gossip heartbeat interval |
 | Cluster | `-failure-timeout` | `5s` | Node failure detection timeout |
 
@@ -1546,7 +1580,7 @@ graph TB
 
     subgraph Consensus
         HRAFT[HashiCorp Raft]
-        GOSSIP[Custom Gossip TCP or Memberlist/SWIM]
+        GOSSIP[Membership over TCP]
     end
 
     subgraph Observability
@@ -1613,7 +1647,7 @@ piece is called out so operators and contributors know what not to rely on yet.
 
 | | |
 |--|--|
-| **What works today** | Bulk `ReplicationService.Snapshot` / `Follower.InstallSnapshot` is fully implemented (CRC, staging, atomic swap, `WAL.ReloadSegments`). Join and ownership transfer call `PartitionManager.SyncPartitionFromLeader`, which can use `--snapshot-catchup-threshold` (default `10000` events; `0` disables). |
+| **What works today** | Bulk `ReplicationService.Snapshot` / `Follower.InstallSnapshot` is fully implemented (CRC, staging, atomic swap, `WAL.ReloadSegments`). Join and ownership transfer call `PartitionManager.SyncPartitionFromLeader`, which installs a snapshot unconditionally. (`--snapshot-catchup-threshold`, default `10000`, is a dead config key — parsed, never read.) |
 | **What is deferred** | While a follower is already connected, large lag is healed only via incremental `Sync` / `Append` (`Leader.catchUpFollower`). **No background loop** watches lag and auto-triggers InstallSnapshot mid-flight. |
 | **Why deferred** | Hot-path replication stays simple; full snapshot is expensive (IO + atomic swap) and is reserved for bootstrap/wipe/join. |
 | **Operator impact** | A follower that falls far behind after join may take longer to catch up via event-by-event replication. For wipe recovery, re-join or re-run state transfer. |
@@ -1623,11 +1657,9 @@ piece is called out so operators and contributors know what not to rely on yet.
 ```mermaid
 flowchart LR
     Join[Node join / ownership move] --> SyncPM[SyncPartitionFromLeader]
-    SyncPM --> Threshold{lag vs snapshot-catchup-threshold}
-    Threshold -->|above or cold start| Snap[InstallSnapshot bulk]
-    Threshold -->|below| IncrJoin[Incremental Sync]
+    SyncPM --> Snap[InstallSnapshot bulk - unconditional]
     Connected[Already connected follower lag] --> CatchUp[catchUpFollower Sync/Append only]
-    CatchUp -.->|not wired| Snap
+    CatchUp -.->|threshold flag is a dead key| Snap
 ```
 
 ### 2. Admin `TriggerRebalance` is a soft stub
@@ -1641,15 +1673,14 @@ flowchart LR
 | **Code** | `internal/api/admin_handler.go` (`TriggerRebalance`), `internal/cluster/manager.go` / `router.go` |
 | **Feature docs** | [cluster.md](docs/architecture/features/cluster.md), [dashboard.md](docs/architecture/features/dashboard.md), [api.md](docs/architecture/features/api.md) |
 
-### 3. Deep delivery requeue under backpressure (deferred)
+### 3. Delivery redrive under backpressure
 
 | | |
 |--|--|
-| **What works today** | Credits, in-flight caps, circuit breakers, retry heap, and durable DLQ after max retries. Subscribe can **resume from committed offset**. Backpressure skips emit `cronos_dispatcher_backpressure_skips_total{partition,reason}`. Events remain **durable in the WAL**. |
-| **What is deferred** | When a dispatch pass finds **no credits / in-flight capacity**, the event is **not re-enqueued into a worker-level redrive queue** on that pass. Recovery relies on later dispatch attempts, consumer credit replenishment, and/or **reconnect resume from committed offset**—not a dedicated “requeue from WAL until acked” loop for every skipped ready event. |
-| **Why deferred** | Changing the push model to true pull/redrive risks hot-path complexity and double-delivery patterns; deferred after observability was added (`plan.md` item 2.5). |
-| **Operator impact** | Under sustained zero-credit consumers, metrics show skips; ensure consumers ack and grant credits, or reconnect. Do not assume every ready-queue dequeue is immediately redelivered without credit recovery. |
-| **Code** | `internal/delivery/dispatcher.go` (credit / in-flight paths + backpressure metrics), `internal/partition/backpressure.go` (publish admission) |
+| **What works today** | Credits, in-flight caps, circuit breakers, retry heap, and durable DLQ after max retries. An event the push path cannot hand over (no credits, in-flight cap, full worker queue, failed send, subscriber disconnect) stays in the WAL and its offset range is queued for redrive; each subscription re-reads exactly that range when credits return. A new subscription first drains the backlog from its group's committed offset at the pace its credits allow. A slow sweep from the first incomplete offset remains as a safety net. Dead-lettered events are recorded complete for the group, so they are not delivered again. |
+| **What is not covered** | Redrive runs inside a subscription stream: a group with no connected subscriber makes no progress until one connects. Redelivery does not preserve offset order, and at-least-once duplicates remain possible after a crash or ack timeout. Completion records are local to the partition leader and are not replicated (audit F03). |
+| **Operator impact** | `cronos_dispatcher_backpressure_skips_total{partition,reason}` now counts events that were deferred to redrive, not events that need a reconnect. Sustained growth means consumers are slower than publishers. |
+| **Code** | `internal/delivery/redrive.go`, `internal/delivery/dispatcher.go` (`dispatchGroupBatch`), `internal/api/handlers.go` (`redriveRetained`) |
 | **Feature doc** | [docs/architecture/features/delivery.md](docs/architecture/features/delivery.md) |
 
 ### Related open work (smaller)
