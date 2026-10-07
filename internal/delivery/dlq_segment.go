@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -171,6 +172,55 @@ func (sw *DLQSegmentWriter) Close() error {
 		return sw.activeFile.Close()
 	}
 	return nil
+}
+
+// Checkpoint copies every segment file into destDir. Writes wait until the
+// copy is done, so the copy holds whole records only.
+func (sw *DLQSegmentWriter) Checkpoint(destDir string) error {
+	sw.mu.Lock()
+	defer sw.mu.Unlock()
+
+	if sw.writer != nil {
+		if err := sw.writer.Flush(); err != nil {
+			return fmt.Errorf("flush dlq segment: %w", err)
+		}
+	}
+	if err := os.MkdirAll(destDir, 0700); err != nil {
+		return fmt.Errorf("create dlq checkpoint dir: %w", err)
+	}
+	entries, err := os.ReadDir(sw.dataDir)
+	if err != nil {
+		return fmt.Errorf("read dlq dir: %w", err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".dlq") {
+			continue
+		}
+		if err := copyDLQSegment(filepath.Join(sw.dataDir, entry.Name()), filepath.Join(destDir, entry.Name())); err != nil {
+			return fmt.Errorf("copy dlq segment %s: %w", entry.Name(), err)
+		}
+	}
+	return nil
+}
+
+func copyDLQSegment(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(out, in)
+	if copyErr == nil {
+		copyErr = out.Sync()
+	}
+	if closeErr := out.Close(); copyErr == nil {
+		copyErr = closeErr
+	}
+	return copyErr
 }
 
 // Scan reads all valid entries from all segment files in the DLQ directory.
