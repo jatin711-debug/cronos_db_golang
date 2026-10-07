@@ -20,8 +20,10 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 )
 
 var replicationLag = promauto.NewGaugeVec(
@@ -445,6 +447,16 @@ func (l *Leader) sendToFollower(f *FollowerInfo, events []*types.Event, checksum
 	return err
 }
 
+// noAnswer reports whether a call failed without the follower having answered
+// it: it ran out of time, or the connection was lost.
+func noAnswer(err error) bool {
+	switch status.Code(err) {
+	case codes.DeadlineExceeded, codes.Unavailable:
+		return true
+	}
+	return false
+}
+
 // catchUpFollower ships events in [from, to) from the leader's WAL to the
 // follower in chunks, advancing on each ack.
 func (l *Leader) catchUpFollower(f *FollowerInfo, from, to int64) error {
@@ -542,6 +554,15 @@ func (l *Leader) appendToFollower(f *FollowerInfo, events []*types.Event, checks
 		f.Connected = false
 		f.InSync = false
 		f.LastError = err
+		// A call that got no answer may have gone into a connection that
+		// carries nothing any more. When the network returns, such a
+		// connection does not at once: what waits in it is resent at
+		// intervals that have grown to as much as minutes. The next call
+		// gets a connection of its own (see reconnectDeadFollowers).
+		if f.client == client && f.conn != nil && noAnswer(err) {
+			_ = f.conn.Close()
+			f.conn, f.client = nil, nil
+		}
 		f.mu.Unlock()
 		return fmt.Errorf("append RPC to follower %s: %w", f.ID, err)
 	}
