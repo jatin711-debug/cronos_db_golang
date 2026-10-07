@@ -107,10 +107,12 @@ encryption:
   # existingSecret: cronos-db-encryption
   # secretKey: master.key
 
-# Enable only when replication mTLS certificates are provided via secrets.
+# Mutual TLS for all traffic between nodes: replication, membership and Raft.
+# Enable only when the certificates are provided via a secret with the keys
+# tls.crt, tls.key and ca.crt. The certificate must be valid for the names the
+# nodes reach each other by (*.<release>-cronos-db-headless.<namespace>.svc).
 replicationTLS:
   enabled: false
-  caCertEnabled: false
   # existingSecret: cronos-db-replication-tls
 
 metrics:

@@ -60,4 +60,3 @@ encryption:
 replicationTLS:
   enabled: true
   existingSecret: cronos-db-replication-tls
-  caCertEnabled: true

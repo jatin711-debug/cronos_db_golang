@@ -129,6 +129,9 @@ type cluster struct {
 	nodes  []*node
 	// extraArgs are appended to every node's command line.
 	extraArgs []string
+	// caFile, certFile and keyFile are what the nodes secure their traffic
+	// with each other with: replication, membership and Raft.
+	caFile, certFile, keyFile string
 }
 
 // newCluster prepares three nodes without starting them. Whatever is still
@@ -141,6 +144,7 @@ func newCluster(t *testing.T, extraArgs ...string) *cluster {
 	if err := os.MkdirAll(filepath.Join(c.dir, "logs"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	c.caFile, c.certFile, c.keyFile = nodeCertificates(t, c.dir)
 	for i := 0; i < 3; i++ {
 		addr := func(k int) string { return fmt.Sprintf("127.0.0.1:%d", ports[i*5+k]) }
 		id := fmt.Sprintf("node%d", i+1)
@@ -211,6 +215,11 @@ func (c *cluster) args(n *node) []string {
 		"--cluster-gossip-addr=" + n.gossipAddr,
 		"--cluster-grpc-addr=" + n.clusterAddr,
 		"--cluster-raft-addr=" + n.raftAddr,
+		// Between themselves the nodes speak mutual TLS, as in production.
+		"--replication-tls-enabled",
+		"--replication-tls-ca-file=" + c.caFile,
+		"--replication-tls-cert-file=" + c.certFile,
+		"--replication-tls-key-file=" + c.keyFile,
 	}
 	if n.index > 0 {
 		seeds := make([]string, len(c.nodes))

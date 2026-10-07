@@ -3,6 +3,7 @@
 package cluster
 
 import (
+	"crypto/tls"
 	"time"
 )
 
@@ -232,6 +233,11 @@ type Config struct {
 	FormationWait time.Duration
 	// UseMemberlist enables HashiCorp Memberlist (SWIM) instead of custom TCP gossip.
 	UseMemberlist bool
+	// ServerTLS and ClientTLS put the membership and Raft ports behind mutual
+	// TLS: the first is what this node listens with, the second what it dials
+	// other nodes with. Both or neither.
+	ServerTLS *tls.Config
+	ClientTLS *tls.Config
 	// Rack is this node's rack topology label.
 	Rack string
 	// Zone is this node's availability-zone topology label.
@@ -283,6 +289,10 @@ type ClusterConfig struct {
 	VirtualNodes int `json:"virtual_nodes"`
 	// UseMemberlist enables HashiCorp Memberlist for membership.
 	UseMemberlist bool `json:"use_memberlist"`
+	// ServerTLS and ClientTLS put the membership and Raft ports behind mutual
+	// TLS; see Config.
+	ServerTLS *tls.Config `json:"-"`
+	ClientTLS *tls.Config `json:"-"`
 	// Rack is this node's rack topology label.
 	Rack string `json:"rack,omitempty"`
 	// Zone is this node's availability-zone topology label.

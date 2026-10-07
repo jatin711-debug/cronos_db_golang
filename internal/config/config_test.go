@@ -3,6 +3,7 @@ package config
 import (
 	"flag"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -562,7 +563,6 @@ func TestLoadConfig_ClusterConfig(t *testing.T) {
 		"-heartbeat-interval=2s",
 		"-failure-timeout=10s",
 		"-suspect-timeout=5s",
-		"-use-memberlist",
 	}
 	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
 
@@ -595,7 +595,34 @@ func TestLoadConfig_ClusterConfig(t *testing.T) {
 	if config.SuspectTimeout != 5*time.Second {
 		t.Errorf("expected SuspectTimeout=5s, got %v", config.SuspectTimeout)
 	}
-	if !config.UseMemberlist {
-		t.Error("expected UseMemberlist=true")
+	if config.UseMemberlist {
+		t.Error("expected UseMemberlist=false")
+	}
+}
+
+// A flag that is accepted and does nothing misleads whoever sets it. The
+// server never used the memberlist adapter, so asking for it is refused.
+func TestValidateConfig_RefusesMemberlist(t *testing.T) {
+	config := &types.Config{NodeID: "n", PartitionCount: 1, ReplicationFactor: 1, DataDir: "d", GPRCAddress: ":1", FlushIntervalMS: 1, DevMode: true}
+	if err := ValidateConfig(config); err != nil {
+		t.Fatalf("the configuration is refused before the flag is set: %v", err)
+	}
+	config.UseMemberlist = true
+	if err := ValidateConfig(config); err == nil || !strings.Contains(err.Error(), "use-memberlist") {
+		t.Fatalf("use-memberlist was accepted: %v", err)
+	}
+}
+
+// Mutual TLS between nodes cannot work without the CA: the internal
+// listeners would have nothing to verify a caller against.
+func TestValidateConfig_NodeTLSNeedsAllThreeFiles(t *testing.T) {
+	config := &types.Config{NodeID: "n", PartitionCount: 1, ReplicationFactor: 1, DataDir: "d", GPRCAddress: ":1", FlushIntervalMS: 1, DevMode: true,
+		ReplicationTLSEnabled: true, ReplicationTLSCertFile: "tls.crt", ReplicationTLSKeyFile: "tls.key"}
+	if err := ValidateConfig(config); err == nil || !strings.Contains(err.Error(), "replication-tls-ca-file") {
+		t.Fatalf("node TLS without a CA was accepted: %v", err)
+	}
+	config.ReplicationTLSCAFile = "ca.crt"
+	if err := ValidateConfig(config); err != nil {
+		t.Fatalf("node TLS with all three files was refused: %v", err)
 	}
 }

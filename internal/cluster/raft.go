@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -40,12 +39,7 @@ func NewRaftNode(config *ClusterConfig) (*RaftNode, error) {
 	fsm := NewClusterFSM()
 
 	// Create transport
-	addr, err := net.ResolveTCPAddr("tcp", config.RaftAddr)
-	if err != nil {
-		return nil, fmt.Errorf("resolve raft addr: %w", err)
-	}
-
-	transport, err := raft.NewTCPTransport(config.RaftAddr, addr, 3, 10*time.Second, os.Stderr)
+	transport, err := newRaftTransport(config)
 	if err != nil {
 		return nil, fmt.Errorf("create transport: %w", err)
 	}
@@ -311,10 +305,19 @@ func (n *RaftNode) WaitForLeader(timeout time.Duration) error {
 	}
 }
 
-// Shutdown cleanly shuts down the Raft instance.
+// Shutdown cleanly shuts down the Raft instance, and closes its port and its
+// store, which Raft leaves to their owner.
 func (n *RaftNode) Shutdown() error {
-	future := n.raft.Shutdown()
-	return future.Error()
+	err := n.raft.Shutdown().Error()
+	if closeErr := n.transport.Close(); err == nil {
+		err = closeErr
+	}
+	if store, ok := n.logStore.(io.Closer); ok {
+		if closeErr := store.Close(); err == nil {
+			err = closeErr
+		}
+	}
+	return err
 }
 
 // Command is a Raft-replicated mutation applied to ClusterFSM.

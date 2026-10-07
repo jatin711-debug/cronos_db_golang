@@ -121,10 +121,8 @@ spec:
               value: "/etc/cronos/replication-tls/tls.crt"
             - name: CRONOS_REPLICATION_TLS_KEY_FILE
               value: "/etc/cronos/replication-tls/tls.key"
-            {{- if .Values.replicationTLS.caCertEnabled }}
             - name: CRONOS_REPLICATION_TLS_CA_FILE
               value: "/etc/cronos/replication-tls/ca.crt"
-            {{- end }}
             {{- end }}
           envFrom:
             - configMapRef:

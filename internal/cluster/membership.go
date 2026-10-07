@@ -3,6 +3,7 @@ package cluster
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -72,6 +73,9 @@ type Membership struct {
 	unreachable map[string]bool
 	// lastDetect is when the failure detector last ran. Guarded by mu.
 	lastDetect time.Time
+	// refusedLogged is when a caller that failed the TLS handshake was last
+	// logged, in Unix nanoseconds. Such callers can come every second.
+	refusedLogged atomic.Int64
 }
 
 // deadProbeRounds is how many heartbeat rounds pass between attempts to reach
@@ -164,12 +168,16 @@ func (m *Membership) Start(ctx context.Context) error {
 	log.Printf("[MEMBERSHIP] Starting membership manager for node %s", m.localNode.ID)
 
 	// Start gossip listener
-	listener, err := net.Listen("tcp", m.config.BindAddr)
+	listener, err := listenPeers(m.config.BindAddr, m.config.ServerTLS)
 	if err != nil {
 		return fmt.Errorf("start gossip listener on %s: %w", m.config.BindAddr, err)
 	}
 	m.listener = listener
-	log.Printf("[MEMBERSHIP] Gossip listener started on %s", m.config.BindAddr)
+	if m.config.ServerTLS != nil {
+		log.Printf("[MEMBERSHIP] Gossip listener started on %s (mutual TLS)", m.config.BindAddr)
+	} else {
+		log.Printf("[MEMBERSHIP] Gossip listener started on %s", m.config.BindAddr)
+	}
 
 	// Accept incoming connections
 	go m.acceptLoop(ctx)
@@ -232,6 +240,18 @@ func (m *Membership) acceptLoop(ctx context.Context) {
 // handleConnection handles an incoming gossip connection in a loop to allow socket reuse
 func (m *Membership) handleConnection(conn net.Conn) {
 	defer conn.Close()
+	if secured, ok := conn.(*tls.Conn); ok {
+		// Nothing is known about the caller until it has shown a certificate
+		// of this cluster, so it gets little time to do that, and nothing it
+		// sends is read before.
+		ctx, cancel := context.WithTimeout(context.Background(), peerHandshakeTimeout)
+		err := secured.HandshakeContext(ctx)
+		cancel()
+		if err != nil {
+			m.logRefusedPeer(conn.RemoteAddr(), err)
+			return
+		}
+	}
 	scanner := bufio.NewScanner(conn)
 
 	for {
@@ -269,6 +289,30 @@ func (m *Membership) handleConnection(conn net.Conn) {
 			log.Printf("[MEMBERSHIP] Unknown message type: %s", msg.Type)
 		}
 	}
+}
+
+// peerHandshakeTimeout bounds the TLS handshake of a caller, and
+// refusedLogInterval how often a refused caller is logged.
+const (
+	peerHandshakeTimeout = 5 * time.Second
+	refusedLogInterval   = 30 * time.Second
+)
+
+// logRefusedPeer reports a caller that did not get through the TLS
+// handshake: a node of this cluster that runs without TLS or with a
+// certificate of another CA, or something that is not a node at all.
+func (m *Membership) logRefusedPeer(remote net.Addr, err error) {
+	now := time.Now().UnixNano()
+	last := m.refusedLogged.Load()
+	if now-last < int64(refusedLogInterval) || !m.refusedLogged.CompareAndSwap(last, now) {
+		return
+	}
+	log.Printf("[MEMBERSHIP] Refused a connection from %s: it did not complete the mutual TLS handshake (%v). A node of this cluster must use the cluster's certificates on its membership port", remote, err)
+}
+
+// dial connects to the membership port of another node.
+func (m *Membership) dial(ctx context.Context, addr string, timeout time.Duration) (net.Conn, error) {
+	return dialPeer(ctx, addr, timeout, m.config.ClientTLS)
 }
 
 // GossipMessage is the wire format for the custom TCP gossip protocol
@@ -466,7 +510,7 @@ func (m *Membership) broadcastNodeJoined(newNode *Node) {
 
 	for _, node := range nodes {
 		go func(addr string) {
-			conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+			conn, err := m.dial(context.Background(), addr, 2*time.Second)
 			if err != nil {
 				return
 			}
@@ -784,7 +828,7 @@ func (m *Membership) sendHeartbeat(node *Node) {
 	}
 
 	// Establish new connection
-	newConn, err := net.DialTimeout("tcp", targetAddr, 2*time.Second)
+	newConn, err := m.dial(context.Background(), targetAddr, 2*time.Second)
 	if err == nil {
 		// Send heartbeat on new connection
 		newConn.SetWriteDeadline(time.Now().Add(2 * time.Second))
@@ -938,8 +982,7 @@ func (m *Membership) joinSeedNodes(ctx context.Context) {
 // members it reports. It returns how many of those are other nodes; none means
 // the node at addr is this one.
 func (m *Membership) joinViaNode(ctx context.Context, addr string) (int, error) {
-	dialer := &net.Dialer{Timeout: 5 * time.Second}
-	conn, err := dialer.DialContext(ctx, "tcp", addr)
+	conn, err := m.dial(ctx, addr, 5*time.Second)
 	if err != nil {
 		return 0, fmt.Errorf("connect to %s: %w", addr, err)
 	}

@@ -312,6 +312,29 @@ func main() {
 			Region:            cfg.NodeRegion,
 		}
 
+		if cfg.ReplicationTLSEnabled {
+			// Membership and Raft decide who belongs to the cluster and who
+			// leads. They use the certificates of the replication channel, so
+			// that all traffic between nodes is one trust domain.
+			peerTLS := &replication.MTLSConfig{
+				Enabled:  true,
+				CAFile:   cfg.ReplicationTLSCAFile,
+				CertFile: cfg.ReplicationTLSCertFile,
+				KeyFile:  cfg.ReplicationTLSKeyFile,
+			}
+			serverTLS, tlsErr := replication.BuildServerTLSConfig(peerTLS)
+			if tlsErr != nil {
+				slog.Error("Failed to load the TLS certificates for membership and Raft", "error", tlsErr)
+				os.Exit(1)
+			}
+			clientTLS, tlsErr := replication.BuildClientTLSConfig(peerTLS)
+			if tlsErr != nil {
+				slog.Error("Failed to load the TLS certificates for membership and Raft", "error", tlsErr)
+				os.Exit(1)
+			}
+			clusterConfig.ServerTLS, clusterConfig.ClientTLS = serverTLS, clientTLS
+		}
+
 		clusterMgr = cluster.NewManager(clusterConfig)
 		// Wire partition state transfer hooks before starting cluster services.
 		clusterMgr.SetPartitionAccessor(pm)
@@ -335,7 +358,7 @@ func main() {
 			}
 		}
 
-		slog.Info("Cluster mode enabled", "gossip_addr", cfg.ClusterGossipAddr, "raft_addr", cfg.ClusterRaftAddr)
+		slog.Info("Cluster mode enabled", "gossip_addr", cfg.ClusterGossipAddr, "raft_addr", cfg.ClusterRaftAddr, "mutual_tls", cfg.ReplicationTLSEnabled)
 	}
 
 	// Create partitions.
