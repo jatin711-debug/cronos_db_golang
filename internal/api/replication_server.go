@@ -218,6 +218,7 @@ func (h *ReplicationServiceHandler) SyncConsumerProgress(ctx context.Context, re
 	if err := p.ConsumerGroup.ApplyReplicatedProgress(req.GetPartitionId(), req.GetGroups()); err != nil {
 		return &types.ReplicationProgressResponse{Error: err.Error()}, nil
 	}
+	p.NoteLeaderFeedPosition(req.GetChangeFeedOffset(), req.GetHasChangeFeedOffset())
 	return &types.ReplicationProgressResponse{Success: true}, nil
 }
 

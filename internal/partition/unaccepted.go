@@ -92,6 +92,8 @@ func (p *Partition) AcceptThrough(offset int64) error {
 	if !p.HasUnaccepted() {
 		return nil
 	}
+	// The change feed waits behind held publishes.
+	defer p.wakeFeed()
 	p.heldMu.Lock()
 	defer p.heldMu.Unlock()
 	defer func() { p.heldCount.Store(int32(len(p.held))) }()

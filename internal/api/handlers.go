@@ -468,8 +468,7 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 		}, nil
 	}
 
-	partitionInternal.BeginPublish()
-	defer partitionInternal.EndPublish()
+	defer partitionInternal.EndPublish(partitionInternal.BeginPublish())
 	if err := h.ensurePublishAllowed(partitionID); err != nil {
 		return nil, err
 	}
@@ -910,8 +909,7 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 		go func(pid int32, logged []*types.Event) {
 			defer wg.Done()
 			partitionInternal := partitionInternals[pid]
-			partitionInternal.BeginPublish()
-			defer partitionInternal.EndPublish()
+			defer partitionInternal.EndPublish(partitionInternal.BeginPublish())
 			err := h.ensurePublishAllowed(pid)
 			if err == nil {
 				err = h.finishPriorPublishes(partitionInternal, logged, durableRetry)
@@ -932,8 +930,7 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 				setError(int32(len(evts)), fmt.Sprintf("partition %d was not materialized", pid))
 				return
 			}
-			partitionInternal.BeginPublish()
-			defer partitionInternal.EndPublish()
+			defer partitionInternal.EndPublish(partitionInternal.BeginPublish())
 
 			// rollbackDedup undoes the dedup claims for this batch when it never
 			// reached the log, so client retries are not dropped as spurious

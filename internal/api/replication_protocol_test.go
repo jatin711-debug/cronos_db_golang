@@ -323,11 +323,11 @@ func TestReplication_PositionReportsLogEnd(t *testing.T) {
 	// earlier is still in flight the log may yet grow, so the node must keep
 	// reporting that it accepts writes; only afterwards is its position final.
 	r.pm.SetWritableCheck(func(int32) bool { return false })
-	r.p.BeginPublish()
+	inFlight := r.p.BeginPublish()
 	if got := position(); !got.GetAcceptingWrites() {
 		t.Fatal("a stopped leader with a publish in flight reported a final position")
 	}
-	r.p.EndPublish()
+	r.p.EndPublish(inFlight)
 	if got := position(); got.GetAcceptingWrites() {
 		t.Fatal("a leader the cluster has stopped still reports that it accepts writes")
 	}

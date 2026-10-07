@@ -427,3 +427,38 @@ func TestLeader_EmptyFollowerIsCaughtUpFromTheStart(t *testing.T) {
 		}
 	}
 }
+
+// A follower that has never answered is asked where its log ends. Without
+// that, an idle partition, after a failover for instance, would neither catch
+// the follower up nor learn what is on a quorum until somebody published.
+func TestLeader_IdleFollowerThatNeverAnsweredIsProbed(t *testing.T) {
+	wal := newLeaderTestWAL(t)
+	events := batchAt(0, 6)
+	for _, e := range events {
+		e.ScheduleTs = 1
+	}
+	if err := wal.AppendBatch(events); err != nil {
+		t.Fatal(err)
+	}
+
+	follower, addr := startGatedReplServer(t, true)
+	l := NewLeader(0, 500, 20*time.Millisecond, wal, 2, "leader", nil)
+	defer l.Stop()
+	if err := l.AddFollower("idle", addr); err != nil {
+		t.Fatal(err)
+	}
+	if got := l.QuorumOffset(); got != -1 {
+		t.Fatalf("QuorumOffset before the follower answered = %d, want -1", got)
+	}
+
+	// Nothing is published. The maintenance loop alone has to find out.
+	l.Start()
+	waitFor(t, "the idle follower to be caught up", func() bool {
+		offsets, _ := follower.snapshot()
+		return len(offsets) == 6
+	})
+	waitFor(t, "the quorum offset to reach the end of the log", func() bool { return l.QuorumOffset() == 5 })
+	if offsets, rejected := follower.snapshot(); rejected != 0 || offsets[0] != 0 || offsets[5] != 5 {
+		t.Fatalf("follower holds %v after %d rejections, want 0-5 with none", offsets, rejected)
+	}
+}
