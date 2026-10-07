@@ -63,6 +63,11 @@ ENV CGO_LDFLAGS="-L/build/go-app -lcronos_dedup"
 # Build the main binary
 RUN go build -trimpath -ldflags="-linkmode=external" -o /cronos-api ./cmd/api
 
+# The administration tool. It restores backups and checks logs on the volume
+# of a stopped node, which in a cluster means from a pod of this image. It
+# uses none of the native library.
+RUN CGO_ENABLED=0 go build -trimpath -o /cronos-admin ./cmd/admin
+
 # -----------------------------------------------------------------------------
 # Stage 3: Final runtime image (Debian for glibc compatibility)
 # =============================================================================
@@ -83,8 +88,9 @@ RUN groupadd -g 1000 cronos && \
 
 WORKDIR /app
 
-# Copy binary from go-builder
+# Copy binaries from go-builder
 COPY --from=go-builder /cronos-api /app/cronos-api
+COPY --from=go-builder /cronos-admin /app/cronos-admin
 
 # Copy Rust library (must be in same directory as binary or in library path)
 COPY --from=rust-builder /build/libcronos_dedup.so /app/libcronos_dedup.so
