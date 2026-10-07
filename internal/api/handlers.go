@@ -256,6 +256,29 @@ func (h *EventServiceHandler) ensureClusterPartitionLed(partitionID int32) error
 	return nil
 }
 
+// ensureSubscriptionServed returns an error once this node has stopped
+// leading the partition of a subscription it accepted.
+//
+// Deliveries are made by the partition's leader. A subscription left open on a
+// node that no longer leads would wait there for good while the events are
+// delivered, or wait to be, on another node; ending it sends the consumer to
+// look for the node that leads now.
+func (h *EventServiceHandler) ensureSubscriptionServed(p *partition.Partition) error {
+	if h.clusterRouter == nil {
+		return nil
+	}
+	if err := h.ensureClusterPartitionLed(p.ID); err != nil {
+		return err
+	}
+	if !p.IsLeader() {
+		// Stepped down for a newer leader that the cluster's records on this
+		// node do not show yet.
+		return status.Errorf(codes.FailedPrecondition,
+			"partition %d is local but this node is not the leader any more; retry against the partition leader", p.ID)
+	}
+	return nil
+}
+
 // duplicateKind says how to answer a publish whose message ID is already
 // recorded for its partition.
 type duplicateKind int
@@ -1206,6 +1229,9 @@ const (
 	// redriveSweepInterval and redriveSweepEvents pace the background sweep.
 	redriveSweepInterval = 500 * time.Millisecond
 	redriveSweepEvents   = 256
+	// servedCheckInterval is how often an open subscription checks that this
+	// node still leads its partition.
+	servedCheckInterval = 250 * time.Millisecond
 )
 
 // redriveRetained delivers retained WAL records to one subscription's consumer
@@ -1255,8 +1281,15 @@ func (h *EventServiceHandler) redriveRetained(ctx context.Context, p *partition.
 	sweep := origin                     // next offset of the background sweep
 	nextSweep := time.Now().Add(redriveSweepInterval)
 	retryLow, retryHigh := int64(0), int64(-1) // queued redrive range; empty when low > high
+	nextServedCheck := time.Now()
 
 	for {
+		if now := time.Now(); !now.Before(nextServedCheck) {
+			if err := h.ensureSubscriptionServed(p); err != nil {
+				return err
+			}
+			nextServedCheck = now.Add(servedCheckInterval)
+		}
 		if low, high, ok := requests.Take(); ok {
 			low = max(low, origin)
 			// A range wholly inside the unread backlog is covered by that pass.
