@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
@@ -36,6 +37,21 @@ type GroupManager struct {
 	partitions  map[int32]*types.Partition // partition_id -> partition
 	offsetStore *OffsetStore               // persistent offset storage
 	completed   map[string]bool            // Used only by the in-memory manager.
+	// floors holds each group's completion floor per partition, keyed by
+	// completionPrefix: every offset below it is complete. Guarded by mu.
+	floors map[string]int64
+
+	// completedMax caches, per group and partition, the highest offset known
+	// complete. Guarded by completedMaxMu, which is never held while waiting
+	// for mu.
+	completedMaxMu sync.Mutex
+	completedMax   map[string]int64
+
+	// commitMu serializes progress writes (acks and replicated progress): each
+	// derives a group's new cursor from the one before it.
+	commitMu sync.Mutex
+	// progressVersion changes whenever any group's progress or membership does.
+	progressVersion atomic.Uint64
 }
 
 // NewGroupManager creates an in-memory-only group manager.
@@ -57,7 +73,20 @@ func NewGroupManagerWithStore(offsetStore *OffsetStore) *GroupManager {
 	}
 	// Restore persisted group metadata if available.
 	if offsetStore != nil {
+		if floors, err := offsetStore.loadFloors(); err == nil {
+			gm.floors = floors
+		}
 		for id, group := range offsetStore.LoadGroups() {
+			// Progress is written with every ack; the group record only when
+			// membership changes. Take whichever is further along.
+			for _, partitionID := range group.Partitions {
+				if offset, err := offsetStore.GetOffset(id, partitionID); err == nil && offset > group.CommittedOffsets[partitionID] {
+					group.CommittedOffsets[partitionID] = offset
+				}
+				if floor := gm.floors[completionPrefix(id, partitionID)]; floor > group.CommittedOffsets[partitionID] {
+					group.CommittedOffsets[partitionID] = floor
+				}
+			}
 			gm.groups[id] = group
 		}
 	}
@@ -66,6 +95,7 @@ func NewGroupManagerWithStore(offsetStore *OffsetStore) *GroupManager {
 
 // persistGroup writes group metadata to the offset store if one is configured.
 func (g *GroupManager) persistGroup(group *types.ConsumerGroup) {
+	g.progressVersion.Add(1)
 	if g.offsetStore != nil {
 		_ = g.offsetStore.PersistGroup(group)
 	}
