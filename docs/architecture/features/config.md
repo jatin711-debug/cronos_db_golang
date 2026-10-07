@@ -98,7 +98,8 @@ Defaults from `internal/config/defaults.go` unless noted. Flags marked **env** h
 | `--min-insync-replicas` | `1` | Min ISR **including leader** to ack a write (prod ≥2) (**env**) |
 | `--snapshot-catchup-threshold` | `10000` | **Dead config key** — parsed, never read (**env**) |
 | `--cluster` | `false` | Enable cluster mode (**env**) |
-| `--cluster-seeds` | *(empty)* | Comma-separated seed gossip addresses (**env**) |
+| `--cluster-seeds` | *(empty)* | Comma-separated membership addresses of the cluster's nodes. Name every node, on every node; production mode requires it (**env**) |
+| `--cluster-bootstrap` | `false` | This node creates the cluster, if it has no state and no other node in `--cluster-seeds` belongs to one. Give it to exactly one node (**env**) |
 | `--cluster-expected-nodes` | `0` | Nodes a new cluster starts with; first partition leaders are assigned as soon as that many are up. `0` = unknown (**env**) |
 | `--cluster-formation-wait` | `5s` | When the expected nodes are unknown or not all up: how long membership must be unchanged before first leaders are assigned. `0` assigns at once (**env**) |
 | `--cluster-gossip-addr` | `:7946` | Membership gossip listen address |

@@ -1545,7 +1545,8 @@ remaining correctness limits. All three nodes ran on one physical machine.
 | Replication | `--replication-tls-ca-file` | `` | Replication mTLS CA |
 | Replication | `--snapshot-catchup-threshold` | `10000` | **Dead config key** — parsed, never read; snapshot install is unconditional on join (not auto mid-flight) |
 | Cluster | `-cluster` | `false` | Enable cluster mode |
-| Cluster | `-cluster-seeds` | empty | Comma-separated seed nodes |
+| Cluster | `-cluster-seeds` | empty | Comma-separated membership addresses of the cluster's nodes; name every node, on every node |
+| Cluster | `-cluster-bootstrap` | `false` | This node creates the cluster, if it has no state and no other seed belongs to one. Exactly one node |
 | Cluster | `-virtual-nodes` | `2048` | Virtual nodes per physical node on the placement ring |
 | Cluster | `-use-memberlist` | `false` | Not supported; the server refuses to start with it |
 | Cluster | `-heartbeat-interval` | `1s` | Gossip heartbeat interval |

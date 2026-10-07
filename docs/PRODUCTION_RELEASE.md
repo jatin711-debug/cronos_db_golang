@@ -67,11 +67,18 @@ upgraded one pod at a time: those versions speak plain TCP on the membership
 and Raft ports, and a node of this version does not talk to them. Stop all its
 nodes and start them on the new version together. The data stays.
 
-The chart starts pods in parallel. Ordinal zero bootstraps a new Raft cluster;
-other pods use the configured seed list. Existing Raft state remains on the data
-volume under `raft/`. Do not replace or wipe these volumes as a bootstrap recovery
-procedure. Membership and ownership recovery after node replacement remain audit
-release blockers.
+The chart starts pods in parallel, and every pod names every pod as a seed.
+Ordinal zero is the one that creates the cluster (`--cluster-bootstrap`), and
+it does so only when it has no Raft state and no other pod belongs to a
+cluster. Raft state is on the data volume under `raft/`.
+
+A pod whose volume is replaced comes back empty, finds the cluster through the
+other pods and is filled from it; that holds for ordinal zero too. Replace one
+volume at a time and wait for the pod to be ready: with two of three volumes
+gone, events that were acknowledged by two replicas can be on neither of the
+two that are left. Production mode refuses to start a node without
+`--cluster-seeds`, because such a node creates a cluster whenever it has no
+state.
 
 The HTTP port (health, metrics, dashboard and the admin API) is plain HTTP. The
 admin API checks the bearer token, but the token and the answers cross the
@@ -98,8 +105,10 @@ Run chart assertions locally with `python scripts/check-production-chart.py`
 disposable `kind-cronos-ci` context and an already-loaded `cronos-db:ci` image. It
 creates ephemeral test credentials, installs three production-mode pods, and
 checks readiness, embedded dashboard assets, key permissions, and rejection of
-unauthenticated HTTP admin requests. It is a startup smoke test, not a proof of
-quorum acceptance, failover, or restore. Tooling follows the
+unauthenticated HTTP admin requests. It then restarts the pods one at a time,
+and starts the cluster again with the volume of ordinal zero emptied, checking
+that the pod joins the cluster instead of creating one. It sends no events: it
+is not a proof of quorum acceptance, failover, or restore. Tooling follows the
 [kind quick-start workflow](https://kind.sigs.k8s.io/docs/user/quick-start/).
 
 The `fault-campaign` job runs `tests/acceptance`: three server processes on the
