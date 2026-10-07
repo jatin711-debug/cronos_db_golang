@@ -1,0 +1,152 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 708" width="1000" height="708" role="img" aria-labelledby="title desc" font-family="'Segoe UI', system-ui, -apple-system, BlinkMacSystemFont, Roboto, 'Helvetica Neue', Arial, sans-serif">
+  <title id="title">Life of an event — from Publish to Ack</title>
+  <desc id="desc">Write path: validate, route to a partition, claim the message ID, append to the log, replicate to a quorum, then accept and acknowledge. Delivery path: the timer fires, a worker drains the ready queue, the dispatcher picks a subscriber with credit, the consumer processes and acknowledges, and the completion is recorded.</desc>
+  <defs>
+    <marker id="ah-57606a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8.5" markerHeight="8.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0.9 L9.6 5 L0 9.1 z" fill="#57606a"/></marker>
+    <marker id="ah-cf3a30" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8.5" markerHeight="8.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0.9 L9.6 5 L0 9.1 z" fill="#cf3a30"/></marker>
+  </defs>
+
+  <!-- card: the diagram brings its own background so it reads on light and dark pages -->
+  <rect x="0.5" y="0.5" width="999" height="707" rx="14" fill="#ffffff" stroke="#d0d7de"/>
+  <text x="28" y="37" font-size="20" font-weight="700" fill="#1f2328">Life of an event — from Publish to Ack</text>
+  <text x="28" y="58" font-size="12.5" fill="#57606a">The write path is synchronous and ends with an answer to the producer. Delivery starts later, when the event’s schedule_ts arrives.</text>
+
+  <!-- write path -->
+  <rect x="14" y="76" width="972" height="268" rx="12" fill="#eaf2fe" stroke="#3b78d8" stroke-width="1.2" stroke-dasharray="5 4" fill-opacity="0.28"/>
+  <text x="28" y="94" font-size="10.5" fill="#0b3a7e" font-weight="700" letter-spacing="0.04em">WRITE PATH  ·  synchronous: the producer is waiting</text>
+  <rect x="26" y="110" width="143" height="112" rx="8" fill="#f4f5f7" stroke="#8b949e" stroke-width="1.3"/>
+  <text x="97.5" y="147.5" font-size="13.5" fill="#24292f" text-anchor="middle" font-weight="600">Validate</text>
+  <text x="97.5" y="165.4" font-size="10.8" fill="#1f2328" text-anchor="middle">size limits, required fields</text>
+  <text x="97.5" y="179.9" font-size="10.8" fill="#1f2328" text-anchor="middle">JWT + topic permission</text>
+  <text x="97.5" y="194.4" font-size="10.8" fill="#1f2328" text-anchor="middle">schema check</text>
+  <circle cx="30" cy="112" r="10.5" fill="#8b949e" stroke="#ffffff" stroke-width="2"/>
+  <text x="30" y="115.9" font-size="11" fill="#ffffff" text-anchor="middle" font-weight="700">1</text>
+  <rect x="187" y="110" width="143" height="112" rx="8" fill="#f2ecfd" stroke="#7c4ddb" stroke-width="1.3"/>
+  <text x="258.5" y="147.5" font-size="13.5" fill="#3d1f85" text-anchor="middle" font-weight="600">Route</text>
+  <text x="258.5" y="165.4" font-size="10.8" fill="#1f2328" text-anchor="middle">FNV-1a(key) mod N</text>
+  <text x="258.5" y="179.9" font-size="10.8" fill="#1f2328" text-anchor="middle">→ partition</text>
+  <text x="258.5" y="194.4" font-size="10.8" fill="#1f2328" text-anchor="middle">is this node its leader?</text>
+  <circle cx="191" cy="112" r="10.5" fill="#7c4ddb" stroke="#ffffff" stroke-width="2"/>
+  <text x="191" y="115.9" font-size="11" fill="#ffffff" text-anchor="middle" font-weight="700">2</text>
+  <path d="M169 166 L185.6 166" fill="none" stroke="#57606a" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#ah-57606a)"/>
+  <rect x="348" y="110" width="143" height="112" rx="8" fill="#eaf2fe" stroke="#3b78d8" stroke-width="1.3"/>
+  <text x="419.5" y="147.5" font-size="13.5" fill="#0b3a7e" text-anchor="middle" font-weight="600">Claim the ID</text>
+  <text x="419.5" y="165.4" font-size="10.8" fill="#1f2328" text-anchor="middle">dedup: bloom → Pebble</text>
+  <text x="419.5" y="179.9" font-size="10.8" fill="#1f2328" text-anchor="middle">new → claim it</text>
+  <text x="419.5" y="194.4" font-size="10.8" fill="#1f2328" text-anchor="middle">seen → see below</text>
+  <circle cx="352" cy="112" r="10.5" fill="#3b78d8" stroke="#ffffff" stroke-width="2"/>
+  <text x="352" y="115.9" font-size="11" fill="#ffffff" text-anchor="middle" font-weight="700">3</text>
+  <path d="M330 166 L346.6 166" fill="none" stroke="#57606a" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#ah-57606a)"/>
+  <rect x="509" y="110" width="143" height="112" rx="8" fill="#e7f6ed" stroke="#2e8b57" stroke-width="1.3"/>
+  <text x="580.5" y="147.5" font-size="13.5" fill="#145232" text-anchor="middle" font-weight="600">Append to log</text>
+  <text x="580.5" y="165.4" font-size="10.8" fill="#1f2328" text-anchor="middle">offset assigned</text>
+  <text x="580.5" y="179.9" font-size="10.8" fill="#1f2328" text-anchor="middle">CRC + term on the record</text>
+  <text x="580.5" y="194.4" font-size="10.8" fill="#1f2328" text-anchor="middle">fsync as configured</text>
+  <circle cx="513" cy="112" r="10.5" fill="#2e8b57" stroke="#ffffff" stroke-width="2"/>
+  <text x="513" y="115.9" font-size="11" fill="#ffffff" text-anchor="middle" font-weight="700">4</text>
+  <path d="M491 166 L507.6 166" fill="none" stroke="#57606a" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#ah-57606a)"/>
+  <rect x="670" y="110" width="143" height="112" rx="8" fill="#f2ecfd" stroke="#7c4ddb" stroke-width="1.3"/>
+  <text x="741.5" y="147.5" font-size="13.5" fill="#3d1f85" text-anchor="middle" font-weight="600">Replicate</text>
+  <text x="741.5" y="165.4" font-size="10.8" fill="#1f2328" text-anchor="middle">send to the followers</text>
+  <text x="741.5" y="179.9" font-size="10.8" fill="#1f2328" text-anchor="middle">wait for min-insync</text>
+  <text x="741.5" y="194.4" font-size="10.8" fill="#1f2328" text-anchor="middle">replicas (leader counts)</text>
+  <circle cx="674" cy="112" r="10.5" fill="#7c4ddb" stroke="#ffffff" stroke-width="2"/>
+  <text x="674" y="115.9" font-size="11" fill="#ffffff" text-anchor="middle" font-weight="700">5</text>
+  <path d="M652 166 L668.6 166" fill="none" stroke="#57606a" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#ah-57606a)"/>
+  <rect x="831" y="110" width="143" height="112" rx="8" fill="#fff4d9" stroke="#c98a00" stroke-width="1.3"/>
+  <text x="902.5" y="147.5" font-size="13.5" fill="#6b4700" text-anchor="middle" font-weight="600">Accept + ack</text>
+  <text x="902.5" y="165.4" font-size="10.8" fill="#1f2328" text-anchor="middle">arm the timer</text>
+  <text x="902.5" y="179.9" font-size="10.8" fill="#1f2328" text-anchor="middle">dedup: ID → offset</text>
+  <text x="902.5" y="194.4" font-size="10.8" fill="#1f2328" text-anchor="middle">answer the producer</text>
+  <circle cx="835" cy="112" r="10.5" fill="#c98a00" stroke="#ffffff" stroke-width="2"/>
+  <text x="835" y="115.9" font-size="11" fill="#ffffff" text-anchor="middle" font-weight="700">6</text>
+  <path d="M813 166 L829.6 166" fill="none" stroke="#57606a" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#ah-57606a)"/>
+
+  <!-- what can go wrong on the write path -->
+  <rect x="183" y="252" width="150" height="78" rx="8" fill="#fdecea" stroke="#cf3a30" stroke-width="1.3"/>
+  <text x="258" y="280.3" font-size="10.8" fill="#1f2328" text-anchor="middle">not the leader, or no</text>
+  <text x="258" y="294.8" font-size="10.8" fill="#1f2328" text-anchor="middle">leader yet → refused</text>
+  <text x="258" y="309.3" font-size="10.8" fill="#1f2328" text-anchor="middle">with a retryable error</text>
+  <rect x="345" y="252" width="150" height="78" rx="8" fill="#fdecea" stroke="#cf3a30" stroke-width="1.3"/>
+  <text x="420" y="280.3" font-size="10.8" fill="#1f2328" text-anchor="middle">ID already accepted →</text>
+  <text x="420" y="294.8" font-size="10.8" fill="#1f2328" text-anchor="middle">“duplicate message_id”,</text>
+  <text x="420" y="309.3" font-size="10.8" fill="#1f2328" text-anchor="middle">nothing is written</text>
+  <rect x="582" y="252" width="318" height="78" rx="8" fill="#fdecea" stroke="#cf3a30" stroke-width="1.3"/>
+  <text x="741" y="280.3" font-size="10.8" fill="#1f2328" text-anchor="middle">no quorum → error to the producer. The event is in</text>
+  <text x="741" y="294.8" font-size="10.8" fill="#1f2328" text-anchor="middle">the log but held: it is not scheduled. A retry with</text>
+  <text x="741" y="309.3" font-size="10.8" fill="#1f2328" text-anchor="middle">the same ID finishes it instead of appending twice.</text>
+  <path d="M258 222 L258 250.6" fill="none" stroke="#cf3a30" stroke-width="1.5" stroke-linejoin="round" stroke-dasharray="4 3" marker-end="url(#ah-cf3a30)"/>
+  <path d="M420 222 L420 250.6" fill="none" stroke="#cf3a30" stroke-width="1.5" stroke-linejoin="round" stroke-dasharray="4 3" marker-end="url(#ah-cf3a30)"/>
+  <path d="M741 222 L741 250.6" fill="none" stroke="#cf3a30" stroke-width="1.5" stroke-linejoin="round" stroke-dasharray="4 3" marker-end="url(#ah-cf3a30)"/>
+
+  <!-- delivery path -->
+  <rect x="14" y="362" width="972" height="246" rx="12" fill="#fff4d9" stroke="#c98a00" stroke-width="1.2" stroke-dasharray="5 4" fill-opacity="0.28"/>
+  <text x="28" y="380" font-size="10.5" fill="#6b4700" font-weight="700" letter-spacing="0.04em">DELIVERY PATH  ·  asynchronous: starts when schedule_ts arrives</text>
+  <rect x="26" y="396" width="172" height="100" rx="8" fill="#fff4d9" stroke="#c98a00" stroke-width="1.3"/>
+  <text x="112" y="427.5" font-size="13.5" fill="#6b4700" text-anchor="middle" font-weight="600">Timer fires</text>
+  <text x="112" y="445.4" font-size="10.8" fill="#1f2328" text-anchor="middle">the wheel slot expires</text>
+  <text x="112" y="459.9" font-size="10.8" fill="#1f2328" text-anchor="middle">(10 ms tick)</text>
+  <text x="112" y="474.4" font-size="10.8" fill="#1f2328" text-anchor="middle">→ ready queue</text>
+  <circle cx="30" cy="398" r="10.5" fill="#c98a00" stroke="#ffffff" stroke-width="2"/>
+  <text x="30" y="401.9" font-size="11" fill="#ffffff" text-anchor="middle" font-weight="700">7</text>
+  <rect x="220" y="396" width="172" height="100" rx="8" fill="#eaf2fe" stroke="#3b78d8" stroke-width="1.3"/>
+  <text x="306" y="434.8" font-size="13.5" fill="#0b3a7e" text-anchor="middle" font-weight="600">Worker</text>
+  <text x="306" y="452.7" font-size="10.8" fill="#1f2328" text-anchor="middle">drains the ready</text>
+  <text x="306" y="467.2" font-size="10.8" fill="#1f2328" text-anchor="middle">queue in batches</text>
+  <circle cx="224" cy="398" r="10.5" fill="#3b78d8" stroke="#ffffff" stroke-width="2"/>
+  <text x="224" y="401.9" font-size="11" fill="#ffffff" text-anchor="middle" font-weight="700">8</text>
+  <path d="M198 446 L218.6 446" fill="none" stroke="#57606a" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#ah-57606a)"/>
+  <rect x="414" y="396" width="172" height="100" rx="8" fill="#eaf2fe" stroke="#3b78d8" stroke-width="1.3"/>
+  <text x="500" y="427.5" font-size="13.5" fill="#0b3a7e" text-anchor="middle" font-weight="600">Dispatcher</text>
+  <text x="500" y="445.4" font-size="10.8" fill="#1f2328" text-anchor="middle">per consumer group:</text>
+  <text x="500" y="459.9" font-size="10.8" fill="#1f2328" text-anchor="middle">pick a subscriber</text>
+  <text x="500" y="474.4" font-size="10.8" fill="#1f2328" text-anchor="middle">that has credit</text>
+  <circle cx="418" cy="398" r="10.5" fill="#3b78d8" stroke="#ffffff" stroke-width="2"/>
+  <text x="418" y="401.9" font-size="11" fill="#ffffff" text-anchor="middle" font-weight="700">9</text>
+  <path d="M392 446 L412.6 446" fill="none" stroke="#57606a" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#ah-57606a)"/>
+  <rect x="608" y="396" width="172" height="100" rx="8" fill="#e4f6f4" stroke="#1f9d94" stroke-width="1.3"/>
+  <text x="694" y="427.5" font-size="13.5" fill="#0d524d" text-anchor="middle" font-weight="600">Consumer</text>
+  <text x="694" y="445.4" font-size="10.8" fill="#1f2328" text-anchor="middle">receives on its gRPC</text>
+  <text x="694" y="459.9" font-size="10.8" fill="#1f2328" text-anchor="middle">stream and does</text>
+  <text x="694" y="474.4" font-size="10.8" fill="#1f2328" text-anchor="middle">the work</text>
+  <circle cx="612" cy="398" r="10.5" fill="#1f9d94" stroke="#ffffff" stroke-width="2"/>
+  <text x="612" y="401.9" font-size="11" fill="#ffffff" text-anchor="middle" font-weight="700">10</text>
+  <path d="M586 446 L606.6 446" fill="none" stroke="#57606a" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#ah-57606a)"/>
+  <rect x="802" y="396" width="172" height="100" rx="8" fill="#e7f6ed" stroke="#2e8b57" stroke-width="1.3"/>
+  <text x="888" y="427.5" font-size="13.5" fill="#145232" text-anchor="middle" font-weight="600">Ack</text>
+  <text x="888" y="445.4" font-size="10.8" fill="#1f2328" text-anchor="middle">completion recorded;</text>
+  <text x="888" y="459.9" font-size="10.8" fill="#1f2328" text-anchor="middle">the group’s floor</text>
+  <text x="888" y="474.4" font-size="10.8" fill="#1f2328" text-anchor="middle">advances</text>
+  <circle cx="806" cy="398" r="10.5" fill="#2e8b57" stroke="#ffffff" stroke-width="2"/>
+  <text x="806" y="401.9" font-size="11" fill="#ffffff" text-anchor="middle" font-weight="700">11</text>
+  <path d="M780 446 L800.6 446" fill="none" stroke="#57606a" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#ah-57606a)"/>
+  <rect x="300" y="522" width="274" height="72" rx="8" fill="#f4f5f7" stroke="#8b949e" stroke-width="1.3"/>
+  <text x="437" y="547.3" font-size="10.8" fill="#1f2328" text-anchor="middle">no credit? the event is not dropped:</text>
+  <text x="437" y="561.8" font-size="10.8" fill="#1f2328" text-anchor="middle">it is re-read from the log when an</text>
+  <text x="437" y="576.3" font-size="10.8" fill="#1f2328" text-anchor="middle">ack returns credit</text>
+  <rect x="590" y="522" width="384" height="72" rx="8" fill="#fdecea" stroke="#cf3a30" stroke-width="1.3"/>
+  <text x="782" y="547.3" font-size="10.8" fill="#1f2328" text-anchor="middle">no ack within 30 s, or a nack → retry heap (backoff =</text>
+  <text x="782" y="561.8" font-size="10.8" fill="#1f2328" text-anchor="middle">attempt × 1 s) → after 5 retries → dead-letter queue,</text>
+  <text x="782" y="576.3" font-size="10.8" fill="#1f2328" text-anchor="middle">and the event counts as complete for the group</text>
+  <path d="M500 496 L500 520.6" fill="none" stroke="#57606a" stroke-width="1.5" stroke-linejoin="round" stroke-dasharray="4 3" marker-end="url(#ah-57606a)"/>
+  <path d="M694 496 L694 520.6" fill="none" stroke="#cf3a30" stroke-width="1.5" stroke-linejoin="round" stroke-dasharray="4 3" marker-end="url(#ah-cf3a30)"/>
+
+  <!-- where state lives -->
+  <text x="26" y="634" font-size="12.5" fill="#1f2328" font-weight="700">What survives a restart, and where it lives</text>
+  <text x="304" y="634" font-size="11.3" fill="#57606a">(timers are not stored: the wheel is rebuilt from the log)</text>
+  <rect x="26" y="646" width="176" height="46" rx="8" fill="#e7f6ed" stroke="#2e8b57" stroke-width="1.3"/>
+  <text x="114" y="665.7" font-size="12.2" fill="#145232" text-anchor="middle" font-weight="600">Log segments</text>
+  <text x="114" y="681" font-size="10.5" fill="#57606a" text-anchor="middle">the events: source of truth</text>
+  <rect x="219" y="646" width="176" height="46" rx="8" fill="#eaf2fe" stroke="#3b78d8" stroke-width="1.3"/>
+  <text x="307" y="665.7" font-size="12.2" fill="#0b3a7e" text-anchor="middle" font-weight="600">Pebble · dedup</text>
+  <text x="307" y="681" font-size="10.5" fill="#57606a" text-anchor="middle">message_id → state</text>
+  <rect x="412" y="646" width="176" height="46" rx="8" fill="#e7f6ed" stroke="#2e8b57" stroke-width="1.3"/>
+  <text x="500" y="665.7" font-size="12.2" fill="#145232" text-anchor="middle" font-weight="600">Pebble · consumer</text>
+  <text x="500" y="681" font-size="10.5" fill="#57606a" text-anchor="middle">progress per group</text>
+  <rect x="605" y="646" width="176" height="46" rx="8" fill="#fdecea" stroke="#cf3a30" stroke-width="1.3"/>
+  <text x="693" y="665.7" font-size="12.2" fill="#8a1f17" text-anchor="middle" font-weight="600">DLQ segments</text>
+  <text x="693" y="681" font-size="10.5" fill="#57606a" text-anchor="middle">events given up on</text>
+  <rect x="798" y="646" width="176" height="46" rx="8" fill="#f2ecfd" stroke="#7c4ddb" stroke-width="1.3"/>
+  <text x="886" y="665.7" font-size="12.2" fill="#3d1f85" text-anchor="middle" font-weight="600">Raft log (BoltDB)</text>
+  <text x="886" y="681" font-size="10.5" fill="#57606a" text-anchor="middle">who leads what, epochs</text>
+</svg>

@@ -848,6 +848,7 @@ automatically on every docs change via `.github/workflows/docs.yml`.
 | **[ARCHITECTURE.md](ARCHITECTURE.md)** | Deep-dive with 30+ Mermaid diagrams — data flows, sequence diagrams, state machines |
 | **[docs/architecture/README.md](docs/architecture/README.md)** | Architecture split by feature (cluster, compliance, dedup, delivery, schema, slo, storage, and more) — all diagrams embedded inline so they render on GitHub |
 | [docs/DEVELOPER_ARCHITECTURE_GUIDE.md](docs/DEVELOPER_ARCHITECTURE_GUIDE.md) | Comprehensive developer-oriented architecture and navigation guide |
+| **[docs/system-design/README.md](docs/system-design/README.md)** | Learn system design from this codebase: what is used where, why, and at what cost — with nine SVG diagrams, trade-off tables and the lessons from the audit |
 | [proto/events.proto](proto/events.proto) | Complete gRPC API specification (7 services, 60+ message types) |
 | [pkg/client](pkg/client) | Production Go SDK (producer/consumer/replay/metadata routing) |
 | [pkg.go.dev/client page](https://pkg.go.dev/github.com/jatin711-debug/cronos_db_golang/pkg/client) | Generated API reference and package docs |
