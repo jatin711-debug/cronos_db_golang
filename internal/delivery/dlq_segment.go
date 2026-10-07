@@ -223,8 +223,22 @@ func copyDLQSegment(src, dst string) error {
 	return copyErr
 }
 
+// DLQDamage is what a scan of the segment files could not read. The files are
+// left as they are: recovery never rewrites them, so the evidence stays.
+type DLQDamage struct {
+	// CorruptRecords counts records whose checksum did not match. Each is
+	// skipped; the records after it are still read.
+	CorruptRecords int
+	// UnreadableBytes counts the bytes after a record whose length makes no
+	// sense, from which the next record cannot be found. At the end of the
+	// file a crashed process was writing, that is a torn last record.
+	UnreadableBytes int64
+	// Files names the segment files with either kind of damage.
+	Files []string
+}
+
 // Scan reads all valid entries from all segment files in the DLQ directory.
-func (sw *DLQSegmentWriter) Scan() ([][]byte, error) {
+func (sw *DLQSegmentWriter) Scan() ([][]byte, DLQDamage, error) {
 	sw.mu.Lock()
 	// Flush active writer so we can read the file
 	if sw.writer != nil {
@@ -235,11 +249,14 @@ func (sw *DLQSegmentWriter) Scan() ([][]byte, error) {
 	return scanEntries(sw.dataDir)
 }
 
-// scanEntries reads all valid entries from DLQ segment files (lock-free).
-func scanEntries(dataDir string) ([][]byte, error) {
+// scanEntries reads all valid entries from DLQ segment files (lock-free). A
+// file that cannot be read at all is an error, not a file to skip: silently
+// leaving it out would lose every entry in it.
+func scanEntries(dataDir string) ([][]byte, DLQDamage, error) {
+	var damage DLQDamage
 	entries, err := os.ReadDir(dataDir)
 	if err != nil {
-		return nil, fmt.Errorf("read dlq dir: %w", err)
+		return nil, damage, fmt.Errorf("read dlq dir: %w", err)
 	}
 
 	var results [][]byte
@@ -251,7 +268,7 @@ func scanEntries(dataDir string) ([][]byte, error) {
 		path := filepath.Join(dataDir, entry.Name())
 		data, err := os.ReadFile(path)
 		if err != nil {
-			continue // Skip unreadable files
+			return nil, damage, fmt.Errorf("read dlq segment %s: %w", entry.Name(), err)
 		}
 
 		// Skip header
@@ -259,14 +276,17 @@ func scanEntries(dataDir string) ([][]byte, error) {
 			continue
 		}
 		offset := dlqHeaderSize
+		damaged := false
 
 		for offset < len(data) {
-			if offset+4 > len(data) {
-				break
+			length := -1
+			if offset+4 <= len(data) {
+				length = int(binary.BigEndian.Uint32(data[offset : offset+4]))
 			}
-			length := int(binary.BigEndian.Uint32(data[offset : offset+4]))
 			if length < 4 || length > len(data)-offset-4 {
-				break // Truncated or corrupt
+				damage.UnreadableBytes += int64(len(data) - offset)
+				damaged = true
+				break
 			}
 
 			storedCRC := binary.BigEndian.Uint32(data[offset+4 : offset+8])
@@ -278,13 +298,19 @@ func scanEntries(dataDir string) ([][]byte, error) {
 			}
 			if crc32.ChecksumIEEE(entryData) == storedCRC {
 				results = append(results, entryData)
+			} else {
+				damage.CorruptRecords++
+				damaged = true
 			}
 
 			offset += 4 + length
 		}
+		if damaged {
+			damage.Files = append(damage.Files, entry.Name())
+		}
 	}
 
-	return results, nil
+	return results, damage, nil
 }
 
 // GetSegmentCount returns the number of segment files.
@@ -322,7 +348,7 @@ func (sw *DLQSegmentWriter) Compact(keep func(data []byte) bool) error {
 	sw.writer = nil
 
 	// Read all entries (lock-free — we already hold the lock)
-	allData, err := scanEntries(sw.dataDir)
+	allData, _, err := scanEntries(sw.dataDir)
 	if err != nil {
 		return err
 	}

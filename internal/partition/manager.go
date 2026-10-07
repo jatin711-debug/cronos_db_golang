@@ -453,7 +453,13 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 	// silently dropped. Retry is operator-driven (no auto-retry loop) to avoid
 	// re-driving genuinely-poison messages forever.
 	dispatcherConfig := deliveryConfig(pm.config)
-	dlq, err := delivery.NewDeadLetterQueue(dataDir, 0) // 0 → default max entries
+	// A dead-lettered event is stored whole, so its file is encrypted like the
+	// log. (A nil *SegmentCipher must not become a non-nil interface.)
+	var dlqCipher delivery.EntryCipher
+	if cipher != nil {
+		dlqCipher = cipher
+	}
+	dlq, err := delivery.NewEncryptedDeadLetterQueue(dataDir, 0, dlqCipher) // 0 → default max entries
 	if err != nil {
 		return fmt.Errorf("create dead-letter queue: %w", err)
 	}
