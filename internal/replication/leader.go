@@ -495,9 +495,18 @@ func (l *Leader) appendToFollower(f *FollowerInfo, events []*types.Event, checks
 		LeaderId:    l.nodeID,
 		Checksum:    checksum,
 	}
-	if len(events) > 0 { // none: a probe, which only asks where the follower is
+	// Every request names the entry it follows, so the follower can tell
+	// whether its log still agrees with this one there. A request without
+	// events is a probe: it asks about the end of this leader's log.
+	prev, lastSent := int64(-1), int64(-1)
+	if len(events) > 0 {
 		req.ExpectedNextOffset = events[0].Offset
-		req.PrevLogTerm = l.getPrevLogTerm(events[0].Offset - 1)
+		prev, lastSent = events[0].Offset-1, events[len(events)-1].Offset
+	} else if l.wal != nil {
+		prev = l.wal.GetLastOffset()
+	}
+	if prev >= 0 {
+		req.HasPrevLog, req.PrevLogOffset, req.PrevLogTerm = true, prev, l.getPrevLogTerm(prev)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), l.getReplicateTimeout())
@@ -513,10 +522,19 @@ func (l *Leader) appendToFollower(f *FollowerInfo, events []*types.Event, checks
 	}
 	if !resp.GetSuccess() {
 		f.mu.Lock()
-		// A rejection reports where the follower's log ends. Next offset 0 is
-		// only believed together with last offset -1, an explicitly empty log;
-		// on its own it is indistinguishable from a reply that carries nothing.
-		if resp.GetNextOffset() > 0 || resp.GetLastOffset() < 0 {
+		switch {
+		case resp.GetLogMismatch():
+			// The follower's log departs from this one at or before prev: it
+			// kept entries written under another leader. Send again from where
+			// the two still agree; the follower replaces what differs. Until
+			// then nothing of its log counts as a copy of this one.
+			f.NextOffset = l.resendFrom(resp.GetConflictTerm(), resp.GetConflictFirstOffset(), prev)
+			f.HighWatermark = -1
+			f.LastAckTS = time.Now().UnixMilli() // it has answered: catch-up may start
+		case resp.GetNextOffset() > 0 || resp.GetLastOffset() < 0:
+			// A rejection reports where the follower's log ends. Next offset 0 is
+			// only believed together with last offset -1, an explicitly empty log;
+			// on its own it is indistinguishable from a reply that carries nothing.
 			f.NextOffset = resp.GetNextOffset()
 		}
 		f.InSync = false
@@ -525,10 +543,27 @@ func (l *Leader) appendToFollower(f *FollowerInfo, events []*types.Event, checks
 		return fmt.Errorf("follower %s rejected append: %s", f.ID, resp.GetError())
 	}
 
+	// The follower's log is known to match this one only as far as this
+	// request reached: through its last entry, or for a probe through prev if
+	// the follower holds that entry. Beyond that the follower may hold entries
+	// of an older leader, which must neither count as replicated nor be taken
+	// for a reason to skip sending.
+	matched := lastSent
+	if len(events) == 0 {
+		matched = -1
+		if resp.GetLastOffset() >= prev {
+			matched = prev
+		}
+	}
+	next := resp.GetNextOffset()
+	if matched >= 0 {
+		next = min(next, matched+1)
+	}
+
 	f.mu.Lock()
-	f.HighWatermark = resp.GetLastOffset()
-	f.NextOffset = resp.GetNextOffset()
-	f.InSync = true
+	f.HighWatermark = min(resp.GetLastOffset(), matched)
+	f.NextOffset = next
+	f.InSync = matched >= 0
 	f.Connected = true
 	f.LastAckTS = time.Now().UnixMilli()
 	f.LastError = nil
@@ -549,18 +584,32 @@ func (l *Leader) appendToFollower(f *FollowerInfo, events []*types.Event, checks
 	return nil
 }
 
-// getPrevLogTerm returns the term of the log entry at the given offset, read
-// from the WAL when possible; otherwise the leader's current epoch.
+// getPrevLogTerm returns the term of the log entry at the given offset, or 0
+// when it cannot be read, which tells the follower not to compare.
 func (l *Leader) getPrevLogTerm(offset int64) int64 {
-	if offset < 0 {
+	if offset < 0 || l.wal == nil {
 		return 0
 	}
+	if term, err := l.wal.GetTermForOffset(offset); err == nil && term > 0 {
+		return term
+	}
+	return 0
+}
+
+// resendFrom is where to resume a follower whose entry at prev was written in
+// conflictTerm, a different term than this leader's entry there. If this log
+// has entries of that term the follower may share them, and sending resumes
+// after the last one; otherwise it resumes at the follower's first entry of
+// that term. Either way it resumes no later than prev, so every round goes
+// further back until the logs agree.
+func (l *Leader) resendFrom(conflictTerm, conflictFirstOffset, prev int64) int64 {
+	from := conflictFirstOffset
 	if l.wal != nil {
-		if term, err := l.wal.GetTermForOffset(offset); err == nil && term > 0 {
-			return term
+		if last := l.wal.LastOffsetOfTerm(conflictTerm); last >= 0 {
+			from = last + 1
 		}
 	}
-	return atomic.LoadInt64(&l.epoch)
+	return max(min(from, prev), 0)
 }
 
 // GetHighWatermark returns the minimum high watermark across in-sync followers.

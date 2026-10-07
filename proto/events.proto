@@ -255,6 +255,15 @@ message ReplicationAppendRequest {
 
   // Node ID of the sending leader. A follower accepts one leader per term.
   string leader_id = 7;
+
+  // The log entry the new entries follow, as the leader holds it: its offset
+  // and, in prev_log_term, its term (0 when the leader cannot say). A follower
+  // that holds a different entry there has a log that departs from the
+  // leader's at or before that point, and answers with log_mismatch instead
+  // of appending after it. A request without events and with these set only
+  // asks whether the follower's log matches there.
+  bool has_prev_log = 8;
+  int64 prev_log_offset = 9;
 }
 
 message ReplicationAppendResponse {
@@ -269,6 +278,14 @@ message ReplicationAppendResponse {
 
   // Term of the follower/acknowledger
   int64 term = 5;
+
+  // Set when the follower holds an entry at prev_log_offset written in a
+  // different term than the leader's. conflict_term is the term of the
+  // follower's entry and conflict_first_offset the first offset it holds in
+  // that term; the leader resends from the point where the logs still agree.
+  bool log_mismatch = 6;
+  int64 conflict_term = 7;
+  int64 conflict_first_offset = 8;
 }
 
 // ReplicationPositionRequest asks a replica where its log ends.
