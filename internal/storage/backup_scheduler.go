@@ -72,12 +72,10 @@ func (bs *BackupScheduler) Stop() {
 }
 
 func (bs *BackupScheduler) loop() {
-	ticker := time.NewTicker(bs.interval)
-	defer ticker.Stop()
-
 	for {
+		timer := time.NewTimer(time.Until(nextBackupTime(time.Now(), bs.interval)))
 		select {
-		case <-ticker.C:
+		case <-timer.C:
 			if err := bs.runBackup(); err != nil {
 				slog.Error("Scheduled backup failed", "error", err)
 				continue // Never expire the last good backup after a failed attempt.
@@ -86,9 +84,21 @@ func (bs *BackupScheduler) loop() {
 				slog.Error("Backup purge failed", "error", err)
 			}
 		case <-bs.quit:
+			timer.Stop()
 			return
 		}
 	}
+}
+
+// nextBackupTime returns the next multiple of interval on the wall clock after
+// now. Backups therefore run at the same times on every node of a cluster,
+// whenever each node was started, which puts the backups of different nodes
+// as close together as their clocks are.
+func nextBackupTime(now time.Time, interval time.Duration) time.Time {
+	if interval <= 0 {
+		return now
+	}
+	return now.Truncate(interval).Add(interval)
 }
 
 func (bs *BackupScheduler) runBackup() error {
