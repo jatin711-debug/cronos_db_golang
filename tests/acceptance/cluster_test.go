@@ -113,11 +113,21 @@ type node struct {
 	cmd    *exec.Cmd
 	exited chan struct{}
 	frozen bool
+
+	// container is the name of the container the node runs in, when the
+	// cluster runs in containers and not as processes of this machine. It
+	// exists once created, and up says whether it is running.
+	container string
+	created   bool
+	up        bool
 }
 
 func (n *node) running() bool {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	if n.container != "" {
+		return n.up && !n.frozen
+	}
 	return n.cmd != nil && !n.frozen
 }
 
@@ -134,6 +144,10 @@ type cluster struct {
 	// caFile, certFile and keyFile are what the nodes secure their traffic
 	// with each other with: replication, membership and Raft.
 	caFile, certFile, keyFile string
+
+	// For a cluster in containers: the image the nodes run, the network they
+	// share, and the directory with their certificates, which each mounts.
+	image, network, certDir string
 }
 
 // newCluster prepares three nodes without starting them. Whatever is still
@@ -146,7 +160,7 @@ func newCluster(t *testing.T, extraArgs ...string) *cluster {
 	if err := os.MkdirAll(filepath.Join(c.dir, "logs"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	c.caFile, c.certFile, c.keyFile = nodeCertificates(t, c.dir)
+	c.caFile, c.certFile, c.keyFile = nodeCertificates(t, c.dir, "127.0.0.1")
 	for i := 0; i < 3; i++ {
 		addr := func(k int) string { return fmt.Sprintf("127.0.0.1:%d", ports[i*5+k]) }
 		id := fmt.Sprintf("node%d", i+1)
@@ -195,6 +209,14 @@ func freePorts(t *testing.T, count int) []int {
 // creates the cluster, which it does when it has no state and neither of the
 // others belongs to one.
 func (c *cluster) args(n *node) []string {
+	dataDir, grpcAddr, httpAddr := n.dataDir, n.grpcAddr, n.httpAddr
+	caFile, certFile, keyFile := c.caFile, c.certFile, c.keyFile
+	if n.container != "" {
+		// Inside its container a node listens on the image's ports; the
+		// addresses above are where this machine reaches them.
+		dataDir, grpcAddr, httpAddr = "/data", "0.0.0.0:9000", "0.0.0.0:8080"
+		caFile, certFile, keyFile = "/certs/ca.crt", "/certs/tls.crt", "/certs/tls.key"
+	}
 	args := []string{
 		"--dev",
 		"--node-id=" + n.id,
@@ -212,17 +234,17 @@ func (c *cluster) args(n *node) []string {
 		"--bloom-capacity=200000",
 		"--follower-reads=true",
 		"--ack-timeout=5s",
-		"--data-dir=" + n.dataDir,
-		"--grpc-addr=" + n.grpcAddr,
-		"--http-addr=" + n.httpAddr,
+		"--data-dir=" + dataDir,
+		"--grpc-addr=" + grpcAddr,
+		"--http-addr=" + httpAddr,
 		"--cluster-gossip-addr=" + n.gossipAddr,
 		"--cluster-grpc-addr=" + n.clusterAddr,
 		"--cluster-raft-addr=" + n.raftAddr,
 		// Between themselves the nodes speak mutual TLS, as in production.
 		"--replication-tls-enabled",
-		"--replication-tls-ca-file=" + c.caFile,
-		"--replication-tls-cert-file=" + c.certFile,
-		"--replication-tls-key-file=" + c.keyFile,
+		"--replication-tls-ca-file=" + caFile,
+		"--replication-tls-cert-file=" + certFile,
+		"--replication-tls-key-file=" + keyFile,
 	}
 	seeds := make([]string, len(c.nodes))
 	for i, other := range c.nodes {
@@ -249,6 +271,10 @@ func (c *cluster) note(n *node, format string, a ...any) {
 // start runs the node's process. Its output is appended to the node's log.
 func (c *cluster) start(n *node) {
 	c.t.Helper()
+	if n.container != "" {
+		c.startContainer(n)
+		return
+	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	if n.cmd != nil {
@@ -279,6 +305,10 @@ func (c *cluster) start(n *node) {
 // kill ends the node's process at once, as a crash or a lost machine does:
 // nothing is flushed and nobody is told.
 func (c *cluster) kill(n *node) {
+	if n.container != "" {
+		c.killContainer(n)
+		return
+	}
 	n.mu.Lock()
 	cmd, exited := n.cmd, n.exited
 	n.cmd, n.exited, n.frozen = nil, nil, false
@@ -302,6 +332,11 @@ func (c *cluster) wipe(n *node) {
 	c.t.Helper()
 	if n.running() {
 		c.t.Fatalf("%s is running", n.id)
+	}
+	if n.container != "" {
+		c.removeContainer(n)
+		c.note(n, "data removed")
+		return
 	}
 	if err := os.RemoveAll(n.dataDir); err != nil {
 		c.t.Fatalf("remove the data of %s: %v", n.id, err)
@@ -413,6 +448,15 @@ func (c *cluster) nodeByID(id string) *node {
 func (c *cluster) dial() *client.Client {
 	c.t.Helper()
 	cfg := client.DefaultConfig(c.addresses()...)
+	if c.image != "" {
+		// The nodes name each other by addresses that mean something inside
+		// their network only. The application is told where each is reached
+		// from outside, as it would be behind a load balancer per node.
+		cfg.NodeIDToAddress = make(map[string]string, len(c.nodes))
+		for _, n := range c.nodes {
+			cfg.NodeIDToAddress[n.id] = n.grpcAddr
+		}
+	}
 	// Short enough that a publish has time to go on to another node when the
 	// first one it tries does not answer.
 	cfg.RequestTimeout = 3 * time.Second
