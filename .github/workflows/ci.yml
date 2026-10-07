@@ -31,13 +31,41 @@ jobs:
           cargo build --release --locked
           cargo test --locked
       - name: Formatting
-        run: test -z "$(gofmt -l internal pkg cmd)"
+        run: test -z "$(gofmt -l internal pkg cmd tests/acceptance)"
       - name: Vet and build
         run: |
           go vet ./internal/... ./pkg/... ./cmd/...
+          go vet -tags acceptance ./tests/acceptance/
           go build ./cmd/...
       - name: Race and regression suite
         run: go test -race -count=1 ./internal/... ./pkg/... ./cmd/... -timeout 180s
+
+  # Three server processes form a cluster and are killed, frozen and restarted
+  # while producers and a consumer group work. Every acknowledged publish must
+  # be delivered, none before its time, and the replicas must end up with the
+  # same logs.
+  fault-campaign:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CGO_ENABLED: "1"
+      LD_LIBRARY_PATH: ${{ github.workspace }}/internal/dedup/rust/target/release
+      CRONOS_ACCEPTANCE_ARTIFACTS: ${{ github.workspace }}/build/acceptance-logs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: cargo build --release --locked --manifest-path internal/dedup/rust/Cargo.toml
+      - name: Fault campaign on a three-node cluster
+        run: go test -tags acceptance -count=1 -timeout 25m -v ./tests/acceptance/
+      - name: Keep the node logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fault-campaign-node-logs
+          path: build/acceptance-logs
+          retention-days: 7
 
   dashboard-and-chart:
     runs-on: ubuntu-latest
