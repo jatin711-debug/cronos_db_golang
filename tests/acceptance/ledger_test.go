@@ -91,6 +91,14 @@ func (l *ledger) noteDelivered(id string, scheduleTS, receivedAt int64, partitio
 	event.deliveries++
 }
 
+// forget removes an event from the record: the test has established that the
+// cluster does not owe it.
+func (l *ledger) forget(id string) {
+	l.mu.Lock()
+	delete(l.sent, id)
+	l.mu.Unlock()
+}
+
 // undelivered lists the acknowledged events the consumer group has not
 // received.
 func (l *ledger) undelivered() []string {

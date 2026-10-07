@@ -47,6 +47,12 @@ type Config struct {
 	DeliveryPollMS int
 	// DedupTTLHours is how long message IDs are retained in the dedup store.
 	DedupTTLHours int
+	// BackupInterval is how often the node backs up its partitions; zero
+	// turns scheduled backups off. BackupRetention is how long a backup is
+	// kept, and BackupDir where backups go (empty: backups under DataDir).
+	BackupInterval  time.Duration
+	BackupRetention time.Duration
+	BackupDir       string
 	// CompactionInterval is how often a partition looks for log segments that
 	// can be removed. Zero means the default of ten minutes.
 	CompactionInterval time.Duration

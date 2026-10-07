@@ -244,13 +244,21 @@ func main() {
 
 	// Start the backup scheduler: every partition's log, consumer state, dedup
 	// store, dead-letter queue and epoch. Restore with `cronos-admin restore`.
+	backupDir := cfg.BackupDir
+	if backupDir == "" {
+		backupDir = cfg.DataDir + "/backups"
+	}
 	backupScheduler := storage.NewCheckpointBackupScheduler(
-		cfg.DataDir+"/backups",
-		1*time.Hour,
-		7*24*time.Hour,
+		backupDir,
+		cfg.BackupInterval,
+		cfg.BackupRetention,
 		pm.Backup,
 	)
-	backupScheduler.Start()
+	if cfg.BackupInterval > 0 {
+		backupScheduler.Start()
+	} else {
+		slog.Warn("Scheduled backups are off (--backup-interval=0)")
+	}
 	defer backupScheduler.Stop()
 
 	// Start compliance retention enforcer

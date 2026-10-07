@@ -127,8 +127,10 @@ type cluster struct {
 	binary string
 	dir    string
 	nodes  []*node
-	// extraArgs are appended to every node's command line.
+	// extraArgs are appended to every node's command line, and what nodeArgs
+	// returns to the command line of the node it is given.
 	extraArgs []string
+	nodeArgs  func(n *node) []string
 	// caFile, certFile and keyFile are what the nodes secure their traffic
 	// with each other with: replication, membership and Raft.
 	caFile, certFile, keyFile string
@@ -229,6 +231,9 @@ func (c *cluster) args(n *node) []string {
 	args = append(args, "--cluster-seeds="+strings.Join(seeds, ","))
 	if n.index == 0 {
 		args = append(args, "--cluster-bootstrap")
+	}
+	if c.nodeArgs != nil {
+		args = append(args, c.nodeArgs(n)...)
 	}
 	return append(args, c.extraArgs...)
 }
@@ -497,6 +502,24 @@ func (c *cluster) logged(n *node, text string) int {
 		c.t.Fatalf("read the log of %s: %v", n.id, err)
 	}
 	return strings.Count(string(data), text)
+}
+
+// logBounds returns where the node's log of a partition starts and the offset
+// of its last entry. A log that holds nothing ends just before it starts: the
+// node has removed everything below its start, or never had anything.
+func (c *cluster) logBounds(n *node, partitionID int32) (first, last int64, err error) {
+	conn, err := grpc.NewClient(n.grpcAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return 0, 0, err
+	}
+	defer conn.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	status, err := types.NewPartitionServiceClient(conn).GetWALStatus(ctx, &types.GetWALStatusRequest{PartitionId: partitionID})
+	if err != nil {
+		return 0, 0, err
+	}
+	return status.GetFirstOffset(), status.GetLastOffset(), nil
 }
 
 // keepLogs copies the node logs to CRONOS_ACCEPTANCE_ARTIFACTS and, when the

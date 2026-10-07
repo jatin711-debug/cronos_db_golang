@@ -35,6 +35,8 @@ func LoadConfig() (*types.Config, error) {
 	config.FsyncMode = DefaultFsyncMode
 	config.FlushIntervalMS = DefaultFlushIntervalMS
 	config.CompactionInterval = DefaultCompactionInterval
+	config.BackupInterval = DefaultBackupInterval
+	config.BackupRetention = DefaultBackupRetention
 	config.RetentionMaxAgeHours = DefaultRetentionMaxAgeHours
 	config.RetentionMaxSizeGB = DefaultRetentionMaxSizeGB
 	config.TickMS = DefaultTickMS
@@ -132,6 +134,9 @@ func LoadConfig() (*types.Config, error) {
 	flag.StringVar(&config.FsyncMode, "fsync-mode", DefaultFsyncMode, "fsync mode: every_event, batch, periodic")
 	var flushInterval int
 	flag.IntVar(&flushInterval, "flush-interval", DefaultFlushIntervalMS, "Flush interval in milliseconds")
+	flag.DurationVar(&config.BackupInterval, "backup-interval", DefaultBackupInterval, "How often the node backs up its partitions, at wall-clock multiples of the interval so that the nodes of a cluster back up at the same moment (0 = no scheduled backups)")
+	flag.DurationVar(&config.BackupRetention, "backup-retention", DefaultBackupRetention, "How long a backup is kept (0 = for good)")
+	flag.StringVar(&config.BackupDir, "backup-dir", "", "Where backups are written (default: backups under --data-dir). A backup on the volume of the data it copies does not survive the loss of that volume")
 	flag.DurationVar(&config.CompactionInterval, "compaction-interval", DefaultCompactionInterval, "How often a partition looks for log segments whose events are all finished and removes them")
 	flag.IntVar(&config.RetentionMaxAgeHours, "retention-max-age-hours", DefaultRetentionMaxAgeHours, "Delete WAL segments older than this many hours (0 = disable)")
 	flag.Int64Var(&config.RetentionMaxSizeGB, "retention-max-size-gb", DefaultRetentionMaxSizeGB, "Keep WAL segments within this many GB by deleting oldest (0 = disable)")
@@ -340,6 +345,9 @@ func ValidateConfig(c *types.Config) error {
 	}
 	if c.CompactionInterval < 0 {
 		return fmt.Errorf("compaction-interval must be >= 0")
+	}
+	if c.BackupInterval < 0 || c.BackupRetention < 0 {
+		return fmt.Errorf("backup-interval and backup-retention must be >= 0")
 	}
 	if c.UseMemberlist {
 		// The flag was accepted and did nothing: the server never used the
