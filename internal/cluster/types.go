@@ -238,6 +238,9 @@ type Config struct {
 	// other nodes with. Both or neither.
 	ServerTLS *tls.Config
 	ClientTLS *tls.Config
+	// Bootstrap names this node as the one that creates the cluster, which it
+	// does only when it has no state and no other seed belongs to a cluster.
+	Bootstrap bool
 	// Rack is this node's rack topology label.
 	Rack string
 	// Zone is this node's availability-zone topology label.
@@ -293,6 +296,8 @@ type ClusterConfig struct {
 	// TLS; see Config.
 	ServerTLS *tls.Config `json:"-"`
 	ClientTLS *tls.Config `json:"-"`
+	// Bootstrap names this node as the one that creates the cluster; see Config.
+	Bootstrap bool `json:"bootstrap"`
 	// Rack is this node's rack topology label.
 	Rack string `json:"rack,omitempty"`
 	// Zone is this node's availability-zone topology label.

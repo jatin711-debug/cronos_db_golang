@@ -298,6 +298,7 @@ func main() {
 			RaftAddr:          cfg.ClusterRaftAddr,
 			RaftDir:           raftDir,
 			SeedNodes:         cfg.ClusterSeeds,
+			Bootstrap:         cfg.ClusterBootstrap,
 			VirtualNodes:      cfg.VirtualNodes,
 			HeartbeatInterval: cfg.HeartbeatInterval,
 			FailureTimeout:    cfg.FailureTimeout,

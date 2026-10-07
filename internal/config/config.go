@@ -184,6 +184,7 @@ func LoadConfig() (*types.Config, error) {
 	flag.DurationVar(&config.HeartbeatInterval, "heartbeat-interval", DefaultHeartbeatInterval, "Cluster heartbeat interval")
 	flag.DurationVar(&config.FailureTimeout, "failure-timeout", DefaultFailureTimeout, "Node failure detection timeout")
 	flag.DurationVar(&config.SuspectTimeout, "suspect-timeout", DefaultSuspectTimeout, "Node suspect timeout")
+	flag.BoolVar(&config.ClusterBootstrap, "cluster-bootstrap", false, "This node creates the cluster, if it has no state and no other node in --cluster-seeds belongs to one. Give it to exactly one node")
 	flag.IntVar(&config.ClusterExpectedNodes, "cluster-expected-nodes", 0, "Nodes a new cluster starts with; first partition leaders are assigned as soon as that many are up (0 = unknown, use --cluster-formation-wait)")
 	flag.DurationVar(&config.ClusterFormationWait, "cluster-formation-wait", DefaultClusterFormationWait, "How long membership must be unchanged before a new cluster assigns first partition leaders when --cluster-expected-nodes is unset or not reached (0 = assign at once)")
 	flag.BoolVar(&config.UseMemberlist, "use-memberlist", DefaultUseMemberlist, "Not supported; the server refuses to start with it")
@@ -405,6 +406,11 @@ func ValidateConfig(c *types.Config) error {
 		}
 		if !c.ReplicationTLSEnabled {
 			return fmt.Errorf("production mode requires replication TLS to be enabled (use --dev to bypass)")
+		}
+		if c.ClusterEnabled && len(c.ClusterSeeds) == 0 {
+			// A node without seeds creates a cluster whenever it has no
+			// state, which is right once and wrong after its disk was lost.
+			return fmt.Errorf("production mode requires cluster-seeds on every node; give exactly one node cluster-bootstrap (use --dev to bypass)")
 		}
 	}
 

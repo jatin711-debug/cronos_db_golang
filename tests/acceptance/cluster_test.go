@@ -189,8 +189,9 @@ func freePorts(t *testing.T, count int) []int {
 }
 
 // args is the command line of a node. It follows the layout of the production
-// chart: the first node names no seeds and creates the cluster when it has no
-// state, the others name every node.
+// chart: every node names every node as a seed, and the first is the one that
+// creates the cluster, which it does when it has no state and neither of the
+// others belongs to one.
 func (c *cluster) args(n *node) []string {
 	args := []string{
 		"--dev",
@@ -221,12 +222,13 @@ func (c *cluster) args(n *node) []string {
 		"--replication-tls-cert-file=" + c.certFile,
 		"--replication-tls-key-file=" + c.keyFile,
 	}
-	if n.index > 0 {
-		seeds := make([]string, len(c.nodes))
-		for i, other := range c.nodes {
-			seeds[i] = other.gossipAddr
-		}
-		args = append(args, "--cluster-seeds="+strings.Join(seeds, ","))
+	seeds := make([]string, len(c.nodes))
+	for i, other := range c.nodes {
+		seeds[i] = other.gossipAddr
+	}
+	args = append(args, "--cluster-seeds="+strings.Join(seeds, ","))
+	if n.index == 0 {
+		args = append(args, "--cluster-bootstrap")
 	}
 	return append(args, c.extraArgs...)
 }
@@ -485,6 +487,16 @@ func (c *cluster) readLog(n *node, partitionID int32, topic string) ([]*types.Ev
 		}
 		next = log[len(log)-1].GetOffset() + 1
 	}
+}
+
+// logged returns how many times text appears in what the node has written
+// to its log since it was first started.
+func (c *cluster) logged(n *node, text string) int {
+	data, err := os.ReadFile(n.logPath)
+	if err != nil {
+		c.t.Fatalf("read the log of %s: %v", n.id, err)
+	}
+	return strings.Count(string(data), text)
 }
 
 // keepLogs copies the node logs to CRONOS_ACCEPTANCE_ARTIFACTS and, when the

@@ -50,3 +50,58 @@ for ordinal in 0 1 2; do
     test "$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/api/admin/topology)" = 401
   '
 done
+
+statefulset=statefulset/cronos-cronos-db
+logs_of() { kubectl -n "$namespace" logs "$1" --tail=-1; }
+
+# A rolling restart: every pod is replaced in turn, and each comes back into
+# the cluster it has on its volume.
+kubectl -n "$namespace" rollout restart "$statefulset"
+kubectl -n "$namespace" rollout status "$statefulset" --timeout=10m
+kubectl -n "$namespace" wait --for=condition=Ready pod -l app.kubernetes.io/instance=cronos --timeout=5m
+first_log=$(logs_of cronos-cronos-db-0)
+grep -q "Continuing in the cluster this node has on disk" <<<"$first_log"
+if grep -q "Bootstrapping new Raft cluster" <<<"$first_log"; then
+  echo "pod 0 created a cluster again after a restart" >&2
+  exit 1
+fi
+
+# Pod 0 is the one that created the cluster. With its volume emptied it must
+# join the cluster the other pods still hold, and not create a second one.
+kubectl -n "$namespace" scale "$statefulset" --replicas=0
+kubectl -n "$namespace" wait --for=delete pod -l app.kubernetes.io/instance=cronos --timeout=5m
+kubectl -n "$namespace" apply -f - <<'EOF'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: empty-volume-0
+spec:
+  restartPolicy: Never
+  securityContext:
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+  containers:
+    - name: empty
+      image: cronos-db:ci
+      imagePullPolicy: Never
+      command: ["/bin/sh", "-ec", "find /data -mindepth 1 -delete; test -z \"$(ls -A /data)\""]
+      volumeMounts:
+        - name: data
+          mountPath: /data
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: data-cronos-cronos-db-0
+EOF
+kubectl -n "$namespace" wait --for=jsonpath='{.status.phase}'=Succeeded pod/empty-volume-0 --timeout=3m
+kubectl -n "$namespace" delete pod empty-volume-0
+kubectl -n "$namespace" scale "$statefulset" --replicas=3
+kubectl -n "$namespace" rollout status "$statefulset" --timeout=10m
+kubectl -n "$namespace" wait --for=condition=Ready pod -l app.kubernetes.io/instance=cronos --timeout=5m
+first_log=$(logs_of cronos-cronos-db-0)
+grep -q "A cluster exists already" <<<"$first_log"
+if grep -q "Bootstrapping new Raft cluster" <<<"$first_log"; then
+  echo "pod 0 created a second cluster after losing its volume" >&2
+  exit 1
+fi

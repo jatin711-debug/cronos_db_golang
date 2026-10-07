@@ -62,10 +62,12 @@ spec:
           command: ["/bin/sh", "-ec"]
           args:
             - |
-              # Only ordinal zero bootstraps a fresh Raft cluster. Existing
-              # Raft state is reused on restart by the application.
+              # Ordinal zero is the node that creates the cluster. It does so
+              # only when it has no Raft state and no other pod belongs to a
+              # cluster, so it joins the existing one when it comes back with
+              # an empty volume. Every pod names every pod as a seed.
               if [ "${POD_NAME##*-}" = "0" ]; then
-                exec /app/cronos-api --cluster-seeds=
+                exec /app/cronos-api --cluster-bootstrap
               fi
               exec /app/cronos-api
           env:

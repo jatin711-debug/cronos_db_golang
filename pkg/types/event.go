@@ -120,6 +120,10 @@ type Config struct {
 	ClusterGRPCAddr string
 	// ClusterSeeds is the list of seed nodes used to join an existing cluster.
 	ClusterSeeds []string
+	// ClusterBootstrap names this node as the one that creates the cluster.
+	// It does so only when it has no state and every other seed has said it
+	// belongs to no cluster.
+	ClusterBootstrap bool
 	// ClusterExpectedNodes is how many nodes a new cluster starts with. Its
 	// partitions get their first leaders as soon as that many are up. Zero
 	// means unknown: wait for ClusterFormationWait instead.
