@@ -62,7 +62,8 @@ Ryzen 7 6800H host. See the [measurement settings and baseline comparison](docs/
 ### Distributed
 - **Multi-Node Clustering** — 3+ nodes with automatic partition distribution
 - **Raft Consensus** — Metadata consistency (HashiCorp Raft)
-- **Pluggable Gossip** — Choose custom TCP heartbeats or HashiCorp Memberlist (SWIM protocol) via config
+- **Membership** — TCP heartbeats between all nodes; a node counted as failed keeps being tried and is taken back when it answers
+- **Mutual TLS Between Nodes** — Replication, membership and Raft accept only callers that hold a certificate of the cluster's CA
 - **Consistent Hashing** — SHA-256 placement ring with virtual nodes (`-virtual-nodes`, default 2048); partition ID routing uses FNV-1a
 - **Leader-follower replication over dedicated internal gRPC** — `InternalGRPCServer` on a separate listener (default `:7947`) with optional cluster-only mTLS. Replication traffic is isolated from the public API on `:9000`.
 - **Bulk snapshot install** — `ReplicationService.Snapshot` streams segment + sparse-index files with per-file IEEE CRC32; follower stages under `<dataDir>/snapshot-staging/{segments,index}`, verifies, and atomically swaps into place via `WAL.ReloadSegments()`. Used for new-node bootstrap and follower-wipe recovery.
@@ -104,7 +105,7 @@ graph TB
 
     subgraph "Cluster"
         RAFT["Raft<br/>Metadata"]
-        GOSSIP["Gossip<br/>TCP Heartbeats or Memberlist/SWIM"]
+        GOSSIP["Membership<br/>TCP Heartbeats"]
         REPL["Replication<br/>gRPC Internal :7947"]
     end
 
@@ -311,7 +312,7 @@ Do **not** use `--dev` for production. A production-ready configuration requires
 | gRPC TLS | `--tls-enabled`, `--tls-cert-file`, `--tls-key-file` | Enabled |
 | Authentication | `--auth-enabled`, `--auth-jwt-secret` or `--auth-jwt-public-key` | Enabled |
 | Encryption at rest | `--encryption-enabled`, `--encryption-key-file` | Enabled |
-| Replication mTLS | `--replication-tls-enabled`, `--replication-tls-*` | Enabled |
+| Mutual TLS between nodes (replication, membership, Raft) | `--replication-tls-enabled`, `--replication-tls-ca-file`, `--replication-tls-cert-file`, `--replication-tls-key-file` | Enabled, all three files |
 | Fsync mode | `--fsync-mode` | `batch` or `every_event` |
 
 Example production startup:
@@ -332,6 +333,7 @@ Example production startup:
   --encryption-enabled \
   --encryption-key-file=/etc/cronos/encryption/master.key \
   --replication-tls-enabled \
+  --replication-tls-ca-file=/etc/cronos/replication-tls/ca.crt \
   --replication-tls-cert-file=/etc/cronos/replication-tls/tls.crt \
   --replication-tls-key-file=/etc/cronos/replication-tls/tls.key
 ```
@@ -577,7 +579,7 @@ flag-only).
 | `-heartbeat-interval` | `1s` | Cluster heartbeat interval |
 | `-failure-timeout` | `5s` | Node failure detection timeout |
 | `-suspect-timeout` | `3s` | Node suspect timeout |
-| `-use-memberlist` | `false` | Use HashiCorp Memberlist (SWIM) instead of custom TCP gossip |
+| `-use-memberlist` | `false` | Not supported; the server refuses to start with it |
 | `-clock-skew-threshold-ms` | `5000` | Max allowed clock skew from leader in ms (0 = disabled) |
 | `-node-rack` | *(empty)* | Rack / AZ label for topology-aware placement |
 | `-node-zone` | *(empty)* | Zone label for topology-aware placement |
@@ -587,10 +589,10 @@ flag-only).
 | `-tls-cert-file` | *(empty)* | Path to TLS certificate for public gRPC |
 | `-tls-key-file` | *(empty)* | Path to TLS private key for public gRPC |
 | `-tls-client-auth` | `false` | Require client certificates on public gRPC (mTLS) |
-| `-replication-tls-enabled` | `false` | Enable CA-pinned mTLS for internal replication traffic |
-| `-replication-tls-ca-file` | *(empty)* | Path to internal replication CA certificate |
-| `-replication-tls-cert-file` | *(empty)* | Path to internal replication certificate |
-| `-replication-tls-key-file` | *(empty)* | Path to internal replication private key |
+| `-replication-tls-enabled` | `false` | Mutual TLS for all traffic between nodes: replication, membership and Raft. Needs the three files below |
+| `-replication-tls-ca-file` | *(empty)* | CA that signed the certificates of the cluster's nodes |
+| `-replication-tls-cert-file` | *(empty)* | This node's certificate, valid for the address other nodes reach it by, for server and client use |
+| `-replication-tls-key-file` | *(empty)* | Private key of that certificate |
 | `-auth-enabled` | `false` | Enable JWT authentication |
 | `-auth-jwt-secret` | *(empty)* | HMAC secret for JWT verification |
 | `-auth-jwt-public-key` | *(empty)* | Path to Ed25519/RSA public key for JWT verification |
@@ -801,7 +803,7 @@ See [proto/events.proto](proto/events.proto) for the complete specification.
 - [x] Non-blocking retry heap (min-heap by retry deadline)
 - [x] Admission control (readyQueue / timingWheel / in-flight limits)
 - [x] Per-subscription circuit breaker (Closed→Open→HalfOpen)
-- [x] Pluggable memberlist gossip (HashiCorp Memberlist / SWIM)
+- [ ] Memberlist (SWIM) membership: an adapter is in the code, the server does not use it
 - [x] Append-only DLQ segments (binary format, CRC32, rotation)
 - [x] Clock skew detection (cross-node heartbeat comparison)
 - [x] TLS/mTLS support (enable in production)

@@ -137,7 +137,7 @@ flowchart TB
     subgraph Control_Plane[Control plane]
       ClusterM[Cluster manager]
       Router[Hash ring router SHA-256 vnodes]
-      Membership[Gossip or Memberlist]
+      Membership[Gossip membership]
       Raft[Raft metadata]
       Replication[Leader follower ReplicationService]
       CrossRegion[CrossRegionService]

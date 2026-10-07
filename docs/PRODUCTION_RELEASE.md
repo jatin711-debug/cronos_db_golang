@@ -55,15 +55,28 @@ Use certificates whose SANs cover the advertised pod DNS addresses, including
 client and server authentication. Public client certificates depend on the
 configured public TLS policy.
 
+The `cronos-db-replication-tls` secret secures all traffic between nodes:
+replication, membership and Raft. Each of the three ports reads nothing from a
+caller that has not presented a certificate signed by the CA in `ca.crt`, and a
+node checks that the certificate of the node it calls is valid for the address
+it called. Certificates are read when a node starts; `ca.crt` may hold more
+than one CA certificate.
+
+A cluster that runs 0.6.0-rc.2 or earlier with replication TLS cannot be
+upgraded one pod at a time: those versions speak plain TCP on the membership
+and Raft ports, and a node of this version does not talk to them. Stop all its
+nodes and start them on the new version together. The data stays.
+
 The chart starts pods in parallel. Ordinal zero bootstraps a new Raft cluster;
 other pods use the configured seed list. Existing Raft state remains on the data
 volume under `raft/`. Do not replace or wipe these volumes as a bootstrap recovery
 procedure. Membership and ownership recovery after node replacement remain audit
 release blockers.
 
-HTTP administration and the Raft/custom membership transports still need network
-isolation. Public gRPC TLS does not encrypt those listeners. Keep them on a trusted
-private network; terminate HTTP TLS before exposing the dashboard/admin API.
+The HTTP port (health, metrics, dashboard and the admin API) is plain HTTP. The
+admin API checks the bearer token, but the token and the answers cross the
+network unencrypted. Keep the port on a trusted private network and terminate
+TLS in front of it before exposing the dashboard or the admin API.
 
 The image builds dashboard assets from the npm lockfile and the Rust library from
 the Cargo lockfile. Its Go builder matches the module's minimum version. Pin the
@@ -95,7 +108,8 @@ library, and a sequence of faults (a leader killed, a follower killed, a leader
 frozen and released, each node restarted, a replica replaced with an empty one
 and killed while it is refilled, the whole cluster killed). It fails if an
 acknowledged event was not delivered, if one arrived before its time, or if
-the replicas of a partition do not end with the same log. Run it locally with
+the replicas of a partition do not end with the same log. Its nodes speak
+mutual TLS with each other, as production nodes do. Run it locally with
 `go test -tags acceptance -count=1 -timeout 20m ./tests/acceptance/`; it needs
 about 500 MB of memory. It stops and kills processes. It does not cut network
 links, and it publishes about 60 events a second, so it says nothing about

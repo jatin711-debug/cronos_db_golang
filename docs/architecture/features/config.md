@@ -110,7 +110,7 @@ Defaults from `internal/config/defaults.go` unless noted. Flags marked **env** h
 | `--heartbeat-interval` | `1s` | Membership heartbeat period |
 | `--failure-timeout` | `5s` | Heartbeat silence before marking a node failed |
 | `--suspect-timeout` | `3s` | Time a node stays suspect before failure |
-| `--use-memberlist` | `false` | Use HashiCorp Memberlist (SWIM) instead of custom TCP gossip |
+| `--use-memberlist` | `false` | Not supported; the server refuses to start with it |
 | `--clock-skew-threshold-ms` | `5000` | Max allowed clock skew from leader (0 = disabled) |
 | `--node-rack` | *(empty)* | Rack/AZ label for topology-aware placement (**env**) |
 | `--node-zone` | *(empty)* | Zone label (**env**) |
@@ -125,10 +125,10 @@ Defaults from `internal/config/defaults.go` unless noted. Flags marked **env** h
 | `--tls-cert-file` | *(empty)* | Server certificate path (**env**) |
 | `--tls-key-file` | *(empty)* | Server private key path (**env**) |
 | `--tls-client-auth` | `false` | Require client certificates (mTLS) |
-| `--replication-tls-enabled` | `false` | mTLS for internal replication traffic (**env**) |
-| `--replication-tls-ca-file` | *(empty)* | Internal CA path (**env**) |
-| `--replication-tls-cert-file` | *(empty)* | Internal certificate path (**env**) |
-| `--replication-tls-key-file` | *(empty)* | Internal private key path (**env**) |
+| `--replication-tls-enabled` | `false` | Mutual TLS for all traffic between nodes: replication, membership and Raft. Requires the three files below (**env**) |
+| `--replication-tls-ca-file` | *(empty)* | CA that signed the nodes' certificates (**env**) |
+| `--replication-tls-cert-file` | *(empty)* | This node's certificate, for server and client use (**env**) |
+| `--replication-tls-key-file` | *(empty)* | Private key of that certificate (**env**) |
 | `--auth-enabled` | `false` | Enable JWT authentication (**env**) |
 | `--auth-jwt-secret` | *(empty)* | HMAC secret (visible in `ps`; prefer the env var) (**env**) |
 | `--auth-jwt-public-key` | *(empty)* | Ed25519/RSA public key file for asymmetric JWTs |
