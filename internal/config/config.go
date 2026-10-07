@@ -151,10 +151,10 @@ func LoadConfig() (*types.Config, error) {
 	flag.Int64Var(&config.MaxInFlightPerPartition, "max-in-flight", DefaultMaxInFlightPerPartition, "Max in-flight deliveries per partition")
 
 	// Delivery configuration
-	flag.DurationVar(&config.DefaultAckTimeout, "ack-timeout", 30*time.Second, "Default ack timeout")
-	flag.IntVar(&config.MaxRetries, "max-retries", DefaultMaxRetries, "Maximum delivery retries")
-	flag.DurationVar(&config.RetryBackoff, "retry-backoff", 1*time.Second, "Retry backoff")
-	flag.IntVar(&config.MaxDeliveryCredits, "max-credits", DefaultMaxDeliveryCredits, "Maximum delivery credits")
+	flag.DurationVar(&config.DefaultAckTimeout, "ack-timeout", 30*time.Second, "How long a delivery may stay unacknowledged before it is retried")
+	flag.IntVar(&config.MaxRetries, "max-retries", DefaultMaxRetries, "Delivery retries before an event goes to the dead-letter queue")
+	flag.DurationVar(&config.RetryBackoff, "retry-backoff", 1*time.Second, "Delay before a retry, multiplied by the attempt number")
+	flag.IntVar(&config.MaxDeliveryCredits, "max-credits", DefaultMaxDeliveryCredits, "Credit ceiling for a subscription that does not set its own")
 	flag.Float64Var(&config.CircuitBreakerFailureThreshold, "cb-failure-threshold", DefaultCircuitBreakerFailureThreshold, "Circuit breaker failure rate to trip (0.0-1.0)")
 	flag.Int64Var(&config.CircuitBreakerMinAttempts, "cb-min-attempts", DefaultCircuitBreakerMinAttempts, "Min attempts before circuit breaker evaluates")
 	flag.Int64Var(&config.CircuitBreakerOpenDurationMs, "cb-open-duration-ms", DefaultCircuitBreakerOpenDurationMs, "Circuit breaker open duration in milliseconds")

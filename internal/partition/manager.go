@@ -335,6 +335,36 @@ func NewPartitionManagerWithCache(nodeID string, config *types.Config, cache *pe
 	return pm
 }
 
+// deliveryConfig takes the dispatcher's settings from the server
+// configuration: ack timeout, retries, backoff, credits and the circuit
+// breaker. A setting left at zero keeps the dispatcher's default, which is
+// what a configuration built by hand, as tests do, relies on.
+func deliveryConfig(cfg *types.Config) *delivery.Config {
+	c := delivery.DefaultConfig()
+	if cfg.MaxRetries > 0 {
+		c.MaxRetries = int32(cfg.MaxRetries)
+	}
+	if cfg.DefaultAckTimeout > 0 {
+		c.DefaultAckTimeout = cfg.DefaultAckTimeout
+	}
+	if cfg.RetryBackoff > 0 {
+		c.RetryBackoff = cfg.RetryBackoff
+	}
+	if cfg.MaxDeliveryCredits > 0 {
+		c.MaxDeliveryCredits = int32(cfg.MaxDeliveryCredits)
+	}
+	if cfg.CircuitBreakerFailureThreshold > 0 {
+		c.CircuitBreakerFailureThreshold = cfg.CircuitBreakerFailureThreshold
+	}
+	if cfg.CircuitBreakerMinAttempts > 0 {
+		c.CircuitBreakerMinAttempts = cfg.CircuitBreakerMinAttempts
+	}
+	if cfg.CircuitBreakerOpenDurationMs > 0 {
+		c.CircuitBreakerOpenDurationMs = cfg.CircuitBreakerOpenDurationMs
+	}
+	return c
+}
+
 // createPartitionLocked creates a new partition (assumes lock is held)
 func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic string) error {
 	// Its previous instance still holds the files until it has finished closing.
@@ -422,7 +452,7 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 	// (delivery failed after max retries) are captured on disk instead of being
 	// silently dropped. Retry is operator-driven (no auto-retry loop) to avoid
 	// re-driving genuinely-poison messages forever.
-	dispatcherConfig := delivery.DefaultConfig()
+	dispatcherConfig := deliveryConfig(pm.config)
 	dlq, err := delivery.NewDeadLetterQueue(dataDir, 0) // 0 → default max entries
 	if err != nil {
 		return fmt.Errorf("create dead-letter queue: %w", err)
