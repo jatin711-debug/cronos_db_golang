@@ -134,7 +134,11 @@ type ConsumerConfig struct {
 	// SubscriptionID optionally labels this subscription; empty lets the client generate one.
 	SubscriptionID string
 
-	// PartitionID selects a partition. -1 uses server auto-assignment.
+	// PartitionID pins the subscription to one partition. -1 consumes every
+	// partition of the cluster, one stream per partition: publishes are spread
+	// over partitions by message ID or partition key, so a single partition only
+	// carries part of a topic. The handler then runs concurrently across
+	// partitions and must be safe for concurrent use.
 	PartitionID int32
 	// StartOffset is the initial read offset. -1 means latest (server semantics).
 	StartOffset int64
@@ -474,8 +478,73 @@ func (c *Client) Subscribe(ctx context.Context, cfg ConsumerConfig, handler Mess
 	return consumer.Run(ctx)
 }
 
-// Run executes the consumer stream lifecycle with reconnect behavior.
+// Run executes the consumer stream lifecycle with reconnect behavior. With
+// PartitionID -1 it runs one such lifecycle per partition and returns when any
+// of them ends.
 func (c *Consumer) Run(ctx context.Context) error {
+	if c.cfg.PartitionID >= 0 {
+		return c.runPartition(ctx)
+	}
+	partitions := c.subscriptionPartitions(ctx)
+	if len(partitions) == 0 {
+		// Partition layout unknown (no metadata service and no static count):
+		// keep the single server-assigned stream.
+		return c.runPartition(ctx)
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	results := make(chan error, len(partitions))
+	for _, partitionID := range partitions {
+		cfg := c.cfg
+		cfg.PartitionID = partitionID
+		cfg.SubscriptionID = fmt.Sprintf("%s-p%d", c.cfg.SubscriptionID, partitionID)
+		sub := &Consumer{client: c.client, cfg: cfg, handler: c.handler}
+		utils.GoSafe("consumer-partition", func() {
+			results <- sub.runPartition(ctx)
+		})
+	}
+
+	// One partition ending would otherwise leave part of the topic silently
+	// unconsumed, so the first to finish stops the rest.
+	var result error
+	for i := range partitions {
+		err := <-results
+		if i == 0 {
+			result = err
+			cancel()
+		}
+	}
+	return result
+}
+
+// subscriptionPartitions lists every partition an unpinned consumer must
+// read, from cluster metadata or the statically configured partition count.
+func (c *Consumer) subscriptionPartitions(ctx context.Context) []int32 {
+	infos := c.client.metadata.Partitions()
+	if len(infos) == 0 {
+		refreshCtx, cancel := context.WithTimeout(ctx, c.client.cfg.RequestTimeout)
+		_ = c.client.ForceMetadataRefresh(refreshCtx)
+		cancel()
+		infos = c.client.metadata.Partitions()
+	}
+	if len(infos) > 0 {
+		ids := make([]int32, 0, len(infos))
+		for _, info := range infos {
+			ids = append(ids, info.GetPartitionId())
+		}
+		return ids
+	}
+	ids := make([]int32, 0, c.client.cfg.PartitionCount)
+	for id := int32(0); id < int32(c.client.cfg.PartitionCount); id++ {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// runPartition runs one subscribe stream (a pinned partition, or the
+// server-assigned one) and reconnects it until ctx ends or attempts run out.
+func (c *Consumer) runPartition(ctx context.Context) error {
 	attempt := 0
 	var lastErr error
 	for {

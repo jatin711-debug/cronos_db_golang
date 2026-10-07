@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"log/slog"
 	"maps"
 	"os"
 	"path/filepath"
@@ -26,6 +27,22 @@ import (
 type ReplicationServiceHandler struct {
 	types.UnimplementedReplicationServiceServer
 	partitionManager *partition.PartitionManager
+}
+
+// acceptLeader applies the fencing rules for a request from leaderID at term.
+// The caller holds p.ReplicateMu.
+func (h *ReplicationServiceHandler) acceptLeader(p *partition.Partition, term int64, leaderID string) error {
+	if term <= 0 || term < p.Epoch {
+		return fmt.Errorf("invalid or stale term %d; current %d", term, p.Epoch)
+	}
+	if term > p.Epoch && p.Leader {
+		// A newer leader exists. Stop leading before taking its writes, so this
+		// node cannot keep acknowledging publishes under the old term.
+		if err := h.partitionManager.DemoteFromLeader(p.ID); err != nil {
+			return fmt.Errorf("step down for term %d: %w", term, err)
+		}
+	}
+	return p.AcceptLeadership(term, leaderID)
 }
 
 // NewReplicationServiceHandler creates a replication service handler.
@@ -90,28 +107,48 @@ func (h *ReplicationServiceHandler) Append(ctx context.Context, req *types.Repli
 		if req.ExpectedNextOffset != 0 && req.ExpectedNextOffset != events[0].Offset {
 			return reject("expected offset does not match batch")
 		}
-		// A matching retry is harmless. A conflicting prefix requires an explicit
-		// snapshot reconciliation; an Append RPC never deletes accepted history.
+	}
+	// The request is well formed; now decide whether its sender may write.
+	// This persists a newer term (and steps a superseded local leader down)
+	// before any of the sender's entries are applied.
+	if err := h.acceptLeader(p, req.GetTerm(), req.GetLeaderId()); err != nil {
+		return reject(err.Error())
+	}
+	if len(events) > 0 && events[0].Offset > p.Wal.GetNextOffset() {
+		return reject("log gap: catch-up required")
+	}
+	if len(events) > 0 {
+		// Entries this replica already holds are compared with the leader's. The
+		// same offset and term is the same entry: a retry, skipped. A different
+		// term means the local entry and everything after it were written under
+		// another leader and never became part of this leader's log, so they are
+		// removed and replaced. Only the accepted leader of the current term gets
+		// this far, and elections pick the most complete replica, so such a tail
+		// was never acknowledged by a quorum.
 		consumed := 0
 		for _, e := range events {
 			if e.Offset >= p.Wal.GetNextOffset() {
 				break
 			}
 			existing, err := p.Wal.ReadEvent(e.Offset)
-			if err != nil || existing.MessageId != e.MessageId || existing.Topic != e.Topic || existing.ScheduleTs != e.ScheduleTs || !bytes.Equal(existing.Payload, e.Payload) || !maps.Equal(existing.Meta, e.Meta) {
-				return reject("log conflict: snapshot reconciliation required")
+			if err != nil {
+				return reject(fmt.Sprintf("log conflict: read offset %d: %v", e.Offset, err))
+			}
+			if existing.Term != e.Term {
+				removed, err := p.Wal.TruncateToOffset(e.Offset)
+				if err != nil {
+					return reject(fmt.Sprintf("truncate divergent log at offset %d: %v", e.Offset, err))
+				}
+				slog.Warn("Removed divergent log tail written under another leader",
+					"partition", p.ID, "from_offset", e.Offset, "local_term", existing.Term, "leader_term", e.Term, "entries", removed)
+				break
+			}
+			if existing.MessageId != e.MessageId || existing.Topic != e.Topic || existing.ScheduleTs != e.ScheduleTs || !bytes.Equal(existing.Payload, e.Payload) || !maps.Equal(existing.Meta, e.Meta) {
+				return reject(fmt.Sprintf("log conflict: offset %d differs within term %d; snapshot reconciliation required", e.Offset, e.Term))
 			}
 			consumed++
 		}
 		events = events[consumed:]
-		if len(events) > 0 && events[0].Offset != p.Wal.GetNextOffset() {
-			return reject("log gap: catch-up required")
-		}
-	}
-	if req.GetTerm() > p.Epoch {
-		if err := p.PersistEpoch(req.GetTerm()); err != nil {
-			return reject(err.Error())
-		}
 	}
 	if len(events) > 0 {
 		if err := p.Wal.AppendReplicatedBatch(events); err != nil {
@@ -133,6 +170,55 @@ func (h *ReplicationServiceHandler) Append(ctx context.Context, req *types.Repli
 		NextOffset: p.Wal.GetNextOffset(),
 		Term:       p.Epoch,
 	}, nil
+}
+
+// Position reports where this replica's log ends, for elections and for
+// checking that a leadership transfer target has caught up.
+func (h *ReplicationServiceHandler) Position(ctx context.Context, req *types.ReplicationPositionRequest) (*types.ReplicationPositionResponse, error) {
+	_ = ctx
+	if req == nil || req.GetPartitionId() < 0 {
+		return nil, status.Error(codes.InvalidArgument, "valid partition_id is required")
+	}
+	if h.partitionManager == nil {
+		return nil, status.Error(codes.Unavailable, "partition manager not initialized")
+	}
+	position := h.partitionManager.LocalReplicaPosition(req.GetPartitionId())
+	return &types.ReplicationPositionResponse{
+		Found:           position.Found,
+		LastOffset:      position.LastOffset,
+		LastTerm:        position.LastTerm,
+		Epoch:           position.Epoch,
+		AcceptingWrites: position.AcceptingWrites,
+	}, nil
+}
+
+// SyncConsumerProgress installs the leader's consumer group progress so this
+// replica can take over without redelivering work that consumers finished.
+func (h *ReplicationServiceHandler) SyncConsumerProgress(ctx context.Context, req *types.ReplicationProgressRequest) (*types.ReplicationProgressResponse, error) {
+	_ = ctx
+	if req == nil || req.GetPartitionId() < 0 {
+		return nil, status.Error(codes.InvalidArgument, "valid partition_id is required")
+	}
+	if h.partitionManager == nil {
+		return nil, status.Error(codes.Unavailable, "partition manager not initialized")
+	}
+	p, err := h.partitionManager.GetOrCreateInternalPartition(req.GetPartitionId(), fmt.Sprintf("partition-%d", req.GetPartitionId()))
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "get partition %d: %v", req.GetPartitionId(), err)
+	}
+
+	p.ReplicateMu.Lock()
+	defer p.ReplicateMu.Unlock()
+	if err := h.acceptLeader(p, req.GetTerm(), req.GetLeaderId()); err != nil {
+		return &types.ReplicationProgressResponse{Error: err.Error()}, nil
+	}
+	if p.ConsumerGroup == nil {
+		return &types.ReplicationProgressResponse{Error: "consumer state not initialized"}, nil
+	}
+	if err := p.ConsumerGroup.ApplyReplicatedProgress(req.GetPartitionId(), req.GetGroups()); err != nil {
+		return &types.ReplicationProgressResponse{Error: err.Error()}, nil
+	}
+	return &types.ReplicationProgressResponse{Success: true}, nil
 }
 
 // Sync streams events from local WAL to followers for catch-up replication.
@@ -258,10 +344,36 @@ func (h *ReplicationServiceHandler) Snapshot(req *types.ReplicationSnapshotReque
 		files = append(files, snapshotFile{filename: file.Filename, path: file.Path, firstOffset: file.FirstOffset, lastOffset: file.LastOffset, fileSize: file.Size, crc32: checksum, isIndex: file.IsIndex})
 	}
 
+	// Files the follower kept from an interrupted transfer are not sent again
+	// when they are unchanged. Closed segments never change, so a retry sends
+	// only what the earlier attempt did not finish and what was written since.
+	held := make(map[string]*types.ReplicationSnapshotHeader, len(req.GetHave()))
+	for _, have := range req.GetHave() {
+		held[snapshotFileKey(have.GetFilename(), have.GetIsIndex())] = have
+	}
+
 	const chunkSize = 1 << 20 // 1MB
 	var sentBytes int64
 
 	for _, f := range files {
+		if have := held[snapshotFileKey(f.filename, f.isIndex)]; have != nil && have.GetFileSize() == f.fileSize && have.GetCrc32() == f.crc32 {
+			if sendErr := stream.Send(&types.ReplicationSnapshotChunk{
+				Payload: &types.ReplicationSnapshotChunk_Header{
+					Header: &types.ReplicationSnapshotHeader{
+						Filename:    f.filename,
+						FirstOffset: f.firstOffset,
+						LastOffset:  f.lastOffset,
+						FileSize:    f.fileSize,
+						Crc32:       f.crc32,
+						IsIndex:     f.isIndex,
+						Reuse:       true,
+					},
+				},
+			}); sendErr != nil {
+				return status.Errorf(codes.Internal, "send header: %v", sendErr)
+			}
+			continue
+		}
 		if sentBytes+f.fileSize > maxBytes {
 			_ = stream.Send(&types.ReplicationSnapshotChunk{
 				Payload: &types.ReplicationSnapshotChunk_Trailer{
@@ -329,6 +441,15 @@ func (h *ReplicationServiceHandler) Snapshot(req *types.ReplicationSnapshotReque
 			},
 		},
 	})
+}
+
+// snapshotFileKey identifies a snapshot file: a segment and its index have
+// different names, but the kind is part of the identity all the same.
+func snapshotFileKey(filename string, isIndex bool) string {
+	if isIndex {
+		return "index/" + filename
+	}
+	return "segments/" + filename
 }
 
 // buildSnapshotFileList returns segment log and index files that overlap the
