@@ -1070,12 +1070,19 @@ func (s *Segment) ReadEventsByTime(startTS, endTS int64) ([]*types.Event, error)
 // ReadEventsByOffsetRange reads events in the inclusive offset range
 // [startOffset, endOffset].
 func (s *Segment) ReadEventsByOffsetRange(startOffset, endOffset int64) ([]*types.Event, error) {
+	events, _, err := s.readOffsetRange(startOffset, endOffset, 0)
+	return events, err
+}
+
+// readOffsetRange reads the events of an inclusive offset range. With
+// maxBytes above zero it stops, after at least one event, once the records
+// it has read come to that many bytes; size is what they came to.
+func (s *Segment) readOffsetRange(startOffset, endOffset, maxBytes int64) (result []*types.Event, size int64, err error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	var result []*types.Event
 	if s.closed {
-		return result, nil // removed (retention, truncation) after the caller listed it
+		return result, 0, nil // removed (retention, truncation) after the caller listed it
 	}
 
 	// Find starting position using index
@@ -1092,7 +1099,7 @@ func (s *Segment) ReadEventsByOffsetRange(startOffset, endOffset int64) ([]*type
 	for {
 		record, ciphertextPos, ok, err := scanner.record()
 		if err != nil {
-			return nil, fmt.Errorf("read record: %w", err)
+			return nil, 0, fmt.Errorf("read record: %w", err)
 		}
 		if !ok {
 			break
@@ -1100,7 +1107,7 @@ func (s *Segment) ReadEventsByOffsetRange(startOffset, endOffset int64) ([]*type
 
 		decrypted, err := s.decryptRecord(record, ciphertextPos)
 		if err != nil {
-			return nil, fmt.Errorf("decrypt: %w", err)
+			return nil, 0, fmt.Errorf("decrypt: %w", err)
 		}
 
 		// Early offset check before full event parsing.
@@ -1118,19 +1125,20 @@ func (s *Segment) ReadEventsByOffsetRange(startOffset, endOffset int64) ([]*type
 
 		event, err := parseEventRecordWithoutLength(decrypted)
 		if err != nil {
-			return nil, fmt.Errorf("parse event: %w", err)
+			return nil, 0, fmt.Errorf("parse event: %w", err)
 		}
 
 		if event.Offset >= startOffset && event.Offset <= endOffset {
 			result = append(result, event)
+			size += int64(len(decrypted))
 		}
 
-		if event.Offset >= endOffset {
+		if event.Offset >= endOffset || (maxBytes > 0 && size >= maxBytes) {
 			break
 		}
 	}
 
-	return result, nil
+	return result, size, nil
 }
 
 // TruncateAfterOffset removes all records with offset > keepThroughOffset from
