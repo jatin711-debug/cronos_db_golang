@@ -252,6 +252,17 @@ func (h *EventServiceHandler) ensureClusterPartitionLed(partitionID int32) error
 		return status.Errorf(codes.FailedPrecondition,
 			"partition %d epoch mismatch: local=%d cluster=%d; possible stale leader, retry", partitionID, localEpoch, clusterEpoch)
 	}
+	// The other way round, the partition has taken the epoch of a newer
+	// leader than the cluster's records on this node show. The records are
+	// what is behind: this node was replaced, heard it from the partition's
+	// other replicas, and has not heard it from the cluster yet, which can
+	// take as long as the node stays cut off from where those records are
+	// kept. It does not lead, and says so in the words that send a client to
+	// look for the node that does.
+	if localEpoch > clusterEpoch {
+		return status.Errorf(codes.FailedPrecondition,
+			"partition %d has a newer leader than this node's records of the cluster show (epoch %d here, %d there); retry against the partition leader", partitionID, localEpoch, clusterEpoch)
+	}
 
 	return nil
 }

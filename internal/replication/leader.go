@@ -344,6 +344,11 @@ func (l *Leader) Replicate(events []*types.Event) error {
 	for outstanding := queued; acks < minISR && outstanding > 0 && acks+outstanding >= minISR; outstanding-- {
 		if err := <-results; err == nil {
 			acks++
+		} else if term := l.newerTerm.Load(); term > 0 {
+			// A follower has just answered for a newer leader. The others
+			// will say the same or nothing; a leader that waited for one it
+			// cannot reach held its publisher for the whole timeout.
+			return fmt.Errorf("partition %d has a leader of term %d; this one, of term %d, takes no more publishes", l.partitionID, term, l.GetEpoch())
 		}
 	}
 
