@@ -36,7 +36,7 @@ RUN npm ci
 COPY web/dashboard/ ./
 RUN npm run build
 
-FROM golang:1.26.7-bookworm AS go-builder
+FROM golang:1.26.9-bookworm AS go-builder
 
 # Install build dependencies for cgo
 RUN apt-get update && apt-get install -y --no-install-recommends \

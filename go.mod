@@ -1,6 +1,6 @@
 module github.com/jatin711-debug/cronos_db_golang
 
-go 1.26.7
+go 1.26.9
 
 require (
 	github.com/cockroachdb/pebble v1.1.5
