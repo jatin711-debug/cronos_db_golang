@@ -1239,6 +1239,9 @@ func (h *EventServiceHandler) Subscribe(stream grpc.BidiStreamingServer[types.Su
 const (
 	// redriveBatchEvents is how many WAL records one redrive step offers.
 	redriveBatchEvents = 512
+	// redriveBatchBytes is how many bytes of them one step may read: events are
+	// megabytes each, and 512 of them at once is gigabytes.
+	redriveBatchBytes = 4 << 20
 	// redriveBlockedWait bounds the wait for credits when no ack arrives.
 	redriveBlockedWait = 250 * time.Millisecond
 	// redriveSweepInterval and redriveSweepEvents pace the background sweep.
@@ -1272,17 +1275,21 @@ func (h *EventServiceHandler) redriveRetained(ctx context.Context, p *partition.
 	requests := p.Dispatcher.RegisterRedrive(group)
 	defer p.Dispatcher.UnregisterRedrive(requests)
 
-	// offer hands [from, to] to the group. blocked means flow control held some
-	// of it back and the same range must be offered again.
+	// offer hands the group [from, to], as far as one batch of the log reads
+	// it: next is where the range goes on from. blocked means flow control held
+	// some of it back and the same range must be offered again.
 	var cached []*types.Event
-	cachedFrom, cachedTo := int64(-1), int64(-1)
-	offer := func(from, to int64) (blocked bool, err error) {
+	cachedFrom, cachedTo, cachedNext := int64(-1), int64(-1), int64(-1)
+	offer := func(from, to int64) (next int64, blocked bool, err error) {
 		if from != cachedFrom || to != cachedTo {
-			events, err := p.Wal.ReadEvents(from, to)
+			events, err := p.Wal.ReadEventsWithin(from, to, redriveBatchBytes)
 			if err != nil {
-				return false, status.Errorf(codes.Internal, "replay retained events: %v", err)
+				return from, false, status.Errorf(codes.Internal, "replay retained events: %v", err)
 			}
-			cached, cachedFrom, cachedTo = events, from, to
+			cached, cachedFrom, cachedTo, cachedNext = events, from, to, to+1
+			if len(events) > 0 {
+				cachedNext = events[len(events)-1].Offset + 1
+			}
 		}
 		now := time.Now().UnixMilli()
 		due := make([]*types.Event, 0, len(cached))
@@ -1292,7 +1299,7 @@ func (h *EventServiceHandler) redriveRetained(ctx context.Context, p *partition.
 			}
 		}
 		_, blocked = p.Dispatcher.RedriveGroup(group, due)
-		return blocked, nil
+		return cachedNext, blocked, nil
 	}
 
 	backlog := origin                   // next offset of the one-time backlog pass
@@ -1328,24 +1335,24 @@ func (h *EventServiceHandler) redriveRetained(ctx context.Context, p *partition.
 		var wait time.Duration
 		switch {
 		case retryLow <= retryTo:
-			blocked, err := offer(retryLow, retryTo)
+			next, blocked, err := offer(retryLow, retryTo)
 			if err != nil {
 				return err
 			}
 			if blocked {
 				wait = redriveBlockedWait
 			} else {
-				retryLow = retryTo + 1
+				retryLow = next
 			}
 		case backlog <= backlogTo:
-			blocked, err := offer(backlog, backlogTo)
+			next, blocked, err := offer(backlog, backlogTo)
 			if err != nil {
 				return err
 			}
 			if blocked {
 				wait = redriveBlockedWait
 			} else {
-				backlog = backlogTo + 1
+				backlog = next
 			}
 		default:
 			if now := time.Now(); now.Before(nextSweep) {
@@ -1361,12 +1368,12 @@ func (h *EventServiceHandler) redriveRetained(ctx context.Context, p *partition.
 				}
 				if sweep <= end {
 					to := min(sweep+redriveSweepEvents-1, end)
-					blocked, err := offer(sweep, to)
+					next, blocked, err := offer(sweep, to)
 					if err != nil {
 						return err
 					}
 					if !blocked {
-						sweep = to + 1
+						sweep = next
 					}
 				}
 				wait = redriveSweepInterval

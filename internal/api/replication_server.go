@@ -336,7 +336,7 @@ func (h *ReplicationServiceHandler) Sync(req *types.ReplicationSyncRequest, stre
 
 	var sentBytes int64
 	for sentBytes < maxBytes {
-		events, err := p.Wal.ReadEvents(offset, offset+batchSize)
+		events, err := p.Wal.ReadEventsWithin(offset, offset+batchSize, maxBytes-sentBytes)
 		if err != nil {
 			return status.Errorf(codes.Internal, "read events: %v", err)
 		}
@@ -364,7 +364,7 @@ func (h *ReplicationServiceHandler) Sync(req *types.ReplicationSyncRequest, stre
 		nextOffset := offset + int64(len(sendEvents))
 		hasMore := len(sendEvents) < len(events)
 		if !hasMore {
-			nextEvents, _ := p.Wal.ReadEvents(nextOffset, nextOffset+1)
+			nextEvents, _ := p.Wal.ReadEventsWithin(nextOffset, nextOffset+1, 1)
 			hasMore = len(nextEvents) > 0
 		}
 

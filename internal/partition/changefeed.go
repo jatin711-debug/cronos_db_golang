@@ -43,6 +43,8 @@ const (
 	feedCursorFile = "changefeed.json"
 	// feedBatchEvents bounds how many events are read and handed over at once.
 	feedBatchEvents = 500
+	// feedBatchBytes bounds the same read by its bytes: events are megabytes each.
+	feedBatchBytes = 4 << 20
 	// feedIdlePoll is how long the feed sleeps when nothing wakes it. Finished
 	// publishes do; the poll covers what advances the watermark silently.
 	feedIdlePoll = time.Second
@@ -367,7 +369,7 @@ func (p *Partition) drainFeed() error {
 		}
 		from := cursor + 1
 		to := min(through, cursor+feedBatchEvents)
-		events, err := p.Wal.ReadEvents(from, to)
+		events, err := p.Wal.ReadEventsWithin(from, to, feedBatchBytes)
 		if err != nil {
 			return fmt.Errorf("read log at offsets %d-%d: %w", from, to, err)
 		}

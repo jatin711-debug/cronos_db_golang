@@ -135,6 +135,13 @@ const progressResendInterval = 30 * time.Second
 // memory. Beyond it the follower is skipped and later caught up from the WAL.
 const maxPendingSendsPerFollower = 4
 
+// catchUpBytes bounds what one catch-up request carries, in bytes as well as
+// in events. Events are up to megabytes each, and a request of five hundred of
+// them is over the transport's message limit: a follower that cannot take what
+// its leader sends it never catches up. A single event is not split, so a
+// request can exceed the bound by one event.
+const catchUpBytes = 8 << 20
+
 // NewLeader creates a new leader. minInSyncReplicas is the minimum ISR size
 // (including the leader itself) required to acknowledge a write as durable;
 // 0 is treated as 1 (single-replica mode). nodeID is this leader's identity;
@@ -514,7 +521,7 @@ func (l *Leader) catchUpFollower(f *FollowerInfo, from, to int64) error {
 		if end > to {
 			end = to
 		}
-		events, err := l.wal.ReadEvents(from, end-1)
+		events, err := l.wal.ReadEventsWithin(from, end-1, catchUpBytes)
 		if err != nil {
 			return fmt.Errorf("catch-up read [%d,%d) for follower %s: %w", from, end, f.ID, err)
 		}
