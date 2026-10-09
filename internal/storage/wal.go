@@ -941,7 +941,23 @@ func (w *WAL) rotateSegment() error {
 
 // ReadEvents reads events in the inclusive offset range [startOffset, endOffset]
 // across all segments that overlap the range.
+//
+// The whole range is held in memory when it returns. A caller that walks the
+// log, or cannot say how large its events are, uses ReadEventsWithin.
 func (w *WAL) ReadEvents(startOffset, endOffset int64) ([]*types.Event, error) {
+	return w.ReadEventsWithin(startOffset, endOffset, 0)
+}
+
+// ReadEventsWithin reads events from startOffset on, as far as endOffset, and
+// stops, after at least one event, once the records it has read come to
+// maxBytes. The caller continues after the last event it was given. Zero or
+// less for maxBytes reads the whole range.
+//
+// An event can be as large as a publish may be, megabytes, so a count of
+// events does not bound the memory a read takes. Reads of ten thousand
+// events at a time were sized for small events and came to gigabytes with
+// large ones.
+func (w *WAL) ReadEventsWithin(startOffset, endOffset, maxBytes int64) ([]*types.Event, error) {
 	// Only the segment list and where each segment ends need the WAL lock.
 	// Reading under it would hold up every append to this partition for the
 	// length of the read; each segment guards its own data. The ends are noted
@@ -973,13 +989,14 @@ func (w *WAL) ReadEvents(startOffset, endOffset int64) ([]*types.Event, error) {
 	}
 	result := make([]*types.Event, 0, estimated)
 
+	remaining := maxBytes
 	for _, sp := range spans {
 		segment := sp.segment
 		// Read events from this segment
 		readOffset := max(startOffset, sp.first)
 		endForSegment := min(endOffset, sp.last)
 
-		events, err := segment.ReadEventsByOffsetRange(readOffset, endForSegment)
+		events, size, err := segment.readOffsetRange(readOffset, endForSegment, remaining)
 		if err != nil {
 			if segment.deleted.Load() {
 				// Pruned since the list was taken: its entries are no longer
@@ -992,6 +1009,11 @@ func (w *WAL) ReadEvents(startOffset, endOffset int64) ([]*types.Event, error) {
 		for _, event := range events {
 			event.PartitionId = w.partitionID
 			result = append(result, event)
+		}
+		if maxBytes > 0 && len(result) > 0 {
+			if remaining -= size; remaining <= 0 {
+				break
+			}
 		}
 	}
 
