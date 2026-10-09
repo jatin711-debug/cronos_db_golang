@@ -168,6 +168,21 @@ paused only while it notes where each file ends.
   waits, except when the leader alone acknowledged writes (`minISR` 1). The
   new epoch is above every epoch the replicas report, not just above the
   cluster's own count.
+- **An election fences before it asks.** "Dead" is what the Raft leader
+  sees. The leader it replaces may be running and reach other replicas, and
+  what they confirm for it after they have answered would not be in the log
+  of the replica chosen. So the election first commits that the partition
+  has no leader, at a new epoch; clients are told to retry, and an election
+  stays owed until one is committed, on whichever node decides next. Then
+  every replica that is asked records that epoch before it answers
+  (`fence_epoch`, `PartitionManager.FenceLocalReplica`). From there on it
+  refuses the old leader, so nothing the old leader sends arrives behind its
+  answer. A replica that held nothing of the partition is given an empty log
+  to hold the epoch with, so that the old leader cannot fill it and count it.
+  With `replicas - minISR + 1` replicas fenced, the old leader cannot gather
+  `minISR` confirmations any more. The leader is then committed at a higher
+  epoch. The old leader learns of it from the first replica that refuses it,
+  and stops.
 - **First assignment.** A partition's first leader is chosen the same way:
   the Raft leader asks the replicas what they hold. A restored cluster thereby
   continues from its backups, led by the most complete replica at an epoch
