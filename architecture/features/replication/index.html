@@ -1,0 +1,2378 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Documentation for CronosDB — a distributed, timestamp-triggered event database">
+      
+      
+      
+        <link rel="canonical" href="https://jatin711-debug.github.io/cronos_db_golang/architecture/features/replication/">
+      
+      
+        <link rel="prev" href="../replay/">
+      
+      
+        <link rel="next" href="../scheduler/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Replication - CronosDB Docs</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="blue-grey" data-md-color-accent="deep-orange">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#replication-architecture" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../../.." title="CronosDB Docs" class="md-header__button md-logo" aria-label="CronosDB Docs" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m16.5 16.25 2.86 1.69-.75 1.22L15 17v-5h1.5zM23 16c0 3.87-3.13 7-7 7a7 7 0 0 1-5.75-3C6.18 19.79 3 18.08 3 16v-3c0 1.88 2.58 3.44 6.06 3.88C9.03 16.59 9 16.3 9 16c0-.38.04-.75.1-1.12-3.5-.43-6.1-2-6.1-3.88V8c0 2.09 3.2 3.8 7.27 4 .6-.86 1.37-1.56 2.26-2.07-.49.04-1.03.07-1.53.07-4.42 0-8-1.79-8-4s3.58-4 8-4 8 1.79 8 4c0 1.2-1.07 2.28-2.75 3 .75.04 1.5.19 2.19.45C18.79 9 19 8.5 19 8v1.68c2.36 1.13 4 3.53 4 6.32m-2 0c0-2.76-2.24-5-5-5s-5 2.24-5 5 2.24 5 5 5 5-2.24 5-5"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            CronosDB Docs
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Replication
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="blue-grey" data-md-color-accent="deep-orange"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="blue-grey" data-md-color-accent="deep-orange"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+          <a href="javascript:void(0)" class="md-search__icon md-icon" title="Share" aria-label="Share" data-clipboard data-clipboard-text="" data-md-component="search-share" tabindex="-1">
+            
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9a3 3 0 0 0-3 3 3 3 0 0 0 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.15c-.05.21-.08.43-.08.66 0 1.61 1.31 2.91 2.92 2.91s2.92-1.3 2.92-2.91A2.92 2.92 0 0 0 18 16.08"/></svg>
+          </a>
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/jatin711-debug/cronos_db_golang" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    jatin711-debug/cronos_db_golang
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../../.." title="CronosDB Docs" class="md-nav__button md-logo" aria-label="CronosDB Docs" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m16.5 16.25 2.86 1.69-.75 1.22L15 17v-5h1.5zM23 16c0 3.87-3.13 7-7 7a7 7 0 0 1-5.75-3C6.18 19.79 3 18.08 3 16v-3c0 1.88 2.58 3.44 6.06 3.88C9.03 16.59 9 16.3 9 16c0-.38.04-.75.1-1.12-3.5-.43-6.1-2-6.1-3.88V8c0 2.09 3.2 3.8 7.27 4 .6-.86 1.37-1.56 2.26-2.07-.49.04-1.03.07-1.53.07-4.42 0-8-1.79-8-4s3.58-4 8-4 8 1.79 8 4c0 1.2-1.07 2.28-2.75 3 .75.04 1.5.19 2.19.45C18.79 9 19 8.5 19 8v1.68c2.36 1.13 4 3.53 4 6.32m-2 0c0-2.76-2.24-5-5-5s-5 2.24-5 5 2.24 5 5 5 5-2.24 5-5"/></svg>
+
+    </a>
+    CronosDB Docs
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/jatin711-debug/cronos_db_golang" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    jatin711-debug/cronos_db_golang
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+          
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" checked>
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../../system-design/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_2" id="__nav_2_label" tabindex="">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Architecture
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../ARCHITECTURE/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../TECHNICAL_DEEP_DIVE/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Technical Deep Dive
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../DEVELOPER_ARCHITECTURE_GUIDE/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Developer Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_5" checked>
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    By Feature
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_2_5" id="__nav_2_5_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_5_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_2_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    By Feature
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Layer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../audit/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Audit
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../auth/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Auth
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cdc/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CDC
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cluster/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cluster Control Plane
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../compliance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Compliance & Retention
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Config & Reload
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../consumer/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Consumer Groups
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../dashboard/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Dashboard
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../dedup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deduplication
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../delivery/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Delivery Pipeline
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../partition/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Partition Runtime
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../replay/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Replay Engine
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Replication
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Replication
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#purpose" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Purpose
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#key-files" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Key Files
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#main-flow-intra-cluster" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Main Flow (intra-cluster)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Main Flow (intra-cluster)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#incremental-catch-up-sync" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Incremental catch-up (Sync)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#bulk-install-snapshot" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Bulk install (Snapshot)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#leadership-and-fencing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Leadership and fencing
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#log-start" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Log start
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#publishes-that-fail-after-the-append" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Publishes that fail after the append
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#production-decisions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Production Decisions
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#trigger-policy-known-limitation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Trigger Policy &amp; Known Limitation
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Trigger Policy &amp; Known Limitation">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#why-mid-flight-auto-snapshot-is-deferred" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why mid-flight auto-snapshot is deferred
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#debug-pointers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Debug Pointers
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#diagrams" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Diagrams
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Diagrams">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#cross-region-replication" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cross-region replication
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#related-diagrams" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Related diagrams
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../scheduler/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Scheduler & Timing Wheel
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../schema/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Schema Registry
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../slo/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SLO & Metrics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../storage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Storage & WAL
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tenant/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tenant Accounting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tracing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tx/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Transactions (2PC)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Operations
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Operations
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../DOCKER/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Docker
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../PERFORMANCE/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Performance & Benchmarks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Project
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Project
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../plan/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Remediation Plan
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../CONTRIBUTING/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../CODE_OF_CONDUCT/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Code of Conduct
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#purpose" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Purpose
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#key-files" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Key Files
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#main-flow-intra-cluster" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Main Flow (intra-cluster)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Main Flow (intra-cluster)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#incremental-catch-up-sync" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Incremental catch-up (Sync)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#bulk-install-snapshot" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Bulk install (Snapshot)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#leadership-and-fencing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Leadership and fencing
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#log-start" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Log start
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#publishes-that-fail-after-the-append" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Publishes that fail after the append
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#production-decisions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Production Decisions
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#trigger-policy-known-limitation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Trigger Policy &amp; Known Limitation
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Trigger Policy &amp; Known Limitation">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#why-mid-flight-auto-snapshot-is-deferred" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why mid-flight auto-snapshot is deferred
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#debug-pointers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Debug Pointers
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#diagrams" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Diagrams
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Diagrams">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#cross-region-replication" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cross-region replication
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#related-diagrams" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Related diagrams
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="replication-architecture">Replication Architecture<a class="headerlink" href="#replication-architecture" title="Permanent link">&para;</a></h1>
+<h2 id="purpose">Purpose<a class="headerlink" href="#purpose" title="Permanent link">&para;</a></h2>
+<p>Replication keeps partition data synchronized across intra-cluster followers
+and pushes events to remote regions for geo-resilience. Two distinct paths
+exist:</p>
+<ul>
+<li><strong>Intra-cluster replication</strong> (<code>internal/replication/leader.go</code>,
+  <code>internal/replication/follower.go</code>) — synchronous, quorum-acked leader →
+  follower streaming over a dedicated internal gRPC listener
+  (<code>internal/api/internal_grpc_server.go</code>), with optional mTLS
+  (<code>internal/replication/mtls.go</code>).</li>
+<li><strong>Cross-region replication</strong> (<code>internal/replication/region.go</code>) —
+  asynchronous, best-effort batched push via the separate
+  <code>CrossRegionService</code> gRPC service. No ISR semantics; fire-and-forget.
+  <strong>Experimental</strong>: a node with <code>CRONOS_REGIONS</code> set refuses to start without
+  <code>--dev --experimental-features</code>, and the service is registered only there.</li>
+</ul>
+<h2 id="key-files">Key Files<a class="headerlink" href="#key-files" title="Permanent link">&para;</a></h2>
+<ul>
+<li><a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/replication/leader.go">internal/replication/leader.go</a> — <code>Leader.Replicate</code>, <code>Leader.catchUpFollower</code>, <code>FollowerInfo</code> management, ISR/quorum accounting.</li>
+<li><a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/replication/follower.go">internal/replication/follower.go</a> — <code>Follower.InstallSnapshot</code>, <code>Follower.dialCredentials</code>, follower-side state.</li>
+<li><a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/replication/mtls.go">internal/replication/mtls.go</a> — <code>MTLSConfig</code>, <code>BuildClientTLSConfig</code>, <code>BuildServerTLSConfig</code>.</li>
+<li><a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/replication/region.go">internal/replication/region.go</a> — <code>CrossRegionReplicator</code>, per-region batched async push.</li>
+<li><a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/api/replication_server.go">internal/api/replication_server.go</a> — <code>ReplicationServiceHandler.Append</code>, <code>.Sync</code>, <code>.Snapshot</code> (server-side handlers).</li>
+<li><a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/api/internal_grpc_server.go">internal/api/internal_grpc_server.go</a> — <code>InternalGRPCServer</code>, registers <code>ReplicationServiceServer</code> and <code>RaftServiceServer</code> on a separate gRPC listener (default <code>:7947</code>).</li>
+<li><a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/api/crossregion_server.go">internal/api/crossregion_server.go</a> — <code>CrossRegionServiceServer</code> handler.</li>
+<li><a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/partition/manager.go">internal/partition/manager.go</a> — <code>PartitionManager.SyncPartitionFromLeader</code> (the trigger path for bulk snapshot install during node join).</li>
+<li><a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/cluster/manager.go">internal/cluster/manager.go</a> — <code>Manager.JoinCluster</code> (calls <code>SyncPartitionFromLeader</code> for every partition the joining node owns; the cluster router also calls it during partition moves, <code>internal/cluster/router.go</code>).</li>
+</ul>
+<h2 id="main-flow-intra-cluster">Main Flow (intra-cluster)<a class="headerlink" href="#main-flow-intra-cluster" title="Permanent link">&para;</a></h2>
+<ol>
+<li>A publish enters <code>Leader.Replicate(events)</code> with a contiguous batch.</li>
+<li><code>Leader</code> snapshots its follower list and <code>minISR</code> under a read lock.</li>
+<li>For each connected follower, <code>sendToFollower</code> issues a gRPC
+   <code>ReplicationService.Append</code> carrying <code>PartitionId</code>, <code>Events</code>,
+   <code>ExpectedNextOffset</code>, <code>Term</code>, <code>PrevLogTerm</code>, and an IEEE CRC32 batch
+   checksum (<code>computeBatchChecksum</code>).</li>
+<li>The follower handler (<code>ReplicationServiceHandler.Append</code>) verifies the
+   batch checksum, then decides whether the sender may write: it rejects a
+   term older than the one it has accepted and a second node claiming a term
+   another node already holds, and records a newer term and its leader on
+   disk before applying anything. Entries it already holds are compared with
+   the leader's and appended via <code>WAL.AppendReplicatedBatch</code> (see
+   <a href="#leadership-and-fencing">Leadership and fencing</a>).</li>
+<li>The leader returns success to the client only after at least
+   <code>min-insync-replicas</code> <strong>replicas including the leader itself</strong> have
+   acknowledged (i.e. minISR−1 followers). It returns as soon as that
+   quorum is reached, or as soon as it can no longer be reached; sends to
+   the remaining followers finish in the background, in offset order.
+   Each <code>Append</code> RPC is bounded by <code>--replication-timeout</code>.</li>
+</ol>
+<h3 id="incremental-catch-up-sync">Incremental catch-up (<code>Sync</code>)<a class="headerlink" href="#incremental-catch-up-sync" title="Permanent link">&para;</a></h3>
+<p>When a follower falls behind (<code>f.NextOffset &lt; events[0].Offset</code>),
+<code>Leader.catchUpFollower</code> slices <code>[from, to)</code> from the leader's WAL into
+<code>batchSize</code>-sized chunks, and reads each chunk only as far as 8 MiB
+(<code>catchUpBytes</code>, through <code>WAL.ReadEventsWithin</code>); one larger event goes on its
+own. A request has to stay under the transport's 64 MiB limit whatever the
+events weigh, so a chunk that does not fit goes as several requests, each
+continuing from the follower's acknowledged offset, and replays them through
+the same <code>Append</code> RPC.
+A follower with more than four batches outstanding is skipped for new
+batches instead of queueing without bound; it is caught up from the WAL by
+its next send, or by the leader's maintenance loop (every 500 ms) when the
+partition is otherwise idle. A follower whose log is empty is caught up from
+offset 0 the same way. A follower that has not acknowledged anything yet is
+first asked where its log ends, with an append that carries no entries;
+without that, an idle partition would neither catch it up nor learn what is on
+a quorum after a failover until somebody published.
+For very long catch-up ranges the leader may also serve
+<code>ReplicationService.Sync</code>, a server-streaming RPC that returns
+<code>ReplicationSyncResponse</code> chunks of decoded events.</p>
+<h3 id="bulk-install-snapshot">Bulk install (<code>Snapshot</code>)<a class="headerlink" href="#bulk-install-snapshot" title="Permanent link">&para;</a></h3>
+<p>Newly joined replicas or freshly wiped followers are initialized via
+<code>Follower.InstallSnapshot(ctx, leaderAddr, partitionID, startOffset)</code>
+(<code>internal/replication/follower.go</code>):</p>
+<ol>
+<li>Dial the leader over the internal gRPC listener, using mTLS when
+   <code>--replication-tls-enabled</code> is set (see <code>dialCredentials</code>).</li>
+<li>Call <code>ReplicationService.Snapshot</code>. The leader flushes its active
+   segment, then for each segment and sparse-index file, sends a
+   <code>ReplicationSnapshotHeader</code> (filename, first/last offset, file size,
+   per-file IEEE CRC32, <code>is_index</code> flag) followed by 1 MB
+   <code>ReplicationSnapshotChunk</code> data frames.</li>
+<li>The follower stages files under
+   <code>&lt;dataDir&gt;/snapshot-staging/{segments,index}/</code>, computing a running
+   CRC32 over each file as it lands. If the transfer breaks, the files that
+   arrived stay staged: the next attempt lists them with their sizes and
+   checksums, and the leader sends only the files that are missing or
+   different, answering the others with a header marked <code>reuse</code>. Staged files
+   the leader no longer has are removed.</li>
+<li>Each file's size and CRC32 are checked against its header as it
+   completes. The trailer carries the source's epoch: a source behind the
+   epoch this replica has accepted was superseded as leader, and its snapshot
+   is refused without touching the local log.</li>
+<li><code>WAL.InstallCheckpoint</code> then swaps the generations under a journal
+   (<code>snapshot-install.state</code>): it writes <code>prepared</code>, moves <code>segments</code> and
+   <code>index</code> aside as <code>*.old</code>, moves the staged directories into place, loads
+   and verifies them against the announced last offset, writes <code>installed</code>,
+   and removes the old directories. A failure, or a crash before <code>installed</code>,
+   restores the old log; <code>RecoverSnapshot</code> finishes or undoes an interrupted
+   install whenever the WAL is opened.</li>
+<li>The installed epoch is persisted, so the replica refuses appends from an
+   older leader after a restart as well.</li>
+</ol>
+<p>The full install is wrapped in a 10-minute <code>context</code> by
+<code>PartitionManager.SyncPartitionFromLeader</code>
+(<code>internal/partition/manager.go:1160</code>), which is itself invoked from
+<code>Manager.JoinCluster</code> (<code>internal/cluster/manager.go:620</code>) for every
+partition the joining node owns.</p>
+<p><code>Manager.reconcileLocalLeadership</code> runs whenever a committed assignment
+changes, and every 5s, and idempotently wires up <code>PromoteToLeader</code> +
+<code>AddFollower</code> on every partition committed to this node, which is what
+enables streaming <code>Append</code> on a healthy cluster.</p>
+<p>The leader's checkpoint copies files without holding the WAL lock: appends are
+paused only while it notes where each file ends.</p>
+<h2 id="leadership-and-fencing">Leadership and fencing<a class="headerlink" href="#leadership-and-fencing" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>One authority.</strong> A node leads a partition only when the Raft-committed
+  assignment says so (<code>internal/cluster/leadership.go</code>). The hash ring decides
+  where replicas belong and which node would ideally lead; it never makes a
+  node the leader by itself.</li>
+<li><strong>One leader per epoch.</strong> Every committed change raises the partition's
+  epoch. A replica stores <code>{epoch, leader}</code> in <code>epoch.json</code> and accepts appends
+  at that epoch from that leader only.</li>
+<li><strong>Divergent tails.</strong> Log entries carry the term they were written in. When a
+  leader sends an entry the follower already holds, the same offset and term
+  is a retry and is skipped; a different term means the follower's entry and
+  everything after it were written under another leader, and they are removed
+  and replaced. Entries are never removed within a term.</li>
+<li><strong>Where an append continues from.</strong> A leader sends entries from where it
+  believes the follower's log ends, so the comparison above only covers what
+  it sends. Every append therefore also names the entry it follows and that
+  entry's term. A follower that holds an entry of another term there refuses
+  the append and reports that term and where its run of it starts; the leader
+  resends from the point where the two logs still agree. An idle leader sends
+  the same check with no entries, so an old leader that returns with a tail it
+  never replicated is brought in line without waiting for a publish. What a
+  follower holds counts as replicated only up to the entry the leader has
+  checked.</li>
+<li><strong>What a refusal says.</strong> A follower that refuses an append reports where
+  its log ends, which tells the leader where to resume sending and nothing
+  else. It is no evidence of what the follower holds: a follower that has
+  gone over to a newer leader reports a log that the newer leader wrote. The
+  leader skips sending only what the follower has acknowledged of this
+  leader's own log.</li>
+<li><strong>A replaced leader stops by itself.</strong> Every answer carries the term the
+  follower has accepted. A leader that reads a newer term than its own there
+  has been replaced, whatever the cluster's records on its node say so far:
+  it refuses publishes, counts nothing more as replicated, records the term,
+  and stops leading (<code>PartitionManager.stepDownFor</code>). After a network failure
+  the followers' answers arrive seconds before the cluster's records do.</li>
+<li><strong>Beyond the end of the leader's log.</strong> Every request also says where the
+  leader's log ends (<code>leader_log_end</code>). A follower that holds an entry there
+  which was written in another term holds a tail the leader never had, and
+  removes it. The checks above did not reach such a tail when the leader had
+  nothing to send: the follower's log stayed longer than the leader's until
+  somebody published, and a handoff of leadership, which waits for the two
+  logs to be equal and refuses publishes while it waits, could not finish.
+  An entry of the leader's own term at that offset stays: it came with a
+  later request, and the one that says the log ends there arrived late.</li>
+<li><strong>Failover.</strong> When the committed leader is dead, the Raft leader asks the
+  remaining replicas where their logs end (<code>ReplicationService.Position</code>) and
+  elects the most complete one. It needs <code>replicas - minISR + 1</code> answers to be
+  sure every acknowledged write is on a replica that answered; with fewer it
+  waits, except when the leader alone acknowledged writes (<code>minISR</code> 1). The
+  new epoch is above every epoch the replicas report, not just above the
+  cluster's own count.</li>
+<li><strong>An election fences before it asks.</strong> "Dead" is what the Raft leader
+  sees. The leader it replaces may be running and reach other replicas, and
+  what they confirm for it after they have answered would not be in the log
+  of the replica chosen. So the election first commits that the partition
+  has no leader, at a new epoch; clients are told to retry, and an election
+  stays owed until one is committed, on whichever node decides next. Then
+  every replica that is asked records that epoch before it answers
+  (<code>fence_epoch</code>, <code>PartitionManager.FenceLocalReplica</code>). From there on it
+  refuses the old leader, so nothing the old leader sends arrives behind its
+  answer. A replica that held nothing of the partition is given an empty log
+  to hold the epoch with, so that the old leader cannot fill it and count it.
+  With <code>replicas - minISR + 1</code> replicas fenced, the old leader cannot gather
+  <code>minISR</code> confirmations any more. The leader is then committed at a higher
+  epoch. The old leader learns of it from the first replica that refuses it,
+  and stops.</li>
+<li><strong>First assignment.</strong> A partition's first leader is chosen the same way:
+  the Raft leader asks the replicas what they hold. A restored cluster thereby
+  continues from its backups, led by the most complete replica at an epoch
+  above the ones stored with the data, without needing Raft metadata from the
+  cluster that took the backups.</li>
+<li><strong>Handoff.</strong> When the ring prefers another live replica, the Raft leader
+  commits the intent first. The current leader then refuses publishes; once it
+  reports that none is in flight and the target's log ends at the same entry,
+  the change of leader is committed. Until then nothing changes hands. A
+  handoff that takes too long is abandoned and the leader stays.</li>
+<li><strong>Consumer progress.</strong> The leader sends each consumer group's completed work
+  to its followers (<code>ReplicationService.SyncConsumerProgress</code>) whenever it
+  changes and at least every 30 seconds, so a promoted follower does not
+  redeliver it. The same message carries the position of the partition's
+  change feed, so a promoted follower continues exporting where the old
+  leader stopped (see <a href="../cdc/">cdc.md</a>).</li>
+<li><strong>Progress stops at the end of the log.</strong> Completion is recorded by
+  offset, so it is worth as much as the entry at that offset. A replica keeps
+  none at or beyond the end of its own log: a follower takes its leader's
+  progress only that far, and is sent it again once it has caught up; what
+  was recorded for entries that a follower removes goes with them
+  (<code>Partition.CutLog</code>); and whatever is left beyond the end of the log is
+  removed when a partition starts and when a replica is made leader. Without
+  this the events that later took those offsets counted as finished and were
+  never delivered.</li>
+<li><strong>Only replicated entries are delivered.</strong> A leader hands its consumers
+  entries up to the offset that the required replicas hold
+  (<code>Partition.DeliverableThrough</code>), and holds back the rest of its log until
+  they have it. An entry that only the leader holds can still be removed, and
+  a consumer cannot give an event back. What the required replicas held at
+  any time since the leader began to lead counts
+  (<code>Leader.ReplicatedThrough</code>): a leader that loses its followers goes on
+  delivering what was replicated before, since every later leader has it. A
+  new leader delivers nothing until it has heard from enough followers,
+  which takes one round of its maintenance loop. A replica that does not
+  lead delivers nothing. With <code>--min-insync-replicas=1</code> the leader alone is
+  enough, and it delivers everything it has written.</li>
+</ul>
+<h2 id="log-start">Log start<a class="headerlink" href="#log-start" title="Permanent link">&para;</a></h2>
+<p>The leader of a partition removes finished segments from the start of its log
+(see <a href="../storage/">storage.md</a>). Every append, and an append without entries
+when a partition is idle, names the offset the leader's log starts at
+(<code>log_start_offset</code>), and a follower follows it
+(<code>Partition.FollowLogStart</code>):</p>
+<ul>
+<li>It removes the segments of its own log that lie wholly below that offset.
+  Its segments need not end where the leader's do, so its log may start a
+  little earlier than the leader's.</li>
+<li>If its log <strong>ends</strong> before that offset, it empties its log and restarts it
+  there. The entries in between cannot be sent any more, and nobody needs
+  them: they were finished before the leader removed them. This is how a
+  replica with an empty disk joins a partition that has already removed
+  entries, and how one that was away for long comes back, without a snapshot.</li>
+<li>Either way the entries below that offset count as complete for every
+  consumer group on that replica, so that it does not look for them if it
+  leads next.</li>
+</ul>
+<p>A follower never removes anything by its own decision: its copy of the
+consumer progress trails the leader's. A new leader removes nothing until it
+has heard from enough followers to know what a quorum holds.</p>
+<p>What this does not do: the leader does not wait for a follower that is behind
+or down before it removes entries. That follower restarts its log at the
+leader's start when it returns, which costs nothing that is still needed but
+means that, for a while, the removed range existed on fewer replicas than the
+replication factor. It was finished by then.</p>
+<h2 id="publishes-that-fail-after-the-append">Publishes that fail after the append<a class="headerlink" href="#publishes-that-fail-after-the-append" title="Permanent link">&para;</a></h2>
+<p>A publish appends to the leader's log before replication, a requested fsync,
+and scheduling. If one of those fails the log cannot take the events back, so
+the partition holds them (<code>internal/partition/unaccepted.go</code>): they are not
+scheduled, and their message IDs are recorded as <em>appended at offset N</em>, not
+as accepted. They are accepted, and scheduled, when the log is known to be
+replicated that far:</p>
+<ul>
+<li>by a retry of the publish, which is finished rather than appended again;</li>
+<li>by the next publish that reaches the required replicas, since a follower
+  holds a prefix of the log;</li>
+<li>by the leader's maintenance loop once catch-up has taken them to a quorum.</li>
+</ul>
+<p>After a restart or a promotion the events not yet due are scheduled, and the
+events already due stay in the log for their subscriptions to read. The dedup
+store is re-seeded from the log tail with <em>appended</em> records, so a retry
+is answered from the log. If the log no longer holds the event, because a newer
+leader replaced this node's unreplicated tail, the record is dropped and the
+retry is published as new.</p>
+<h2 id="production-decisions">Production Decisions<a class="headerlink" href="#production-decisions" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>Wire format</strong>: gRPC over <code>InternalGRPCServer</code> (default <code>:7947</code>), a
+  separate listener from the public client API on <code>:9000</code>. Public clients
+  cannot reach replication traffic, and replication traffic does not
+  contend for public-API rate limits or interceptors.</li>
+<li><strong>Integrity</strong>:</li>
+<li>Every <code>ReplicationAppendRequest</code> carries a per-batch IEEE CRC32
+    (<code>computeBatchChecksum</code>), which the follower handler verifies before it
+    applies the batch.</li>
+<li>Every <code>ReplicationSnapshotHeader</code> carries a per-file IEEE CRC32 and
+    size; the follower checks each file against its header and aborts the
+    install on a mismatch.</li>
+<li>Each WAL record (v2) carries its own CRC32 plus a payload checksum
+    and Raft term, so per-record integrity is preserved on disk after
+    install.</li>
+<li><strong>Term fencing</strong>: <code>ReplicationServiceHandler.Append</code> rejects
+  <code>req.Term &lt; p.Epoch</code>, rejects a second leader at the current term, and on a
+  newer term persists it (stepping down first if this node was leading)
+  before applying the sender's entries. See
+  <a href="#leadership-and-fencing">Leadership and fencing</a>.</li>
+<li><strong>Quorum durability</strong>: <code>Leader.Replicate</code> returns success only after
+  <code>min-insync-replicas</code> replicas <strong>including the leader</strong> have appended
+  (<code>--min-insync-replicas</code>, default <code>1</code>). With RF=3 / minISR=2 the leader</li>
+<li>at least one follower must ack before the client write is
+  acknowledged. If the cluster degrades below minISR, writes fail closed
+  rather than silently succeeding on a leader-only ack. In the <code>batch</code> and
+  <code>every_event</code> fsync modes a follower syncs an append before it
+  acknowledges it, so a quorum-acknowledged write is on that many disks. In
+  <code>periodic</code> mode it acknowledges first and syncs on a timer, and a
+  simultaneous leader and follower crash inside one flush interval can lose
+  acknowledged writes; production mode refuses <code>periodic</code>.</li>
+<li><strong>Snapshot trigger</strong>: bulk install is invoked by
+  <code>PartitionManager.SyncPartitionFromLeader</code> (node join and router-driven
+  partition moves). The <code>--snapshot-catchup-threshold</code> flag (default
+  <code>10000</code>) is defined and exposed but is currently a <strong>dead config key</strong> —
+  nothing in <code>internal/partition</code>, <code>internal/replication</code>, or
+  <code>internal/cluster</code> reads it; <code>SyncPartitionFromLeader</code> installs a
+  snapshot unconditionally. Treated as a future-work knob here; flag stays
+  so configuration is forward-compatible.</li>
+<li><strong>Journaled swap on install</strong>: the WAL is closed before the
+  <code>segments.old</code>/<code>index.old</code> renames, staged dirs are renamed into place, and
+  the old pair is kept until the new log has been loaded and verified. Every
+  crash point recovers to one complete generation, never a mix
+  (<code>internal/storage/checkpoint_test.go</code>).</li>
+<li><strong>mTLS</strong>: <code>--replication-tls-enabled</code> plus
+  <code>--replication-tls-{ca,cert,key}-file</code> (all three are required, and the
+  same certificates secure the membership and Raft ports; see
+  <a href="../cluster/">cluster.md</a>) enable cluster-only mTLS via
+  <code>replication.BuildClientTLSConfig</code> / <code>BuildServerTLSConfig</code>. Server
+  uses <code>tls.RequireAndVerifyClientCert</code>; both sides pin against
+  <code>--replication-tls-ca-file</code>. In dev mode the follower falls back to
+  insecure credentials (<code>Follower.dialCredentials</code>,
+  <code>internal/replication/follower.go:261</code>).</li>
+<li><strong>Cross-region path is separate</strong>: <code>CrossRegionReplicator</code>
+  (<code>internal/replication/region.go</code>) batches outgoing events per region
+  (100 events / 100 ms), pushes them via <code>CrossRegionService.ReplicateEvents</code>,
+  and never participates in the intra-cluster quorum. Loss of a remote
+  region does not stall local writes.</li>
+<li><strong>Conflict resolution</strong>: cross-region uses last-write-wins; intra-cluster
+  uses Raft-style term fencing (the leader with the higher epoch wins).</li>
+</ul>
+<h2 id="trigger-policy-known-limitation">Trigger Policy &amp; Known Limitation<a class="headerlink" href="#trigger-policy-known-limitation" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Trigger</th>
+<th>Code</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Bulk snapshot install (<code>InstallSnapshot</code>)</td>
+<td>New node joins and owns partitions it does not yet have data for (wipe/bootstrap), or the router moves a partition</td>
+<td><code>Manager.JoinCluster</code> / router rebalance → <code>PartitionManager.SyncPartitionFromLeader</code> (unconditional)</td>
+</tr>
+<tr>
+<td>Incremental catch-up (<code>Sync</code> / <code>Append</code> loop)</td>
+<td>A <strong>connected</strong> follower reports <code>NextOffset &lt; nextBatchStart</code> during normal <code>Replicate</code>, or is found behind while idle by the maintenance loop</td>
+<td><code>Leader.catchUpFollower</code>, <code>Leader.catchUpIdleFollowers</code></td>
+</tr>
+<tr>
+<td>Automatic lag-driven snapshot install</td>
+<td><strong>Not implemented (documented gap).</strong> No mid-flight loop watches lag and switches to <code>InstallSnapshot</code> when lag &gt; <code>--snapshot-catchup-threshold</code> — the flag is parsed but never read (dead config key).</td>
+<td>See <a href="../../../ARCHITECTURE/#known-limitations">ARCHITECTURE.md § Known Limitations</a></td>
+</tr>
+</tbody>
+</table>
+<h3 id="why-mid-flight-auto-snapshot-is-deferred">Why mid-flight auto-snapshot is deferred<a class="headerlink" href="#why-mid-flight-auto-snapshot-is-deferred" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Incremental catch-up preserves the normal leader→follower hot path and term fencing.</li>
+<li>Full snapshot is heavyweight (segment + index stream, CRC, atomic dir swap, WAL close/reload).</li>
+<li>Bootstrap/join already covers the common “empty or wiped follower” case.</li>
+</ul>
+<p><strong>Operator guidance:</strong> If a follower is hopelessly behind after network isolation, prefer
+re-provision / re-join so <code>SyncPartitionFromLeader</code> can InstallSnapshot, rather than waiting
+for unbounded incremental catch-up alone.</p>
+<h2 id="debug-pointers">Debug Pointers<a class="headerlink" href="#debug-pointers" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Quorum / append errors: <a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/api/replication_server.go">internal/api/replication_server.go</a> (<code>ReplicationServiceHandler.Append</code>)</li>
+<li>Follower lag and ISR state: <a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/replication/leader.go">internal/replication/leader.go</a> (<code>FollowerInfo</code>, <code>GetInSyncReplicas</code>, <code>GetHighWatermark</code>)</li>
+<li>Bulk install failure (CRC mismatch, atomic-swap error): <a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/replication/follower.go">internal/replication/follower.go</a> (<code>InstallSnapshot</code>)</li>
+<li>mTLS handshake failure: <a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/replication/mtls.go">internal/replication/mtls.go</a> (<code>BuildClientTLSConfig</code> / <code>BuildServerTLSConfig</code>)</li>
+<li>New-node join flow: <a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/cluster/manager.go">internal/cluster/manager.go</a> (<code>JoinCluster</code> at line 620)</li>
+<li>Cross-region queue / flush lag: <a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/replication/region.go">internal/replication/region.go</a> (<code>flushLoop</code>)</li>
+</ul>
+<h2 id="diagrams">Diagrams<a class="headerlink" href="#diagrams" title="Permanent link">&para;</a></h2>
+<h3 id="cross-region-replication">Cross-region replication<a class="headerlink" href="#cross-region-replication" title="Permanent link">&para;</a></h3>
+<pre class="mermaid"><code>flowchart TB
+    subgraph RegionA
+      ALeader[Leader partition]
+      AFollower1[Follower 1]
+      AFollower2[Follower 2]
+      AHook["Change feed: accepted events, leader only"]
+    end
+    subgraph RegionB
+      BInternal["Internal gRPC :7947&lt;br/&gt;CrossRegionService"]
+      BApply["Local WAL apply&lt;br/&gt;AppendBatch on receiving partition"]
+      BNote["Cross-region-applied events are NOT re-fanned-out&lt;br/&gt;to intra-region followers on this path"]
+    end
+
+    ALeader --&gt; AHook
+    AHook --&gt;|"ReplicateAsync if source_region empty"| BInternal
+    BInternal --&gt;|"tag source_region meta, dedup + LWW on created_ts"| BApply
+    BApply -.-&gt; BNote
+    ALeader --&gt;|"ReplicationService Append"| AFollower1
+    ALeader --&gt;|"ReplicationService Append"| AFollower2
+
+    Fetch["FetchEvents pull catch-up RPC also served on :7947"]
+    BInternal -.-&gt; Fetch
+
+    EchoGuard["Echo guard: skip re-export when source_region meta set"]
+    AHook -.-&gt; EchoGuard</code></pre>
+<h3 id="related-diagrams">Related diagrams<a class="headerlink" href="#related-diagrams" title="Permanent link">&para;</a></h3>
+<ul>
+<li><a href="../cluster/#cluster-rebalance">Cluster rebalance</a></li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/jatin711-debug/cronos_db_golang" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+      <div class="md-progress" data-md-component="progress" role="progressbar"></div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../../..", "features": ["navigation.instant", "navigation.instant.progress", "navigation.tracking", "navigation.top", "navigation.sections", "navigation.indexes", "search.highlight", "search.suggest", "search.share", "content.tooltips", "toc.follow"], "search": "../../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+        <script src="https://cdn.jsdelivr.net/npm/svg-pan-zoom@3.6.1/dist/svg-pan-zoom.min.js"></script>
+      
+        <script src="../../../javascripts/mermaid-zoom.js"></script>
+      
+    
+  </body>
+</html>

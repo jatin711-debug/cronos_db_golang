@@ -1,0 +1,3008 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Documentation for CronosDB — a distributed, timestamp-triggered event database">
+      
+      
+      
+        <link rel="canonical" href="https://jatin711-debug.github.io/cronos_db_golang/system-design/">
+      
+      
+        <link rel="prev" href="../DEVELOPER_ARCHITECTURE_GUIDE/">
+      
+      
+        <link rel="next" href="../architecture/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Learn System Design - CronosDB Docs</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="blue-grey" data-md-color-accent="deep-orange">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#learn-system-design-from-cronosdb" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="CronosDB Docs" class="md-header__button md-logo" aria-label="CronosDB Docs" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m16.5 16.25 2.86 1.69-.75 1.22L15 17v-5h1.5zM23 16c0 3.87-3.13 7-7 7a7 7 0 0 1-5.75-3C6.18 19.79 3 18.08 3 16v-3c0 1.88 2.58 3.44 6.06 3.88C9.03 16.59 9 16.3 9 16c0-.38.04-.75.1-1.12-3.5-.43-6.1-2-6.1-3.88V8c0 2.09 3.2 3.8 7.27 4 .6-.86 1.37-1.56 2.26-2.07-.49.04-1.03.07-1.53.07-4.42 0-8-1.79-8-4s3.58-4 8-4 8 1.79 8 4c0 1.2-1.07 2.28-2.75 3 .75.04 1.5.19 2.19.45C18.79 9 19 8.5 19 8v1.68c2.36 1.13 4 3.53 4 6.32m-2 0c0-2.76-2.24-5-5-5s-5 2.24-5 5 2.24 5 5 5 5-2.24 5-5"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            CronosDB Docs
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Learn System Design
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="blue-grey" data-md-color-accent="deep-orange"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="blue-grey" data-md-color-accent="deep-orange"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+          <a href="javascript:void(0)" class="md-search__icon md-icon" title="Share" aria-label="Share" data-clipboard data-clipboard-text="" data-md-component="search-share" tabindex="-1">
+            
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9a3 3 0 0 0-3 3 3 3 0 0 0 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.15c-.05.21-.08.43-.08.66 0 1.61 1.31 2.91 2.92 2.91s2.92-1.3 2.92-2.91A2.92 2.92 0 0 0 18 16.08"/></svg>
+          </a>
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/jatin711-debug/cronos_db_golang" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    jatin711-debug/cronos_db_golang
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="CronosDB Docs" class="md-nav__button md-logo" aria-label="CronosDB Docs" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m16.5 16.25 2.86 1.69-.75 1.22L15 17v-5h1.5zM23 16c0 3.87-3.13 7-7 7a7 7 0 0 1-5.75-3C6.18 19.79 3 18.08 3 16v-3c0 1.88 2.58 3.44 6.06 3.88C9.03 16.59 9 16.3 9 16c0-.38.04-.75.1-1.12-3.5-.43-6.1-2-6.1-3.88V8c0 2.09 3.2 3.8 7.27 4 .6-.86 1.37-1.56 2.26-2.07-.49.04-1.03.07-1.53.07-4.42 0-8-1.79-8-4s3.58-4 8-4 8 1.79 8 4c0 1.2-1.07 2.28-2.75 3 .75.04 1.5.19 2.19.45C18.79 9 19 8.5 19 8v1.68c2.36 1.13 4 3.53 4 6.32m-2 0c0-2.76-2.24-5-5-5s-5 2.24-5 5 2.24 5 5 5 5-2.24 5-5"/></svg>
+
+    </a>
+    CronosDB Docs
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/jatin711-debug/cronos_db_golang" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    jatin711-debug/cronos_db_golang
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+          
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" checked>
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="./" class="md-nav__link md-nav__link--active">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link md-nav__link--active" for="__nav_2" id="__nav_2_label" tabindex="">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Architecture
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ARCHITECTURE/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../TECHNICAL_DEEP_DIVE/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Technical Deep Dive
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../DEVELOPER_ARCHITECTURE_GUIDE/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Developer Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_5" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../architecture/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    By Feature
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_2_5" id="__nav_2_5_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    By Feature
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Layer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/audit/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Audit
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/auth/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Auth
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/cdc/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CDC
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/cluster/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cluster Control Plane
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/compliance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Compliance & Retention
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Config & Reload
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/consumer/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Consumer Groups
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/dashboard/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Dashboard
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/dedup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deduplication
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/delivery/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Delivery Pipeline
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/partition/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Partition Runtime
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/replay/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Replay Engine
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/replication/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Replication
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/scheduler/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Scheduler & Timing Wheel
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/schema/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Schema Registry
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/slo/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SLO & Metrics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/storage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Storage & WAL
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/tenant/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tenant Accounting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tracing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/tx/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Transactions (2PC)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Operations
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Operations
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../DOCKER/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Docker
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../PERFORMANCE/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Performance & Benchmarks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Project
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Project
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../plan/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Remediation Plan
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../CONTRIBUTING/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../CODE_OF_CONDUCT/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Code of Conduct
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#1-the-problem" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. The problem
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#2-the-system-on-one-page" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. The system on one page
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="2. The system on one page">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#technology-map" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Technology map
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#3-life-of-an-event" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Life of an event
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#4-deep-dives" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. Deep dives
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="4. Deep dives">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#41-the-log" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.1 The log
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#42-time" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.2 Time
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#43-idempotent-publish" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.3 Idempotent publish
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#44-partitioning-and-routing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.4 Partitioning and routing
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#45-cluster-control-plane" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.5 Cluster control plane
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#46-replication-and-failover" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.6 Replication and failover
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#47-delivery" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.7 Delivery
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#48-around-the-core" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.8 Around the core
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#5-every-trade-off-on-one-page" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. Every trade-off on one page
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#6-lessons-this-codebase-learned-the-hard-way" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6. Lessons this codebase learned the hard way
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#7-which-document-answers-which-question" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7. Which document answers which question
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#8-try-it-yourself" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8. Try it yourself
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#9-glossary" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9. Glossary
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#10-further-reading" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        10. Further reading
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="learn-system-design-from-cronosdb">Learn System Design from CronosDB<a class="headerlink" href="#learn-system-design-from-cronosdb" title="Permanent link">&para;</a></h1>
+<blockquote>
+<p>What is used where, why it was chosen, and what it costs.</p>
+</blockquote>
+<p>The other documents in this repository describe <strong>what the code does</strong>. This one
+explains <strong>the decisions behind it</strong>: the problem each part solves, the
+alternatives that were on the table, and the price of the choice that was made.
+The aim is that you can carry the reasoning to a different system.</p>
+<p><strong>Who it is for.</strong> Any engineer who can read Go. No knowledge of Raft, LSM
+trees, bloom filters or timing wheels is assumed; each is introduced where it
+is used.</p>
+<p><strong>How to read it.</strong> Sections 1–3 give the whole picture in about fifteen
+minutes. Section 4 is a set of independent deep dives; read the ones you care
+about. Section 5 puts every trade-off on one page, and section 6 lists what
+went wrong in practice, which is where most of the learning is.</p>
+<ul>
+<li><a href="#1-the-problem">1. The problem</a></li>
+<li><a href="#2-the-system-on-one-page">2. The system on one page</a></li>
+<li><a href="#3-life-of-an-event">3. Life of an event</a></li>
+<li><a href="#4-deep-dives">4. Deep dives</a></li>
+<li><a href="#41-the-log">4.1 The log</a> · <a href="#42-time">4.2 Time</a> · <a href="#43-idempotent-publish">4.3 Idempotent publish</a> · <a href="#44-partitioning-and-routing">4.4 Partitioning and routing</a></li>
+<li><a href="#45-cluster-control-plane">4.5 Cluster control plane</a> · <a href="#46-replication-and-failover">4.6 Replication and failover</a> · <a href="#47-delivery">4.7 Delivery</a> · <a href="#48-around-the-core">4.8 Around the core</a></li>
+<li><a href="#5-every-trade-off-on-one-page">5. Every trade-off on one page</a></li>
+<li><a href="#6-lessons-this-codebase-learned-the-hard-way">6. Lessons this codebase learned the hard way</a></li>
+<li><a href="#7-which-document-answers-which-question">7. Which document answers which question</a></li>
+<li><a href="#8-try-it-yourself">8. Try it yourself</a></li>
+<li><a href="#9-glossary">9. Glossary</a></li>
+<li><a href="#10-further-reading">10. Further reading</a></li>
+</ul>
+<hr />
+<h2 id="1-the-problem">1. The problem<a class="headerlink" href="#1-the-problem" title="Permanent link">&para;</a></h2>
+<p>CronosDB stores events that carry a time (<code>schedule_ts</code>) and delivers each one
+to its consumer groups when that time arrives. It is what you would build
+delayed jobs, reminders, retry-after-a-delay, scheduled workflows or a
+distributed cron on.</p>
+<p>That sounds like "a queue with a timer". The difficulty is in the promises:</p>
+<table>
+<thead>
+<tr>
+<th>Promise</th>
+<th>Why it is hard</th>
+<th>What answers it</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>An accepted event is not lost</td>
+<td>Processes crash in the middle of a write, disks buffer, machines die</td>
+<td>An append-only log, <code>fsync</code>, replication to a quorum</td>
+</tr>
+<tr>
+<td>It fires at its time, with millions pending</td>
+<td>Sorting millions of timers is slow, and memory is finite</td>
+<td>A timing wheel, plus a cold store on disk</td>
+</tr>
+<tr>
+<td>A retried publish stays one event</td>
+<td>A producer cannot know whether a publish that timed out worked</td>
+<td>Dedup keyed by <code>message_id</code>, with explicit in-between states</td>
+</tr>
+<tr>
+<td>The system survives a node failure</td>
+<td>A replacement must take over, and every node must agree which one</td>
+<td>Gossip for liveness, Raft for the decision, epochs to fence the loser</td>
+</tr>
+<tr>
+<td>A slow consumer cannot sink the server</td>
+<td>Pushing work builds up state on the server</td>
+<td>Credits, retries with backoff, a circuit breaker, a dead-letter queue</td>
+</tr>
+<tr>
+<td>It scales past one machine</td>
+<td>One log and one timer wheel have a ceiling</td>
+<td>Partitions, placed on nodes by a consistent-hash ring</td>
+</tr>
+</tbody>
+</table>
+<p><strong>The idea that organises everything else:</strong> the log is the source of truth,
+and almost everything around it is an index that can be rebuilt from it.
+Timers, the sparse offset index and recent dedup records are all derived from
+the log. Two things cannot be derived: which consumer group has finished which
+event, and which node leads which partition. Those get their own durable
+stores and their own replication.</p>
+<hr />
+<h2 id="2-the-system-on-one-page">2. The system on one page<a class="headerlink" href="#2-the-system-on-one-page" title="Permanent link">&para;</a></h2>
+<p><img alt="What runs inside one CronosDB node" src="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/docs/system-design/diagrams/01-system-map.svg" /></p>
+<p>Three things to take from the picture:</p>
+<ol>
+<li><strong>One binary, three kinds of work.</strong> The <em>data plane</em> handles events and
+   exists once per partition. The <em>control plane</em> decides which node does what
+   and exists once per node. The <em>cross-cutting</em> parts (auth, schemas, quotas,
+   metrics, encryption, backups) wrap both.</li>
+<li><strong>A partition is the unit of everything.</strong> Ordering, replication,
+   leadership and failure are all per partition. A partition owns one log, one
+   scheduler, one dedup store, one delivery pipeline and one consumer-state
+   store; <a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/partition/manager.go"><code>internal/partition/manager.go</code></a>
+   assembles them.</li>
+<li><strong>Two audiences, separate doors.</strong> Clients use <code>:9000</code> and <code>:8080</code>. Nodes
+   talk to each other on <code>:7946</code> (gossip), <code>:7947</code> (replication) and <code>:7948</code>
+   (Raft). Replication traffic never passes the public interceptor chain, and
+   public clients cannot reach the replication service.</li>
+</ol>
+<h3 id="technology-map">Technology map<a class="headerlink" href="#technology-map" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>Technology</th>
+<th>Where it is used</th>
+<th>Why this one</th>
+<th>What it costs</th>
+<th>The usual alternative</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Go</strong></td>
+<td>The whole server (<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/cmd/api/main.go"><code>cmd/api</code></a>)</td>
+<td>Goroutines fit "many partitions × many streams"; strong networking standard library</td>
+<td>A garbage collector on the hot path, held down with pooling and batching</td>
+<td>Rust or C++ (no GC, slower to build), Java (JVM tuning)</td>
+</tr>
+<tr>
+<td><strong>gRPC + Protocol Buffers</strong></td>
+<td>Client API, replication, admin (<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/proto/events.proto"><code>proto/events.proto</code></a>)</td>
+<td>A typed contract with generated code; streams in both directions, which <code>Subscribe</code> and <code>Ack</code> need</td>
+<td>Harder to poke at than JSON; browsers need a proxy, so the dashboard goes through an HTTP JSON handler</td>
+<td>REST/JSON; a custom binary protocol as in Kafka</td>
+</tr>
+<tr>
+<td><strong>Hand-written segmented log</strong></td>
+<td>Event data (<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/storage/wal.go"><code>internal/storage</code></a>)</td>
+<td>Sequential appends are the cheapest durable write, and the record carries exactly what recovery and replication need</td>
+<td>Every crash-safety and corruption case is yours to get right</td>
+<td>Keeping the log in an embedded store (simpler, more write amplification)</td>
+</tr>
+<tr>
+<td><strong>Pebble</strong> (LSM-tree key-value store)</td>
+<td>Dedup records, consumer progress, far-future timer references</td>
+<td>Embedded, so no extra service; good at many small writes and ordered scans</td>
+<td>Background compaction I/O; one more on-disk format to back up</td>
+<td>bbolt/SQLite (B-tree: better reads, slower writes), an external Redis</td>
+</tr>
+<tr>
+<td><strong>hashicorp/raft + BoltDB</strong></td>
+<td>Cluster metadata: who leads which partition, at which epoch (<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/cluster/raft.go"><code>internal/cluster/raft.go</code></a>)</td>
+<td>A proven consensus library for a small amount of state that must be agreed on</td>
+<td>Needs a majority to make progress; bootstrap and join logic</td>
+<td>An external etcd or ZooKeeper; one Raft group per partition</td>
+</tr>
+<tr>
+<td><strong>Gossip membership</strong> (built-in TCP heartbeats, over mutual TLS in production)</td>
+<td>Liveness (<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/cluster/membership.go"><code>internal/cluster/membership.go</code></a>)</td>
+<td>Cheap and leaderless</td>
+<td>Eventually consistent; can suspect a healthy node</td>
+<td>Liveness from Raft heartbeats only; external service discovery</td>
+</tr>
+<tr>
+<td><strong>Consistent-hash ring</strong> (SHA-256, 2,048 virtual nodes)</td>
+<td>Which nodes hold a partition (<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/cluster/hashring.go"><code>internal/cluster/hashring.go</code></a>)</td>
+<td>Few partitions move when a node joins or leaves</td>
+<td>Needs many virtual nodes to be even in a small cluster</td>
+<td>A placement table managed by a controller, as in Kafka</td>
+</tr>
+<tr>
+<td><strong>FNV-1a hash mod N</strong></td>
+<td>Which partition a key belongs to</td>
+<td>A few nanoseconds, no state</td>
+<td>The partition count is fixed; changing it remaps almost every key</td>
+<td>Consistent hashing of keys; range partitioning</td>
+</tr>
+<tr>
+<td><strong>Hierarchical timing wheel</strong></td>
+<td>Pending timers (<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/scheduler/timing_wheel.go"><code>internal/scheduler</code></a>)</td>
+<td>Constant work per timer, however many are pending</td>
+<td>Precise to one tick only; hot timers live in memory</td>
+<td>A priority queue; a sorted index polled by time</td>
+</tr>
+<tr>
+<td><strong>Bloom filter</strong> (Rust through cgo, pure-Go fallback)</td>
+<td>Dedup fast path (<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/dedup/bloom_store.go"><code>internal/dedup</code></a>)</td>
+<td>"Definitely new" answered from memory</td>
+<td>False positives, memory per partition, and a second toolchain</td>
+<td>An exact in-memory set; a cuckoo filter</td>
+</tr>
+<tr>
+<td><strong>AES-256-GCM</strong></td>
+<td>Encryption at rest (<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/storage/crypto.go"><code>internal/storage/crypto.go</code></a>)</td>
+<td>Encrypts and authenticates each record</td>
+<td>A nonce and tag on every record; the operator must keep the key safe, and it is never in a backup</td>
+<td>Disk-level encryption; envelope encryption with a KMS</td>
+</tr>
+<tr>
+<td><strong>JWT + RBAC policy file</strong></td>
+<td>Authentication and per-topic authorisation (<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/auth/auth.go"><code>internal/auth</code></a>)</td>
+<td>Verified locally, no call to an identity service per request</td>
+<td>Tokens are hard to revoke before they expire</td>
+<td>mTLS client certificates; token introspection</td>
+</tr>
+<tr>
+<td><strong>Prometheus + OpenTelemetry</strong></td>
+<td>Metrics and traces</td>
+<td>The common pull-based metrics format; vendor-neutral tracing</td>
+<td>Tracing is off by default because it costs throughput</td>
+<td>—</td>
+</tr>
+<tr>
+<td><strong>Docker, Helm (StatefulSet)</strong></td>
+<td>Deployment (<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/charts/cronos-db/values.yaml"><code>charts/cronos-db</code></a>)</td>
+<td>Stable node names and one volume per node, which a stateful system needs</td>
+<td>—</td>
+<td>—</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="3-life-of-an-event">3. Life of an event<a class="headerlink" href="#3-life-of-an-event" title="Permanent link">&para;</a></h2>
+<p><img alt="Life of an event, from Publish to Ack" src="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/docs/system-design/diagrams/02-event-lifecycle.svg" /></p>
+<p><strong>Write path</strong> — <a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/api/handlers.go"><code>EventServiceHandler.Publish</code> / <code>PublishBatch</code></a>:</p>
+<ol>
+<li><strong>Validate.</strong> Size limits (<code>message_id</code> ≤ 128 characters, payload ≤ 4 MB),
+   the caller's JWT and topic permission, and the topic's schema if one is
+   registered. Cheap checks come first, so a bad request costs nothing durable.</li>
+<li><strong>Route.</strong> The key (the <code>partition_key</code> metadata entry if present,
+   otherwise the <code>message_id</code>) is hashed to a partition. In a cluster the node
+   then checks that it is the <em>committed</em> leader of that partition; if it is
+   not, or there is no leader yet, the publish is refused with an error the
+   client can retry.</li>
+<li><strong>Claim the ID.</strong> The dedup store records that a publish with this
+   <code>message_id</code> is in flight. An ID that was already accepted is answered with
+   "duplicate" and nothing is written.</li>
+<li><strong>Append.</strong> The event is appended to the partition's log and gets its
+   offset. Whether the bytes are on disk before the next step depends on the
+   fsync mode.</li>
+<li><strong>Replicate.</strong> With more than one replica, the leader sends the batch to
+   its followers and waits until <code>min-insync-replicas</code> replicas (the leader
+   counts as one) hold it.</li>
+<li><strong>Accept.</strong> The timer is armed, the dedup record becomes "accepted at
+   offset N", and the producer gets its answer.</li>
+</ol>
+<p>Steps 4–6 are where a publish can fail <em>after</em> the event is already in the
+log. Section <a href="#43-idempotent-publish">4.3</a> explains what happens then.</p>
+<p><strong>Delivery path</strong> — starts later, when <code>schedule_ts</code> arrives:</p>
+<ol>
+<li>The timing wheel's current slot expires, and its timers move to the ready
+   queue.</li>
+<li>The delivery worker drains the ready queue in batches.</li>
+<li>The dispatcher picks, for every consumer group, one subscriber that has
+   credit.</li>
+<li>The consumer receives the event on its <code>Subscribe</code> stream and processes it.</li>
+<li>Its ack records the event as complete for that group.</li>
+</ol>
+<p>The write path is synchronous because the producer needs an answer. Delivery
+is asynchronous because by then the producer is long gone; the only parties
+left are the server and the consumer.</p>
+<hr />
+<h2 id="4-deep-dives">4. Deep dives<a class="headerlink" href="#4-deep-dives" title="Permanent link">&para;</a></h2>
+<p>Each deep dive follows the same order: the problem, what CronosDB does, what
+it costs, what you would choose under different requirements, and where to
+read the code.</p>
+<h3 id="41-the-log">4.1 The log<a class="headerlink" href="#41-the-log" title="Permanent link">&para;</a></h3>
+<p><img alt="The append-only, segmented event log" src="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/docs/system-design/diagrams/03-storage-wal.svg" /></p>
+<p><strong>The problem.</strong> Make an event durable as cheaply as possible, in an order
+that every replica can reproduce.</p>
+<p><strong>What CronosDB does.</strong> Each partition has one append-only log
+(<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/storage/wal.go"><code>wal.go</code></a>), cut into segment files of 512 MB
+(<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/storage/segment.go"><code>segment.go</code></a>). Only the newest segment is
+written; the others never change again. An offset is simply an event's
+position in that log.</p>
+<ul>
+<li><strong>Records carry what recovery needs.</strong> The CRC detects a torn or corrupted
+  write; on restart the active file is cut back to its last good record. The
+  <em>term</em> (the leader epoch that wrote the record) lets a follower tell a
+  retried entry from one written by a different leader. <code>schedule_ts</code> and
+  <code>message_id</code> are in the record, so timers and dedup state can be rebuilt
+  from the log alone.</li>
+<li><strong>A sparse index</strong> (<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/storage/index.go"><code>index.go</code></a>) maps every
+  1,000th offset to a byte position. Reading by offset is a binary search in
+  memory followed by a short scan.</li>
+<li><strong>Reads use <code>mmap</code></strong>, so replaying a segment does not copy it through read
+  buffers. The platform differences sit in two small files
+  (<code>mmap_unix.go</code>, <code>mmap_windows.go</code>).</li>
+<li><strong>Space comes back by deleting whole files</strong> — by retention (age or size) or
+  by compaction (every consumer group has finished every event in the file).
+  In a cluster only files at the start of the log go, so that the log stays
+  one unbroken range, and the partition's leader decides; the other replicas
+  are told where its log starts and follow.</li>
+</ul>
+<p><strong>The durability knob.</strong> A write is only safe once it is on the disk, and a
+disk sync takes milliseconds however few bytes it covers. <code>--fsync-mode</code>
+decides who waits for it:</p>
+<table>
+<thead>
+<tr>
+<th>Mode</th>
+<th>A publish is acknowledged…</th>
+<th>A power loss can lose</th>
+<th>Use it when</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>every_event</code></td>
+<td>after its own sync</td>
+<td>nothing acknowledged</td>
+<td>correctness matters more than rate</td>
+</tr>
+<tr>
+<td><code>batch</code> (default)</td>
+<td>after a sync that started after its append; writers arriving during a sync share the next one (<em>group commit</em>)</td>
+<td>nothing acknowledged</td>
+<td>the normal case</td>
+</tr>
+<tr>
+<td><code>periodic</code></td>
+<td>at once; a background sync runs every <code>--flush-interval</code> (1 s)</td>
+<td>up to one interval</td>
+<td>load tests, or when replicas on other machines are the durability</td>
+</tr>
+</tbody>
+</table>
+<p>Group commit is the classic way out of "sync is slow": one sync is as
+expensive for a thousand appends as for one, so let the appends that arrive
+while a sync is running ride on the next. See
+<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/storage/wal.go"><code>groupCommitSync</code></a>.</p>
+<p><strong>What it costs, and the alternatives.</strong></p>
+<table>
+<thead>
+<tr>
+<th>Decision</th>
+<th>You gain</th>
+<th>You pay</th>
+<th>Choose otherwise when</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Append-only instead of update-in-place</td>
+<td>Sequential writes; recovery is "cut the torn tail"; replication is "send the bytes"</td>
+<td>Space is reclaimed a whole file at a time; reading by key needs an index</td>
+<td>Records are updated in place and read by key: use a B-tree or LSM store</td>
+</tr>
+<tr>
+<td>Segments instead of one file</td>
+<td>Immutable files can be deleted, copied for a backup or sent to a follower while writes continue</td>
+<td>A file-rollover path with its own edge cases</td>
+<td>—</td>
+</tr>
+<tr>
+<td>Sparse instead of dense index</td>
+<td>A tiny index that can be rebuilt</td>
+<td>Up to 1,000 records scanned per lookup</td>
+<td>Point lookups dominate</td>
+</tr>
+<tr>
+<td>Own file format instead of an embedded store</td>
+<td>Exactly the fields that recovery and replication need; no compaction of event data</td>
+<td>You own every crash and corruption case</td>
+<td>Throughput is modest or the team is small: put the log in an embedded store</td>
+</tr>
+<tr>
+<td>Durability as a knob</td>
+<td>The operator picks the trade-off</td>
+<td>Three code paths to test and reason about</td>
+<td>—</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Related:</strong> encryption at rest wraps each record in AES-256-GCM with a fresh
+random nonce (<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/storage/crypto.go"><code>crypto.go</code></a>); backups copy
+every partition's log cut at one instant, while writes continue
+(<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/storage/checkpoint.go"><code>checkpoint.go</code></a>,
+<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/partition/backup.go"><code>backup.go</code></a>).</p>
+<details>
+<summary>Check yourself: in <code>batch</code> mode on a single node, the process is killed right after a producer received "success". Is the event still there after a restart? And after a power cut?</summary>
+Yes to both: the answer was only sent after a sync that covered the append. In periodic mode the answer to the first is still yes (the operating system has the bytes), but a power cut can lose up to one flush interval.
+</details>
+
+<p>More: <a href="../architecture/features/storage/">storage.md</a> ·
+<a href="../TECHNICAL_DEEP_DIVE/">TECHNICAL_DEEP_DIVE.md §2</a> ·
+<a href="../PERFORMANCE/">PERFORMANCE.md</a></p>
+<h3 id="42-time">4.2 Time<a class="headerlink" href="#42-time" title="Permanent link">&para;</a></h3>
+<p><img alt="Hierarchical timing wheel with a cold store" src="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/docs/system-design/diagrams/04-timing-wheel.svg" /></p>
+<p><strong>The problem.</strong> Answer "which events are due now?" every few milliseconds,
+with millions of events pending, some due in a second and some next month.</p>
+<p><strong>What CronosDB does.</strong></p>
+<ul>
+<li><strong>A timing wheel</strong> (<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/scheduler/timing_wheel.go"><code>timing_wheel.go</code></a>)
+  is a clock face of buckets. A timer is put into the bucket for its tick;
+  every tick the hand moves on and the current bucket is emptied. Insert,
+  cancel and expire are constant work. The default is 600 slots of 10 ms.</li>
+<li><strong>Higher levels</strong> are coarser wheels: a slot of level 1 is one whole turn of
+  level 0 (6 s). A timer far away starts on a coarse wheel and is moved down
+  as it gets close.</li>
+<li><strong>A cold store</strong> (<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/scheduler/cold_store.go"><code>cold_store.go</code></a>)
+  holds timers further away than the hot window (60 minutes) as a 16-byte
+  reference in Pebble, sorted by time. A <em>hydrator</em> moves the next window into
+  the wheels. This is what keeps memory bounded when events are scheduled
+  weeks ahead.</li>
+<li><strong>Nothing here is saved to disk as a timer.</strong> After a restart the wheels are
+  rebuilt by re-reading the log, and whatever came due while the node was down
+  fires immediately.</li>
+</ul>
+<p><strong>The alternatives.</strong></p>
+<table>
+<thead>
+<tr>
+<th>Approach</th>
+<th>Insert</th>
+<th>Fire the next</th>
+<th>Precision</th>
+<th>Memory</th>
+<th>You have seen it in</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Priority queue (heap)</td>
+<td>O(log n)</td>
+<td>O(log n)</td>
+<td>exact</td>
+<td>every timer in RAM</td>
+<td>language runtimes, small job queues</td>
+</tr>
+<tr>
+<td>Sorted index, polled (<code>WHERE due &lt;= now</code>)</td>
+<td>O(log n) + disk</td>
+<td>a disk scan per poll</td>
+<td>the poll interval</td>
+<td>on disk</td>
+<td>"delayed jobs" tables, Redis sorted sets</td>
+</tr>
+<tr>
+<td>Timing wheel</td>
+<td>O(1)</td>
+<td>O(1) per timer</td>
+<td>one tick</td>
+<td>every hot timer in RAM</td>
+<td>the Linux kernel, Netty, Kafka's purgatory</td>
+</tr>
+</tbody>
+</table>
+<p>CronosDB is a hybrid: a wheel for the near future, where speed matters, and a
+sorted index for the far future, where memory matters.</p>
+<p><strong>What it costs.</strong> Precision is one tick. Hot timers use memory, so admission
+control refuses publishes beyond 10 million pending timers or 1 million ready
+events per partition. And a partition without a leader fires nothing: events
+are delivered by the leader only, so failover time is added to lateness.</p>
+<details>
+<summary>Check yourself: why is it safe not to persist the wheel?</summary>
+Because every pending timer is an event in the log that no consumer group has finished yet. The log plus the consumer progress are enough to rebuild it; persisting the wheel would add a second copy that could disagree with the first.
+</details>
+
+<p>More: <a href="../architecture/features/scheduler/">scheduler.md</a> ·
+<a href="../TECHNICAL_DEEP_DIVE/">TECHNICAL_DEEP_DIVE.md §3</a></p>
+<h3 id="43-idempotent-publish">4.3 Idempotent publish<a class="headerlink" href="#43-idempotent-publish" title="Permanent link">&para;</a></h3>
+<p><img alt="Two-tier dedup and the states of a message ID" src="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/docs/system-design/diagrams/05-dedup-idempotency.svg" /></p>
+<p><strong>The problem.</strong> Networks fail, so producers retry. A producer whose publish
+timed out cannot know whether it worked. The same <code>message_id</code> must never
+become two events — and must never be silently swallowed either.</p>
+<p><strong>What CronosDB does.</strong></p>
+<ul>
+<li><strong>Two tiers.</strong> A bloom filter in memory answers "definitely new" without
+  touching the disk. Only a "maybe seen" is looked up in the exact store
+  (Pebble), because a bloom filter can be wrong in that direction and never in
+  the other. See <a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/dedup/bloom_store.go"><code>bloom_store.go</code></a>.</li>
+<li><strong>Three states, not two.</strong> A known ID is <em>claimed</em> (a publish is in flight),
+  <em>appended at offset N</em> (in the log, but nobody was promised delivery yet) or
+  <em>accepted at offset N</em>. A retry is answered by state: "still in progress",
+  <em>finish the earlier attempt</em>, or "duplicate". See
+  <a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/dedup/outcome.go"><code>outcome.go</code></a> and
+  <a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/partition/unaccepted.go"><code>unaccepted.go</code></a>.</li>
+</ul>
+<p>The middle state exists because of step 5 of the write path. If replication
+fails after the append, the log cannot take the event back. Forgetting the ID
+would let the retry append a second copy; calling it done would answer the
+retry with "duplicate" although the event was never scheduled. So the event is
+<em>held</em> — in the log, not scheduled — until a retry, a later successful publish
+or follower catch-up shows that the required replicas have it.</p>
+<p><strong>What it costs.</strong></p>
+<table>
+<thead>
+<tr>
+<th>Decision</th>
+<th>You gain</th>
+<th>You pay</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Bloom filter in front of the exact store</td>
+<td>Most publishes need no disk read</td>
+<td>About 120 MB of memory per partition at the default capacity of 100 million IDs (allocated on first use); under 1 % of new IDs take the slow path</td>
+</tr>
+<tr>
+<td>Dedup records expire (7 days)</td>
+<td>The store stays bounded</td>
+<td>A retry after the TTL is a new event</td>
+</tr>
+<tr>
+<td>Server-side dedup at all</td>
+<td>Producers can retry blindly</td>
+<td>A write to the dedup store on every publish; producers that guarantee unique sends can opt out per request with <code>AllowDuplicate</code></td>
+</tr>
+<tr>
+<td>Bloom filter in Rust through cgo</td>
+<td>A lock-free filter with fast batch hashing</td>
+<td>Two toolchains, a shared library to ship, a pure-Go fallback to maintain. In the recorded three-node runs the pure-Go build was not slower end to end (<a href="../CLUSTER_PERFORMANCE_VALIDATION_2026-09-29/">numbers</a>)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>The general lesson:</strong> <em>an unknown outcome is a state, not an error.</em> Any API
+that can time out needs an idempotency key and a server that remembers what
+happened to it. The same pattern is behind idempotency keys in payment APIs
+and producer sequence numbers in Kafka.</p>
+<p>More: <a href="../architecture/features/dedup/">dedup.md</a> ·
+<a href="../architecture/features/replication/#publishes-that-fail-after-the-append">replication.md § Publishes that fail after the append</a></p>
+<h3 id="44-partitioning-and-routing">4.4 Partitioning and routing<a class="headerlink" href="#44-partitioning-and-routing" title="Permanent link">&para;</a></h3>
+<p>There are two different questions, answered by two different hashes.</p>
+<p><strong>Which partition does an event belong to?</strong> <code>FNV-1a(key) mod N</code>, where the
+key is the <code>partition_key</code> metadata entry if the producer set one, and the
+<code>message_id</code> otherwise.</p>
+<ul>
+<li>By default events spread evenly, and two events about the same entity land
+  on different partitions with no order between them. Set a <code>partition_key</code>
+  (an order ID, a user ID) to keep an entity's events on one partition.</li>
+<li><code>N</code> is fixed when the cluster is created. <code>mod N</code> remaps almost every key
+  when <code>N</code> changes, and with it the dedup records and consumer progress.
+  Choose the count for the load you expect; online splitting exists only as an
+  experimental feature.</li>
+</ul>
+<p><strong>Which nodes hold a partition?</strong> A consistent-hash ring: every node is placed
+on a circle at 2,048 pseudo-random positions ("virtual nodes"); a partition is
+hashed onto the circle, and the first <code>replication-factor</code> distinct nodes
+clockwise hold it. When a node joins or leaves, only the partitions next to
+its positions move.</p>
+<ul>
+<li>2,048 virtual nodes is a deliberate number: with 150, ownership in small
+  clusters was badly uneven, because a few hundred random points do not divide
+  a circle evenly.</li>
+<li>The ring only <em>proposes</em> a placement. A node leads a partition when the
+  placement has been committed through Raft (see <a href="#45-cluster-control-plane">4.5</a>).</li>
+</ul>
+<p><strong>How does a request find the leader?</strong> A node that is not the partition's
+leader refuses the publish. The Go SDK (<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/pkg/client"><code>pkg/client</code></a>) keeps
+a routing table and sends each batch to the right node; it also carries the
+connection pool, retries with backoff, a circuit breaker and request hedging,
+so that every application does not rebuild them.</p>
+<table>
+<thead>
+<tr>
+<th>Decision</th>
+<th>You gain</th>
+<th>You pay</th>
+<th>The alternative</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Hash partitioning</td>
+<td>Even load without knowing the keys</td>
+<td>No range scans across keys; a fixed count</td>
+<td>Range partitioning: splittable, but hot ranges need active balancing</td>
+</tr>
+<tr>
+<td>Ring placement</td>
+<td>No placement table to maintain; minimal movement</td>
+<td>Little control over where a partition goes (racks, throttled moves)</td>
+<td>A controller that assigns and moves replicas explicitly</td>
+</tr>
+<tr>
+<td>Routing in the client</td>
+<td>No extra hop</td>
+<td>Every client language needs a smart SDK</td>
+<td>A proxy tier, or servers that forward</td>
+</tr>
+</tbody>
+</table>
+<p>More: <a href="../architecture/features/cluster/">cluster.md</a> ·
+<a href="../TECHNICAL_DEEP_DIVE/">TECHNICAL_DEEP_DIVE.md §6.1</a></p>
+<h3 id="45-cluster-control-plane">4.5 Cluster control plane<a class="headerlink" href="#45-cluster-control-plane" title="Permanent link">&para;</a></h3>
+<p><img alt="Three questions, three mechanisms" src="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/docs/system-design/diagrams/06-cluster-control-plane.svg" /></p>
+<p><strong>The problem.</strong> In a cluster, every node must answer three questions, and a
+wrong answer costs something different each time.</p>
+<table>
+<thead>
+<tr>
+<th>Question</th>
+<th>A wrong answer costs</th>
+<th>So it is answered by</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Who is alive?</td>
+<td>A moment of delay</td>
+<td><strong>Gossip</strong>: heartbeats every second, failed after 5 s. Fast and leaderless, sometimes briefly wrong</td>
+</tr>
+<tr>
+<td>Where should replicas live?</td>
+<td>Nothing, as long as everyone computes the same</td>
+<td><strong>The hash ring</strong>: pure arithmetic on the member list</td>
+</tr>
+<tr>
+<td>Who leads this partition, at which epoch?</td>
+<td>Two leaders, two diverging logs, lost data</td>
+<td><strong>Raft</strong>: a majority must agree before anything changes</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Two kinds of leader.</strong> Do not confuse them. The <em>Raft leader</em> is one node of
+the cluster that commits metadata changes. A <em>partition leader</em> is the node
+that accepts writes for one partition; with 32 partitions there are 32 of
+them, spread over the nodes. The Raft leader decides who the partition leaders
+are; it does not handle their data.</p>
+<p><strong>How a change travels.</strong> A membership change recomputes the ring; the Raft
+leader commits the new assignment with a higher epoch; every node then makes
+itself match what was committed — it promotes itself, demotes itself, starts
+following, or unloads the partition
+(<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/cluster/leadership.go"><code>leadership.go</code></a>). A node never
+promotes itself because the ring says so.</p>
+<p><strong>Moving leadership without a gap in safety.</strong> When the ring prefers another
+live replica, leadership moves by a <em>staged handoff</em>: the intent is committed
+first, the current leader stops accepting publishes, and only when the
+target's log is shown to end at the same entry is the change of leader
+committed. If that takes too long, the handoff is abandoned and nothing
+changed.</p>
+<p><strong>Starting a cluster is a distributed problem too.</strong> The first node of a new
+cluster sees a membership of one. If it assigned leaders at once it would lead
+every partition, then hand most of them over as the others arrive, refusing
+publishes meanwhile. So the first assignment waits until
+<code>--cluster-expected-nodes</code> are up, or until membership has been quiet for
+<code>--cluster-formation-wait</code>. <code>/health/ready</code> answers 503 until every partition
+has a leader that has loaded it.</p>
+<table>
+<thead>
+<tr>
+<th>Decision</th>
+<th>You gain</th>
+<th>You pay</th>
+<th>The alternative</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Raft for metadata only, not for event data</td>
+<td>A publish is one round trip to the followers; data throughput is not bounded by a consensus library</td>
+<td>Fencing, log reconciliation and elections for data are hand-built, and hard to get right (see <a href="#6-lessons-this-codebase-learned-the-hard-way">section 6</a>)</td>
+<td>One Raft group per partition (CockroachDB, TiKV, Redpanda): correctness comes with the library</td>
+</tr>
+<tr>
+<td>Raft embedded in the server</td>
+<td>One binary to run</td>
+<td>Bootstrap and join logic inside the product</td>
+<td>An external etcd or ZooKeeper</td>
+</tr>
+<tr>
+<td>Gossip beside Raft</td>
+<td>Liveness without a leader or a majority</td>
+<td>Two views of the cluster that must be reconciled</td>
+<td>Deriving liveness from Raft alone</td>
+</tr>
+</tbody>
+</table>
+<details>
+<summary>Check yourself: the Raft leader dies. Can producers still publish?</summary>
+Yes, to every partition whose own leader is alive: the write path does not go through Raft. What cannot happen until a new Raft leader is elected is a change of partition leadership, so a partition leader that fails in the same window stays unreplaced for that long.
+</details>
+
+<p>More: <a href="../architecture/features/cluster/">cluster.md</a> ·
+<a href="../architecture/features/replication/#leadership-and-fencing">replication.md § Leadership and fencing</a></p>
+<h3 id="46-replication-and-failover">4.6 Replication and failover<a class="headerlink" href="#46-replication-and-failover" title="Permanent link">&para;</a></h3>
+<p><img alt="Quorum writes, epochs and failover" src="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/docs/system-design/diagrams/07-replication-failover.svg" /></p>
+<p><strong>The problem.</strong> Keep a partition's log on several machines so that losing
+one loses nothing — without two machines ever accepting different histories.</p>
+<p><strong>What CronosDB does.</strong></p>
+<ul>
+<li><strong>Leader and followers.</strong> One replica, the leader, orders the writes. It
+  appends to its own log and sends the batch to the followers over the
+  internal gRPC port (<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/replication/leader.go"><code>leader.go</code></a>,
+  <a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/api/replication_server.go"><code>replication_server.go</code></a>).</li>
+<li><strong>Quorum acknowledgement.</strong> The producer gets "success" once
+  <code>min-insync-replicas</code> replicas, the leader included, hold the batch. With
+  three replicas and min-insync 2, any one node can be lost without losing an
+  acknowledged write, and a slow follower does not slow the producer down. If
+  the quorum cannot be reached, the write <em>fails</em> instead of quietly staying
+  on one machine.</li>
+<li><strong>Epochs fence stale leaders.</strong> Every committed leadership change raises the
+  partition's epoch. A replica stores the epoch and leader it has accepted and
+  refuses appends from an older epoch, or from a second node claiming the same
+  one. A leader that was cut off cannot reach its quorum, so it cannot
+  acknowledge anything; what it appended alone is replaced when it rejoins.
+  The general name for this is a <em>fencing token</em>.</li>
+<li><strong>Records carry their term.</strong> When a leader sends an entry the follower
+  already has, the same offset and term means "a retry, skip it"; a different
+  term means "this and everything after it was written under another leader,
+  replace it". Without the term a follower cannot tell the two apart.</li>
+<li><strong>Failover picks the most complete log.</strong> The Raft leader asks the survivors
+  where their logs end and needs <code>replicas − min-insync + 1</code> answers: every
+  acknowledged write is on at least <code>min-insync</code> replicas, so any set that
+  large contains one that has it. With fewer answers it waits rather than
+  guess.</li>
+<li><strong>Catching up.</strong> A follower that is a little behind is sent the missing
+  range from the leader's log. A new, wiped or far-behind replica copies the
+  leader's segment files as a <em>snapshot</em>: each file is checked against its
+  CRC, staged beside the old log, and swapped in under a small journal so that
+  a crash at any point leaves one complete log. A transfer that breaks resumes
+  with the files that already arrived
+  (<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/replication/follower.go"><code>follower.go</code></a>,
+  <a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/storage/checkpoint.go"><code>checkpoint.go</code></a>).</li>
+<li><strong>Consumer progress is replicated too</strong>, separately from the log, so that a
+  promoted follower does not redeliver finished work.</li>
+</ul>
+<p><strong>What it costs, and what it does not give you.</strong></p>
+<table>
+<thead>
+<tr>
+<th>Decision</th>
+<th>You gain</th>
+<th>You pay</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Wait for min-insync, not for every replica</td>
+<td>One slow follower does not set the latency</td>
+<td>A follower can be behind; failover must find the most complete log</td>
+</tr>
+<tr>
+<td>Fail without quorum</td>
+<td>No acknowledged write on a single machine</td>
+<td>Writes stop for a partition that cannot reach its quorum</td>
+</tr>
+<tr>
+<td>A follower acknowledges after appending, before its own disk sync</td>
+<td>Lower latency</td>
+<td>If the leader and that follower lose power within the same flush interval, an acknowledged write can be lost. Machines in different failure domains are the defence</td>
+</tr>
+<tr>
+<td>Cross-region replication is asynchronous</td>
+<td>A slow or lost region never blocks local writes</td>
+<td>The remote region is behind, and conflicts are resolved last-write-wins</td>
+</tr>
+</tbody>
+</table>
+<details>
+<summary>Check yourself: replication factor 3, min-insync 2. One node is down and a second becomes unreachable. What happens to writes, and why is that the right answer?</summary>
+They fail. The leader alone is one replica, below min-insync. Accepting them would mean an acknowledged write exists on one machine only, and losing that machine would lose data the producer was told was safe. Refusing is the consistent choice; min-insync 1 would be the available one.
+</details>
+
+<p>More: <a href="../architecture/features/replication/">replication.md</a> ·
+<a href="../TECHNICAL_DEEP_DIVE/">TECHNICAL_DEEP_DIVE.md §6.3–6.4</a></p>
+<h3 id="47-delivery">4.7 Delivery<a class="headerlink" href="#47-delivery" title="Permanent link">&para;</a></h3>
+<p><img alt="Push with credits, retries and a dead-letter queue" src="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/docs/system-design/diagrams/08-delivery-pipeline.svg" /></p>
+<p><strong>The problem.</strong> Hand each due event to one consumer of every consumer group,
+keep doing so until it is acknowledged, and survive consumers that are slow,
+broken or gone.</p>
+<p><strong>What CronosDB does.</strong></p>
+<ul>
+<li><strong>Consumer groups.</strong> Every group receives every event of its topic; within a
+  group, one subscriber gets each event. That gives both fan-out (several
+  groups) and load sharing (several consumers in one group).</li>
+<li><strong>Push with credits</strong> (<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/delivery/dispatcher.go"><code>dispatcher.go</code></a>).
+  A subscriber grants credits; a delivery spends one and an ack returns one.
+  Without credit the event is not dropped: its offset is queued and the event
+  is re-read from the log when credit returns.</li>
+<li><strong>Retry, then park.</strong> No ack within 30 s, or a nack, sends the delivery to a
+  heap ordered by retry time (<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/delivery/retry_queue.go"><code>retry_queue.go</code></a>).
+  After 5 retries the event is written to the dead-letter queue and counts as
+  complete for the group.</li>
+<li><strong>A circuit breaker per subscription</strong>
+  (<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/delivery/circuit_breaker.go"><code>circuit_breaker.go</code></a>) stops
+  sending to a consumer that keeps failing, and probes it again later.</li>
+<li><strong>Progress is a floor plus single completions</strong>
+  (<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/consumer/completion.go"><code>completion.go</code></a>). Events come due
+  in schedule order, not offset order, so one "committed offset" cannot
+  describe what a group has finished. Everything below the floor is complete;
+  above it, completion is recorded per event.</li>
+</ul>
+<p><strong>What it costs.</strong></p>
+<table>
+<thead>
+<tr>
+<th>Decision</th>
+<th>You gain</th>
+<th>You pay</th>
+<th>The alternative</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Push instead of pull</td>
+<td>The server fires the timer; consumers stay simple</td>
+<td>The server tracks every in-flight delivery and must defend itself (credits, in-flight caps, admission control)</td>
+<td>Pull, as in Kafka: the state moves to the client, but a client cannot know when something is due</td>
+</tr>
+<tr>
+<td>At-least-once</td>
+<td>No event is lost to a crash between delivery and ack</td>
+<td>A consumer can see an event twice, and redelivery can reorder</td>
+<td>At-most-once (never repeats, may lose); exactly-once needs the consumer's side effects in the same transaction</td>
+</tr>
+<tr>
+<td>Per-event completion</td>
+<td>Correct progress when events finish out of order</td>
+<td>More state than one number per group; it must be replicated as well</td>
+<td>A single committed offset, which is enough when delivery is in log order</td>
+</tr>
+<tr>
+<td>A dead-letter queue</td>
+<td>One poison event cannot block a group or log cleanup</td>
+<td>Someone has to look at the queue</td>
+<td>Retrying forever; dropping after N attempts</td>
+</tr>
+</tbody>
+</table>
+<p><strong>The practical consequence for your code:</strong> make consumers idempotent. Use
+the <code>message_id</code> as the key for "have I done this already?".</p>
+<p>More: <a href="../architecture/features/delivery/">delivery.md</a> ·
+<a href="../architecture/features/consumer/">consumer.md</a></p>
+<h3 id="48-around-the-core">4.8 Around the core<a class="headerlink" href="#48-around-the-core" title="Permanent link">&para;</a></h3>
+<p>Short notes on the parts that surround the data path.</p>
+<ul>
+<li><strong>API and interceptors</strong> (<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/api/grpc_server.go"><code>grpc_server.go</code></a>).
+  Every public request passes one chain: tracing, SLO recording, version
+  check, authentication, rate limiting, audit, metrics. Putting these in
+  interceptors keeps the handlers about events only. The cost is that every
+  interceptor runs on every request, so the heavier ones (SLO recording,
+  metrics, per-IP rate limiting) are skipped when authentication is off, and
+  tracing is disabled by default.</li>
+<li><strong>Secure by default.</strong> Without <code>--dev</code>, the server refuses to start unless
+  TLS, JWT authentication with a policy file, encryption at rest, replication
+  mTLS, replication factor ≥ 3 and min-insync ≥ 2 are configured
+  (<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/config/config.go"><code>config.go</code></a>). An unsafe production
+  deployment has to be asked for; it cannot happen by omission.</li>
+<li><strong>Health is two questions.</strong> <em>Live</em> means the process runs. <em>Ready</em> means
+  this node can serve publishes: its partitions have committed leaders and are
+  loaded (<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/api/health.go"><code>health.go</code></a>). Load balancers and
+  rollouts need the second.</li>
+<li><strong>Backups</strong> (<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/partition/backup.go"><code>backup.go</code></a>) copy every
+  partition's log, consumer progress, dedup store, dead-letter queue and
+  epoch. The logs are cut at one instant; the other stores are captured just
+  before, never after, so a restored node may redeliver but cannot skip. Every
+  file is listed with its size and CRC, and <code>cronos-admin restore</code> verifies
+  all of them before touching an empty data directory. A backup never contains
+  the encryption key, only a value that identifies it.</li>
+<li><strong>Schema registry</strong> (<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/schema/registry.go"><code>internal/schema</code></a>).
+  Topics can require Avro, Protobuf or JSON Schema payloads with compatibility
+  rules, so a producer cannot publish what consumers cannot read.</li>
+<li><strong>Tenants and overload</strong> (<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/tenant/tenant.go"><code>internal/tenant</code></a>,
+  <a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/partition/backpressure.go"><code>backpressure.go</code></a>). Token buckets
+  per tenant and per topic, plus per-partition admission control. An
+  overloaded server answers <code>ResourceExhausted</code> early instead of queueing
+  until it falls over.</li>
+<li><strong>Change data capture and cross-region replication</strong>
+  (<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/partition/changefeed.go"><code>changefeed.go</code></a>,
+  <a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/cdc/sink.go"><code>internal/cdc</code></a>,
+  <a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/replication/region.go"><code>region.go</code></a>) read a per-partition
+  <em>change feed</em>: one goroutine that follows the log behind the accepted
+  watermark and hands events over in order, on the leader only. It replaced a
+  hook on the append path, which fired before a publish was accepted and once
+  per replica. A sink that fails makes the feed wait and retry; publishing
+  never waits for it, and nothing is dropped. The feed's position is stored
+  and sent to followers, so restarts and failovers continue it. The general
+  pattern: <em>derive side outputs from the log, not from the write path</em>.</li>
+<li><strong>Experimental: transactions and online split</strong>
+  (<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/tx/coordinator.go"><code>internal/tx</code></a>,
+  <a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/partition/split.go"><code>split.go</code></a>). Two-phase commit across
+  partitions and splitting a partition online are implemented but disabled by
+  default. Two-phase commit is the simplest atomic commit, and it blocks when
+  the coordinator dies between the phases — a good example of why these
+  features need far more testing than their code size suggests.</li>
+</ul>
+<hr />
+<h2 id="5-every-trade-off-on-one-page">5. Every trade-off on one page<a class="headerlink" href="#5-every-trade-off-on-one-page" title="Permanent link">&para;</a></h2>
+<p><img alt="Where CronosDB sits on the classic trade-offs" src="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/docs/system-design/diagrams/09-tradeoff-map.svg" /></p>
+<p><strong>What you get, and what you do not.</strong></p>
+<table>
+<thead>
+<tr>
+<th>You get</th>
+<th>You do not get</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>At-least-once delivery to every consumer group</td>
+<td>Exactly-once delivery</td>
+</tr>
+<tr>
+<td>Offsets ordered within a partition</td>
+<td>Delivery in offset order, or any order across partitions</td>
+</tr>
+<tr>
+<td>No acknowledged write lost while a quorum of replicas survives (min-insync ≥ 2)</td>
+<td>Safety against the leader and its only acknowledging follower losing power in the same instant</td>
+</tr>
+<tr>
+<td>A retried publish stays one event, within the dedup TTL</td>
+<td>Dedup forever, or across a changed partition key</td>
+</tr>
+<tr>
+<td>Timers precise to one tick</td>
+<td>Hard real-time firing, or firing while a partition has no leader</td>
+</tr>
+<tr>
+<td>Automatic failover of partition leaders</td>
+<td>Failover without a Raft majority</td>
+</tr>
+</tbody>
+</table>
+<p><strong>In CAP terms.</strong> Cluster metadata is always consistent-first: without a Raft
+majority, leadership cannot change. Event data is what you configure: with
+min-insync ≥ 2 a partition that cannot reach its quorum refuses writes
+(consistent-first); with min-insync 1 it keeps accepting them and can lose
+what only the leader had (available-first). There is no setting that gives
+both, in this system or any other.</p>
+<hr />
+<h2 id="6-lessons-this-codebase-learned-the-hard-way">6. Lessons this codebase learned the hard way<a class="headerlink" href="#6-lessons-this-codebase-learned-the-hard-way" title="Permanent link">&para;</a></h2>
+<p>A production-readiness audit of this repository
+(<a href="../PRODUCTION_AUDIT_2026-09-27/">PRODUCTION_AUDIT_2026-09-27.md</a>) recorded
+twenty findings that the existing tests had not caught, and the performance
+work added a few more. They are worth more than the happy path, because each
+is a mistake that is easy to make again.</p>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Lesson</th>
+<th>What happened here</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td><strong>Fail closed.</strong> If a safety condition cannot be verified, refuse.</td>
+<td>A release candidate acknowledged writes meant for three replicas after appending them to one: when a partition's replication leader had not been set up, the publish fell through to the single-replica path. A policy file that failed to load left "allow all" in place (F02). A wrong encryption key opened existing data as an empty, writable log (F10).</td>
+</tr>
+<tr>
+<td>2</td>
+<td><strong>One source of truth for who leads.</strong></td>
+<td>Both the hash ring and Raft could make a node a leader, so nodes could disagree (F08). Now only a Raft-committed assignment does.</td>
+</tr>
+<tr>
+<td>3</td>
+<td><strong>A retry must be distinguishable from a conflict.</strong></td>
+<td>Repeating a replication request could cut accepted history off a follower's log (F06). Records now carry their term: same offset and term is a retry.</td>
+</tr>
+<tr>
+<td>4</td>
+<td><strong>An unknown outcome is a state, not an error.</strong></td>
+<td>A publish that failed after reaching the log was remembered as done, so the retry was answered "duplicate" and the event never fired (F07). Hence the <em>appended</em> state.</td>
+</tr>
+<tr>
+<td>5</td>
+<td><strong>Replacing files is a transaction.</strong></td>
+<td>Installing a snapshot swapped directories without a journal; a crash in between could leave a mix of old and new (F09). Every crash point now recovers to one complete log.</td>
+</tr>
+<tr>
+<td>6</td>
+<td><strong>A single offset cannot describe out-of-order work.</strong></td>
+<td>Acks could commit progress for events that were never delivered (F03). Progress became a floor plus per-event completions.</td>
+</tr>
+<tr>
+<td>7</td>
+<td><strong>No disk I/O under a hot lock.</strong></td>
+<td><code>batch</code> mode synced while holding the log lock, so sixteen writers waited for each other: 3.2–6.1 ms per small batch, 0.44–0.51 ms once the sync moved outside the lock and was shared.</td>
+</tr>
+<tr>
+<td>8</td>
+<td><strong>Allocate when used, not when created.</strong></td>
+<td>Every empty partition held 146 MB (a bloom filter sized for 100 million IDs and a million-entry queue). Allocating on first use left 12 MB.</td>
+</tr>
+<tr>
+<td>9</td>
+<td><strong>Starting up is a distributed problem.</strong></td>
+<td>The first node of a new cluster led every partition and handed most of them over again, refusing writes meanwhile. The first assignment now waits for the cluster to form.</td>
+</tr>
+<tr>
+<td>10</td>
+<td><strong>Measure end to end, and keep the evidence.</strong></td>
+<td>Earlier "1M events/s" figures could not be reproduced under recorded conditions; the measured three-node figures are in <a href="../CLUSTER_PERFORMANCE_VALIDATION_2026-09-29/">the validation notes</a>. A faster component is not a faster system until the whole path is measured.</td>
+</tr>
+<tr>
+<td>11</td>
+<td><strong>Green unit tests do not show safe failover.</strong></td>
+<td>Almost every finding sat on a boundary — crash, retry, leader change, restart — that a test of one component in isolation never crosses.</td>
+</tr>
+</tbody>
+</table>
+<p>Notice where these are: nearly all in the hand-built parts (log, replication,
+delivery, snapshots), almost none in the libraries (Raft, Pebble, gRPC). That
+is the real price of "build it yourself" in section 5.</p>
+<hr />
+<h2 id="7-which-document-answers-which-question">7. Which document answers which question<a class="headerlink" href="#7-which-document-answers-which-question" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>If you want to…</th>
+<th>Read</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Understand why it is built this way</td>
+<td>This guide</td>
+</tr>
+<tr>
+<td>See every subsystem with flow and sequence diagrams</td>
+<td><a href="../ARCHITECTURE/">ARCHITECTURE.md</a></td>
+</tr>
+<tr>
+<td>Learn the algorithms and data structures from first principles</td>
+<td><a href="../TECHNICAL_DEEP_DIVE/">TECHNICAL_DEEP_DIVE.md</a></td>
+</tr>
+<tr>
+<td>Find the file for a feature, or trace a bug</td>
+<td><a href="../DEVELOPER_ARCHITECTURE_GUIDE/">DEVELOPER_ARCHITECTURE_GUIDE.md</a></td>
+</tr>
+<tr>
+<td>Read about one subsystem at a time</td>
+<td><a href="../architecture/">architecture/README.md</a> and its feature pages</td>
+</tr>
+<tr>
+<td>Know what is unsafe or unfinished</td>
+<td><a href="../PRODUCTION_AUDIT_2026-09-27/">PRODUCTION_AUDIT_2026-09-27.md</a>, <a href="../PRODUCTION_RELEASE/">PRODUCTION_RELEASE.md</a></td>
+</tr>
+<tr>
+<td>See performance numbers and how they were measured</td>
+<td><a href="../PERFORMANCE/">PERFORMANCE.md</a>, <a href="../CLUSTER_PERFORMANCE_VALIDATION_2026-09-29/">CLUSTER_PERFORMANCE_VALIDATION_2026-09-29.md</a></td>
+</tr>
+<tr>
+<td>Check what backups and retention were validated to do</td>
+<td><a href="../MAINTENANCE_VALIDATION_2026-09-29/">MAINTENANCE_VALIDATION_2026-09-29.md</a></td>
+</tr>
+<tr>
+<td>Build, run and configure it</td>
+<td><a href="../">README.md</a>, <a href="../DOCKER/">DOCKER.md</a>, <a href="../architecture/features/config/">config.md</a></td>
+</tr>
+<tr>
+<td>Read the API contract</td>
+<td><a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/proto/events.proto">proto/events.proto</a>, <a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/proto/admin.proto">proto/admin.proto</a></td>
+</tr>
+<tr>
+<td>Use it from Go</td>
+<td><a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/pkg/client">pkg/client</a>, <a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/examples/pubsub_demo/main.go">examples/pubsub_demo</a></td>
+</tr>
+</tbody>
+</table>
+<p><strong>A reading order through the code</strong>, following one event:
+<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/cmd/api/main.go"><code>cmd/api/main.go</code></a> (how everything is wired) →
+<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/api/handlers.go"><code>internal/api/handlers.go</code></a> (<code>Publish</code>) →
+<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/dedup/bloom_store.go"><code>internal/dedup/bloom_store.go</code></a> →
+<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/storage/wal.go"><code>internal/storage/wal.go</code></a> →
+<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/replication/leader.go"><code>internal/replication/leader.go</code></a> →
+<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/scheduler/timing_wheel.go"><code>internal/scheduler/timing_wheel.go</code></a> →
+<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/delivery/dispatcher.go"><code>internal/delivery/dispatcher.go</code></a> →
+<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/consumer/completion.go"><code>internal/consumer/completion.go</code></a>.
+Then the control plane:
+<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/cluster/leadership.go"><code>internal/cluster/leadership.go</code></a>.</p>
+<hr />
+<h2 id="8-try-it-yourself">8. Try it yourself<a class="headerlink" href="#8-try-it-yourself" title="Permanent link">&para;</a></h2>
+<p>Reading about a trade-off is one thing; watching it is another. All of these
+run on a laptop.</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="c1"># Build the server (see the README for prerequisites)</span>
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>make<span class="w"> </span>build-api
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="c1"># One node, developer mode</span>
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>./bin/cronos-api<span class="w"> </span>--dev<span class="w"> </span>--node-id<span class="o">=</span>node1<span class="w"> </span>--data-dir<span class="o">=</span>./data
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>
+</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="c1"># In another terminal: publish one event 10 s ahead and wait for it</span>
+</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>go<span class="w"> </span>run<span class="w"> </span>./examples/pubsub_demo
+</span></code></pre></div>
+<ol>
+<li><strong>The log is the source of truth.</strong> Start the demo, stop the server before
+   the ten seconds are over, and start it again. The event still arrives: the
+   timer was rebuilt from the log (section 4.2).</li>
+<li><strong>Idempotent publish.</strong> Publish the same <code>messageId</code> twice with <code>grpcurl</code>
+   (the commands are in the <a href="../">README</a>). The second answer is
+   "duplicate message_id" and only one event is delivered (section 4.3).</li>
+<li><strong>Durability has a price.</strong> Run the log benchmark in the three fsync modes
+   and compare the time per append:</li>
+</ol>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>go<span class="w"> </span><span class="nb">test</span><span class="w"> </span>./internal/storage/<span class="w"> </span>-run<span class="w"> </span><span class="s1">'^$'</span><span class="w"> </span>-benchtime<span class="o">=</span>100ms<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="w">  </span>-bench<span class="w"> </span><span class="s1">'BenchmarkWAL_AppendBatch_Matrix/(fsync=every_event|fsync=batch|fsync=periodic)/payload=4KB/batch=1/par=1$'</span>
+</span></code></pre></div>
+<ol>
+<li><strong>Failover.</strong> Start three nodes in three terminals (<code>make node1</code>,
+   <code>make node2</code>, <code>make node3</code>), check <code>make health</code>, then look at who leads
+   what with <code>./bin/cronos-admin --server=localhost:9000 topology</code>. Stop a
+   node that leads a partition and run it again: after a few seconds another
+   replica leads it, at a higher epoch (sections 4.5 and 4.6).</li>
+<li><strong>Read a test instead of a diagram.</strong> The tests named after a behaviour
+   are the most precise description of it, for example
+   <a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/api/publish_retry_test.go"><code>publish_retry_test.go</code></a>,
+   <a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/api/snapshot_resume_test.go"><code>snapshot_resume_test.go</code></a> and
+   <a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/internal/cluster/leadership_test.go"><code>leadership_test.go</code></a>.</li>
+</ol>
+<p>Keep cluster load tests small on a laptop: three nodes share one CPU, one disk
+and one pool of memory, and the large Makefile presets reserve tens of
+gigabytes of log segments. <code>scripts/compare-cluster-throughput.ps1</code> refuses to
+start when memory is short and stops when it runs low.</p>
+<hr />
+<h2 id="9-glossary">9. Glossary<a class="headerlink" href="#9-glossary" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning here</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Offset</strong></td>
+<td>An event's position in its partition's log. Assigned at append, never reused.</td>
+</tr>
+<tr>
+<td><strong>Segment</strong></td>
+<td>One file of the log. Only the newest is written.</td>
+</tr>
+<tr>
+<td><strong>WAL</strong></td>
+<td>Write-ahead log. In most databases it protects another structure; here it <em>is</em> the data.</td>
+</tr>
+<tr>
+<td><strong>fsync</strong></td>
+<td>Asking the operating system to put buffered bytes on the physical disk. Until it returns, a power loss can lose them.</td>
+</tr>
+<tr>
+<td><strong>Group commit</strong></td>
+<td>Letting many writers share one fsync.</td>
+</tr>
+<tr>
+<td><strong>Partition</strong></td>
+<td>An independent log with its own timers, dedup store and consumers. The unit of ordering, replication and leadership.</td>
+</tr>
+<tr>
+<td><strong>Replica / replication factor</strong></td>
+<td>A copy of a partition on a node / how many copies exist.</td>
+</tr>
+<tr>
+<td><strong>Partition leader</strong></td>
+<td>The replica that accepts writes for a partition.</td>
+</tr>
+<tr>
+<td><strong>Raft leader</strong></td>
+<td>The one node that commits cluster metadata. Not the same thing.</td>
+</tr>
+<tr>
+<td><strong>min-insync-replicas</strong></td>
+<td>How many replicas, the leader included, must hold a write before it is acknowledged.</td>
+</tr>
+<tr>
+<td><strong>Quorum</strong></td>
+<td>The number of replicas that must agree before something counts. For a write here: min-insync-replicas. For a Raft decision: a majority of the nodes.</td>
+</tr>
+<tr>
+<td><strong>Epoch / term</strong></td>
+<td>A number raised on every leadership change of a partition. Used to refuse a stale leader.</td>
+</tr>
+<tr>
+<td><strong>Fencing</strong></td>
+<td>Making sure an old leader that does not know it was replaced cannot do damage.</td>
+</tr>
+<tr>
+<td><strong>Split brain</strong></td>
+<td>Two nodes both acting as leader of the same thing.</td>
+</tr>
+<tr>
+<td><strong>Snapshot</strong></td>
+<td>A copy of a partition's log files used to bring a replica up from nothing.</td>
+</tr>
+<tr>
+<td><strong>Gossip</strong></td>
+<td>Nodes telling each other who they have heard from, instead of asking a central authority.</td>
+</tr>
+<tr>
+<td><strong>Consistent hashing / virtual node</strong></td>
+<td>Placing nodes and keys on a circle so that few keys move when a node changes / one of many positions a node takes on the circle.</td>
+</tr>
+<tr>
+<td><strong>LSM tree</strong></td>
+<td>A storage structure that turns random writes into sequential ones by merging sorted files in the background. Pebble is one.</td>
+</tr>
+<tr>
+<td><strong>Bloom filter</strong></td>
+<td>A compact set that answers "definitely not in it" or "maybe in it".</td>
+</tr>
+<tr>
+<td><strong>Idempotency key</strong></td>
+<td>An identifier that lets a server recognise a repeated request. Here: <code>message_id</code>.</td>
+</tr>
+<tr>
+<td><strong>Timing wheel</strong></td>
+<td>Timers stored in buckets by expiry tick, like a clock face.</td>
+</tr>
+<tr>
+<td><strong>Consumer group</strong></td>
+<td>A set of consumers that share the work: each event goes to one of them.</td>
+</tr>
+<tr>
+<td><strong>Credit</strong></td>
+<td>Permission from a consumer to be sent one more event.</td>
+</tr>
+<tr>
+<td><strong>Backpressure</strong></td>
+<td>A slow receiver slowing the sender down, instead of the sender's queue growing without limit.</td>
+</tr>
+<tr>
+<td><strong>Dead-letter queue (DLQ)</strong></td>
+<td>Where events go that no consumer managed to process.</td>
+</tr>
+<tr>
+<td><strong>At-least-once</strong></td>
+<td>Every event is delivered, possibly more than once.</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="10-further-reading">10. Further reading<a class="headerlink" href="#10-further-reading" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Varghese and Lauck, <a href="https://www.cs.columbia.edu/~nahum/w6998/papers/sosp87-timing-wheels.pdf"><em>Hashed and Hierarchical Timing Wheels</em></a> (1987) — section 4.2.</li>
+<li>Ongaro and Ousterhout, <a href="https://raft.github.io/"><em>In Search of an Understandable Consensus Algorithm</em></a> (Raft, 2014) — section 4.5.</li>
+<li>Jay Kreps, <a href="https://engineering.linkedin.com/distributed-systems/log-what-every-software-engineer-should-know-about-real-time-datas-unifying"><em>The Log: What every software engineer should know about real-time data's unifying abstraction</em></a> (2013) — sections 1 and 4.1.</li>
+<li>DeCandia et al., <a href="https://www.allthingsdistributed.com/files/amazon-dynamo-sosp2007.pdf"><em>Dynamo: Amazon's Highly Available Key-value Store</em></a> (2007) — consistent hashing, section 4.4.</li>
+<li>Das, Gupta and Motivala, <em>SWIM: Scalable Weakly-consistent Infection-style Process Group Membership Protocol</em> (2002) — gossip, section 4.5.</li>
+<li>Martin Kleppmann, <em>Designing Data-Intensive Applications</em> — replication, partitioning, fencing tokens and exactly-once, in depth.</li>
+<li>Martin Fowler and Unmesh Joshi, <a href="https://martinfowler.com/articles/patterns-of-distributed-systems/"><em>Patterns of Distributed Systems</em></a> — short write-ups of the patterns named in this guide.</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/jatin711-debug/cronos_db_golang" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+      <div class="md-progress" data-md-component="progress" role="progressbar"></div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.instant", "navigation.instant.progress", "navigation.tracking", "navigation.top", "navigation.sections", "navigation.indexes", "search.highlight", "search.suggest", "search.share", "content.tooltips", "toc.follow"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+        <script src="https://cdn.jsdelivr.net/npm/svg-pan-zoom@3.6.1/dist/svg-pan-zoom.min.js"></script>
+      
+        <script src="../javascripts/mermaid-zoom.js"></script>
+      
+    
+  </body>
+</html>

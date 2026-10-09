@@ -1,0 +1,134 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 694" width="1000" height="694" role="img" aria-labelledby="title desc" font-family="'Segoe UI', system-ui, -apple-system, BlinkMacSystemFont, Roboto, 'Helvetica Neue', Arial, sans-serif">
+  <title id="title">Cluster control plane — three questions, three mechanisms</title>
+  <desc id="desc">Membership by gossip answers who is alive: fast, leaderless, briefly wrong. A consistent-hash ring answers where replicas should live: computed locally, only a proposal. A Raft metadata log answers who leads which partition at which epoch: needs a majority and is the only authority. A membership change recomputes the ring, the Raft leader commits the new assignment with a higher epoch, and every node reconciles its partitions to match.</desc>
+  <defs>
+    <marker id="ah-1f2328" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8.5" markerHeight="8.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0.9 L9.6 5 L0 9.1 z" fill="#1f2328"/></marker>
+    <marker id="ah-57606a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8.5" markerHeight="8.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0.9 L9.6 5 L0 9.1 z" fill="#57606a"/></marker>
+  </defs>
+
+  <!-- card: the diagram brings its own background so it reads on light and dark pages -->
+  <rect x="0.5" y="0.5" width="999" height="693" rx="14" fill="#ffffff" stroke="#d0d7de"/>
+  <text x="28" y="37" font-size="20" font-weight="700" fill="#1f2328">Cluster control plane — three questions, three mechanisms</text>
+  <text x="28" y="58" font-size="12.5" fill="#57606a">Each question has a different price for a wrong answer, so each gets a different tool. Only the last one needs consensus.</text>
+  <rect x="40" y="80" width="296" height="240" rx="10" fill="#e4f6f4" stroke="#1f9d94" stroke-width="1.4"/>
+  <text x="188" y="110" font-size="15.5" fill="#0d524d" text-anchor="middle" font-weight="700">Who is alive?</text>
+  <text x="188" y="132" font-size="12" fill="#1f2328" text-anchor="middle" font-weight="600">Membership (gossip) · port 7946</text>
+  <text x="188" y="168" font-size="11.3" fill="#1f2328" text-anchor="middle">heartbeat to the other nodes every 1 s</text>
+  <text x="188" y="188" font-size="11.3" fill="#1f2328" text-anchor="middle">suspect after 3 s · failed after 5 s</text>
+  <text x="188" y="208" font-size="11.3" fill="#1f2328" text-anchor="middle">built-in TCP heartbeats, or</text>
+  <text x="188" y="228" font-size="11.3" fill="#1f2328" text-anchor="middle">HashiCorp memberlist (SWIM) by flag</text>
+  <rect x="54" y="278" width="268" height="28" rx="14" fill="#ffffff" stroke="#1f9d94" stroke-width="1.1"/>
+  <text x="188" y="296.5" font-size="10.6" fill="#0d524d" text-anchor="middle" font-weight="600">fast · leaderless · can be wrong for a moment</text>
+  <rect x="352" y="80" width="296" height="240" rx="10" fill="#eaf2fe" stroke="#3b78d8" stroke-width="1.4"/>
+  <text x="500" y="110" font-size="15.5" fill="#0b3a7e" text-anchor="middle" font-weight="700">Where should replicas live?</text>
+  <text x="500" y="132" font-size="12" fill="#1f2328" text-anchor="middle" font-weight="600">Consistent-hash ring</text>
+  <rect x="366" y="278" width="268" height="28" rx="14" fill="#ffffff" stroke="#3b78d8" stroke-width="1.1"/>
+  <text x="500" y="296.5" font-size="10.6" fill="#0b3a7e" text-anchor="middle" font-weight="600">local maths · deterministic · only a proposal</text>
+  <rect x="664" y="80" width="296" height="240" rx="10" fill="#f2ecfd" stroke="#7c4ddb" stroke-width="1.4"/>
+  <text x="812" y="110" font-size="15.5" fill="#3d1f85" text-anchor="middle" font-weight="700">Who leads what, at which epoch?</text>
+  <text x="812" y="132" font-size="12" fill="#1f2328" text-anchor="middle" font-weight="600">Raft metadata log · port 7948</text>
+  <text x="812" y="168" font-size="11.3" fill="#1f2328" text-anchor="middle">hashicorp/raft, log stored in BoltDB</text>
+  <text x="812" y="188" font-size="11.3" fill="#1f2328" text-anchor="middle">the Raft leader commits</text>
+  <text x="812" y="208" font-size="11.3" fill="#1f2328" text-anchor="middle" font-family="ui-monospace, 'Cascadia Mono', 'SF Mono', Consolas, Menlo, monospace">partition → {leader, replicas, epoch}</text>
+  <text x="812" y="228" font-size="11.3" fill="#1f2328" text-anchor="middle">every change raises the epoch</text>
+  <rect x="678" y="278" width="268" height="28" rx="14" fill="#ffffff" stroke="#7c4ddb" stroke-width="1.1"/>
+  <text x="812" y="296.5" font-size="10.6" fill="#3d1f85" text-anchor="middle" font-weight="600">needs a majority · slower · the only authority</text>
+
+  <!-- the ring -->
+  <circle cx="424" cy="206" r="42" fill="none" stroke="#8b949e" stroke-width="1.4"/>
+  <path d="M456.0 165.0 A52 52 0 0 1 475.9 203.3" fill="none" stroke="#1f2328" stroke-width="1.4" marker-end="url(#ah-1f2328)"/>
+  <circle cx="431.3" cy="164.6" r="3.8" fill="#1f9d94" stroke="#ffffff" stroke-width="1"/>
+  <circle cx="445" cy="169.6" r="3.8" fill="#c98a00" stroke="#ffffff" stroke-width="1"/>
+  <circle cx="456.2" cy="179" r="6" fill="#7c4ddb" stroke="#1f2328" stroke-width="1.8"/>
+  <circle cx="463.5" cy="191.6" r="6" fill="#c98a00" stroke="#1f2328" stroke-width="1.8"/>
+  <circle cx="466" cy="206" r="6" fill="#1f9d94" stroke="#1f2328" stroke-width="1.8"/>
+  <circle cx="463.5" cy="220.4" r="3.8" fill="#7c4ddb" stroke="#ffffff" stroke-width="1"/>
+  <circle cx="456.2" cy="233" r="3.8" fill="#7c4ddb" stroke="#ffffff" stroke-width="1"/>
+  <circle cx="445" cy="242.4" r="3.8" fill="#1f9d94" stroke="#ffffff" stroke-width="1"/>
+  <circle cx="431.3" cy="247.4" r="3.8" fill="#c98a00" stroke="#ffffff" stroke-width="1"/>
+  <circle cx="416.7" cy="247.4" r="3.8" fill="#1f9d94" stroke="#ffffff" stroke-width="1"/>
+  <circle cx="403" cy="242.4" r="3.8" fill="#7c4ddb" stroke="#ffffff" stroke-width="1"/>
+  <circle cx="391.8" cy="233" r="3.8" fill="#c98a00" stroke="#ffffff" stroke-width="1"/>
+  <circle cx="384.5" cy="220.4" r="3.8" fill="#c98a00" stroke="#ffffff" stroke-width="1"/>
+  <circle cx="382" cy="206" r="3.8" fill="#7c4ddb" stroke="#ffffff" stroke-width="1"/>
+  <circle cx="384.5" cy="191.6" r="3.8" fill="#1f9d94" stroke="#ffffff" stroke-width="1"/>
+  <circle cx="391.8" cy="179" r="3.8" fill="#7c4ddb" stroke="#ffffff" stroke-width="1"/>
+  <circle cx="403" cy="169.6" r="3.8" fill="#c98a00" stroke="#ffffff" stroke-width="1"/>
+  <circle cx="416.7" cy="164.6" r="3.8" fill="#1f9d94" stroke="#ffffff" stroke-width="1"/>
+  <rect x="445.9" y="168.9" width="8" height="8" rx="1" fill="#1f2328"/>
+  <text x="445.9" y="157.9" font-size="9.8" fill="#1f2328" text-anchor="end">hash(partition)</text>
+  <circle cx="388" cy="268" r="4" fill="#1f9d94"/>
+  <text x="396" y="271.5" font-size="10" fill="#57606a">A</text>
+  <circle cx="418" cy="268" r="4" fill="#c98a00"/>
+  <text x="426" y="271.5" font-size="10" fill="#57606a">B</text>
+  <circle cx="448" cy="268" r="4" fill="#7c4ddb"/>
+  <text x="456" y="271.5" font-size="10" fill="#57606a">C</text>
+  <text x="512" y="160" font-size="10.8" fill="#1f2328">SHA-256 positions,</text>
+  <text x="512" y="176.5" font-size="10.8" fill="#1f2328">2,048 virtual nodes</text>
+  <text x="512" y="193" font-size="10.8" fill="#1f2328">per physical node.</text>
+  <text x="512" y="209.5" font-size="10.8" fill="#1f2328">Walk clockwise from</text>
+  <text x="512" y="226" font-size="10.8" fill="#1f2328">the partition’s hash:</text>
+  <text x="512" y="242.5" font-size="10.8" fill="#1f2328">the first RF distinct</text>
+  <text x="512" y="259" font-size="10.8" fill="#1f2328">nodes hold it.</text>
+
+  <!-- how a change travels -->
+  <text x="40" y="348" font-size="12.8" fill="#1f2328" font-weight="700">How a change travels through the three</text>
+  <rect x="40" y="362" width="218" height="68" rx="8" fill="#e4f6f4" stroke="#1f9d94" stroke-width="1.3"/>
+  <text x="149" y="384.8" font-size="13.5" fill="#0d524d" text-anchor="middle" font-weight="600">Membership changes</text>
+  <text x="149" y="402.7" font-size="10.8" fill="#1f2328" text-anchor="middle">a node joins, leaves or</text>
+  <text x="149" y="417.2" font-size="10.8" fill="#1f2328" text-anchor="middle">stops answering</text>
+  <circle cx="44" cy="364" r="10.5" fill="#1f9d94" stroke="#ffffff" stroke-width="2"/>
+  <text x="44" y="367.9" font-size="11" fill="#ffffff" text-anchor="middle" font-weight="700">1</text>
+  <rect x="274" y="362" width="218" height="68" rx="8" fill="#eaf2fe" stroke="#3b78d8" stroke-width="1.3"/>
+  <text x="383" y="384.8" font-size="13.5" fill="#0b3a7e" text-anchor="middle" font-weight="600">Ring is recomputed</text>
+  <text x="383" y="402.7" font-size="10.8" fill="#1f2328" text-anchor="middle">every node derives the</text>
+  <text x="383" y="417.2" font-size="10.8" fill="#1f2328" text-anchor="middle">same desired placement</text>
+  <circle cx="278" cy="364" r="10.5" fill="#3b78d8" stroke="#ffffff" stroke-width="2"/>
+  <text x="278" y="367.9" font-size="11" fill="#ffffff" text-anchor="middle" font-weight="700">2</text>
+  <path d="M258 396 L272.6 396" fill="none" stroke="#57606a" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#ah-57606a)"/>
+  <rect x="508" y="362" width="218" height="68" rx="8" fill="#f2ecfd" stroke="#7c4ddb" stroke-width="1.3"/>
+  <text x="617" y="384.8" font-size="13.5" fill="#3d1f85" text-anchor="middle" font-weight="600">Raft leader commits</text>
+  <text x="617" y="402.7" font-size="10.8" fill="#1f2328" text-anchor="middle">the partition’s leader and</text>
+  <text x="617" y="417.2" font-size="10.8" fill="#1f2328" text-anchor="middle">replicas, at epoch + 1</text>
+  <circle cx="512" cy="364" r="10.5" fill="#7c4ddb" stroke="#ffffff" stroke-width="2"/>
+  <text x="512" y="367.9" font-size="11" fill="#ffffff" text-anchor="middle" font-weight="700">3</text>
+  <path d="M492 396 L506.6 396" fill="none" stroke="#57606a" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#ah-57606a)"/>
+  <rect x="742" y="362" width="218" height="68" rx="8" fill="#f2ecfd" stroke="#7c4ddb" stroke-width="1.3"/>
+  <text x="851" y="384.8" font-size="13.5" fill="#3d1f85" text-anchor="middle" font-weight="600">Every node reconciles</text>
+  <text x="851" y="402.7" font-size="10.8" fill="#1f2328" text-anchor="middle">lead, follow or release</text>
+  <text x="851" y="417.2" font-size="10.8" fill="#1f2328" text-anchor="middle">each partition to match</text>
+  <circle cx="746" cy="364" r="10.5" fill="#7c4ddb" stroke="#ffffff" stroke-width="2"/>
+  <text x="746" y="367.9" font-size="11" fill="#ffffff" text-anchor="middle" font-weight="700">4</text>
+  <path d="M726 396 L740.6 396" fill="none" stroke="#57606a" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#ah-57606a)"/>
+  <path d="M851 430 L851 450.6" fill="none" stroke="#57606a" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#ah-57606a)"/>
+  <rect x="508" y="452" width="452" height="46" rx="8" fill="#eaf2fe" stroke="#3b78d8" stroke-width="1.3"/>
+  <text x="734" y="471.7" font-size="10.3" fill="#1f2328" text-anchor="middle" font-family="ui-monospace, 'Cascadia Mono', 'SF Mono', Consolas, Menlo, monospace">PromoteToLeader · DemoteFromLeader · AddFollower</text>
+  <text x="734" y="485.5" font-size="10.3" fill="#1f2328" text-anchor="middle" font-family="ui-monospace, 'Cascadia Mono', 'SF Mono', Consolas, Menlo, monospace">SyncPartitionFromLeader · ReleasePartition</text>
+  <rect x="40" y="452" width="452" height="46" rx="8" fill="#fff4d9" stroke="#c98a00" stroke-width="1.3"/>
+  <text x="266" y="471.5" font-size="10.8" fill="#1f2328" text-anchor="middle">A new cluster waits for the expected number of nodes (or for</text>
+  <text x="266" y="486" font-size="10.8" fill="#1f2328" text-anchor="middle">5 s of quiet membership) before it commits the first leaders.</text>
+  <rect x="40" y="516" width="296" height="162" rx="8" fill="#e4f6f4" stroke="#1f9d94" stroke-width="1.2"/>
+  <text x="53" y="539" font-size="12.5" fill="#0d524d" font-weight="700">Why not gossip alone?</text>
+  <text x="53" y="561.9" font-size="11.3" fill="#1f2328">Gossip is eventually consistent. For a moment</text>
+  <text x="53" y="578" font-size="11.3" fill="#1f2328">two nodes can disagree about who is alive, and</text>
+  <text x="53" y="594" font-size="11.3" fill="#1f2328">each may decide that it leads the partition: split</text>
+  <text x="53" y="610.1" font-size="11.3" fill="#1f2328">brain, two logs that diverge. Being wrong about</text>
+  <text x="53" y="626.1" font-size="11.3" fill="#1f2328">liveness for a second is fine; being wrong about</text>
+  <text x="53" y="642.2" font-size="11.3" fill="#1f2328">leadership is not.</text>
+  <rect x="352" y="516" width="296" height="162" rx="8" fill="#f2ecfd" stroke="#7c4ddb" stroke-width="1.2"/>
+  <text x="365" y="539" font-size="12.5" fill="#3d1f85" font-weight="700">Why not Raft for everything?</text>
+  <text x="365" y="561.9" font-size="11.3" fill="#1f2328">Consensus costs a majority round trip per decision</text>
+  <text x="365" y="578" font-size="11.3" fill="#1f2328">and stops without a majority. Heartbeats and</text>
+  <text x="365" y="594" font-size="11.3" fill="#1f2328">placement maths don’t need agreement. Event</text>
+  <text x="365" y="610.1" font-size="11.3" fill="#1f2328">data doesn’t go through Raft either: each partition</text>
+  <text x="365" y="626.1" font-size="11.3" fill="#1f2328">leader replicates its own log, which keeps a</text>
+  <text x="365" y="642.2" font-size="11.3" fill="#1f2328">publish to one round trip.</text>
+  <rect x="664" y="516" width="296" height="162" rx="8" fill="#eaf2fe" stroke="#3b78d8" stroke-width="1.2"/>
+  <text x="677" y="539" font-size="12.5" fill="#0b3a7e" font-weight="700">Two hashes, two jobs</text>
+  <text x="677" y="561.9" font-size="11.3" fill="#1f2328">key → partition: FNV-1a(key) mod partition count.</text>
+  <text x="677" y="578" font-size="11.3" fill="#1f2328">It runs on every publish, so it is cheap; the count is</text>
+  <text x="677" y="594" font-size="11.3" fill="#1f2328">fixed.</text>
+  <text x="677" y="614" font-size="11.3" fill="#1f2328">partition → nodes: the SHA-256 ring. It runs when</text>
+  <text x="677" y="630.1" font-size="11.3" fill="#1f2328">membership changes, spreads load evenly and</text>
+  <text x="677" y="646.1" font-size="11.3" fill="#1f2328">moves few partitions when a node comes or goes.</text>
+</svg>
