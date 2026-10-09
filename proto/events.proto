@@ -305,6 +305,13 @@ message ReplicationAppendResponse {
 // ReplicationPositionRequest asks a replica where its log ends.
 message ReplicationPositionRequest {
   int32 partition_id = 1;
+
+  // Above zero, the replica first stops accepting leaders of an epoch below
+  // this one, durably, and reports its position as it is after that. An
+  // election asks this way: a leader that is being replaced may still be
+  // running and still reach this replica, and what it wrote here after the
+  // position was reported would not be in the log of the replica chosen.
+  int64 fence_epoch = 2;
 }
 
 // ReplicationPositionResponse is a replica's log position, used to elect the

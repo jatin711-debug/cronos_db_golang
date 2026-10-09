@@ -45,6 +45,14 @@ type ReplicaPositioner interface {
 	ReplicaLogPosition(ctx context.Context, addr string, partitionID int32) (found bool, lastOffset, lastTerm, epoch int64, acceptingWrites bool, err error)
 }
 
+// ReplicaFencer is a ReplicaPositioner whose replicas can be told, before
+// they report, to accept no leader of an older epoch any more.
+type ReplicaFencer interface {
+	// FencedReplicaLogPosition is ReplicaLogPosition, taken after the replica
+	// has durably stopped accepting leaders of an epoch below fenceEpoch.
+	FencedReplicaLogPosition(ctx context.Context, addr string, partitionID int32, fenceEpoch int64) (found bool, lastOffset, lastTerm, epoch int64, acceptingWrites bool, err error)
+}
+
 // assignmentStore is the committed partition metadata and the way to change it.
 type assignmentStore interface {
 	IsLeader() bool
@@ -252,12 +260,21 @@ func (m *Manager) aliveNodes() map[string]string {
 // replicaPositions asks each node for its log position, in parallel. Nodes
 // that do not answer are left out of the result.
 func (m *Manager) replicaPositions(partitionID int32, nodes map[string]string) map[string]ReplicaPosition {
+	return m.fencedPositions(partitionID, nodes, 0)
+}
+
+// fencedPositions is replicaPositions for an election. With fenceEpoch above
+// zero every replica that answers has first stopped accepting leaders of an
+// older epoch, so no answer can be overtaken by a leader that is being
+// replaced and is still running.
+func (m *Manager) fencedPositions(partitionID int32, nodes map[string]string, fenceEpoch int64) map[string]ReplicaPosition {
 	m.mu.RLock()
 	positioner := m.positions
 	m.mu.RUnlock()
 	if positioner == nil || len(nodes) == 0 {
 		return nil
 	}
+	fencer, _ := positioner.(ReplicaFencer)
 	ctx, cancel := context.WithTimeout(m.ctx, positionQueryTimeout)
 	defer cancel()
 
@@ -273,7 +290,17 @@ func (m *Manager) replicaPositions(partitionID int32, nodes map[string]string) m
 		wg.Add(1)
 		go func(id, addr string) {
 			defer wg.Done()
-			found, lastOffset, lastTerm, epoch, accepting, err := positioner.ReplicaLogPosition(ctx, addr, partitionID)
+			var (
+				found                       bool
+				lastOffset, lastTerm, epoch int64
+				accepting                   bool
+				err                         error
+			)
+			if fenceEpoch > 0 && fencer != nil {
+				found, lastOffset, lastTerm, epoch, accepting, err = fencer.FencedReplicaLogPosition(ctx, addr, partitionID, fenceEpoch)
+			} else {
+				found, lastOffset, lastTerm, epoch, accepting, err = positioner.ReplicaLogPosition(ctx, addr, partitionID)
+			}
 			if err != nil {
 				return
 			}
@@ -389,21 +416,53 @@ func (m *Manager) adoptReplicaState(assigned *PartitionInfo, alive map[string]st
 	return true
 }
 
-// electNewLeader replaces a dead partition leader. It asks the surviving
-// replicas where their logs end and commits the most complete one. When too
-// few replicas answer to be sure none of them is missing acknowledged writes,
-// it elects nobody and the partition stays unavailable until more return.
-// The caller holds leadershipMu.
+// electNewLeader gives a partition a leader when the one it had is dead, or
+// when it has none. It asks the surviving replicas where their logs end and
+// commits the most complete one. When too few replicas answer to be sure none
+// of them is missing acknowledged writes, it elects nobody and the partition
+// stays unavailable until more return. The caller holds leadershipMu.
+//
+// "Dead" is what this node sees. The leader may be running and reach other
+// replicas, and what they confirm for it after they have said where their
+// logs end would be lost with the choice of another replica. So the election
+// has two steps. It first commits that the partition has no leader, at a new
+// epoch: from there on an election is owed, whoever decides next and whether
+// or not the old leader shows up again. Then it asks the replicas, each of
+// which stops accepting leaders below that epoch before it answers
+// (fencedPositions), and commits the leader at a higher one.
 func (m *Manager) electNewLeader(partitionID int32, info *PartitionInfo) {
 	m.mu.RLock()
 	store, rt, hasPositions := m.assignments, m.router, m.positions != nil
 	m.mu.RUnlock()
 
-	alive := m.aliveNodes()
 	oldLeader := info.LeaderID
+	fenceEpoch := int64(0)
+	if store != nil && hasPositions {
+		if oldLeader != "" {
+			vacant := info.clone()
+			vacant.LeaderID, vacant.Epoch = "", info.Epoch+1
+			vacant.TransferTo, vacant.TransferStartedMs = "", 0
+			if err := store.ProposePartition(&vacant, false); err != nil {
+				log.Printf("[CLUSTER] Partition %d: recording that leader %s is gone failed: %v", partitionID, oldLeader, err)
+				return
+			}
+			committed, ok := store.Partitions()[partitionID]
+			if !ok || committed.LeaderID != "" {
+				return // changed under this election; the next round looks again
+			}
+			info = &committed
+			log.Printf("[CLUSTER] Partition %d has no leader as of epoch %d (was %s); electing one", partitionID, info.Epoch, oldLeader)
+		}
+		fenceEpoch = info.Epoch
+	}
+
+	alive := m.aliveNodes()
 	candidates := make(map[string]string)
 	for _, id := range info.Replicas {
-		if addr, ok := alive[id]; ok && id != oldLeader {
+		// A leader counted dead is not asked. Once the partition is recorded
+		// as having none, every replica that can be reached is a candidate,
+		// the former leader too if it has come back.
+		if addr, ok := alive[id]; ok && (id != oldLeader || fenceEpoch > 0) {
 			candidates[id] = addr
 		}
 	}
@@ -415,7 +474,7 @@ func (m *Manager) electNewLeader(partitionID int32, info *PartitionInfo) {
 	newLeader := ""
 	var positions map[string]ReplicaPosition
 	if hasPositions {
-		positions = m.replicaPositions(partitionID, candidates)
+		positions = m.fencedPositions(partitionID, candidates, fenceEpoch)
 		need, guaranteed := cleanElectionQuorum(len(info.Replicas), m.config.MinInSyncReplicas)
 		if guaranteed && len(positions) < need {
 			log.Printf("[CLUSTER] Partition %d: not electing a leader, only %d of the %d replicas needed to rule out losing acknowledged writes answered",
@@ -460,6 +519,9 @@ func (m *Manager) electNewLeader(partitionID int32, info *PartitionInfo) {
 		// The election stands until the membership changes again; the ring's
 		// placement is not this function's to change (see KeepLeader).
 		rt.KeepLeader(partitionID, newLeader)
+	}
+	if oldLeader == "" {
+		oldLeader = "nobody"
 	}
 	log.Printf("[CLUSTER] Partition %d new leader: %s (was %s)", partitionID, newLeader, oldLeader)
 	// Promotion and demotion follow from the committed assignment.
@@ -629,6 +691,12 @@ func (m *Manager) checkPartitionHealth() {
 	}
 	for partitionID, info := range partitions {
 		if info.LeaderID == "" {
+			if store != nil && info.Epoch > 0 {
+				// Committed without a leader: an election began and did not
+				// finish (see electNewLeader).
+				info := info
+				m.electNewLeader(partitionID, &info)
+			}
 			continue
 		}
 		if _, ok := alive[info.LeaderID]; !ok {
