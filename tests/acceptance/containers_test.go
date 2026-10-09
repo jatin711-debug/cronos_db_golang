@@ -297,6 +297,32 @@ func (c *cluster) watchClocks() *atomic.Int64 {
 }
 
 // others returns the nodes that are not n.
+// coordinator returns the node that decides which replica leads each
+// partition, or nil when no running node says it is the one.
+func (c *cluster) coordinator() *node {
+	httpClient := http.Client{Timeout: 2 * time.Second}
+	for _, n := range c.nodes {
+		if !n.running() {
+			continue
+		}
+		resp, err := httpClient.Get("http://" + n.httpAddr + "/health/deep")
+		if err != nil {
+			continue
+		}
+		var health struct {
+			Checks map[string]struct {
+				Detail string `json:"detail"`
+			} `json:"checks"`
+		}
+		err = json.NewDecoder(resp.Body).Decode(&health)
+		_ = resp.Body.Close()
+		if err == nil && health.Checks["cluster_role"].Detail == "coordinator" {
+			return n
+		}
+	}
+	return nil
+}
+
 func (c *cluster) others(n *node) []*node {
 	var rest []*node
 	for _, other := range c.nodes {

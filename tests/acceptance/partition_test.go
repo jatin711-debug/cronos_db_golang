@@ -63,9 +63,26 @@ func TestNetworkPartitions(t *testing.T) {
 	// One link fails: two nodes cannot reach each other, and both reach the
 	// third. Each of the two counts the other as gone while the third sees
 	// everybody, so the nodes disagree about who is there.
+	//
+	// The link taken, where there is one, is between the leader of a
+	// partition and the node that decides who leads. That node then replaces
+	// a leader which is still running, still reaches the third node, and is
+	// still where the applications send their publishes: whatever the third
+	// node goes on confirming for it must not be lost, and the applications
+	// must find the leader that replaced it.
+	partitionLed := int32(0)
 	leader = c.leaderOf(observer, 0)
 	other := c.others(leader)[0]
-	step(t, "cutting the link between %s, which leads partition 0, and %s", leader.id, other.id)
+	what := other.id
+	if coordinator := c.coordinator(); coordinator != nil {
+		for id := int32(0); id < partitionCount; id++ {
+			if led := c.leaderOf(observer, id); led != coordinator {
+				partitionLed, leader, other, what = id, led, coordinator, coordinator.id+", which decides who leads"
+				break
+			}
+		}
+	}
+	step(t, "cutting the link between %s, which leads partition %d, and %s", leader.id, partitionLed, what)
 	c.cut(leader, other)
 	w.waitProgress(accepted, 150, 90*time.Second, "publishes accepted with one link down")
 	time.Sleep(15 * time.Second)
