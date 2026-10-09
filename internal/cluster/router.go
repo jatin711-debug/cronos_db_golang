@@ -371,6 +371,13 @@ func (r *Router) executeRebalance(moves []PartitionMove) {
 			if leader.ID == r.localNodeID {
 				continue // this node already holds the data it would copy
 			}
+			if leader.State != NodeStateAlive {
+				// It left, which is why the partition moves. Nothing can be
+				// copied from a node this one does not reach, and the attempt
+				// held the partition's log locked until the connection timed
+				// out, with this node about to lead it.
+				continue
+			}
 
 			log.Printf("[ROUTER] Node %s initiating bulk file sync from %s for partition %d", r.localNodeID, leader.Address, move.PartitionID)
 
