@@ -118,13 +118,56 @@ faults were found.
   failures, and timeouts with the consumer still connected, count towards
   dead-lettering.
 
-Verified here: the unit tests that come with each change;
-`TestNetworkPartitions` ten times in a row against an image of this tree;
-the other acceptance tests. Three of the ten runs were made with every
-publish and every delivery logged. A leader that was cut off refused 25
-publishes in them, and none of those reached a consumer before it was
-replicated; in a run logged the same way before the change, 6 of 9 had. No
-offset was acknowledged for two different events.
+The first run of the test in CI failed where none on a developer's machine
+had. The link that was cut there was the one between the leader of the
+partitions and the node that decides who leads (it leads the cluster's Raft
+group). That node replaced a leader which was still running, still reached
+the third node, and was still where the applications sent their publishes.
+Two faults came out of that, and a third came up in the same run. The test
+now cuts that link whenever a partition is led by another node:
+
+- **An election could lose what the old leader was still having confirmed.**
+  The deciding node asked the replicas it could reach where their logs
+  ended, and chose by the answers. The old leader went on writing to the
+  third node, which confirmed it, until the new leader's first request told
+  that node of the new epoch, about half a second later. What was
+  acknowledged in between was not in the log that had been chosen, and was
+  removed. An election now has two steps. It first commits that the
+  partition has no leader, at a new epoch, so that an election stays owed
+  whoever decides next and whether or not the old leader shows up again.
+  Then each replica it asks stops accepting leaders below that epoch,
+  durably, before it answers with where its log ends
+  (`ReplicationPositionRequest.fence_epoch`), and the leader is committed at
+  a higher one.
+- **A leader that had been replaced kept the publishers that were sending to
+  it.** Stepping down on a follower's word, as described above, left the
+  node answering publishes with "replication leader is not ready", which a
+  client takes for a final refusal: the publishers came back to the same
+  node for as long as it stayed cut off from the cluster's records. A node
+  whose partition has taken a newer epoch than its records of the cluster
+  show now answers that it does not lead and that the publish belongs with
+  the leader, which is what sends a client to look for it. A replaced leader
+  also answers at once, where it used to wait out the replication timeout
+  for a node it could not reach.
+- **A node about to lead a partition tried to copy it from the node it had
+  just counted dead.** The ring moves a partition when a node leaves, and
+  the node it moves to fetched a copy from the current leader, which was the
+  node that had left. Nothing came of it, but the attempt held the
+  partition's log locked until the connection timed out, twenty seconds
+  during which the node could neither take publishes for the partition nor
+  be written to. It no longer tries.
+
+Verified here: the unit tests that come with each change; the whole Go suite
+(`go test ./...`); the race detector on the four packages the election and
+publish paths are in; the four process-based acceptance tests; and
+`TestNetworkPartitions`, six runs in a row against an image of this tree. The
+image as pushed did not pass a local run of that test: once node3 was cut
+off, 5 of the 150 publishes were accepted within 90 seconds. (In CI the
+link failed earlier, as above.) Before the CI run, ten runs in a row had
+passed, three of them with every publish and every delivery logged: a leader
+that was cut off refused 25 publishes in them, and none of those reached a
+consumer before it was replicated, where 6 of 9 had in a run logged the same
+way before the change. No offset was acknowledged for two different events.
 
 Not verified: links that are slow or lose some packets, as opposed to all;
 outages longer than a minute; more than one machine. With
