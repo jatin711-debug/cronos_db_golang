@@ -811,10 +811,17 @@ func (pm *PartitionManager) startPartitionInternal(partition *Partition) error {
 	}
 	// Snapshots/checkpoints contain metadata, not the pending timer set. Rebuild
 	// from retained WAL records on every start; duplicate delivery is allowed.
+	//
+	// A partition of a cluster does this when its node is made leader, and
+	// not before. Until then it delivers nothing, the log may still change,
+	// and a timer holds its event: scheduled on every replica, the events that
+	// wait to come due were held in memory once for each of them.
 	snapshotMgr := NewSnapshotManager(partition.DataDir, partition.ID)
-	pm.replayWALTimers(partition)
-	if err := partition.GetReplayError(); err != nil {
-		return err
+	if !partition.replicated {
+		pm.replayWALTimers(partition)
+		if err := partition.GetReplayError(); err != nil {
+			return err
+		}
 	}
 	partition.started = true
 
@@ -947,14 +954,18 @@ func (pm *PartitionManager) recoverDedupFromWAL(partition *Partition) {
 	}
 
 	recovered := 0
-	const batch int64 = 10000
-	for from := startOffset; from <= lastOffset; from += batch {
-		to := min(from+batch-1, lastOffset)
-		events, err := partition.Wal.ReadEvents(from, to)
+	for from := startOffset; from <= lastOffset; {
+		to := min(from+logWalkEvents-1, lastOffset)
+		events, err := partition.Wal.ReadEventsWithin(from, to, logWalkBytes)
 		if err != nil {
 			log.Printf("[Partition %d] Dedup recovery read failed at offsets %d-%d: %v", partition.ID, from, to, err)
 			return
 		}
+		if len(events) == 0 {
+			from = to + 1 // removed from the log meanwhile
+			continue
+		}
+		from = events[len(events)-1].Offset + 1
 		for _, ev := range events {
 			mid := ev.GetMessageId()
 			if mid == "" {
@@ -987,9 +998,24 @@ func (pm *PartitionManager) recoverDedupFromWAL(partition *Partition) {
 	}
 }
 
-// replayWALTimers reads all events from the WAL and re-schedules any whose
-// schedule_ts is still in the future. This recovers timers lost during a crash.
-// Uses incremental checkpointing to avoid O(N) replay on each boot.
+// logWalkBytes and logWalkEvents bound one read of a walk through the log at
+// a start or a promotion: about this many bytes of records, and no more than
+// this many events. Such a walk used to read ten thousand events at a time,
+// which is megabytes of small events and gigabytes of large ones.
+const (
+	logWalkBytes  = 16 << 20
+	logWalkEvents = 10_000
+)
+
+// replayWALTimers walks the log and schedules the events that are not due
+// yet, which restores the timers a stopped node lost.
+//
+// Events that are due already are left where they are. A subscription reads
+// what its group has not finished from the log when it starts, at the pace
+// its consumers take it (redriveRetained), and nothing is delivered without
+// one. Queuing them here as well put the whole undelivered backlog in memory
+// at every start, where nothing bounded it: a node with more waiting on disk
+// than it has memory did not come back.
 func (pm *PartitionManager) replayWALTimers(partition *Partition) {
 	// Every event in the log is scheduled below, held or not.
 	partition.dropHeld()
@@ -1004,48 +1030,47 @@ func (pm *PartitionManager) replayWALTimers(partition *Partition) {
 		return // Empty WAL, nothing to replay
 	}
 
-	startOffset := int64(0)
+	startOffset := partition.Wal.GetFirstOffset()
 
 	now := time.Now().UnixMilli()
 	scheduledCount := 0
 	maturedCount := 0
 	lastScheduled := startOffset - 1
 
-	const replayBatchSize int64 = 10000
-	for batchStart := startOffset; batchStart <= lastOffset; batchStart += replayBatchSize {
-		batchEnd := min(batchStart+replayBatchSize-1, lastOffset)
+	for batchStart := startOffset; batchStart <= lastOffset; {
+		batchEnd := min(batchStart+logWalkEvents-1, lastOffset)
 
-		events, err := partition.Wal.ReadEvents(batchStart, batchEnd)
+		events, err := partition.Wal.ReadEventsWithin(batchStart, batchEnd, logWalkBytes)
 		if err != nil {
 			err = fmt.Errorf("WAL replay failed at offsets %d-%d: %w", batchStart, batchEnd, err)
 			partition.setReplayError(err)
 			log2.Warn("WAL replay failed", "partition", partition.ID, "start_offset", batchStart, "end_offset", batchEnd, "error", err)
 			return
 		}
+		if len(events) == 0 {
+			batchStart = batchEnd + 1 // removed from the log meanwhile
+			continue
+		}
+		batchStart = events[len(events)-1].Offset + 1
 
 		for _, event := range events {
-			// Schedule every replayed event. Scheduler.Schedule routes future
-			// events into the timing wheel and events whose schedule_ts has already
-			// passed (matured while the node was down) straight to the ready queue
-			// for immediate delivery. Previously matured events were only counted
-			// and dropped, so any timer that came due during downtime was lost.
+			lastScheduled = event.Offset
+			if event.GetScheduleTs() <= now {
+				maturedCount++ // a subscription reads it from the log
+				continue
+			}
 			if err := partition.Scheduler.Schedule(event); err != nil {
 				log2.Warn("WAL replay scheduler error", "partition", partition.ID, "offset", event.Offset, "error", err)
 				continue
 			}
-			if event.GetScheduleTs() > now {
-				scheduledCount++
-			} else {
-				maturedCount++
-			}
-			lastScheduled = event.Offset
+			scheduledCount++
 		}
 	}
 
 	// Update checkpoint incrementally
 	pm.writeTimerCheckpoint(partition, lastScheduled)
 
-	log.Printf("[Partition %d] WAL replay complete: %d future events re-scheduled, %d matured-during-downtime enqueued (offsets %d-%d)",
+	log.Printf("[Partition %d] WAL replay complete: %d future events re-scheduled, %d already due left in the log for subscriptions (offsets %d-%d)",
 		partition.ID, scheduledCount, maturedCount, startOffset, lastScheduled)
 }
 
@@ -1518,13 +1543,22 @@ func (pm *PartitionManager) PromoteToLeader(partitionID int32, epoch int64) erro
 			return err
 		}
 	}
-	if !partition.started {
+	wasStarted := partition.started
+	if !wasStarted {
 		if err := pm.startPartitionInternal(partition); err != nil {
 			return err
 		}
-	} else if !partition.IsLeader() {
-		pm.replayWALTimers(partition)
-		pm.recoverDedupFromWAL(partition)
+	}
+	if !partition.IsLeader() {
+		// A start has walked the log for its timers, unless the partition is
+		// replicated, and has recovered the dedup store either way: the walk and
+		// the recovery are needed here only for a partition that was running.
+		if wasStarted || partition.replicated {
+			pm.replayWALTimers(partition)
+		}
+		if wasStarted {
+			pm.recoverDedupFromWAL(partition)
+		}
 		if err := partition.GetReplayError(); err != nil {
 			return err
 		}
