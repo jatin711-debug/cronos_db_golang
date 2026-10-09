@@ -55,7 +55,12 @@ exist:
 
 When a follower falls behind (`f.NextOffset < events[0].Offset`),
 `Leader.catchUpFollower` slices `[from, to)` from the leader's WAL into
-`batchSize`-sized chunks and replays them through the same `Append` RPC.
+`batchSize`-sized chunks, and reads each chunk only as far as 8 MiB
+(`catchUpBytes`, through `WAL.ReadEventsWithin`); one larger event goes on its
+own. A request has to stay under the transport's 64 MiB limit whatever the
+events weigh, so a chunk that does not fit goes as several requests, each
+continuing from the follower's acknowledged offset, and replays them through
+the same `Append` RPC.
 A follower with more than four batches outstanding is skipped for new
 batches instead of queueing without bound; it is caught up from the WAL by
 its next send, or by the leader's maintenance loop (every 500 ms) when the
@@ -265,8 +270,9 @@ replicated that far:
   holds a prefix of the log;
 - by the leader's maintenance loop once catch-up has taken them to a quorum.
 
-After a restart or a promotion every event in the log is scheduled, and the
-dedup store is re-seeded from the log tail with *appended* records, so a retry
+After a restart or a promotion the events not yet due are scheduled, and the
+events already due stay in the log for their subscriptions to read. The dedup
+store is re-seeded from the log tail with *appended* records, so a retry
 is answered from the log. If the log no longer holds the event, because a newer
 leader replaced this node's unreplicated tail, the record is dropped and the
 retry is published as new.
