@@ -267,6 +267,12 @@ func (h *ReplicationServiceHandler) Position(ctx context.Context, req *types.Rep
 		return nil, status.Error(codes.Unavailable, "partition manager not initialized")
 	}
 	position := h.partitionManager.LocalReplicaPosition(req.GetPartitionId())
+	if fence := req.GetFenceEpoch(); fence > 0 {
+		var err error
+		if position, err = h.partitionManager.FenceLocalReplica(req.GetPartitionId(), fence); err != nil {
+			return nil, status.Errorf(codes.Internal, "fence partition %d at epoch %d: %v", req.GetPartitionId(), fence, err)
+		}
+	}
 	return &types.ReplicationPositionResponse{
 		Found:           position.Found,
 		LastOffset:      position.LastOffset,

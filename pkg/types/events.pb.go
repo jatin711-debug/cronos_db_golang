@@ -1604,8 +1604,14 @@ func (x *ReplicationAppendResponse) GetConflictFirstOffset() int64 {
 
 // ReplicationPositionRequest asks a replica where its log ends.
 type ReplicationPositionRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	PartitionId   int32                  `protobuf:"varint,1,opt,name=partition_id,json=partitionId,proto3" json:"partition_id,omitempty"`
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	PartitionId int32                  `protobuf:"varint,1,opt,name=partition_id,json=partitionId,proto3" json:"partition_id,omitempty"`
+	// Above zero, the replica first stops accepting leaders of an epoch below
+	// this one, durably, and reports its position as it is after that. An
+	// election asks this way: a leader that is being replaced may still be
+	// running and still reach this replica, and what it wrote here after the
+	// position was reported would not be in the log of the replica chosen.
+	FenceEpoch    int64 `protobuf:"varint,2,opt,name=fence_epoch,json=fenceEpoch,proto3" json:"fence_epoch,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1643,6 +1649,13 @@ func (*ReplicationPositionRequest) Descriptor() ([]byte, []int) {
 func (x *ReplicationPositionRequest) GetPartitionId() int32 {
 	if x != nil {
 		return x.PartitionId
+	}
+	return 0
+}
+
+func (x *ReplicationPositionRequest) GetFenceEpoch() int64 {
+	if x != nil {
+		return x.FenceEpoch
 	}
 	return 0
 }
@@ -4506,9 +4519,11 @@ const file_proto_events_proto_rawDesc = "" +
 	"\x04term\x18\x05 \x01(\x03R\x04term\x12!\n" +
 	"\flog_mismatch\x18\x06 \x01(\bR\vlogMismatch\x12#\n" +
 	"\rconflict_term\x18\a \x01(\x03R\fconflictTerm\x122\n" +
-	"\x15conflict_first_offset\x18\b \x01(\x03R\x13conflictFirstOffset\"?\n" +
+	"\x15conflict_first_offset\x18\b \x01(\x03R\x13conflictFirstOffset\"`\n" +
 	"\x1aReplicationPositionRequest\x12!\n" +
-	"\fpartition_id\x18\x01 \x01(\x05R\vpartitionId\"\xb2\x01\n" +
+	"\fpartition_id\x18\x01 \x01(\x05R\vpartitionId\x12\x1f\n" +
+	"\vfence_epoch\x18\x02 \x01(\x03R\n" +
+	"fenceEpoch\"\xb2\x01\n" +
 	"\x1bReplicationPositionResponse\x12\x14\n" +
 	"\x05found\x18\x01 \x01(\bR\x05found\x12\x1f\n" +
 	"\vlast_offset\x18\x02 \x01(\x03R\n" +

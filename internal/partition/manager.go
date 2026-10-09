@@ -1722,6 +1722,57 @@ func (pm *PartitionManager) partitionOnDisk(partitionID int32) bool {
 	return err == nil && info.IsDir()
 }
 
+// FenceLocalReplica has this node's replica of a partition accept no leader
+// of an epoch below epoch any more, and returns where its log ends once that
+// holds. It is what an election asks of every replica it counts on.
+//
+// An election replaces a leader that the node deciding it cannot reach. That
+// leader may be running all the same, and reach other replicas: it then goes
+// on getting its publishes confirmed by them, and acknowledges them, until
+// its successor's first request tells them of the new epoch. What it wrote in
+// between is not in the log the election chose, and is removed. Recording the
+// epoch here, before the position is read and under the lock that appends
+// take, closes that: nothing of an older leader arrives after the answer.
+//
+// A replica without the partition is given an empty one, so that it has an
+// epoch to hold: otherwise the old leader could still fill it and count it.
+func (pm *PartitionManager) FenceLocalReplica(partitionID int32, epoch int64) (ReplicaPosition, error) {
+	p, err := pm.GetOrCreateInternalPartition(partitionID, fmt.Sprintf("partition-%d", partitionID))
+	if err != nil {
+		return ReplicaPosition{}, err
+	}
+	p.ReplicateMu.Lock()
+	defer p.ReplicateMu.Unlock()
+	if epoch > p.Epoch() {
+		if p.IsLeader() {
+			// This node is the leader being replaced.
+			if err := pm.DemoteFromLeader(partitionID); err != nil {
+				return ReplicaPosition{}, fmt.Errorf("step down for epoch %d: %w", epoch, err)
+			}
+		}
+		if err := p.PersistEpoch(epoch); err != nil {
+			return ReplicaPosition{}, err
+		}
+	}
+	return pm.LocalReplicaPosition(partitionID), nil
+}
+
+// FencedReplicaLogPosition is ReplicaLogPosition for an election: the replica
+// first stops accepting leaders of an epoch below fenceEpoch (see
+// FenceLocalReplica).
+func (pm *PartitionManager) FencedReplicaLogPosition(ctx context.Context, addr string, partitionID int32, fenceEpoch int64) (found bool, lastOffset, lastTerm, epoch int64, acceptingWrites bool, err error) {
+	var position ReplicaPosition
+	if addr == "" {
+		position, err = pm.FenceLocalReplica(partitionID, fenceEpoch)
+	} else {
+		position, err = pm.remoteReplicaPosition(ctx, addr, partitionID, fenceEpoch)
+	}
+	if err != nil {
+		return false, -1, 0, 0, false, err
+	}
+	return position.Found, position.LastOffset, position.LastTerm, position.Epoch, position.AcceptingWrites, nil
+}
+
 // ReplicaLogPosition returns the log position of the replica on the node at
 // addr, or of this node when addr is empty. It is what the cluster uses to
 // elect the most complete replica and to check a handoff target.
@@ -1737,7 +1788,11 @@ func (pm *PartitionManager) ReplicaLogPosition(ctx context.Context, addr string,
 
 // RemoteReplicaPosition asks the node at addr for its log position.
 func (pm *PartitionManager) RemoteReplicaPosition(ctx context.Context, addr string, partitionID int32) (ReplicaPosition, error) {
-	resp, err := replication.QueryPosition(ctx, addr, partitionID, pm.replicationTLSConfig())
+	return pm.remoteReplicaPosition(ctx, addr, partitionID, 0)
+}
+
+func (pm *PartitionManager) remoteReplicaPosition(ctx context.Context, addr string, partitionID int32, fenceEpoch int64) (ReplicaPosition, error) {
+	resp, err := replication.QueryPosition(ctx, addr, partitionID, fenceEpoch, pm.replicationTLSConfig())
 	if err != nil {
 		return ReplicaPosition{}, err
 	}

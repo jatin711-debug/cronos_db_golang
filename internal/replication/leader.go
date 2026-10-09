@@ -1177,7 +1177,10 @@ func (l *Leader) shipConsumerProgress() {
 }
 
 // QueryPosition asks the replica at addr where its log for a partition ends.
-func QueryPosition(ctx context.Context, addr string, partitionID int32, tlsConfig *MTLSConfig) (*types.ReplicationPositionResponse, error) {
+//
+// With fenceEpoch above zero the replica first stops accepting leaders of an
+// older epoch (see partition.PartitionManager.FenceLocalReplica).
+func QueryPosition(ctx context.Context, addr string, partitionID int32, fenceEpoch int64, tlsConfig *MTLSConfig) (*types.ReplicationPositionResponse, error) {
 	var creds credentials.TransportCredentials = insecure.NewCredentials()
 	if tlsConfig != nil && tlsConfig.Enabled {
 		tlsCfg, err := BuildClientTLSConfig(tlsConfig)
@@ -1191,7 +1194,7 @@ func QueryPosition(ctx context.Context, addr string, partitionID int32, tlsConfi
 		return nil, fmt.Errorf("dial replica %s: %w", addr, err)
 	}
 	defer conn.Close()
-	return types.NewReplicationServiceClient(conn).Position(ctx, &types.ReplicationPositionRequest{PartitionId: partitionID})
+	return types.NewReplicationServiceClient(conn).Position(ctx, &types.ReplicationPositionRequest{PartitionId: partitionID, FenceEpoch: fenceEpoch})
 }
 
 // Stop stops the leader and closes all follower connections. Safe to call

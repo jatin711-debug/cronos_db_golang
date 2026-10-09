@@ -186,9 +186,11 @@ func TestElection_RefusesWhenTooFewReplicasAnswer(t *testing.T) {
 	f.positions.unreachable["node-3"] = true
 	delete(f.membership.nodes, "node-1")
 
+	// Nobody is elected. The partition is on record as having no leader, so
+	// that the election is taken up again (see TestElection_IsOwedUntilItIsDecided).
 	f.manager.checkPartitionHealth()
-	if got := f.committed(t); got.LeaderID != "node-1" {
-		t.Fatalf("elected %s although only one of the two surviving replicas answered", got.LeaderID)
+	if got := f.committed(t); got.LeaderID != "" {
+		t.Fatalf("leader = %q after an election in which only one of the two surviving replicas answered, want none", got.LeaderID)
 	}
 
 	// Once the other replica answers, the election goes ahead.
