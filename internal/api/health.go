@@ -260,6 +260,14 @@ func (h *HealthChecker) handleDeepHealth(w http.ResponseWriter, r *http.Request)
 		if clusterStats.NumPartitions > 0 {
 			checks["cluster_partitions"] = HealthCheck{Status: "up", Detail: fmt.Sprintf("%d partitions, %d leaders", clusterStats.NumPartitions, clusterStats.LeaderPartitions), Healthy: true}
 		}
+		// One node decides which replica leads each partition (it leads the
+		// cluster's Raft group). Which one matters when the network fails:
+		// the nodes it cannot reach are the ones whose partitions move.
+		role := "member"
+		if clusterStats.IsLeader {
+			role = "coordinator"
+		}
+		checks["cluster_role"] = HealthCheck{Status: "up", Detail: role, Healthy: true}
 	}
 
 	resp := DeepHealthResponse{
