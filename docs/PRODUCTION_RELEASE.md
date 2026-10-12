@@ -151,6 +151,31 @@ node, or mount a second volume and point `--backup-dir` at it.
 `check-log` work on the files of a stopped node: scale the StatefulSet down
 and run them from a pod of the same image that mounts the node's volume.
 
+The acceptance tests make faults that show once in a few runs, and a change
+gets one run. `.github/workflows/nightly.yml` runs them three times over
+every night on `main`, on processes and on containers, and keeps the node
+logs of a failure for two weeks. It runs on request for any branch:
+`gh workflow run nightly.yml --ref developement`.
+
+### Binaries
+
+A release carries the server and `cronos-admin` for Linux and macOS (amd64
+and arm64) and Windows (amd64), one archive for each, with `SHA256SUMS`.
+`.github/workflows/release.yml` builds them from the tag when the release is
+published, starts the Linux server it built and waits for it to say it is
+ready, and attaches them. `scripts/build-release-binaries.sh <version>` builds
+the same archives on any machine that has Go and `zip`.
+
+They are built without cgo, which is what lets one machine build all five
+and lets each run without a library beside it. A build without cgo uses the
+bloom filter written in Go; the image is built with cgo and uses the one in
+Rust, which is faster. Neither keeps anything on disk, so a data directory
+can go from one to the other. The `go` job of CI runs the suite once without
+cgo and builds the five archives, so that a release is not the first to find
+out that one of them does not build. The first release with binaries is the
+one after `v0.6.0-rc.3`: before it the server did not build for macOS, and
+needed cgo and the Rust library everywhere but on Windows.
+
 ## Memory and overload
 
 A node keeps in memory, payload included, every event that is due within the
@@ -172,13 +197,25 @@ producers flood a cluster that has a small limit and no consumer; the nodes
 refuse, none dies, and everything that was acknowledged is delivered once a
 consumer starts.
 
-What this does not bound: a node that restarts reads its undelivered backlog
-back into memory whatever its size, because the refusal applies to publishes
-and not to recovery. A node whose backlog alone exceeds its memory limit is
-killed on every start. Give nodes memory for the backlog you allow, alert on
-the two gauges, and keep consumers running. The queues themselves are still
-bounded by event count (`--max-ready-queue`, `--max-timing-wheel-size`,
-`--max-in-flight`), not by bytes. Sustained load at production sizes has not
+A node that restarts leaves on disk what is due and not delivered: a
+subscription reads it from the log at the pace its consumers take it, a few
+megabytes at a time. Two tests hold it to that. In
+`TestRestartWithABacklogLargerThanMemory` three processes take in a backlog a
+quarter larger than the memory limit they are restarted with, and must stay
+below it until a consumer has received everything. In
+`TestRestartInContainersWithABacklogLargerThanTheirMemory` three containers of
+the image, which the kernel kills above 384 MiB, take in a gigabyte, are
+killed, come back and deliver it; in CI the fullest held 141 MiB. This is on
+the development branch. `v0.6.0-rc.3` and everything before it reads the
+backlog into memory at a start, and a node there whose backlog exceeds its
+memory is killed on every start.
+
+What this does not bound: events that are not due yet and fall in the hot
+window are in memory after a restart as they were before it. The queues
+themselves are still bounded by event count (`--max-ready-queue`,
+`--max-timing-wheel-size`, `--max-in-flight`), not by bytes, and a partition's
+leader holds up to 64 MiB of due events for its consumers whatever the limit
+is. Backlogs beyond a gigabyte and sustained load at production sizes have not
 been measured.
 
 ## What a release promises, and what that rests on
@@ -197,7 +234,8 @@ second; the last column says what they do not show.
 | A partition takes publishes again within 90 seconds of its leader's death | The bound the campaign enforces | Typical times; behavior under load |
 | Any node, the first included, can be replaced with an empty one | `TestFaultCampaign`, `TestFirstNodeReplaced`, the kind job on the chart | Two at once |
 | A cluster that is lost entirely comes back from its nodes' backups with everything acknowledged before the earliest of them | `TestClusterRestoredFromBackups` | Restore to a point between backups; getting backups off the node, which is the operator's to arrange |
-| Producers that outrun the cluster are refused, and no node dies of it | `TestOverloadIsRefusedAndSurvived` | A backlog larger than a node's memory at restart; load at production sizes |
+| Producers that outrun the cluster are refused, and no node dies of it | `TestOverloadIsRefusedAndSurvived` | Load at production sizes |
+| A node comes back with more waiting for consumers than it has memory, and delivers it (development branch; not in `v0.6.0-rc.3`) | `TestRestartWithABacklogLargerThanMemory`; `TestRestartInContainersWithABacklogLargerThanTheirMemory`, with a limit of 384 MiB that the kernel enforces and a backlog of 1 GiB | Backlogs beyond a gigabyte; events not yet due, which are held in memory for the hot window |
 | Traffic between nodes is encrypted and only nodes that hold the cluster's certificate take part | `TestTransportTLS_*`, the kind job | The HTTP port; replacing certificates without a restart |
 | One tenant cannot read, replay or acknowledge another's events | `TestIsolation_*` | |
 
@@ -230,6 +268,7 @@ still needs:
 Known limits of what is released are in the
 [audit](PRODUCTION_AUDIT_2026-09-27.md): log entries are removed from the
 start of a log only, so one event that cannot go yet keeps every later
-segment; a restart reads the undelivered backlog into memory; a consumer
-group's finished work in a partition shared by several topics is carried over
-a failover only in part, and may be delivered again.
+segment; a restart of `v0.6.0-rc.3` reads the undelivered backlog into memory,
+which the development branch no longer does; a consumer group's finished work
+in a partition shared by several topics is carried over a failover only in
+part, and may be delivered again.

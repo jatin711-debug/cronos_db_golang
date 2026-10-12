@@ -1,0 +1,79 @@
+name: nightly-acceptance
+
+# Every night, on the default branch: the acceptance tests several times over.
+# A fault that shows once in a few runs is not found by the one run a change
+# gets, and the faults these tests make are of that kind. It also runs on
+# request, for any branch:
+#   gh workflow run nightly.yml --ref <branch>
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      count:
+        description: How many times each test runs
+        required: false
+        default: "3"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-acceptance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Three server processes: killed, frozen, restarted, restored from backups,
+  # flooded, and restarted with a backlog larger than their memory.
+  processes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      CGO_ENABLED: "1"
+      LD_LIBRARY_PATH: ${{ github.workspace }}/internal/dedup/rust/target/release
+      CRONOS_ACCEPTANCE_ARTIFACTS: ${{ github.workspace }}/build/acceptance-logs
+      COUNT: ${{ inputs.count || '3' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: cargo build --release --locked --manifest-path internal/dedup/rust/Cargo.toml
+      - name: Acceptance tests on three processes, several times
+        run: go test -tags acceptance -count="$COUNT" -timeout 110m -v ./tests/acceptance/
+      - name: Keep the node logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-process-node-logs
+          path: build/acceptance-logs
+          retention-days: 14
+          if-no-files-found: ignore
+
+  # Three containers of the image: links cut between them, and a memory limit
+  # that the kernel enforces.
+  containers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      CRONOS_IMAGE: cronos-db:nightly
+      CRONOS_ACCEPTANCE_ARTIFACTS: ${{ github.workspace }}/build/container-logs
+      COUNT: ${{ inputs.count || '3' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Build the image
+        run: docker build -t cronos-db:nightly .
+      - name: Acceptance tests on three containers, several times
+        run: go test -tags acceptance -count="$COUNT" -timeout 110m -v -run 'TestNetworkPartitions|TestRestartInContainers' ./tests/acceptance/
+      - name: Keep the node logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-container-node-logs
+          path: build/container-logs
+          retention-days: 14
+          if-no-files-found: ignore

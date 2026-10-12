@@ -34,7 +34,7 @@ existing-test review, not a new fault-injection or deployment campaign.
 | F17: overload/latency | Partial | Worker event-count and estimated-byte caps added. Replication returns on quorum instead of waiting for every follower; sends to a slow follower stay ordered and bounded, and a skipped follower is caught up from the WAL; `--replication-timeout` is the Append deadline. `batch` fsync no longer syncs under the WAL lock: writers that append during a sync share the next one. An empty partition no longer allocates its bloom filter and consumer queue up front. CDC no longer runs on the append path or queues in memory: a slow sink makes its feed lag. The delivery settings (ack timeout, retries, backoff, credits, circuit breaker) now reach the dispatcher; they were parsed and ignored. An overload test runs in CI: producers flood three nodes that have a small memory limit and no consumer; the nodes refuse publishes, none dies, they hold less than their limit, and everything acknowledged is delivered once a consumer starts (`TestOverloadIsRefusedAndSurvived`). Byte-bounded queues and measurements of sustained load at production sizes remain; the reads of the log are bounded by bytes at a restart and on the replication, redrive, feed, replay and cross-region paths (eighth batch). |
 | F18: accounting/metrics | Core fix implemented | SLO interceptor counts semantic failure responses. Counters now follow an event per partition: accepted, answered as duplicate, delivered (first attempt or retry), acknowledged (success or failure), timed out, dead-lettered; a histogram records how long after its scheduled time an event was first delivered; gauges show where each log starts and how far its change feed has got (tested through publish, subscribe and acknowledge). The chart's alert rules use them, and the rule that compared one node's leader count with the partition total, which fired on every node of a healthy cluster, is replaced. Remaining: nothing counts events that are never delivered because no consumer group takes their topic, and there is no per-tenant view. |
 | F19: dependencies | Partial | Go module/toolchain at 1.26.9, which fixes the standard-library advisories CI reported, gRPC and dashboard lockfile updates present; Docker Go builder aligned. The archived Avro codec was replaced with a patched fork and explicit decoder limits after the first CI security scan failed. CI now scans the image it builds and fails on a high or critical vulnerability that has a fix. The first scan, of the `v0.6.0-rc.2` image, found seven, all in the base image's `perl-base` package and none in the server binary; the image build now applies Debian's security updates. An audit of the Rust dependencies remains. |
-| F20: release gates | Partial | Linux cgo/race/vet/build/format checks, Rust and dashboard tests, Go/npm scans, chart assertions, and production-mode kind startup workflow added. CI runs for pull requests and for pushes to `main`; a commit of the development branch is checked on request, which is done for the commit of a release. A fault campaign (`tests/acceptance`) now runs there too: three server processes, producers and a consumer group through the client library, a ledger of every acknowledged event, and a comparison of the replicas' logs at the end. The job that builds the image also cuts links between three containers of it. Remaining: branch protection that makes the jobs required. |
+| F20: release gates | Partial | Linux cgo/race/vet/build/format checks, Rust and dashboard tests, Go/npm scans, chart assertions, and production-mode kind startup workflow added. CI runs for pull requests and for pushes to `main`; a commit of the development branch is checked on request, which is done for the commit of a release. A fault campaign (`tests/acceptance`) now runs there too: three server processes, producers and a consumer group through the client library, a ledger of every acknowledged event, and a comparison of the replicas' logs at the end. The job that builds the image also cuts links between three containers of it. The acceptance tests also run three times over every night on `main`, on processes and on containers, and a release gets binaries for Linux, macOS and Windows, built from its tag and started before they are attached (eighth batch). Remaining: branch protection that makes the jobs required. |
 
 The first pushed production-checks run found reachable decoder advisories in the
 archived `hamba/avro` module. The follow-up migrates schema validation to
@@ -122,6 +122,25 @@ is unchanged. The table rows for F04, F14, F17 and F19 describe what moved.
   first and the last event's times, which the pruning that F12 removed went
   by, say nothing about the events between them; the tests fail when those
   are used.
+- **A release gets binaries, and the acceptance tests run every night.** The
+  server did not build for macOS at all (it called `fallocate`, which Linux
+  has and macOS does not), and needed cgo and the Rust library on every
+  system but Windows. A build without cgo now uses the bloom filter written
+  in Go on any system, and macOS gives a segment its length without
+  reserving its blocks. `release.yml` builds the server and the admin tool for
+  five systems from a release's tag, starts the Linux server it built, and
+  attaches the archives; CI builds the same archives and runs the suite once
+  without cgo. `nightly.yml` runs the acceptance tests three times over each
+  night. Neither workflow has run for a release or on a schedule yet: both
+  start when this reaches `main`.
+- **Two failures that could not be explained say more the next time.** A
+  partition test once lost the directory its containers read their
+  certificates from, to something outside the test; the test now says so by
+  name when it ends. An isolation test failed once in CI on an
+  acknowledgement that did not finish its event, and passed 240 times in a
+  row here; its failure now says whether the server still waited for the
+  delivery, how often the consumer was called, and whether its subscription
+  had ended. Neither cause is known.
 
 Verified here: the whole Go suite on 1.26.9; the replay, partition,
 transaction, API and storage packages with the race detector; a fetch of

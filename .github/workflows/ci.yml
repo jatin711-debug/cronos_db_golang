@@ -42,6 +42,15 @@ jobs:
           go build ./cmd/...
       - name: Race and regression suite
         run: go test -race -count=1 ./internal/... ./pkg/... ./cmd/... -timeout 180s
+      # The binaries of a release are built without cgo, for five systems. The
+      # suite is run once the way they are built, and they are built, so that
+      # a release is not the first to find out that one of them does not.
+      - name: Suite without cgo, as the binaries of a release are built
+        env:
+          CGO_ENABLED: "0"
+        run: go test -count=1 ./internal/... ./pkg/... ./cmd/... -timeout 300s
+      - name: Build the binaries of a release
+        run: bash scripts/build-release-binaries.sh ci "$RUNNER_TEMP/release-check"
 
   # Three server processes form a cluster and are killed, frozen and restarted
   # while producers and a consumer group work. Every acknowledged publish must

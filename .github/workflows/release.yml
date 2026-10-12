@@ -1,0 +1,83 @@
+name: release-binaries
+
+# Builds the server and the admin tool for Linux, macOS and Windows and
+# attaches them, with their checksums, to a release. It runs when a release
+# is published, and on request for one that exists:
+#   gh workflow run release.yml -f tag=v0.7.0
+#
+# It builds the source of the tag, with the script of the tag, so it works for
+# releases from the first one that has scripts/build-release-binaries.sh.
+# The container image is not built here: it is built and pushed by hand.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag of the release to attach binaries to
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-binaries-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  binaries:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/dashboard/package-lock.json
+      # The server serves the dashboard from files that are compiled into it.
+      # They are built here from the tag's source, as the image build does.
+      - name: Build the dashboard that is compiled into the server
+        run: |
+          npm --prefix web/dashboard ci
+          npm --prefix web/dashboard run build
+          rm -rf internal/api/web/dist
+          cp -r web/dashboard/dist internal/api/web/dist
+      - name: Build the binaries
+        run: bash scripts/build-release-binaries.sh "$TAG" dist
+      # The archive for this machine is unpacked and its server started: it
+      # has to say that it is ready, and the admin tool has to run.
+      - name: Start the server that was built
+        run: |
+          set -euo pipefail
+          tar -C "$RUNNER_TEMP" -xzf "dist/cronos-db_${TAG}_linux_amd64.tar.gz"
+          bin="$RUNNER_TEMP/cronos-db_${TAG}_linux_amd64"
+          "$bin/cronos-admin" --help > /dev/null
+          "$bin/cronos-api" --dev --node-id=release-check --auth-enabled=false \
+            --data-dir="$RUNNER_TEMP/data" --grpc-addr=127.0.0.1:19000 --http-addr=127.0.0.1:18080 \
+            > "$RUNNER_TEMP/server.log" 2>&1 &
+          server=$!
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18080/health/ready > /dev/null; then
+              echo "the server is ready"
+              kill "$server"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "the server did not become ready"
+          tail -50 "$RUNNER_TEMP/server.log"
+          kill "$server" || true
+          exit 1
+      - name: Attach the binaries to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" dist/*.tar.gz dist/*.zip dist/SHA256SUMS --clobber
