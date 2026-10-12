@@ -148,6 +148,8 @@ type cluster struct {
 	// For a cluster in containers: the image the nodes run, the network they
 	// share, and the directory with their certificates, which each mounts.
 	image, network, certDir string
+	// runOptions are given to docker when a node's container is created.
+	runOptions []string
 }
 
 // newCluster prepares three nodes without starting them. Whatever is still

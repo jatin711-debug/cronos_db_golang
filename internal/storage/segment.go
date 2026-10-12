@@ -26,21 +26,22 @@ type Segment struct {
 	segmentFile     *os.File
 	writer          *bufio.Writer // buffered path for encrypted or non-mmap writes; nil until one is made (bufferedWriter)
 	reader          io.ReaderAt
-	mmapData        []byte // memory-mapped file view; nil when encrypted or unmapped
-	mmapWritePos    int64  // current write cursor within mmapData (bytes)
-	mmapSize        int64  // mapped length in bytes (tracks len(mmapData))
-	mmapFlushedPos  int64  // mmap prefix already handed to the OS by syncMmap; guarded by flushMu
-	firstOffset     int64  // first event offset stored in this segment
-	lastOffset      int64  // last event offset; -1 when empty
-	firstTS         int64  // schedule timestamp of first event (ms); 0 if unknown
-	lastTS          int64  // schedule timestamp of last event (ms)
-	nextOffset      int64  // next offset expected to be appended in this segment
-	indexEntries    int64  // number of sparse index entries written
-	nextIndexOffset int64  // relative event count threshold for next index entry
-	sizeBytes       int64  // logical data end in bytes (header + records)
-	createdTS       int64  // segment creation time (Unix ms)
-	isActive        bool   // true while this segment accepts appends
-	closed          bool   // true after Close(); reads/writes are rejected
+	mmapData        []byte    // memory-mapped file view; nil when encrypted or unmapped
+	mmapWritePos    int64     // current write cursor within mmapData (bytes)
+	mmapSize        int64     // mapped length in bytes (tracks len(mmapData))
+	mmapFlushedPos  int64     // mmap prefix already handed to the OS by syncMmap; guarded by flushMu
+	firstOffset     int64     // first event offset stored in this segment
+	lastOffset      int64     // last event offset; -1 when empty
+	firstTS         int64     // schedule timestamp of first event (ms); 0 if unknown
+	lastTS          int64     // schedule timestamp of last event (ms)
+	times           timeRange // least and greatest schedule timestamp of its events
+	nextOffset      int64     // next offset expected to be appended in this segment
+	indexEntries    int64     // number of sparse index entries written
+	nextIndexOffset int64     // relative event count threshold for next index entry
+	sizeBytes       int64     // logical data end in bytes (header + records)
+	createdTS       int64     // segment creation time (Unix ms)
+	isActive        bool      // true while this segment accepts appends
+	closed          bool      // true after Close(); reads/writes are rejected
 	dataDir         string
 	filename        string // e.g. "00000000000000000012.log"
 	indexFilename   string // e.g. "00000000000000000012.index"
@@ -396,6 +397,7 @@ func (s *Segment) AppendPreparedBatchLocked(prepared []*PreparedRecord, indexInt
 		if s.firstTS == 0 {
 			s.firstTS = prep.Event.GetScheduleTs()
 		}
+		s.times.note(prep.Event.GetScheduleTs())
 		s.nextOffset++
 
 		s.sizeBytes = filePos + written
@@ -453,6 +455,7 @@ func (s *Segment) appendBatchInternal(events []*types.Event, indexInterval int64
 		if s.firstTS == 0 {
 			s.firstTS = event.GetScheduleTs()
 		}
+		s.times.note(event.GetScheduleTs())
 		s.nextOffset++
 
 		s.sizeBytes = filePos + written
@@ -497,6 +500,7 @@ func (s *Segment) appendEventActive(event *types.Event, indexInterval int64) err
 	if s.firstTS == 0 {
 		s.firstTS = event.GetScheduleTs()
 	}
+	s.times.note(event.GetScheduleTs())
 	s.nextOffset++
 	s.sizeBytes = filePos + written
 
@@ -1196,6 +1200,7 @@ func (s *Segment) TruncateAfterOffset(keepThroughOffset int64) (int, error) {
 	var cutPos int64 = -1
 	var newLastOffset int64 = s.firstOffset - 1
 	var newLastTS int64
+	var kept timeRange // of the events that stay
 	lengthBytes := make([]byte, 4)
 	recordBuf := make([]byte, 0, 4096)
 	currentPos := int64(64) // after header
@@ -1235,6 +1240,7 @@ func (s *Segment) TruncateAfterOffset(keepThroughOffset int64) (int, error) {
 		}
 		newLastOffset = event.Offset
 		newLastTS = event.GetScheduleTs()
+		kept.note(event.GetScheduleTs())
 		currentPos += 4 + int64(recordLen)
 	}
 
@@ -1251,6 +1257,7 @@ func (s *Segment) TruncateAfterOffset(keepThroughOffset int64) (int, error) {
 
 	s.lastOffset = newLastOffset
 	s.lastTS = newLastTS
+	s.times = kept
 	s.nextOffset = newLastOffset + 1
 
 	// Reconcile the sparse index so it holds no entries past the new last offset.
@@ -1278,6 +1285,7 @@ func (s *Segment) scan() error {
 
 	s.lastOffset = -1
 	s.lastTS = 0
+	s.times = timeRange{}
 
 	// Capture the on-disk size before the scan loop mutates s.sizeBytes (line
 	// below: s.sizeBytes = lastGoodPos on each valid record). The truncation
@@ -1359,6 +1367,7 @@ func (s *Segment) scan() error {
 		// Valid record - update last good position
 		s.lastOffset = event.Offset
 		s.lastTS = event.GetScheduleTs()
+		s.times.note(event.GetScheduleTs())
 		lastGoodPos = recordStartPos + 4 + int64(len(recordData)) // After length + recordData
 	}
 
@@ -1772,6 +1781,32 @@ func (s *Segment) GetFirstOffset() int64 {
 // GetLastOffset returns the last event offset in this segment, or -1 if empty.
 func (s *Segment) GetLastOffset() int64 {
 	return s.lastOffset
+}
+
+// timeRange is the least and the greatest schedule timestamp (Unix ms) of a
+// set of events.
+type timeRange struct {
+	min, max int64
+	has      bool // false while the set is empty
+}
+
+// note widens the range to take in ts.
+func (r *timeRange) note(ts int64) {
+	if !r.has {
+		r.min, r.max, r.has = ts, ts, true
+		return
+	}
+	r.min, r.max = min(r.min, ts), max(r.max, ts)
+}
+
+// MayHoldTime reports whether the segment can hold an event scheduled in
+// [startTS, endTS]. Events are not in time order in the log, so the first and
+// the last event's times say nothing about the ones between them; this compares
+// with the least and the greatest. A segment it says no for holds none.
+func (s *Segment) MayHoldTime(startTS, endTS int64) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.times.has && s.times.min <= endTS && s.times.max >= startTS
 }
 
 // GetFirstTS returns the schedule timestamp of the first event (Unix ms), or 0.

@@ -154,7 +154,8 @@ func (c *cluster) startContainer(n *node) {
 		for attempt := 1; ; attempt++ {
 			args := []string{"run", "-d", "--name", n.container, "--network", c.network,
 				"-p", n.grpcAddr + ":9000", "-p", n.httpAddr + ":8080",
-				"-v", c.certDir + ":/certs:ro", c.image}
+				"-v", c.certDir + ":/certs:ro"}
+			args = append(append(args, c.runOptions...), c.image)
 			out, err := docker(append(args, c.args(n)...)...)
 			if err == nil {
 				break

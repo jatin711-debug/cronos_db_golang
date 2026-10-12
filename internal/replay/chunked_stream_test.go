@@ -14,7 +14,13 @@ import (
 // openReplayWAL opens an empty WAL for a test. It is closed when the test ends.
 func openReplayWAL(t *testing.T) *storage.WAL {
 	t.Helper()
-	wal, err := storage.NewWAL(t.TempDir(), 0, &storage.WALConfig{SegmentSizeBytes: 64 << 20, IndexInterval: 100, FsyncMode: "batch", FlushIntervalMS: 100}, nil)
+	return openReplayWALSized(t, 64<<20)
+}
+
+// openReplayWALSized opens an empty WAL whose segments hold segmentBytes.
+func openReplayWALSized(t *testing.T, segmentBytes int64) *storage.WAL {
+	t.Helper()
+	wal, err := storage.NewWAL(t.TempDir(), 0, &storage.WALConfig{SegmentSizeBytes: segmentBytes, IndexInterval: 100, FsyncMode: "batch", FlushIntervalMS: 100}, nil)
 	if err != nil {
 		t.Fatalf("NewWAL failed: %v", err)
 	}
@@ -135,5 +141,78 @@ func TestReplayCursor_ReadStopsAtTheByteBound(t *testing.T) {
 	// which is four of them. The cursor has the first and holds the other three.
 	if read := len(cursor.chunk) + 1; read < 2 || read > 5 {
 		t.Fatalf("first read took %d events of 1 MiB under a %d byte bound; want 2 to 5", read, replayChunkBytes)
+	}
+}
+
+// TestReplayStream_ByTimeOverSegmentsOutsideTheWindow replays windows of time
+// from a log of many small segments, most of which hold no event in the
+// window and are not read. Each stream is checked against every event of the
+// log: the replay must send what is in the window, in offset order, and
+// nothing else, wherever the events lie.
+func TestReplayStream_ByTimeOverSegmentsOutsideTheWindow(t *testing.T) {
+	const (
+		hour = int64(3_600_000)
+		base = int64(1_700_000_000_000)
+	)
+	wal := openReplayWALSized(t, 2048)
+	id := 0
+	add := func(ts int64) {
+		topic := "orders"
+		if id%4 == 0 {
+			topic = "billing"
+		}
+		event := &types.Event{MessageId: fmt.Sprintf("msg-%04d", id), Topic: topic, ScheduleTs: ts, Payload: make([]byte, 100)}
+		id++
+		if err := wal.AppendEvent(event); err != nil {
+			t.Fatalf("AppendEvent failed: %v", err)
+		}
+	}
+	// Six hours of events, an hour after another, those of an hour in no order
+	// of time; then two that are scheduled in the first and the third hour.
+	for era := int64(0); era < 6; era++ {
+		for i := int64(0); i < 40; i++ {
+			add(base + era*hour + ((i*11)%40)*60_000)
+		}
+	}
+	add(base + 5)
+	add(base + 2*hour + 5)
+	wal.Flush()
+
+	all, err := wal.ReadEvents(0, wal.GetLastOffset())
+	if err != nil {
+		t.Fatalf("ReadEvents failed: %v", err)
+	}
+	if len(all) != id {
+		t.Fatalf("the log holds %d events; %d were appended", len(all), id)
+	}
+
+	windows := [][2]int64{
+		{base, base + hour - 1},
+		{base + 2*hour, base + 3*hour - 1},
+		{base + 5*hour, base + 6*hour},
+		{base + hour, base + 4*hour - 1},
+		{base + 3*hour + 30_000, base + 3*hour + 40_000}, // between two events
+		{base - 2*hour, base - 1},                        // before everything
+		{base, base + 6*hour},                            // everything
+	}
+	for _, chunk := range []int64{1, replayChunkBytes} {
+		engine := NewReplayEngine(wal)
+		engine.chunkBytes = chunk
+		for _, window := range windows {
+			var inWindow []*types.Event
+			for _, event := range all {
+				if ts := event.GetScheduleTs(); ts >= window[0] && ts <= window[1] {
+					inWindow = append(inWindow, event)
+				}
+			}
+			for _, topic := range []string{"", "orders"} {
+				req := &ReplayRequest{Topic: topic, StartTS: window[0], EndTS: window[1]}
+				want := wantStream(inWindow, topic)
+				got := streamAll(t, engine, req)
+				if !slices.Equal(got, want) {
+					t.Fatalf("chunk %d, window %d-%d, topic %q:\n got %v\nwant %v", chunk, window[0], window[1], topic, got, want)
+				}
+			}
+		}
 	}
 }
