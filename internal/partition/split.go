@@ -114,8 +114,9 @@ func (sm *SplitManager) SplitPartition(sourceID int32, newID int32, splitOffset 
 	slog.Info("Partition split: scanning WAL from split offset",
 		"source", sourceID, "new", newID, "split_offset", splitOffset, "split_key", splitKey)
 
-	// Batch-copy events from source to new partition to keep memory bounded.
-	const batchSize int64 = 1000
+	// Batch-copy events from source to new partition. Each read takes at most
+	// splitBatchBytes, so what a batch holds does not depend on how many it has.
+	const splitBatchBytes = 4 << 20
 	var totalMoved int
 	var currentOffset = splitOffset
 	var sourceHW int64
@@ -124,12 +125,7 @@ func (sm *SplitManager) SplitPartition(sourceID int32, newID int32, splitOffset 
 	}
 
 	for currentOffset <= sourceHW {
-		endOffset := currentOffset + batchSize
-		if endOffset > sourceHW+1 {
-			endOffset = sourceHW + 1
-		}
-
-		events, readErr := source.Wal.ReadEvents(currentOffset, endOffset)
+		events, readErr := source.Wal.ReadEventsWithin(currentOffset, sourceHW+1, splitBatchBytes)
 		if readErr != nil {
 			slog.Warn("Partition split: WAL read error, stopping replay",
 				"source", sourceID, "offset", currentOffset, "error", readErr)
@@ -139,6 +135,8 @@ func (sm *SplitManager) SplitPartition(sourceID int32, newID int32, splitOffset 
 		if len(events) == 0 {
 			break
 		}
+		// Taken now: appending an event to the new partition gives it an offset there.
+		nextOffset := events[len(events)-1].Offset + 1
 
 		// Filter events matching the new partition's range if splitKey is provided
 		var toMigrate []*types.Event
@@ -169,7 +167,7 @@ func (sm *SplitManager) SplitPartition(sourceID int32, newID int32, splitOffset 
 			totalMoved += len(toMigrate)
 		}
 
-		currentOffset += int64(len(events))
+		currentOffset = nextOffset
 	}
 
 	// Update source partition key boundaries

@@ -186,8 +186,9 @@ func (s *CrossRegionServer) FetchEvents(req *types.RegionFetchRequest, stream ty
 		return status.Errorf(codes.NotFound, "partition %d not found", req.PartitionId)
 	}
 
-	// Stream events from WAL in chunks
-	const batchSize = 100
+	// Stream events from WAL in chunks of at most fetchChunkBytes, so a
+	// response holds that much and at most one event more, whatever they weigh.
+	const fetchChunkBytes = 4 << 20
 	offset := req.StartOffset
 	maxBytes := req.MaxBytes
 	if maxBytes <= 0 {
@@ -196,7 +197,7 @@ func (s *CrossRegionServer) FetchEvents(req *types.RegionFetchRequest, stream ty
 	var sentBytes int64
 
 	for sentBytes < maxBytes {
-		events, err := p.Wal.ReadEvents(offset, offset+batchSize)
+		events, err := p.Wal.ReadEventsWithin(offset, p.Wal.GetLastOffset(), fetchChunkBytes)
 		if err != nil {
 			return status.Errorf(codes.Internal, "read events: %v", err)
 		}
@@ -213,16 +214,15 @@ func (s *CrossRegionServer) FetchEvents(req *types.RegionFetchRequest, stream ty
 		if sentBytes >= maxBytes {
 			resp.HasMore = false
 		} else {
-			// Peek ahead
-			nextEvents, _ := p.Wal.ReadEvents(offset+batchSize, offset+batchSize*2)
-			resp.HasMore = len(nextEvents) > 0
+			// The log goes on past the events just read if its last offset does.
+			resp.HasMore = events[len(events)-1].Offset < p.Wal.GetLastOffset()
 		}
 
 		if err := stream.Send(resp); err != nil {
 			return status.Errorf(codes.Internal, "send: %v", err)
 		}
 
-		offset += int64(len(events))
+		offset = events[len(events)-1].Offset + 1
 	}
 
 	return nil

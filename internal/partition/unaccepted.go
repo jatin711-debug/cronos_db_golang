@@ -31,8 +31,11 @@ type heldRange struct {
 	claimed bool
 }
 
-// acceptChunk bounds how many held events are read from the log at a time.
+// acceptChunk bounds how many log offsets one step of accepting covers.
 const acceptChunk = 10_000
+
+// acceptChunkBytes bounds how much of the log one read of held events takes.
+const acceptChunkBytes = 4 << 20
 
 // HoldUnaccepted records that events are in the log but that their publish
 // failed before it was accepted. events must be consecutive; claimed says
@@ -118,15 +121,23 @@ func (p *Partition) AcceptThrough(offset int64) error {
 // acceptRangeLocked schedules the log entries in [from, to] and, when their
 // publish claimed them, records the message IDs as accepted.
 func (p *Partition) acceptRangeLocked(from, to int64, claimed bool) error {
-	events, err := p.Wal.ReadEvents(from, to)
-	if err != nil {
-		return err
-	}
-	if err := p.Scheduler.ScheduleBatch(events); err != nil {
-		return err
-	}
-	if claimed {
-		p.recordAccepted(events)
+	// The range is read acceptChunkBytes at a time, so the events held at once
+	// do not depend on how many there are.
+	for from <= to {
+		events, err := p.Wal.ReadEventsWithin(from, to, acceptChunkBytes)
+		if err != nil {
+			return err
+		}
+		if len(events) == 0 {
+			return nil
+		}
+		from = events[len(events)-1].Offset + 1
+		if err := p.Scheduler.ScheduleBatch(events); err != nil {
+			return err
+		}
+		if claimed {
+			p.recordAccepted(events)
+		}
 	}
 	return nil
 }

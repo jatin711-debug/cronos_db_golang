@@ -280,16 +280,15 @@ func (c *Coordinator) RecoverPreparedLocks() {
 		}
 
 		activePrepared := make(map[string]bool)
-		const chunkSize = 20000
-		for start := int64(0); start <= lastOffset; start += chunkSize {
-			end := start + chunkSize - 1
-			if end > lastOffset {
-				end = lastOffset
-			}
-			events, err := part.Wal.ReadEvents(start, end)
-			if err != nil {
+		// The log is read a few megabytes at a time, since a count of events does
+		// not bound what they weigh.
+		const scanBytes = 4 << 20
+		for next := int64(0); next <= lastOffset; {
+			events, err := part.Wal.ReadEventsWithin(next, lastOffset, scanBytes)
+			if err != nil || len(events) == 0 {
 				break
 			}
+			next = events[len(events)-1].Offset + 1
 			for _, event := range events {
 				if event.Topic == "__transaction_log" {
 					txID := event.Meta["tx_id"]

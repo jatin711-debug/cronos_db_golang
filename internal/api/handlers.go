@@ -1592,8 +1592,9 @@ func (h *EventServiceHandler) Replay(req *types.ReplayRequest, stream types.Even
 		Speed:          req.GetSpeed(),
 	}
 
-	// Create channel for replay events
-	eventCh := make(chan *replay.ReplayEvent, 100)
+	// Create channel for replay events. It has no buffer: the engine reads the log
+	// a chunk at a time, and events queued here would be held on top of that chunk.
+	eventCh := make(chan *replay.ReplayEvent)
 
 	// Start replay in goroutine
 	errCh := make(chan error, 1)
