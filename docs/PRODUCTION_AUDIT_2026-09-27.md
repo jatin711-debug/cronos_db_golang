@@ -18,7 +18,7 @@ existing-test review, not a new fault-injection or deployment campaign.
 | F01: topic isolation | Partial | Replay and recipient topic filters, group topic checks, and ACK principal validation added. Two principals are now tested through the public API with authentication on, each with one topic and both topics in one partition: neither can publish to, subscribe to or replay the other's topic, a replay of one's own topic over the shared log returns only its events, both consume at once and receive exactly their own, one cannot join the other's consumer group, and one cannot acknowledge a delivery made to the other. Remaining: consumer groups are named in one space shared by all principals, so a principal can take a group name before another does; there is no tenant scope beyond topics. |
 | F02: policy loading | Fixed with startup regressions | Invalid/missing policy and public-key loading fail before data stores/listeners are initialized. Subprocess tests cover missing, empty, malformed, empty-subject, and null-subject policies. |
 | F03: ACK correctness | Partial | Tracked-delivery validation, per-event completion, and partition-local manager use added. Acks on a stream are recorded in batches with one durable write, outside the group lock. A group's completed work is a durable floor plus the completions above it, and the partition leader sends that progress to its followers, so a follower that takes over does not redeliver finished work, including work finished out of order (tested end to end over the replication channel). Progress reaches followers on the leader's maintenance tick, so what completed in the last moments before a failover can be delivered again; a replication-factor-1 handoff does not move it; an ACK concurrency test through the public RPC remains. |
-| F04: delivery/backpressure | Partial | Worker and scheduler ready-slice ownership, worker count/64 MiB estimated-byte budget, WAL redrive, and unsent-group reservation cleanup added. Held-back, dropped, and abandoned deliveries are queued for redrive by offset range and follow acks; a connecting consumer drains its backlog at credit pace instead of a fixed 512 events/s; dead-lettered events are recorded complete. Regressions cover exhausted credits, worker overflow, disconnect, and backlog. Publishes are now refused while the process holds 80% of its own memory limit (the container's, when there is one), and the Go client reports that as `overloaded` instead of opening its circuit breaker. The guard that was there compared the whole machine's memory use with a percentage, which says nothing inside a container, and was off by default. Byte bounds on the queues themselves and an accepted-ID conservation ledger remain. Recovery no longer reads the undelivered backlog into memory at a start, and the reads of the log are bounded by bytes (eighth batch). |
+| F04: delivery/backpressure | Partial | Worker and scheduler ready-slice ownership, worker count/64 MiB estimated-byte budget, WAL redrive, and unsent-group reservation cleanup added. Held-back, dropped, and abandoned deliveries are queued for redrive by offset range and follow acks; a connecting consumer drains its backlog at credit pace instead of a fixed 512 events/s; dead-lettered events are recorded complete. Regressions cover exhausted credits, worker overflow, disconnect, and backlog. Publishes are now refused while the process holds 80% of its own memory limit (the container's, when there is one), and the Go client reports that as `overloaded` instead of opening its circuit breaker. The guard that was there compared the whole machine's memory use with a percentage, which says nothing inside a container, and was off by default. Byte bounds on the queues themselves and an accepted-ID conservation ledger remain. Recovery no longer reads the undelivered backlog into memory at a start, the reads of the log are bounded by bytes, and a test restarts three nodes with a backlog larger than their memory limit (eighth batch). |
 | F05: timer recovery | Partial | WAL reconstruction, overdue cold hydration, and promotion scheduling added. Pending-timer preservation now tested through three consecutive snapshot/restart cycles; complete recovery/completion behavior remains to be validated. |
 | F06: replication retries | Core fix implemented | A replica accepts one leader per epoch and records it durably before applying any of its entries; entries carry their term on the wire; an existing entry is replaced only when its term differs from the leader's, never within a term; a superseded leader steps down. Tests cover two leaders claiming one term, replacement of a divergent tail, same-term conflicts, step-down, and a leader change concurrent with appends. A same-term content conflict is rejected and needs a snapshot to reconcile. Every append now names the entry it follows and that entry's term; a replica that holds a different entry there refuses the append and says where its log stops agreeing, and the leader resends from that point. Before this a replica that had kept entries of an older leader got the new entries appended after them. An old leader that returns with a tail it never replicated is brought in line without anyone publishing (tested with a tail shorter and longer than what the new leader wrote, and with a new leader that wrote nothing: every request now says where the leader's log ends, and a follower drops what it holds beyond that from another term. Before, such a tail stayed until the next publish, and a leadership handoff that waited for equal logs blocked that publish; the restore test found it). The fault campaign kills and freezes leaders with producers running and compares the replicas' logs entry for entry, and the partition test does the same with links cut between running nodes. A follower's answer now counts as replication only for what it acknowledged of this leader's log, and a leader that a follower tells of a newer term stops leading at once. |
 | F07: quorum/idempotency | Core fix implemented | A publish that reaches the log and then fails (replication, requested fsync, or scheduling) is held: its events are not scheduled and its message IDs are recorded as appended at their offsets, distinct from accepted. A retry finishes that publish instead of appending again; so does the next publish that reaches the replicas, or follower catch-up, if nobody retries. After a restart or promotion the log position is recorded, so a retry is answered from the log; claims left by a crash are dropped when the store opens. Change data capture and cross-region replication now read a per-partition change feed behind the accepted watermark: accepted events only, in log order, from the partition's leader, with a position that survives restarts and is handed to followers (tested through the publish path and a failover). Pruning now waits for the feed: an entry is kept until the feed has handed it over. Production mode refuses `--fsync-mode=periodic`, the one mode in which a replica acknowledges an entry it has not put on disk. Remaining: dedup recovery covers the last 500,000 log entries; a sink that keeps failing holds back that partition's feed for every sink, and with it that partition's pruning. |
@@ -91,17 +91,41 @@ is unchanged. The table rows for F04, F14, F17 and F19 describe what moved.
   well. The first version of the split copy took where to continue from an
   event it had just appended to the new partition, which had its offset there
   by then, and copied events twice; the split tests fail on it.
+- **A cluster is restarted with a backlog larger than its memory limit**
+  (2026-10-12, `TestRestartWithABacklogLargerThanMemory`). Three nodes take
+  events that are due at once, with no consumer, until the backlog is a
+  quarter larger than the memory limit they are then restarted with, which is
+  what they hold idle and 64 MiB more. Every node has to come back and stay
+  below the limit, and a consumer has to receive every acknowledged event
+  while they stay below it. In one run the fullest node held 121 MiB of a
+  179 MiB limit, with 223 MiB waiting. The server from before the restart
+  change above held 329 MiB against a limit of 196 MiB.
+- **A segment holds a write buffer only while it is written through one.**
+  The test above failed when it was first run, on a node that held about
+  80 MiB more than an idle one whatever the size of the backlog. A heap
+  profile showed 128 MiB of write buffers: every segment got a 4 MiB buffer
+  when it was created or opened and kept it until it was removed.
+  Unencrypted segments are written through their mapping and never used it,
+  and no segment uses it once it is full, so a node held 4 MiB of heap for
+  each segment of its logs, while it ran and from the moment it started. The
+  buffer is now made by the first write that goes through it and released
+  when the segment stops taking appends. A storage test counts the buffers a
+  log holds, encrypted and not, after appends and after it is opened again,
+  and fails on the old code with a buffer for each of nine segments.
 
-Verified here: the whole Go suite on 1.26.9, and the replay, partition,
-transaction and API packages with the race detector; a fetch of 12 MiB of
-one-MiB events that arrives whole in several responses, and a split of 12 MiB
-of which half moves. Not verified: an
-acceptance run with a backlog larger than memory at a restart, which is still
-to be written; the redrive, feed, prepared-transaction and held-publish bounds
-have no test of their own beyond the WAL test and the existing suites. A
-replay by time still reads every entry of the log, since the log has no index
-by time (F12). The dead-letter queue does not read the log, and an earlier
-version of this note listed it by mistake.
+Verified here: the whole Go suite on 1.26.9; the replay, partition,
+transaction, API and storage packages with the race detector; a fetch of
+12 MiB of one-MiB events that arrives whole in several responses, and a split
+of 12 MiB of which half moves; the restart test on three processes on
+Windows, which passes on this tree and fails on the server from before either
+change. Not verified: the restart test at sizes beyond a few hundred
+megabytes, or with a memory limit the system enforces, as a container's is;
+the redrive, feed, prepared-transaction and held-publish bounds have no test
+of their own beyond the WAL test and the existing suites. A replay by time
+still reads every entry of the log, since the log has no index by time (F12).
+The dead-letter queue does not read the log, and an earlier version of this
+note listed it by mistake; it does hold a 4 MiB write buffer for each
+partition from the start, used or not.
 
 ### Seventh hardening batch — 2026-10-07
 
