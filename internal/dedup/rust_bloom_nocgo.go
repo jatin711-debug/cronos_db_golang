@@ -1,9 +1,11 @@
-//go:build windows && !cgo
+//go:build !cgo
 
 package dedup
 
-// RustBloomFilter is a stub when cgo is disabled on Windows.
-// NewRustBloomFilter always returns nil so callers use GoBloomFilter instead.
+// RustBloomFilter is a stub when the program is built without cgo, on any
+// system. NewRustBloomFilter always returns nil so callers use GoBloomFilter
+// instead. That is what makes a build for another system possible without the
+// Rust library for it: the binaries of a release are built this way.
 type RustBloomFilter struct{}
 
 // NewRustBloomFilter returns nil so callers fall back to the pure-Go bloom filter.

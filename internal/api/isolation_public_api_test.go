@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -294,15 +295,22 @@ func TestIsolation_AcknowledgementsBelongToTheirRecipient(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Alice receives the event and holds on to it.
+	// Alice receives the event and holds on to it. What her consumer sees is
+	// kept for the message of a failure: this test has failed once where it
+	// could not be made to fail again, and the message did not say enough.
 	delivered := make(chan client.Delivery, 1)
+	var calls atomic.Int32
+	var lastCall atomic.Value // string
+	subscribed := make(chan error, 1)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() {
 		cfg := client.DefaultConsumerConfig("alpha", "group-a")
 		cfg.AckMode = client.AckModeManual
 		cfg.AutoAck = false
-		_ = ts.sdk("alice").Subscribe(ctx, cfg, func(_ context.Context, d client.Delivery) error {
+		subscribed <- ts.sdk("alice").Subscribe(ctx, cfg, func(_ context.Context, d client.Delivery) error {
+			calls.Add(1)
+			lastCall.Store(fmt.Sprintf("delivery %s, attempt %d", d.DeliveryID, d.Attempt))
 			select {
 			case delivered <- d:
 			default:
@@ -340,7 +348,17 @@ func TestIsolation_AcknowledgementsBelongToTheirRecipient(t *testing.T) {
 	deadline := time.Now().Add(10 * time.Second)
 	for !ts.p.ConsumerGroup.IsCompleted("group-a", 0, held.LastOffset()) {
 		if time.Now().After(deadline) {
-			t.Fatal("alice's own acknowledgement did not finish her event")
+			// Whether the server still waits for this delivery says on which
+			// side the acknowledgement was lost.
+			_, _, _, serverSays := ts.p.Dispatcher.ValidateAck(held.DeliveryID, "alice", held.LastOffset()+1, true)
+			ended := "is still running"
+			select {
+			case err := <-subscribed:
+				ended = fmt.Sprintf("ended with: %v", err)
+			default:
+			}
+			t.Fatalf("alice's own acknowledgement of delivery %s did not finish her event; the server says of an acknowledgement of it now: %v; her handler was called %d times, last with %v; her subscription %s",
+				held.DeliveryID, serverSays, calls.Load(), lastCall.Load(), ended)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}

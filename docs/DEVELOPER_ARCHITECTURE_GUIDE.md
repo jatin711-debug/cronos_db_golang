@@ -306,7 +306,7 @@ This section is organized by feature area and tells you where to read first, wha
   - `internal/dedup/bloom_store.go`
   - `internal/dedup/pebble_store.go`
   - `internal/dedup/rust_bloom_unix.go`
-  - `internal/dedup/rust_bloom_windows_cgo.go` / `internal/dedup/rust_bloom_windows_nocgo.go`
+  - `internal/dedup/rust_bloom_windows_cgo.go` / `internal/dedup/rust_bloom_nocgo.go`
 - Main flow:
   - Fast probabilistic check first, persistent confirmation fallback when needed.
   - Store update keeps recent message IDs with TTL behavior.

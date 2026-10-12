@@ -148,8 +148,17 @@ func TestDispatcher_DeliveryThatCannotBeSentAgainGoesBackToTheGroup(t *testing.T
 	if finished.Load() != 0 {
 		t.Fatal("the event was dead-lettered because it could not be sent")
 	}
-	if low, high, ok := cursor.Take(); !ok || low != 7 || high != 7 {
-		t.Fatalf("redrive request = [%d, %d] ok=%v, want [7, 7]", low, high, ok)
+	// The group is asked to read the event again after it has stopped being
+	// on its way, not at the same moment: asked first, a reader would find it
+	// still on its way and leave it. So the request is waited for as well.
+	var low, high int64
+	eventually(t, "the group to be asked to read the event again", func() bool {
+		var asked bool
+		low, high, asked = cursor.Take()
+		return asked
+	})
+	if low != 7 || high != 7 {
+		t.Fatalf("redrive request = [%d, %d], want [7, 7]", low, high)
 	}
 	if credits := atomic.LoadInt32(&sub.Credits); credits != sub.MaxCredits {
 		t.Fatalf("the consumer has %d of %d credits after its delivery was given back", credits, sub.MaxCredits)

@@ -13,6 +13,9 @@ func TestRustBloomIntegration(t *testing.T) {
 	// Create Rust-backed bloom filter
 	// 1000 items, 0.01 FPR
 	bf := NewRustBloomFilter(1000, 0.01)
+	if bf == nil {
+		t.Skip("built without cgo: the Rust bloom filter is not part of this build")
+	}
 
 	// Basic Add/Check
 	key1 := "test-key-1"

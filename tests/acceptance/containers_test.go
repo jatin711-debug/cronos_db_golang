@@ -125,6 +125,14 @@ func newContainerCluster(t *testing.T, extraArgs ...string) *cluster {
 
 	c.docker("network", "create", c.network)
 	t.Cleanup(func() {
+		// The nodes read their certificates from this machine whenever they
+		// connect to each other. A run once lost the directory while it ran,
+		// to something outside the test, and what showed was replicas that
+		// could not reach each other after their links were restored. Said
+		// here, it does not have to be worked out from that again.
+		if _, err := os.Stat(c.certFile); err != nil {
+			t.Errorf("the nodes' certificates in %s were gone when the test ended, and nothing in the test removes them: %v", c.certDir, err)
+		}
 		for _, n := range c.nodes {
 			c.removeContainer(n)
 		}
