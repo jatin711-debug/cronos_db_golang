@@ -2,6 +2,7 @@ package partition
 
 import (
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -220,5 +221,81 @@ func TestSplitPartition_AtomicRollback(t *testing.T) {
 
 	if pm.IsSplitting(sourceID) {
 		t.Error("Expected splitting lock to be released on failure")
+	}
+}
+
+// TestSplitPartition_CopiesALogLargerThanOneRead splits a log that the copy
+// reads in several parts, and checks that every event that belongs in the new
+// partition arrives there once and in order. Half of the events stay behind, so
+// an event's offset in the new partition is not its offset in the source.
+func TestSplitPartition_CopiesALogLargerThanOneRead(t *testing.T) {
+	cfg := &types.Config{
+		DataDir:          t.TempDir(),
+		PartitionCount:   8,
+		TickMS:           10,
+		WheelSize:        100,
+		SegmentSizeBytes: 32 << 20,
+	}
+
+	pm := NewPartitionManager("node-1", cfg)
+	defer pm.StopAllPartitions()
+
+	sourceID := int32(1)
+	newID := int32(2)
+
+	if err := pm.CreatePartition(sourceID, "topic-test"); err != nil {
+		t.Fatalf("Failed to create partition: %v", err)
+	}
+	if err := pm.StartPartition(sourceID); err != nil {
+		t.Fatalf("Failed to start partition: %v", err)
+	}
+	sourcePart, err := pm.GetInternalPartition(sourceID)
+	if err != nil {
+		t.Fatalf("Failed to get internal partition: %v", err)
+	}
+
+	// Twelve events of one MiB are three reads of 4 MiB. The odd ones move.
+	const total = 12
+	payload := make([]byte, 1<<20)
+	later := time.Now().Add(time.Hour).UnixMilli()
+	var want []string
+	for i := 0; i < total; i++ {
+		key := "apple"
+		if i%2 == 1 {
+			key = "zebra"
+		}
+		ev := &types.Event{
+			MessageId:  fmt.Sprintf("big-%02d", i),
+			Topic:      "topic-test",
+			Payload:    payload,
+			ScheduleTs: later,
+			Meta:       map[string]string{"partition_key": key},
+		}
+		if err := sourcePart.Wal.AppendEvent(ev); err != nil {
+			t.Fatalf("Append failed: %v", err)
+		}
+		if i%2 == 1 {
+			want = append(want, ev.MessageId)
+		}
+	}
+
+	if err := NewSplitManager(pm).SplitPartition(sourceID, newID, 0, "mango"); err != nil {
+		t.Fatalf("SplitPartition failed: %v", err)
+	}
+
+	newPart, err := pm.GetInternalPartition(newID)
+	if err != nil {
+		t.Fatalf("Failed to get new partition: %v", err)
+	}
+	migrated, err := newPart.Wal.ReadEvents(0, newPart.Wal.GetLastOffset())
+	if err != nil {
+		t.Fatalf("Failed to read migrated events: %v", err)
+	}
+	var got []string
+	for _, ev := range migrated {
+		got = append(got, ev.MessageId)
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("new partition holds %v; want %v", got, want)
 	}
 }

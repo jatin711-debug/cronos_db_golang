@@ -2,12 +2,95 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/jatin711-debug/cronos_db_golang/internal/partition"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
+	"google.golang.org/grpc/metadata"
 )
+
+type mockRegionFetchStream struct {
+	ctx       context.Context
+	responses []*types.RegionFetchResponse
+}
+
+func (m *mockRegionFetchStream) SetHeader(metadata.MD) error  { return nil }
+func (m *mockRegionFetchStream) SendHeader(metadata.MD) error { return nil }
+func (m *mockRegionFetchStream) SetTrailer(metadata.MD)       {}
+func (m *mockRegionFetchStream) Context() context.Context     { return m.ctx }
+func (m *mockRegionFetchStream) SendMsg(interface{}) error    { return nil }
+func (m *mockRegionFetchStream) RecvMsg(interface{}) error    { return nil }
+func (m *mockRegionFetchStream) Send(resp *types.RegionFetchResponse) error {
+	m.responses = append(m.responses, resp)
+	return nil
+}
+
+// TestCrossRegionServer_FetchEvents_SendsTheLogInByteBoundedResponses fetches a
+// log of one-MiB events and checks that it arrives whole and in order, in
+// responses that each hold a part of it, with HasMore set on all but the last.
+func TestCrossRegionServer_FetchEvents_SendsTheLogInByteBoundedResponses(t *testing.T) {
+	cfg := &types.Config{
+		DataDir:          t.TempDir(),
+		PartitionCount:   1,
+		TickMS:           100,
+		WheelSize:        60,
+		DedupTTLHours:    24,
+		BloomCapacity:    1000,
+		SegmentSizeBytes: 32 << 20,
+	}
+
+	pm := partition.NewPartitionManager("node-1", cfg)
+	defer pm.StopAllPartitions()
+
+	if err := pm.CreatePartition(0, "test-topic"); err != nil {
+		t.Fatalf("Failed to create partition: %v", err)
+	}
+	p, err := pm.GetInternalPartition(0)
+	if err != nil {
+		t.Fatalf("Failed to get internal partition: %v", err)
+	}
+
+	const total = 12
+	payload := make([]byte, 1<<20)
+	for i := 0; i < total; i++ {
+		event := &types.Event{MessageId: fmt.Sprintf("big-%02d", i), Topic: "test-topic", Payload: payload}
+		if err := p.Wal.AppendEvent(event); err != nil {
+			t.Fatalf("AppendEvent failed: %v", err)
+		}
+	}
+	p.Wal.Flush()
+
+	stream := &mockRegionFetchStream{ctx: context.Background()}
+	req := &types.RegionFetchRequest{RegionId: "region-east", PartitionId: 0, StartOffset: 0, MaxBytes: 64 << 20}
+	if err := NewCrossRegionServer(pm).FetchEvents(req, stream); err != nil {
+		t.Fatalf("FetchEvents failed: %v", err)
+	}
+
+	if len(stream.responses) < 2 {
+		t.Fatalf("12 MiB of events arrived in %d responses; want several", len(stream.responses))
+	}
+	next := int64(0)
+	for i, resp := range stream.responses {
+		// A response holds 4 MiB of the log and at most the event that crosses that bound.
+		if n := len(resp.Events); n == 0 || n > 5 {
+			t.Fatalf("response %d holds %d events of 1 MiB; want 1 to 5", i, n)
+		}
+		for _, event := range resp.Events {
+			if event.Offset != next {
+				t.Fatalf("response %d holds offset %d; want %d", i, event.Offset, next)
+			}
+			next++
+		}
+		if last := i == len(stream.responses)-1; resp.HasMore == last {
+			t.Fatalf("response %d of %d has HasMore=%v", i+1, len(stream.responses), resp.HasMore)
+		}
+	}
+	if next != total {
+		t.Fatalf("fetched %d events; want %d", next, total)
+	}
+}
 
 func TestCrossRegionServer_ReplicateEvents_LWW(t *testing.T) {
 
