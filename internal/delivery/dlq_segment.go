@@ -14,10 +14,13 @@ import (
 )
 
 const (
-	dlqMagic        = "CRNDLQ1"
-	dlqHeaderSize   = 64
-	dlqSegmentSize  = 64 * 1024 * 1024 // 64MB per segment
-	dlqWriteBufSize = 4 * 1024 * 1024  // 4MB write buffer
+	dlqMagic       = "CRNDLQ1"
+	dlqHeaderSize  = 64
+	dlqSegmentSize = 64 * 1024 * 1024 // 64MB per segment
+	// dlqCompactBufSize is the buffer a compaction writes the kept entries
+	// through. Nothing else is buffered: an entry is written and synced as one
+	// record, so a buffer between the two would only be memory held.
+	dlqCompactBufSize = 1 << 20
 )
 
 // DLQSegmentWriter writes DLQ entries to append-only rotating segment files.
@@ -26,7 +29,6 @@ type DLQSegmentWriter struct {
 	mu         sync.Mutex
 	dataDir    string
 	activeFile *os.File
-	writer     *bufio.Writer
 	size       int64 // current active segment size in bytes
 	seqNum     int64 // active segment sequence number
 }
@@ -90,7 +92,6 @@ func (sw *DLQSegmentWriter) openActiveSegment() error {
 	}
 
 	sw.activeFile = file
-	sw.writer = bufio.NewWriterSize(file, dlqWriteBufSize)
 	sw.size = info.Size()
 	return nil
 }
@@ -127,11 +128,8 @@ func (sw *DLQSegmentWriter) WriteEntry(data []byte) error {
 	binary.BigEndian.PutUint32(record[4:8], crc32.ChecksumIEEE(data))
 	copy(record[8:], data)
 
-	if _, err := sw.writer.Write(record); err != nil {
+	if _, err := sw.activeFile.Write(record); err != nil {
 		return fmt.Errorf("write dlq entry: %w", err)
-	}
-	if err := sw.writer.Flush(); err != nil {
-		return fmt.Errorf("flush dlq entry: %w", err)
 	}
 	if err := sw.activeFile.Sync(); err != nil {
 		return fmt.Errorf("sync dlq entry: %w", err)
@@ -143,9 +141,6 @@ func (sw *DLQSegmentWriter) WriteEntry(data []byte) error {
 
 // rotate closes the current segment and opens a new one.
 func (sw *DLQSegmentWriter) rotate() error {
-	if err := sw.writer.Flush(); err != nil {
-		return err
-	}
 	if err := sw.activeFile.Sync(); err != nil {
 		return err
 	}
@@ -155,16 +150,11 @@ func (sw *DLQSegmentWriter) rotate() error {
 	return sw.openActiveSegment()
 }
 
-// Close flushes and closes the active segment.
+// Close syncs and closes the active segment.
 func (sw *DLQSegmentWriter) Close() error {
 	sw.mu.Lock()
 	defer sw.mu.Unlock()
 
-	if sw.writer != nil {
-		if err := sw.writer.Flush(); err != nil {
-			return err
-		}
-	}
 	if sw.activeFile != nil {
 		if err := sw.activeFile.Sync(); err != nil {
 			return err
@@ -180,11 +170,6 @@ func (sw *DLQSegmentWriter) Checkpoint(destDir string) error {
 	sw.mu.Lock()
 	defer sw.mu.Unlock()
 
-	if sw.writer != nil {
-		if err := sw.writer.Flush(); err != nil {
-			return fmt.Errorf("flush dlq segment: %w", err)
-		}
-	}
 	if err := os.MkdirAll(destDir, 0700); err != nil {
 		return fmt.Errorf("create dlq checkpoint dir: %w", err)
 	}
@@ -239,12 +224,10 @@ type DLQDamage struct {
 
 // Scan reads all valid entries from all segment files in the DLQ directory.
 func (sw *DLQSegmentWriter) Scan() ([][]byte, DLQDamage, error) {
+	// An entry is in its file when WriteEntry returns, so there is nothing to
+	// flush first. The lock keeps a record that is being written out of the scan.
 	sw.mu.Lock()
-	// Flush active writer so we can read the file
-	if sw.writer != nil {
-		sw.writer.Flush()
-	}
-	sw.mu.Unlock()
+	defer sw.mu.Unlock()
 
 	return scanEntries(sw.dataDir)
 }
@@ -334,18 +317,11 @@ func (sw *DLQSegmentWriter) Compact(keep func(data []byte) bool) error {
 	sw.mu.Lock()
 	defer sw.mu.Unlock()
 
-	// Flush current writer
-	if sw.writer != nil {
-		sw.writer.Flush()
-	}
-
 	// Close active file BEFORE reading so Windows can read/delete it
 	if sw.activeFile != nil {
 		sw.activeFile.Close()
 		sw.activeFile = nil
 	}
-	// Reset writer so it won't be used while we rebuild
-	sw.writer = nil
 
 	// Read all entries (lock-free — we already hold the lock)
 	allData, _, err := scanEntries(sw.dataDir)
@@ -375,7 +351,7 @@ func (sw *DLQSegmentWriter) Compact(keep func(data []byte) bool) error {
 		return err
 	}
 
-	writer := bufio.NewWriterSize(file, dlqWriteBufSize)
+	writer := bufio.NewWriterSize(file, dlqCompactBufSize)
 	for _, data := range allData {
 		if keep != nil && !keep(data) {
 			continue
@@ -394,6 +370,5 @@ func (sw *DLQSegmentWriter) Compact(keep func(data []byte) bool) error {
 		return fmt.Errorf("sync compacted dlq: %w", err)
 	}
 	sw.activeFile = file
-	sw.writer = writer
 	return nil
 }

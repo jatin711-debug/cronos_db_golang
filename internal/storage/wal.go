@@ -1052,6 +1052,9 @@ func (w *WAL) ReadEventsByTime(startTS, endTS int64) ([]*types.Event, error) {
 
 	// Find segments that contain the timestamp range
 	for _, segment := range w.segments {
+		if !segment.MayHoldTime(startTS, endTS) {
+			continue
+		}
 		events, err := segment.ReadEventsByTime(startTS, endTS)
 		if err != nil {
 			return nil, fmt.Errorf("read from segment %s: %w", segment.GetFilename(), err)
@@ -1064,6 +1067,39 @@ func (w *WAL) ReadEventsByTime(startTS, endTS int64) ([]*types.Event, error) {
 	}
 
 	return result, nil
+}
+
+// TimeSpan returns the first run of offsets at or after from, and no further
+// than last, that lies in segments which can hold an event scheduled in
+// [startTS, endTS]. ok is false when no segment from there on can.
+//
+// Events are not in time order in the log, so a reader still has to look at
+// every event of the span. What it is spared is the segments that hold none:
+// a read by time used to go through the whole log whatever the window was.
+func (w *WAL) TimeSpan(from, last, startTS, endTS int64) (first, end int64, ok bool) {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+
+	for _, segment := range w.segments {
+		segFirst, segLast := segment.GetFirstOffset(), segment.GetLastOffset()
+		if segLast < segFirst || segLast < from {
+			continue // empty, or before where the reader is
+		}
+		if segFirst > last {
+			break
+		}
+		if !segment.MayHoldTime(startTS, endTS) {
+			if ok {
+				break // the run ends at the first segment that holds none
+			}
+			continue
+		}
+		if !ok {
+			first, ok = max(from, segFirst), true
+		}
+		end = min(segLast, last)
+	}
+	return first, end, ok
 }
 
 // backgroundFlushBuffer is invoked by the global FsyncCoalescer. It flushes the

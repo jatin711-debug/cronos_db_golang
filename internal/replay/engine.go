@@ -143,19 +143,29 @@ type replayCursor struct {
 	wal        *storage.WAL
 	chunkBytes int64
 	keep       func(*types.Event) bool // nil keeps every event
-	next       int64                   // first offset the next read starts at
-	last       int64                   // last offset of the range, inclusive
-	chunk      []*types.Event          // events read and not yet handed out
+	// byTime is set when the cursor walks a window of schedule timestamps,
+	// [fromTS, toTS]: it then reads only the segments that can hold an event
+	// in it (WAL.TimeSpan).
+	byTime bool
+	fromTS int64
+	toTS   int64
+	next   int64          // first offset the next read starts at
+	last   int64          // last offset of the range, inclusive
+	chunk  []*types.Event // events read and not yet handed out
 }
 
-// timeCursor walks the events whose schedule timestamps fall in [startTS, endTS].
-// The log has no time index, so it walks every offset up to the last one now.
+// timeCursor walks the events whose schedule timestamps fall in [startTS, endTS],
+// up to the last offset of the log now. Events are not in time order, so it
+// looks at every event of each segment that can hold one in the window, and
+// skips the segments that cannot.
 func (r *ReplayEngine) timeCursor(startTS, endTS int64) *replayCursor {
 	keep := func(event *types.Event) bool {
 		ts := event.GetScheduleTs()
 		return ts >= startTS && ts <= endTS
 	}
-	return r.newCursor(0, r.wal.GetLastOffset(), keep)
+	c := r.newCursor(0, r.wal.GetLastOffset(), keep)
+	c.byTime, c.fromTS, c.toTS = true, startTS, endTS
+	return c
 }
 
 // offsetCursor walks up to count events from startOffset, capped at the last
@@ -203,13 +213,23 @@ func (c *replayCursor) Next(ctx context.Context) (*types.Event, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		events, err := c.wal.ReadEventsWithin(c.next, c.last, c.chunkBytes)
+		end := c.last
+		if c.byTime {
+			first, spanEnd, ok := c.wal.TimeSpan(c.next, c.last, c.fromTS, c.toTS)
+			if !ok {
+				// No segment from here on holds an event in the window.
+				c.next = c.last + 1
+				continue
+			}
+			c.next, end = first, spanEnd
+		}
+		events, err := c.wal.ReadEventsWithin(c.next, end, c.chunkBytes)
 		if err != nil {
-			return nil, fmt.Errorf("read events %d-%d: %w", c.next, c.last, err)
+			return nil, fmt.Errorf("read events %d-%d: %w", c.next, end, err)
 		}
 		if len(events) == 0 {
-			// The log holds no event from here to the end of the range.
-			c.next = c.last + 1
+			// The log holds no event from here to the end of what was read.
+			c.next = end + 1
 			continue
 		}
 		c.next = events[len(events)-1].Offset + 1
