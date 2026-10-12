@@ -24,7 +24,7 @@ type Segment struct {
 	mu              sync.RWMutex
 	flushMu         sync.Mutex // serializes flush/sync with mmap remapping
 	segmentFile     *os.File
-	writer          *bufio.Writer // buffered path for encrypted or non-mmap writes
+	writer          *bufio.Writer // buffered path for encrypted or non-mmap writes; nil until one is made (bufferedWriter)
 	reader          io.ReaderAt
 	mmapData        []byte // memory-mapped file view; nil when encrypted or unmapped
 	mmapWritePos    int64  // current write cursor within mmapData (bytes)
@@ -152,8 +152,7 @@ func NewSegmentWithSize(dataDir string, firstOffset int64, isActive bool, cipher
 
 	segment := &Segment{
 		segmentFile:     file,
-		writer:          bufio.NewWriterSize(file, 4*1024*1024), // 4MB buffer for high throughput
-		reader:          file,                                   // io.ReaderAt doesn't have buffered option
+		reader:          file, // io.ReaderAt doesn't have buffered option
 		mmapData:        mmapData,
 		mmapWritePos:    dataEnd, // Start appending after existing data / header
 		mmapSize:        stat.Size(),
@@ -224,7 +223,6 @@ func OpenSegment(dataDir string, filename string, cipher *SegmentCipher) (*Segme
 
 	segment := &Segment{
 		segmentFile:   file,
-		writer:        bufio.NewWriterSize(file, 4*1024*1024), // 4MB buffer for high throughput
 		reader:        file,
 		mmapData:      mmapData,
 		mmapWritePos:  stat.Size(), // Start writing at end of existing data
@@ -798,6 +796,30 @@ func (s *Segment) writeRecordMmap(record []byte) (int64, error) {
 	return recordLen, nil
 }
 
+// segmentWriteBufSize is the size of the buffer a segment writes through when
+// it does not write to its mapping.
+const segmentWriteBufSize = 4 << 20
+
+// bufferedWriter returns that buffer, and makes it on first use. Only a segment
+// that is appended to without a mapping needs one: an encrypted segment, or one
+// whose file could not be mapped. Every segment used to get one when it was
+// created or opened, so a node held 4 MiB for each segment of its logs from the
+// moment it started, whether or not the segment would ever be written again.
+func (s *Segment) bufferedWriter() *bufio.Writer {
+	if s.writer == nil {
+		s.writer = bufio.NewWriterSize(s.segmentFile, segmentWriteBufSize)
+	}
+	return s.writer
+}
+
+// flushWriter writes out what the buffer holds, when there is a buffer.
+func (s *Segment) flushWriter() error {
+	if s.writer == nil {
+		return nil
+	}
+	return s.writer.Flush()
+}
+
 // writeRecordBuffered writes using bufio.Writer (for encryption or fallback).
 func (s *Segment) writeRecordBuffered(record []byte) (int64, error) {
 	if s.cipher != nil {
@@ -817,14 +839,14 @@ func (s *Segment) writeRecordBuffered(record []byte) (int64, error) {
 		// Write new length prefix for encrypted payload
 		var length [4]byte
 		binary.BigEndian.PutUint32(length[:], uint32(4+len(ciphertext)))
-		n1, err := s.writer.Write(length[:])
+		n1, err := s.bufferedWriter().Write(length[:])
 		if err != nil {
 			return int64(n1), err
 		}
-		n2, err := s.writer.Write(ciphertext)
+		n2, err := s.bufferedWriter().Write(ciphertext)
 		return int64(n1 + n2), err
 	}
-	n, err := s.writer.Write(record)
+	n, err := s.bufferedWriter().Write(record)
 	return int64(n), err
 }
 
@@ -1165,7 +1187,7 @@ func (s *Segment) TruncateAfterOffset(keepThroughOffset int64) (int, error) {
 		if err := syncMmap(s.mmapData[:s.mmapWritePos]); err != nil {
 			return 0, fmt.Errorf("sync mmap before truncate: %w", err)
 		}
-	} else if err := s.writer.Flush(); err != nil {
+	} else if err := s.flushWriter(); err != nil {
 		return 0, fmt.Errorf("flush writer before truncate: %w", err)
 	}
 
@@ -1529,7 +1551,7 @@ func (s *Segment) FlushBuffer() error {
 	if s.closed {
 		return nil
 	}
-	return s.writer.Flush()
+	return s.flushWriter()
 }
 
 // Sync persists the segment file to disk (fdatasync).
@@ -1621,9 +1643,12 @@ func (s *Segment) Deactivate() error {
 
 	var errs []error
 
-	// Flush any buffered (e.g. encrypted) records still in the writer.
-	if err := s.writer.Flush(); err != nil {
+	// Flush any buffered (e.g. encrypted) records still in the writer. The
+	// segment takes no more appends, so the buffer goes with them.
+	if err := s.flushWriter(); err != nil {
 		errs = append(errs, fmt.Errorf("flush writer: %w", err))
+	} else {
+		s.writer = nil
 	}
 
 	// Sync and unmap the mmap; reads do not depend on it.
@@ -1659,7 +1684,7 @@ func (s *Segment) closeLocked() error {
 	// Always flush the buffered writer first. Even when mmap is active, the
 	// writer may contain data (e.g., encrypted records or headers written
 	// before the mmap path was chosen) and must be persisted before unmapping.
-	if err := s.writer.Flush(); err != nil {
+	if err := s.flushWriter(); err != nil {
 		errs = append(errs, fmt.Errorf("flush writer: %w", err))
 	}
 
