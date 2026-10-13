@@ -153,15 +153,16 @@ a scan of the built image for known vulnerabilities, a fault campaign against
 three server processes, and a disposable kind cluster running the production
 chart with security enabled. It runs for pull requests and for pushes to
 `main`. Work on the development branch is not checked as it is pushed; a
-commit there is checked on request with
-`gh workflow run ci.yml --ref developement`, which is done for every commit a
-release is cut from.
+commit there can be checked on request with
+`gh workflow run ci.yml --ref developement`.
 The five jobs (`go`, `fault-campaign`, `dashboard-and-chart`, `go-security`,
 `production-chart-startup`) are required checks on `main` since 2026-10-13, for
 administrators as well: `main` moves only to a commit on which all five have
-passed, so a commit of the development branch is checked on request first and
-`main` is fast-forwarded to it afterwards. A vulnerability finding fails its
-job; it is not silently waived.
+passed in a run for a pull request or a push. A run on request does not count
+for this, because GitHub does not hold its results against the commit. A
+release therefore goes through a pull request from the development branch to
+`main`, which runs the five jobs, and `main` moves when they are green. A
+vulnerability finding fails its job; it is not silently waived.
 
 Run chart assertions locally with `python scripts/check-production-chart.py`
 (Helm and PyYAML required). `scripts/production-chart-smoke.sh` requires the
