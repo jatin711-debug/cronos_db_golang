@@ -21,9 +21,9 @@ exist:
 
 - [internal/replication/leader.go](../../../internal/replication/leader.go) — `Leader.Replicate`, `Leader.catchUpFollower`, `FollowerInfo` management, ISR/quorum accounting.
 - [internal/replication/follower.go](../../../internal/replication/follower.go) — `Follower.InstallSnapshot`, `Follower.dialCredentials`, follower-side state.
-- [internal/replication/mtls.go](../../../internal/replication/mtls.go) — `MTLSConfig`, `BuildClientTLSConfig`, `BuildServerTLSConfig`.
+- [internal/replication/mtls.go](../../../internal/replication/mtls.go) — `MTLSConfig`, `BuildClientTLS` (client configuration that re-reads the certificate, key and CA when their files change), `BuildClientTLSConfig`, `BuildServerTLSConfig`.
 - [internal/replication/region.go](../../../internal/replication/region.go) — `CrossRegionReplicator`, per-region batched async push.
-- [internal/api/replication_server.go](../../../internal/api/replication_server.go) — `ReplicationServiceHandler.Append`, `.Sync`, `.Snapshot` (server-side handlers).
+- [internal/api/replication_server.go](../../../internal/api/replication_server.go) — `ReplicationServiceHandler.Append`, `.Sync`, `.Snapshot`, `.Position` (where a replica's log ends; fences for elections), `.LeaderReport` (in-sync replicas and offsets of the partitions a node leads; the source of the admin topology), `.SyncConsumerProgress` (consumer progress and change-feed position from the leader).
 - [internal/api/internal_grpc_server.go](../../../internal/api/internal_grpc_server.go) — `InternalGRPCServer`, registers `ReplicationServiceServer` and `RaftServiceServer` on a separate gRPC listener (default `:7947`).
 - [internal/api/crossregion_server.go](../../../internal/api/crossregion_server.go) — `CrossRegionServiceServer` handler.
 - [internal/partition/manager.go](../../../internal/partition/manager.go) — `PartitionManager.SyncPartitionFromLeader` (the trigger path for bulk snapshot install during node join).
@@ -109,11 +109,12 @@ Newly joined replicas or freshly wiped followers are initialized via
 
 The full install is wrapped in a 10-minute `context` by
 `PartitionManager.SyncPartitionFromLeader`
-(`internal/partition/manager.go:1160`), which is itself invoked from
-`Manager.JoinCluster` (`internal/cluster/manager.go:620`) for every
-partition the joining node owns.
+(`internal/partition/manager.go`), which is itself invoked from
+`Manager.JoinCluster` (`internal/cluster/manager.go`) for every
+partition the joining node owns, and by the handoff target of a
+replication-factor-1 partition (`pullForHandoff`).
 
-`Manager.reconcileLocalLeadership` runs whenever a committed assignment
+`Manager.reconcileLocalLeadership` (`internal/cluster/leadership.go`) runs whenever a committed assignment
 changes, and every 5s, and idempotently wires up `PromoteToLeader` +
 `AddFollower` on every partition committed to this node, which is what
 enables streaming `Append` on a healthy cluster.
@@ -303,7 +304,13 @@ retry is published as new.
   (`--min-insync-replicas`, default `1`). With RF=3 / minISR=2 the leader
   + at least one follower must ack before the client write is
   acknowledged. If the cluster degrades below minISR, writes fail closed
-  rather than silently succeeding on a leader-only ack. In the `batch` and
+  rather than silently succeeding on a leader-only ack. The count comes from
+  what followers have acknowledged (`Leader.QuorumOffset` reads each
+  follower's last acknowledgement and acknowledged offset), not from the
+  `InSync` flag; `InSync` feeds only reports (`GetInSyncReplicas`, the
+  leader's stats). A follower of a partition whose log is empty on both sides
+  counts as in sync, since it holds all of the leader's log
+  (`bothEmpty` in `Leader.appendToFollower`). In the `batch` and
   `every_event` fsync modes a follower syncs an append before it
   acknowledges it, so a quorum-acknowledged write is on that many disks. In
   `periodic` mode it acknowledges first and syncs on a timer, and a
@@ -328,9 +335,11 @@ retry is published as new.
   [cluster.md](cluster.md)) enable cluster-only mTLS via
   `replication.BuildClientTLSConfig` / `BuildServerTLSConfig`. Server
   uses `tls.RequireAndVerifyClientCert`; both sides pin against
-  `--replication-tls-ca-file`. In dev mode the follower falls back to
-  insecure credentials (`Follower.dialCredentials`,
-  `internal/replication/follower.go:261`).
+  `--replication-tls-ca-file`. Clients use `BuildClientTLS`, and the server
+  configuration does the same: the certificate, its key and the CA are read
+  again when their files change, so they are replaced without a restart. In
+  dev mode the follower falls back to insecure credentials
+  (`Follower.dialCredentials`, `internal/replication/follower.go`).
 - **Cross-region path is separate**: `CrossRegionReplicator`
   (`internal/replication/region.go`) batches outgoing events per region
   (100 events / 100 ms), pushes them via `CrossRegionService.ReplicateEvents`,
@@ -362,8 +371,8 @@ for unbounded incremental catch-up alone.
 - Quorum / append errors: [internal/api/replication_server.go](../../../internal/api/replication_server.go) (`ReplicationServiceHandler.Append`)
 - Follower lag and ISR state: [internal/replication/leader.go](../../../internal/replication/leader.go) (`FollowerInfo`, `GetInSyncReplicas`, `GetHighWatermark`)
 - Bulk install failure (CRC mismatch, atomic-swap error): [internal/replication/follower.go](../../../internal/replication/follower.go) (`InstallSnapshot`)
-- mTLS handshake failure: [internal/replication/mtls.go](../../../internal/replication/mtls.go) (`BuildClientTLSConfig` / `BuildServerTLSConfig`)
-- New-node join flow: [internal/cluster/manager.go](../../../internal/cluster/manager.go) (`JoinCluster` at line 620)
+- mTLS handshake failure: [internal/replication/mtls.go](../../../internal/replication/mtls.go) (`BuildClientTLS` / `BuildServerTLSConfig`)
+- New-node join flow: [internal/cluster/manager.go](../../../internal/cluster/manager.go) (`JoinCluster`)
 - Cross-region queue / flush lag: [internal/replication/region.go](../../../internal/replication/region.go) (`flushLoop`)
 
 ## Diagrams

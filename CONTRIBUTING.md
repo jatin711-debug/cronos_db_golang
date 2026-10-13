@@ -11,16 +11,17 @@ Thank you for considering a contribution to CronosDB.
 
 Prerequisites:
 
-- **Go 1.25+** (module currently pins `go 1.25.12`)
-- **Rust** / Cargo (bloom-filter FFI library via cgo)
-- **protoc** (Protocol Buffers compiler)
+- **Go 1.26.9** (the version `go.mod` names)
+- **Rust** / Cargo (optional: the bloom-filter library used through cgo; without cgo the server uses one written in Go)
+- **protoc** (only to regenerate the gRPC code with `make proto`)
+- **Docker** with `docker compose` (the container tests, and `make verify-env`)
 - **npm** (admin dashboard SPA build)
 - **Make** (optional but recommended; Windows and Unix targets are supported)
 
 Build and local run:
 
 ```bash
-make verify-env   # checks go, cargo, protoc, npm where available
+make verify-env   # checks go, cargo, protoc, docker and docker compose
 make build        # rust-dedup + dashboard stage + cronos-api
 ./bin/cronos-api --dev -node-id=node1 -data-dir=./data
 ```
@@ -30,6 +31,10 @@ Testing:
 ```bash
 make test-unit          # unit suite (excludes live integration/chaos)
 make lint               # gofmt + go vet
+
+# Acceptance tests: three real server processes, a fault campaign with a ledger
+# of every acknowledged event. They build the server and take several minutes.
+go test -tags acceptance -count=1 -timeout 25m ./tests/acceptance/
 ```
 
 Architecture and developer walkthrough:
@@ -38,15 +43,16 @@ Architecture and developer walkthrough:
 - [ARCHITECTURE.md](ARCHITECTURE.md) — full system architecture
 - [docs/DEVELOPER_ARCHITECTURE_GUIDE.md](docs/DEVELOPER_ARCHITECTURE_GUIDE.md) — composition root and flows
 - [docs/architecture/README.md](docs/architecture/README.md) — per-feature docs index
+- [docs/PRODUCTION_RELEASE.md](docs/PRODUCTION_RELEASE.md) — what a release promises and the test behind each promise
 
 ## Pull Request Process
 
-1. **Fork & Branch:** Create a focused branch for your change.
+1. **Fork & Branch:** Create a focused branch for your change, from `developement` (the development branch; `main` is fast-forwarded to it when CI passes).
 2. **Code Style:** Run `gofmt` (or `make lint`). Prefer clear GoDoc on exported types and fields.
 3. **Tests:** Add or update tests. Unit tests must pass; add integration/chaos coverage when changing cluster/replication paths.
 4. **Docs:** Update architecture or feature docs when behavior or defaults change.
 5. **Commits:** Use clear, conventional-style messages when possible (`fix:`, `docs:`, `feat:`).
-6. **Submit PR:** Describe the problem, the approach, and how you verified it.
+6. **Submit PR:** Describe the problem, the approach, and how you verified it. CI (`production-checks`) runs on every pull request: build, vet, the suite under the race detector and without cgo, the acceptance fault campaign, container partition tests and an image scan, the production Helm chart in Kubernetes, and `govulncheck`.
 
 ## Code Review
 

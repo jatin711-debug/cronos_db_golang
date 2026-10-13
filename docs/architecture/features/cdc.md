@@ -67,13 +67,20 @@ in the log of whichever replica leads next.
 
 - The feed of a partition is one stream for all sinks. While one sink refuses
   events, the other sinks wait with it for that partition.
-- Retention does not wait for the feed. If a segment is removed before the
-  feed reached it, the feed logs the gap and continues after it.
+- Retention waits for the feed. `Partition.PruneWAL` removes an entry only
+  once the feed has exported it, besides every consumer group having finished
+  it, so a sink that is down holds the log on disk. If the feed still finds
+  offsets missing from the log (for example after a failover to a replica
+  whose stored position trails where the old leader's log starts), it logs
+  "Change feed skips offsets" and continues after them.
 - A replica that takes over before it was told the feed's position starts at
   the end of its log.
-- Cross-region replication reads the same feed but stays asynchronous and
-  best-effort beyond it: its buffer is bounded and drops the oldest events
-  when a remote region is unreachable for long.
+- Cross-region replication is experimental. It is refused unless the server
+  runs with `--dev --experimental-features`; with `CRONOS_REGIONS` set
+  otherwise, the server exits at start. It reads the same feed but stays
+  asynchronous and best-effort beyond it: its per-region buffer holds at most
+  100,000 events and drops the oldest when a remote region is unreachable for
+  long.
 
 ## Debug Pointers
 

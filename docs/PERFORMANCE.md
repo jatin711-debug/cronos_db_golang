@@ -1,6 +1,8 @@
 # CronosDB Performance Baseline
 
-This document records the write-path throughput baseline used to validate Tier 3 optimizations. **All performance-related changes must be accompanied by before/after `benchstat` comparison against these benchmarks.**
+This document records the write-path throughput baseline used to validate the Tier 3 optimizations in July 2026, before `v0.3.0`.
+
+> **Historical numbers.** They were measured on one Windows laptop with Go 1.25.0 at commit `3bbbfd5`, and the code has changed a great deal since (group commit in `batch` mode, per-entry terms, encryption v2, quorum replication). Use them to see the shape of the costs, not as current figures. A change to the write path is compared with `benchstat` against the same benchmarks run on its own base commit, as described under [How to Compare a Change](#how-to-compare-a-change). Later dated measurements are in the [three-node validation](CLUSTER_PERFORMANCE_VALIDATION_2026-09-29.md) and the [maintenance validation](MAINTENANCE_VALIDATION_2026-09-29.md). No throughput or latency figure is promised for a release ([release requirements](PRODUCTION_RELEASE.md)).
 
 ## Environment
 
@@ -44,7 +46,7 @@ The old implementation treated `batch` and `periodic` identically: both relied o
 
 * `batch=1` is now event-level durable (like `every_event`) and is much slower than the old `batch=1` number, which was not actually syncing.
 * `batch` and `periodic` are no longer comparable; `periodic` remains the highest-throughput mode with a small loss window, while `batch` is the recommended durable-high-throughput mode and is now the default.
-* Use `every_event` for maximum durability; use `periodic` for maximum throughput.
+* Use `every_event` for maximum durability; `periodic` gives the most throughput, and production mode refuses it: an acknowledged event is only in memory on the replicas until the next flush.
 
 ### 2. Encrypted writes use record cipher v2 (random nonce)
 
@@ -110,7 +112,7 @@ Representative median values after Tier 3 #13:
 
 ## End-to-End gRPC Baseline (PublishBatch, par=1)
 
-Representative median values after Tier 3 #15:
+Representative median values after Tier 3 #15. **Do not rely on these rows:** a single `every_event` publish cannot take 126 ns when the WAL benchmark above needs milliseconds to sync one event. The harness of the time could count rejected or duplicate requests as throughput (see the [maintenance validation](MAINTENANCE_VALIDATION_2026-09-29.md)); it has been corrected since, and these rows were not measured again.
 
 | Fsync Mode | Payload | Batch Size | ns/op | MB/s |
 |------------|---------|-----------|-------|------|

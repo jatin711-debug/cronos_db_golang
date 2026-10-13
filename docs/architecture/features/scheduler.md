@@ -24,7 +24,7 @@ The scheduler controls when events become deliverable, using a hot timing wheel 
 - Defaults: **`-tick-ms=10`**, **`-wheel-size=600`** (6s root span); hot window default 60 minutes.
 - Adaptive hydrator interval (5s–5min) manages cold-store scan pressure.
 - Hot and cold separation keeps memory bounded for distant schedules.
-- **Crash recovery:** restore `timer_state.json` when present, **rebase `currentTick` from wall clock**, replay WAL timers from checkpoint; events matured during downtime are **enqueued for immediate delivery** (not dropped).
+- **Crash recovery:** restore `timer_state.json` when present and rebase `currentTick` from the wall clock. `replayWALTimers` then walks the retained log from its first offset and schedules only the events that are not due yet. A replicated partition does this when its node becomes leader, not at start. Events that came due while the node was down are not queued: they stay in the log, and a subscription reads what its group has not finished from the log when it starts, at the pace its consumers take it (`redriveRetained` in `internal/api/handlers.go`). Nothing is dropped, and the backlog is not loaded into memory at start.
 - Ready-queue and wheel size admission limits reject publish under overload (`ResourceExhausted`).
 
 ## Debug Pointers

@@ -2,16 +2,25 @@
 
 Date: 2026-09-27. Audited commit: `1de04d6575a810c79f716dfe48b54e1744b42a33`.
 
-## Working-tree follow-up — 2026-09-28
+## Status of the findings — kept current through 2026-10-13
+
+The audit itself (from "Verdict" on) describes commit `1de04d6` and is kept as
+it was. This table and the hardening batches after it are kept current: the
+latest release is `v0.6.0-rc.4`, and the ninth batch is on the development
+branch.
 
 ### Finding closure review
 
-**The remediation program is incomplete. Do not treat the passing local suite as
-production approval.** This table compares the current working tree with each
-finding's full required outcome. "Core fix implemented" means the specific code
-defect has been addressed; it does not mean its production release validation is
-complete. "Partial" means material requirements remain. This is a source and
-existing-test review, not a new fault-injection or deployment campaign.
+**The remediation program is incomplete; `v0.6.0-rc.4` is a release candidate,
+not a final release.** This table compares the code with each finding's full
+required outcome. "Core fix implemented" means the specific code defect has been
+addressed; it does not mean its production release validation is complete.
+"Partial" means material requirements remain. The evidence is the test suite,
+and since the third batch also fault injection: the acceptance fault campaign
+against three server processes and the partition tests between containers,
+both in CI, and the production chart in a disposable Kubernetes cluster. What a
+release promises, and what a final release still needs, is in
+[the release requirements](PRODUCTION_RELEASE.md).
 
 | Finding | Status | Implemented work and remaining requirement |
 |---|---|---|
@@ -28,7 +37,7 @@ existing-test review, not a new fault-injection or deployment campaign.
 | F11: DLQ | Partial | Record-length/reopen defect and batch payload handling addressed. Entries are encrypted with the partition's key when encryption is on; entries written before that are still read, and an entry that cannot be opened with the configured key stops the partition from starting instead of being skipped. Records that fail their checksum are counted, logged with the file they were in, and shown in the queue's stats; the rest of the queue is kept. Retention of dead-lettered entries and a repair procedure for a damaged queue file remain. |
 | F12: unordered time queries | Fixed with regressions | Correct full scans replace invalid timestamp pruning/index assumptions. Tests cover shuffled records across segment rotation and reopening. A read by time now skips the segments whose schedule times, from least to greatest, do not meet the window (eighth batch); a segment that does is read whole. |
 | F13: SDK consumption | Partial | Stream infrastructure is canceled before waiting; cancellation cause also preserved for producer RPCs. An unpinned SDK consumer opens one stream per partition, with a regression that publishes across four partitions. Against a real cluster the client had four more defects, all fixed and tested: a publish ended at the first node that answered "not the leader" instead of going on to the leader, so with three replicas on three nodes most publishes failed unless the caller mapped node IDs to addresses by hand; a batch refused that way was reported as failed; consumers that left the subscription ID to the client chose the same ID in every process, and the second one was refused; and a subscription ended for good when the server closed its stream without an error. The server now ends the subscriptions of a partition it stops leading, so consumers move to the new leader instead of waiting on the old one. The client remembers which node served a partition, and notices a node that stopped answering after 15 seconds instead of 40. The fault campaign runs two consumers in one group through the client and has one leave. Remaining: the server shares a partition's events between a group's consumers by credit, with no assignment a consumer can observe or control. |
-| F14: deployment | Partial | CLI precedence fixed; chart now wires bootstrap seeds, routable addresses, persistent Raft path, auth policy, private key staging, probes, placement, and shutdown grace. Image builds dashboard and uses Go 1.26.9 (eighth batch)/locked Rust dependencies. Render assertions pass; actual Linux image/chart startup still requires the new CI smoke job. The membership and Raft ports now speak mutual TLS with the replication certificates; they were plain TCP, and anyone who could reach the membership port could join the cluster as a node. The production chart's startup job and the fault campaign both run that way. The HTTP port is served over TLS with `--http-tls-enabled`, which the production values turn on, and every port reads its certificate, key and CA again when the files change, so they are replaced without a restart (eighth batch). `--use-memberlist`, which was accepted and did nothing, is refused. The node that creates the cluster (pod 0) no longer creates a second one when it comes back with an empty volume: every pod names every pod as a seed, and pod 0 creates a cluster only when it has no state and no other pod belongs to one. Tested with three processes (`TestFirstNodeReplaced`) and on the chart in the kind job, which also restarts the pods one at a time. |
+| F14: deployment | Partial | CLI precedence fixed; chart now wires bootstrap seeds, routable addresses, persistent Raft path, auth policy, private key staging, probes, placement, and shutdown grace. Image builds dashboard and uses Go 1.26.9 (eighth batch)/locked Rust dependencies. Render assertions pass, and the `production-chart-startup` CI job starts the image and the production chart in a kind cluster. The membership and Raft ports now speak mutual TLS with the replication certificates; they were plain TCP, and anyone who could reach the membership port could join the cluster as a node. The production chart's startup job and the fault campaign both run that way. The HTTP port is served over TLS with `--http-tls-enabled`, which the production values turn on, and every port reads its certificate, key and CA again when the files change, so they are replaced without a restart (eighth batch). `--use-memberlist`, which was accepted and did nothing, is refused. The node that creates the cluster (pod 0) no longer creates a second one when it comes back with an empty volume: every pod names every pod as a seed, and pod 0 creates a cluster only when it has no state and no other pod belongs to one. Tested with three processes (`TestFirstNodeReplaced`) and on the chart in the kind job, which also restarts the pods one at a time. |
 | F15: backup/retention | Partial | Backups now hold each partition's log, consumer groups with offsets and completions, dedup store, dead-letter queue and epoch, captured in an order that is safe to restore, with the size and CRC of every file in the manifest. `cronos-admin restore` checks every file and restores into an empty data directory, all partitions or none; tests cover damaged, incomplete and misplaced backups, and one backup was restored and served by the real binary. Completion-aware live pruning has regressions. The logs of all partitions on a node are cut at one instant; scheduled backups start at wall-clock multiples of the interval on every node; the manifest identifies the encryption key without containing it, and restore can check a key before writing anything (all tested). A restored cluster needs no Raft metadata: a partition's first leader is the replica with the most complete log, at an epoch above any a replica accepted (tested with stand-in replicas). A cluster now deletes from its logs: the partition's leader removes finished segments from the start of the log, tells the other replicas where its log starts, and they follow; a replica whose log ends before that restarts its log there, which is also how an emptied replica rejoins (tested through the replication channel, across a leader change, and in the fault campaign). Before this, nothing was ever deleted in a cluster. A whole three-node cluster has now been restored from its backups in CI: backups taken while publishes arrive, every node destroyed, each restored from its own backup, and everything acknowledged before the backups present and delivered at its time (`TestClusterRestoredFromBackups`). The backup interval, retention and directory are settings now. Remaining: backups go to the data volume unless `--backup-dir` names another, and the chart mounts no other volume; the backups of different nodes are separate copies that agree only as closely as their clocks; backups are full copies and hold no keys or credentials, the latter by design; in a cluster one event that cannot go yet keeps every later segment; restore exercises on Linux. See the [maintenance validation](MAINTENANCE_VALIDATION_2026-09-29.md). |
 | F16: transactions/splits | Contained for first release | Transactions and splitting are disabled by default and require --dev --experimental-features. Production rejects this opt-in and exactly-once commits. Public-RPC tests verify disabled endpoints; underlying experimental state machines remain unsupported. |
 | F17: overload/latency | Partial | Worker event-count and estimated-byte caps added. Replication returns on quorum instead of waiting for every follower; sends to a slow follower stay ordered and bounded, and a skipped follower is caught up from the WAL; `--replication-timeout` is the Append deadline. `batch` fsync no longer syncs under the WAL lock: writers that append during a sync share the next one. An empty partition no longer allocates its bloom filter and consumer queue up front. CDC no longer runs on the append path or queues in memory: a slow sink makes its feed lag. The delivery settings (ack timeout, retries, backoff, credits, circuit breaker) now reach the dispatcher; they were parsed and ignored. An overload test runs in CI: producers flood three nodes that have a small memory limit and no consumer; the nodes refuse publishes, none dies, they hold less than their limit, and everything acknowledged is delivered once a consumer starts (`TestOverloadIsRefusedAndSurvived`). Byte-bounded queues and measurements of sustained load at production sizes remain; the reads of the log are bounded by bytes at a restart and on the replication, redrive, feed, replay and cross-region paths (eighth batch). |
@@ -43,12 +52,12 @@ archived `hamba/avro` module. The follow-up migrates schema validation to
 an oversized map block before allocation. A local `govulncheck` rescan found no
 called-symbol vulnerabilities; it reported one imported-package finding without
 a reachable call. The historical F19 findings below describe the original audited
-dependency; the new CI scan must verify closure.
+dependency; CI now scans every image it builds, and the F19 row says what the scans found.
 
-The next release-blocking work should establish the supported feature scope and
-acceptance/loss contract, then finish F03/F06–F09 and F13/F15, wire and exercise
-F14/F20, and measure F04/F17/F18 with a ledger of accepted event IDs. F01's public
-authorization tests and F19's release scans also remain release gates.
+The supported scope and the acceptance and loss contract are now set in
+[the release requirements](PRODUCTION_RELEASE.md), which also lists what a final
+`v0.6.0` still needs. The "Remaining" part of each row above is what is still
+open for that finding.
 
 ### Ninth hardening batch — 2026-10-13
 

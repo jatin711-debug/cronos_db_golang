@@ -2,7 +2,7 @@
 
 These focused regression probes accompany the [production audit](../PRODUCTION_AUDIT_2026-09-27.md) of commit `1de04d6575a810c79f716dfe48b54e1744b42a33`.
 
-They assert the desired behavior and **fail against the audited implementation**. They are stored as `.go.txt` and added to their packages through Go's `-overlay` option. Normal test runs are unchanged. Probe data uses Go test temporary directories; no production database or running cluster is needed.
+They assert the desired behavior and **failed against the audited implementation**. Every one of them has since become a normal test, in the `production_audit_test.go` file of its package, and passes: they run with the rest of the suite in CI and with `go test ./...`. The `.go.txt` copies here are the probes as they were written for the audit, and are kept as its record. Probe data uses Go test temporary directories; no production database or running cluster is needed.
 
 ## Run
 
@@ -13,7 +13,7 @@ python docs/audit-probes/run.py
 python docs/audit-probes/run.py --race
 ```
 
-The first command runs 15 functional probes with `GOARCH=amd64 CGO_ENABLED=0`. A nonzero exit code is the expected result until the defects are fixed. The second runs one concurrency probe with cgo and the Go race detector; it requires a compatible C compiler and the Rust dedup library built using the repository's normal cgo setup. The runner preserves `CC`, linker flags and dynamic-library search paths from the calling environment. Do not use its results to claim validation on another architecture.
+The first command runs 15 functional probes with `GOARCH=amd64 CGO_ENABLED=0`. Since each package now has its `production_audit_test.go`, the runner uses those and adds no overlay, so it runs the current tests; they pass. On the audited commit it overlays the `.go.txt` probes, and they fail. The second runs one concurrency probe with cgo and the Go race detector; it requires a compatible C compiler and the Rust dedup library built using the repository's normal cgo setup. The runner preserves `CC`, linker flags and dynamic-library search paths from the calling environment. Do not use its results to claim validation on another architecture.
 
 For the audit's Windows environment, the race run used these process-local settings before invoking Python:
 
@@ -26,6 +26,8 @@ python docs/audit-probes/run.py --race
 Those paths are machine-specific prerequisites, not installation instructions. Functional probes do not need them. After a fix, move the relevant probe into the normal package tests and strengthen it with end-to-end assertions where appropriate.
 
 ## Recorded results
+
+What each probe found at commit `1de04d6`, when the audit ran. All of these are fixed; the status of each finding is in the [audit](../PRODUCTION_AUDIT_2026-09-27.md).
 
 | Probe | Observed result | Finding |
 |---|---|---|

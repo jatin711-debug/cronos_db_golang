@@ -2,7 +2,16 @@
 
 ## Purpose
 
-Tenant module enables per-tenant resource accounting and rate control hooks for multi-tenant safety.
+The tenant module contains per-tenant accounting and quota code (publish rate,
+in-flight events, storage bytes).
+
+**Limits are not enforced.** `Accountant.SetLimits` has no caller outside
+tests, and no flag, environment variable or RPC sets a limit. Without a
+configured limit the publish path skips the accountant entirely
+(`HasConfiguredLimits` is false), so no publish is checked or counted, and
+`RecordDelivery` only adjusts usage entries that already exist, of which there
+are none. `AdminService.GetTenantUsage` therefore reports zero usage and
+`limits_configured: false`.
 
 ## Key Files
 
@@ -12,15 +21,23 @@ Tenant module enables per-tenant resource accounting and rate control hooks for 
 
 ## Main Flow
 
-1. Startup initializes tenant accountant.
-2. Handlers extract tenant identity from request context or metadata.
-3. Publish and delivery paths record and enforce tenant-level usage.
+1. Startup creates a tenant accountant and hands it to the event handler, the
+   partition manager (delivery callbacks) and the admin handler.
+2. If any limit were configured, the publish handlers would take the tenant
+   from the JWT subject (`"default"` without claims), reserve quota with
+   `ReservePublishBatch`, refuse with `ResourceExhausted` when it is exceeded,
+   and tag the event with `tenant_id`.
+3. Delivery completion calls `RecordDelivery` for the event's tenant.
 
-## Production Decisions
+As shipped, step 2 never runs; see Purpose.
 
-- Shared cluster fairness is improved by tenant-scoped accounting.
-- Wiring through partition manager ensures delivery completion is also tracked.
-- Default-tenant fallback avoids hard failure in missing-claim cases.
+## Design Notes
+
+- The accountant is built so that it costs nothing on the hot path when no
+  limits are configured.
+- Delivery callbacks are wired through the partition manager, including
+  partitions created later.
+- Tenant identity falls back to `"default"` when a request carries no claims.
 
 ## Debug Pointers
 

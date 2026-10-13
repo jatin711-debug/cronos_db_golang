@@ -19,9 +19,9 @@ The auth module handles authentication and authorization policy enforcement befo
 
 ## Production Decisions
 
-- Authentication is required in production; `--dev` bypasses auth and must not be used in production.
-- Supports multiple JWT verification modes and external policy loading.
-- Fails closed when explicitly configured with strict policy inputs.
+- Authentication is off by default (`--auth-enabled=false`). Production mode (no `--dev`) refuses to start without `--auth-enabled`, a JWT secret or public key, and `--auth-policy-file`. `--dev` only lifts these production requirements; it does not switch auth off. With `--dev --auth-enabled`, every request is authenticated and authorized as in production.
+- Supports HMAC (`--auth-jwt-secret`) and Ed25519/RSA public-key (`--auth-jwt-public-key`) JWT verification, and an RBAC policy loaded from a JSON file.
+- Fails closed: with `--auth-enabled`, the server exits at start if the policy file is missing or cannot be loaded, or if the public key cannot be loaded.
 - Runs early in interceptor chain to minimize wasted work for rejected requests.
 
 ## Debug Pointers

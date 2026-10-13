@@ -189,7 +189,12 @@ decides who waits for it:
 |---|---|---|---|
 | `every_event` | after its own sync | nothing acknowledged | correctness matters more than rate |
 | `batch` (default) | after a sync that started after its append; writers arriving during a sync share the next one (*group commit*) | nothing acknowledged | the normal case |
-| `periodic` | at once; a background sync runs every `--flush-interval` (1 s) | up to one interval | load tests, or when replicas on other machines are the durability |
+| `periodic` | at once; a background sync runs every `--flush-interval` (1 s) | up to one interval | load tests and development only: production mode refuses it |
+
+In `batch` and `every_event` a follower also syncs a replicated batch before
+it answers the leader ([`AppendReplicatedBatch`](../../internal/storage/wal.go)),
+so a publish acknowledged with min-insync 2 is on two disks. In `periodic` it
+is only in memory on those replicas until the next flush.
 
 Group commit is the classic way out of "sync is slow": one sync is as
 expensive for a thousand appends as for one, so let the appends that arrive
@@ -218,7 +223,6 @@ Yes to both: the answer was only sent after a sync that covered the append. In p
 </details>
 
 More: [storage.md](../architecture/features/storage.md) ·
-[TECHNICAL_DEEP_DIVE.md §2](../../TECHNICAL_DEEP_DIVE.md) ·
 [PERFORMANCE.md](../PERFORMANCE.md)
 
 ### 4.2 Time
@@ -242,9 +246,13 @@ with millions of events pending, some due in a second and some next month.
   reference in Pebble, sorted by time. A *hydrator* moves the next window into
   the wheels. This is what keeps memory bounded when events are scheduled
   weeks ahead.
-- **Nothing here is saved to disk as a timer.** After a restart the wheels are
-  rebuilt by re-reading the log, and whatever came due while the node was down
-  fires immediately.
+- **Nothing here is saved to disk as a timer.** After a restart (on a
+  replicated partition: when the node becomes its leader) the log is re-read
+  and only events that are not due yet go back into the wheels. What came due
+  while the node was down stays in the log; a subscription reads what its
+  group has not finished from the log when it starts, at the pace its
+  consumers take it. So a large backlog is not loaded into memory at start,
+  and nothing is delivered before a consumer subscribes.
 
 **The alternatives.**
 
@@ -259,7 +267,9 @@ sorted index for the far future, where memory matters.
 
 **What it costs.** Precision is one tick. Hot timers use memory, so admission
 control refuses publishes beyond 10 million pending timers or 1 million ready
-events per partition. And a partition without a leader fires nothing: events
+events per partition, and a memory guard refuses publishes while the process
+holds `--max-memory-percent` (default 80) of its memory limit or more. And a
+partition without a leader fires nothing: events
 are delivered by the leader only, so failover time is added to lateness.
 
 <details>
@@ -267,8 +277,7 @@ are delivered by the leader only, so failover time is added to lateness.
 Because every pending timer is an event in the log that no consumer group has finished yet. The log plus the consumer progress are enough to rebuild it; persisting the wheel would add a second copy that could disagree with the first.
 </details>
 
-More: [scheduler.md](../architecture/features/scheduler.md) ·
-[TECHNICAL_DEEP_DIVE.md §3](../../TECHNICAL_DEEP_DIVE.md)
+More: [scheduler.md](../architecture/features/scheduler.md)
 
 ### 4.3 Idempotent publish
 
@@ -356,7 +365,7 @@ so that every application does not rebuild them.
 | Routing in the client | No extra hop | Every client language needs a smart SDK | A proxy tier, or servers that forward |
 
 More: [cluster.md](../architecture/features/cluster.md) ·
-[TECHNICAL_DEEP_DIVE.md §6.1](../../TECHNICAL_DEEP_DIVE.md)
+[partition.md](../architecture/features/partition.md)
 
 ### 4.5 Cluster control plane
 
@@ -390,6 +399,14 @@ first, the current leader stops accepting publishes, and only when the
 target's log is shown to end at the same entry is the change of leader
 committed. If that takes too long, the handoff is abandoned and nothing
 changed.
+
+**A node that is gone for good has to be removed.** A node that dies stays a
+Raft voter and a member, and keeps counting toward what a majority is: a
+cluster of three that gets a fourth node in place of a dead one needs three of
+four until the dead one is removed. `cronos-admin cluster remove-node <id>`,
+sent to any node on its internal port, removes it from Raft and from every
+node's member list. The node must not be running, or it joins again
+([`cmd/admin/main.go`](../../cmd/admin/main.go)).
 
 **Starting a cluster is a distributed problem too.** The first node of a new
 cluster sees a membership of one. If it assigned leaders at once it would lead
@@ -464,8 +481,8 @@ one loses nothing — without two machines ever accepting different histories.
 |---|---|---|
 | Wait for min-insync, not for every replica | One slow follower does not set the latency | A follower can be behind; failover must find the most complete log |
 | Fail without quorum | No acknowledged write on a single machine | Writes stop for a partition that cannot reach its quorum |
-| A follower acknowledges after appending, before its own disk sync | Lower latency | If the leader and that follower lose power within the same flush interval, an acknowledged write can be lost. Machines in different failure domains are the defence |
-| Cross-region replication is asynchronous | A slow or lost region never blocks local writes | The remote region is behind, and conflicts are resolved last-write-wins |
+| A follower syncs before it acknowledges (`batch`, `every_event`) | An acknowledged write is on min-insync disks | A disk sync on the follower in every replication round trip. Only `periodic`, which production refuses, acknowledges before the sync |
+| Cross-region replication (experimental, `--dev --experimental-features` only) is asynchronous | A slow or lost region never blocks local writes | The remote region is behind, events are dropped when a region stays unreachable, and conflicts are resolved last-write-wins |
 
 <details>
 <summary>Check yourself: replication factor 3, min-insync 2. One node is down and a second becomes unreachable. What happens to writes, and why is that the right answer?</summary>
@@ -473,7 +490,7 @@ They fail. The leader alone is one replica, below min-insync. Accepting them wou
 </details>
 
 More: [replication.md](../architecture/features/replication.md) ·
-[TECHNICAL_DEEP_DIVE.md §6.3–6.4](../../TECHNICAL_DEEP_DIVE.md)
+[cluster.md](../architecture/features/cluster.md)
 
 ### 4.7 Delivery
 
@@ -533,7 +550,9 @@ Short notes on the parts that surround the data path.
   tracing is disabled by default.
 - **Secure by default.** Without `--dev`, the server refuses to start unless
   TLS, JWT authentication with a policy file, encryption at rest, replication
-  mTLS, replication factor ≥ 3 and min-insync ≥ 2 are configured
+  mTLS, replication factor ≥ 3, min-insync ≥ 2, `--fsync-mode` `batch` or
+  `every_event`, and (in a cluster) `--cluster-seeds` are configured, and it
+  refuses `--experimental-features` and `--exactly-once-commits`
   ([`config.go`](../../internal/config/config.go)). An unsafe production
   deployment has to be asked for; it cannot happen by omission.
 - **Health is two questions.** *Live* means the process runs. *Ready* means
@@ -552,9 +571,10 @@ Short notes on the parts that surround the data path.
   rules, so a producer cannot publish what consumers cannot read.
 - **Tenants and overload** ([`internal/tenant`](../../internal/tenant/tenant.go),
   [`backpressure.go`](../../internal/partition/backpressure.go)). Token buckets
-  per tenant and per topic, plus per-partition admission control. An
+  per topic, per-partition admission control and a process memory guard. An
   overloaded server answers `ResourceExhausted` early instead of queueing
-  until it falls over.
+  until it falls over. Per-tenant quotas exist in code but no setting
+  configures them, so they are not enforced ([tenant.md](../architecture/features/tenant.md)).
 - **Change data capture and cross-region replication**
   ([`changefeed.go`](../../internal/partition/changefeed.go),
   [`internal/cdc`](../../internal/cdc/sink.go),
@@ -563,9 +583,12 @@ Short notes on the parts that surround the data path.
   watermark and hands events over in order, on the leader only. It replaced a
   hook on the append path, which fired before a publish was accepted and once
   per replica. A sink that fails makes the feed wait and retry; publishing
-  never waits for it, and nothing is dropped. The feed's position is stored
-  and sent to followers, so restarts and failovers continue it. The general
-  pattern: *derive side outputs from the log, not from the write path*.
+  never waits for it, and the log keeps entries until the feed has exported
+  them. The feed's position is stored and sent to followers, so restarts and
+  failovers continue it. Cross-region replication is experimental: it needs
+  `--dev --experimental-features`, and its bounded buffer drops the oldest
+  events when a region stays unreachable. The general pattern: *derive side
+  outputs from the log, not from the write path*.
 - **Experimental: transactions and online split**
   ([`internal/tx`](../../internal/tx/coordinator.go),
   [`split.go`](../../internal/partition/split.go)). Two-phase commit across
@@ -586,7 +609,7 @@ Short notes on the parts that surround the data path.
 |---|---|
 | At-least-once delivery to every consumer group | Exactly-once delivery |
 | Offsets ordered within a partition | Delivery in offset order, or any order across partitions |
-| No acknowledged write lost while a quorum of replicas survives (min-insync ≥ 2) | Safety against the leader and its only acknowledging follower losing power in the same instant |
+| No acknowledged write lost while a quorum of replicas survives (min-insync ≥ 2, fsync `batch` or `every_event`) | Safety when two nodes' disks are lost together; the fault tests kill processes, and power loss on real machines has not been tested ([PRODUCTION_RELEASE.md](../PRODUCTION_RELEASE.md)) |
 | A retried publish stays one event, within the dedup TTL | Dedup forever, or across a changed partition key |
 | Timers precise to one tick | Hard real-time firing, or firing while a partition has no leader |
 | Automatic failover of partition leaders | Failover without a Raft majority |
@@ -634,7 +657,7 @@ is the real price of "build it yourself" in section 5.
 |---|---|
 | Understand why it is built this way | This guide |
 | See every subsystem with flow and sequence diagrams | [ARCHITECTURE.md](../../ARCHITECTURE.md) |
-| Learn the algorithms and data structures from first principles | [TECHNICAL_DEEP_DIVE.md](../../TECHNICAL_DEEP_DIVE.md) |
+| Learn the algorithms and data structures from first principles | [TECHNICAL_DEEP_DIVE.md](../../TECHNICAL_DEEP_DIVE.md) (historical: written for an older version; its replication, membership, client and recovery sections no longer match the code) |
 | Find the file for a feature, or trace a bug | [DEVELOPER_ARCHITECTURE_GUIDE.md](../DEVELOPER_ARCHITECTURE_GUIDE.md) |
 | Read about one subsystem at a time | [architecture/README.md](../architecture/README.md) and its feature pages |
 | Know what is unsafe or unfinished | [PRODUCTION_AUDIT_2026-09-27.md](../PRODUCTION_AUDIT_2026-09-27.md), [PRODUCTION_RELEASE.md](../PRODUCTION_RELEASE.md) |

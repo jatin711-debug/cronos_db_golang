@@ -2,12 +2,13 @@
 
 > Distributed Timestamp-Triggered Event Database with Built-in Scheduling, Pub/Sub & Replay
 
-[![Go](https://img.shields.io/badge/Go-1.25+-blue.svg)](https://golang.org)
+[![Go](https://img.shields.io/badge/Go-1.26.9-blue.svg)](https://golang.org)
 [![Rust](https://img.shields.io/badge/Rust-FFI-dea584.svg)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-Beta-yellow.svg)](#status)
+[![Release](https://img.shields.io/github/v/release/jatin711-debug/cronos_db_golang?include_prereleases)](https://github.com/jatin711-debug/cronos_db_golang/releases)
+[![Status](https://img.shields.io/badge/status-release%20candidate-yellow.svg)](#status)
 
-> **Production Readiness:** Production hardening is in progress. Security configuration and passing unit tests do not establish safe failover, recovery, or retention. See the [audit and open findings](docs/PRODUCTION_AUDIT_2026-09-27.md) and [release requirements](docs/PRODUCTION_RELEASE.md). Transactions and online partition splitting are disabled by default and require `--dev --experimental-features`; they are unsupported in production. End-to-end exactly-once delivery is not supported.
+> **Production Readiness:** The current release is the release candidate [`v0.6.0-rc.4`](https://github.com/jatin711-debug/cronos_db_golang/releases/tag/v0.6.0-rc.4). What a release promises, the test behind each promise, and what a final `v0.6.0` still needs are in the [release requirements](docs/PRODUCTION_RELEASE.md); open findings are in the [audit](docs/PRODUCTION_AUDIT_2026-09-27.md). Transactions, online partition splitting and cross-region replication are disabled by default and require `--dev --experimental-features`; they are unsupported in production. End-to-end exactly-once delivery is not supported.
 
 CronosDB is a distributed database purpose-built for **timestamp-triggered event processing**. Publish events with a future timestamp — CronosDB stores them durably and delivers them precisely when the time arrives.
 
@@ -15,18 +16,22 @@ It combines the durability of a write-ahead log, the precision of a hierarchical
 
 ## Key Numbers
 
-Recent numbers below are accepted publish rates from three nodes on one AMD
-Ryzen 7 6800H host. See the [measurement settings and baseline comparison](docs/CLUSTER_PERFORMANCE_VALIDATION_2026-09-29.md).
+The publish rates below were measured on 2026-09-29, on the development branch
+of that day, with three processes on one AMD Ryzen 7 6800H laptop and
+`periodic` fsync, which production mode refuses. They show what the code
+accepts on one machine; they are not a capacity to plan a deployment on, and
+no throughput or latency figure is promised. See the
+[measurement settings and baseline comparison](docs/CLUSTER_PERFORMANCE_VALIDATION_2026-09-29.md).
 
 | Metric | Value |
 |--------|-------|
-| **RF=1 raw publish, current branch** | **~612K events/sec median** — Go fallback, dedup bypassed, 32 partitions, 4.8M events; 16.4% below matched v0.5.0 median |
-| **RF=3, minISR=2, current branch** | **~111K events/sec** — native Rust/CGO, dedup enabled, 16 partitions, 960K events; one sample |
+| **RF=1 raw publish** | **~612K events/sec median** — Go bloom filter, dedup bypassed, 32 partitions, 4.8M events; 16.4% below matched v0.5.0 median |
+| **RF=3, minISR=2** | **~111K events/sec** — native Rust/CGO, dedup enabled, 16 partitions, 960K events; one sample |
 | **Reported publish errors** | **0** in the listed completed profiles; delivery and failover are separate checks |
 | **Timer Precision** | 10ms tick default (`-tick-ms`; configurable) |
-| **Dedup False Positive Rate** | <1% (Rust bloom filter) |
+| **Dedup False Positive Rate** | <1% (bloom filter, confirmed against PebbleDB) |
 
-> Earlier ~790K RF=1, ~200K RF=3, and 1M+ claims used different conditions or lack preserved evidence. They are not current production capacity targets. The `v0.6.0-rc.1` tag also has an RF=3 quorum acknowledgement defect; the current branch fixes the fail-open path, but release blockers remain.
+> Earlier ~790K RF=1, ~200K RF=3, and 1M+ claims used different conditions or lack preserved evidence. They are not capacity targets.
 
 ---
 
@@ -44,7 +49,7 @@ Ryzen 7 6800H host. See the [measurement settings and baseline comparison](docs/
 - **Two-Tier Cold/Hot Scheduler** — PebbleDB cold store for far-future events (>1hr); adaptive hydrator adjusts scan frequency based on load (5s–5min). Keeps hot memory bounded.
 - **Absolute Time Tracking** — No drift across overflow wheel cascades
 - **Batch Scheduling** — Single lock acquisition for entire batch
-- **Crash Recovery** — Incremental WAL replay with checkpointing
+- **Crash Recovery** — A restart times again the events of the log that are not due yet; those already due stay in the log and their subscriptions read them at the consumers' pace, so a backlog larger than memory does not stop a node from coming back
 
 ### Deduplication
 - **Rust Bloom Filter (FFI)** — Lock-free AtomicU64 arrays, XxHash64, Rayon parallel batch
@@ -63,76 +68,89 @@ Ryzen 7 6800H host. See the [measurement settings and baseline comparison](docs/
 - **Multi-Node Clustering** — 3+ nodes with automatic partition distribution
 - **Raft Consensus** — Metadata consistency (HashiCorp Raft)
 - **Membership** — TCP heartbeats between all nodes; a node counted as failed keeps being tried and is taken back when it answers
-- **Mutual TLS Between Nodes** — Replication, membership and Raft accept only callers that hold a certificate of the cluster's CA
+- **Mutual TLS Between Nodes** — Replication, membership and Raft accept only callers that hold a certificate of the cluster's CA. Certificates and the CA are replaced without a restart, and `--http-tls-enabled` serves the HTTP port over TLS
 - **Consistent Hashing** — SHA-256 placement ring with virtual nodes (`-virtual-nodes`, default 2048); partition ID routing uses FNV-1a
-- **Leader-follower replication over dedicated internal gRPC** — `InternalGRPCServer` on a separate listener (default `:7947`) with optional cluster-only mTLS. Replication traffic is isolated from the public API on `:9000`.
-- **Bulk snapshot install** — `ReplicationService.Snapshot` streams segment + sparse-index files with per-file IEEE CRC32; follower stages under `<dataDir>/snapshot-staging/{segments,index}`, verifies, and atomically swaps into place via `WAL.ReloadSegments()`. Used for new-node bootstrap and follower-wipe recovery.
+- **Raft-committed leadership** — Raft records which node leads each partition; the hash ring only proposes placement. When a leader dies, the replicas that answer are first fenced at a new epoch, and the one with the most complete log is elected. A rebalance moves leadership by a staged handoff that waits until the target's log is equal
+- **Quorum replication over dedicated internal gRPC** — Followers on a separate listener (default `:7947`); a publish is acknowledged once `--min-insync-replicas` replicas, the leader included, hold it. Replication traffic is isolated from the public API on `:9000`, and production requires mutual TLS on it
+- **Bulk snapshot install** — `ReplicationService.Snapshot` streams segment and index files with per-file size and CRC32; the follower stages them, checks every file, and installs them through a journaled swap that recovers from a crash at any point. An interrupted transfer resumes with the files that already arrived. Used to fill a new or emptied replica
+- **Node removal** — `cronos-admin cluster remove-node` takes a node that is lost for good out of Raft and off every node's member list, so it no longer counts towards a majority
 - **Clock Skew Detection** — Cross-node heartbeat timestamp comparison; warns if absolute skew exceeds 5 seconds
 
 ### API
 - **gRPC Streaming** — Bidirectional subscribe, streaming replay
 - **Batch Publish** — 100-4000 events per call for maximum throughput
-- **Consumer Groups** — Persistent PebbleDB offsets, group metadata, and per-event completion records; progress across failover remains under validation
+- **Consumer Groups** — Persistent PebbleDB offsets, group metadata, and per-event completion records; the leader sends a group's progress to its followers, so a new leader does not deliver finished work again (what finished in the last moments before a failover can be)
 - **Replay Engine** — Time-range or offset-based historical replay
 
 ---
 
 ## Architecture Overview
 
+Events are spread over partitions by key. Every partition has one leader node, and its other replicas live on other nodes. An event goes to its partition's leader, is written to the log and copied to the other replicas, and is acknowledged once enough of them hold it. It waits in a timer until its scheduled time and is then delivered to a consumer group.
+
+### How an event moves
+
 ```mermaid
-graph TB
-    subgraph Clients
-        C1[Producer]
-        C2[Consumer]
+flowchart LR
+    P([Producer]) -->|"publish"| D
+
+    subgraph L["Partition leader"]
+        direction LR
+        D["Dedup<br/>by message ID"] --> W[("Write-ahead log<br/>segmented, indexed")]
+        W --> T["Timing wheel<br/>due within the hot window"]
+        W --> C[("Cold store<br/>due later")]
+        C -->|"hydrated as<br/>the time nears"| T
+        T -->|"due"| X["Dispatcher<br/>credit-based flow"]
     end
 
-    subgraph "API Layer"
-        GW["gRPC Server :9000<br/>Rate Limit · Metrics · Tracing"]
-    end
-
-    subgraph "Routing"
-        PM["Partition Manager<br/>FNV-1a hash routing"]
-    end
-
-    subgraph "Per-Partition Engine"
-        WAL["WAL<br/>Segmented + Indexed"]
-        CS["Cold Store<br/>PebbleDB (>1hr)"]
-        SCH["Timing Wheel<br/>Hierarchical"]
-        DD["Dedup<br/>Rust Bloom + PebbleDB"]
-        DSP["Dispatcher<br/>32 Shards + Circuit Breaker"]
-        CG["Consumer Groups<br/>Persistent Offsets"]
-    end
-
-    subgraph "Cluster"
-        RAFT["Raft<br/>Metadata"]
-        GOSSIP["Membership<br/>TCP Heartbeats"]
-        REPL["Replication<br/>gRPC Internal :7947"]
-    end
-
-    C1 -->|"Publish/Batch"| GW
-    C2 -->|"Subscribe stream"| GW
-    GW --> PM --> DD --> WAL --> SCH
-    WAL --> CS
-    CS -->|"Hydrator (adaptive 5s–5min)"| SCH
-    SCH -->|"Ready events"| DSP -->|"Stream"| C2
-    WAL -.-> REPL
-    PM -.-> RAFT
-    GOSSIP -.-> PM
+    W -->|"replicate"| F[("Follower replicas<br/>same log")]
+    X -->|"deliver at the scheduled time<br/>acks come back on the stream"| G([Consumer group])
 ```
 
-> For the full architecture with Mermaid diagrams, sequence diagrams, and deep-dive explanations, see **[ARCHITECTURE.md](ARCHITECTURE.md)** (includes a **[Known Limitations](ARCHITECTURE.md#known-limitations)** section for deferred gaps such as mid-flight lag snapshots, admin rebalance soft-stub, and deep delivery requeue).
->
-> For per-feature architecture docs with inline-rendered Mermaid diagrams, see **[docs/architecture/README.md](docs/architecture/README.md)** (diagrams are embedded directly in the feature docs — see its [Diagram Index](docs/architecture/README.md#diagram-index)).
+A publish is acknowledged only after `--min-insync-replicas` replicas, the leader included, hold it. A consumer that does not acknowledge in time gets the event again, and an event that keeps failing goes to the dead-letter queue.
+
+### How a cluster fits together
+
+```mermaid
+flowchart TB
+    APP([Applications, Go client]) -->|"gRPC :9000, each request to its partition's leader"| nodes
+    OPS([Operators]) -->|"HTTP :8080: health, metrics, dashboard, admin API"| nodes
+
+    subgraph nodes["Three nodes; every partition has a replica on each"]
+        direction LR
+        N1["Node 1<br/>leads partitions 0, 3<br/>follows the rest"]
+        N2["Node 2<br/>leads partitions 1, 4<br/>follows the rest"]
+        N3["Node 3<br/>leads partitions 2, 5<br/>follows the rest"]
+        N1 <-->|"replication :7947"| N2
+        N2 <-->|"replication :7947"| N3
+    end
+
+    nodes --- RAFT["Raft :7948<br/>which node leads each partition"]
+    nodes --- MEM["Membership :7946<br/>heartbeats: which nodes are alive"]
+```
+
+Raft records which node leads each partition. When a leader dies, the surviving replica with the most complete log takes over. Between nodes, the replication, membership and Raft ports speak mutual TLS with the cluster's certificates.
+
+For the details see **[ARCHITECTURE.md](ARCHITECTURE.md)** and the per-feature docs in **[docs/architecture/](docs/architecture/README.md)**. What a release promises, and the test behind each promise, is in **[docs/PRODUCTION_RELEASE.md](docs/PRODUCTION_RELEASE.md)**.
 
 ---
 
 ## Quick Start
 
-### Prerequisites
+### Install a release
 
-- **Go 1.25+**
-- **Rust** (for bloom filter FFI) — install via [rustup](https://rustup.rs)
-- **protoc** (Protocol Buffers compiler)
+Each release has binaries of the server and of `cronos-admin` for Linux and macOS (amd64, arm64) and Windows (amd64), with `SHA256SUMS`, on the [releases page](https://github.com/jatin711-debug/cronos_db_golang/releases). They are built without cgo and use the bloom filter written in Go. The container image uses the one written in Rust:
+
+```bash
+docker pull johnny711dock/cronos-db:0.6.0-rc.4    # also :latest
+```
+
+### Prerequisites to build
+
+- **Go 1.26.9** (the version `go.mod` names)
+- **npm** for the dashboard that `make build` compiles into the server
+- **Rust** (optional) for the faster bloom filter through cgo — install via [rustup](https://rustup.rs). Without cgo the server uses the one written in Go
+- **protoc** only to regenerate the gRPC code (`make proto`)
 
 ### Build
 
@@ -195,8 +213,8 @@ The dashboard includes:
 - **Replication lag** — leader HWM and per-follower lag with a snapshot bar chart.
 - **Consumer groups** — group/partition listing and committed-vs-HWM lag charts.
 - **Schema registry** — browse registered topic schemas (`/ui/schemas`).
-- **Tenant usage** — per-tenant in-flight and storage accounting (`/ui/tenants`).
-- **Operations** — run retention, compaction, and trigger rebalancing.
+- **Tenant usage** — the page for per-tenant in-flight and storage accounting (`/ui/tenants`). Nothing sets tenant limits yet, and usage is only counted for tenants that have them, so it shows zeros in this release.
+- **Operations** — run retention and compaction. Rebalancing is driven by membership; the rebalance action only reports that.
 - **Dark / light / system theme** toggle.
 - **Toast notifications** for async operations.
 
@@ -209,42 +227,44 @@ admin CLI:
 
 ### Admin CLI
 
-`cronos-admin` is the operator gRPC CLI. Build it with:
+`cronos-admin` is the operator CLI. It comes with each release, is in the image at `/app/cronos-admin`, and builds with:
 
 ```bash
-go build -o bin/cronos-admin ./cmd/admin/main.go
+go build -o bin/cronos-admin ./cmd/admin
 ```
 
-Common commands:
+The operator commands are under `admin` and use the client port:
 
 ```bash
-# Cluster status
-./bin/cronos-admin --server=localhost:9000 topology
-
-# Per-partition runtime health
-./bin/cronos-admin --server=localhost:9000 partition-health 0
-
-# Replication lag (omit partition-id for all local leaders)
-./bin/cronos-admin --server=localhost:9000 replication-lag
-
-# Consumer groups
-./bin/cronos-admin --server=localhost:9000 consumer-groups list
-./bin/cronos-admin --server=localhost:9000 consumer-group-lag my-group 0
-
-# Schema registry
-./bin/cronos-admin --server=localhost:9000 schema-list
-./bin/cronos-admin --server=localhost:9000 schema-get my-topic 0
-
-# Tenant accounting
-./bin/cronos-admin --server=localhost:9000 tenant-usage
-
-# Operations (require Subject.Admin=true when auth is enabled)
-./bin/cronos-admin --server=localhost:9000 retention-run --partition-id=0
-./bin/cronos-admin --server=localhost:9000 compaction-run --partition-id=0
-./bin/cronos-admin --server=localhost:9000 cluster-rebalance
+./bin/cronos-admin --server=localhost:9000 admin topology              # nodes, partitions, in-sync replicas
+./bin/cronos-admin --server=localhost:9000 admin partition-health 0
+./bin/cronos-admin --server=localhost:9000 admin replication-lag       # omit the partition for all local leaders
+./bin/cronos-admin --server=localhost:9000 admin consumer-groups list
+./bin/cronos-admin --server=localhost:9000 admin consumer-group-lag my-group 0
+./bin/cronos-admin --server=localhost:9000 admin schema-list
+./bin/cronos-admin --server=localhost:9000 admin tenant-usage
+./bin/cronos-admin --server=localhost:9000 admin retention-run --partition-id=0
+./bin/cronos-admin --server=localhost:9000 admin compaction-run --partition-id=0
 ```
 
-Use `--jwt-token <token>` for authenticated clusters.
+The cluster commands are asked on the port the nodes use with each other (`--cluster-grpc-addr`), with the cluster's certificates:
+
+```bash
+TLS="--tls --tls-ca=ca.crt --tls-cert=tls.crt --tls-key=tls.key"
+./bin/cronos-admin --server=node1:7947 $TLS cluster status
+./bin/cronos-admin --server=node1:7947 $TLS cluster voters
+./bin/cronos-admin --server=node1:7947 $TLS cluster remove-node node4   # a node that is gone for good
+```
+
+Offline tools, run on the data directory of a stopped node:
+
+```bash
+./bin/cronos-admin restore --from=/backups/<backup> --data-dir=/data       # checks every file, then restores
+./bin/cronos-admin check-log --data-dir=/data                              # reports damage inside a log
+./bin/cronos-admin check-log --data-dir=/data --partition=3 --repair       # cuts it out, naming what is lost
+```
+
+`--tls`, `--tls-ca`, `--tls-cert` and `--tls-key` connect to a node that serves TLS; `--jwt-token <token>` authenticates when auth is on.
 
 ### Load Test
 
@@ -303,33 +323,44 @@ make docker-logs
 
 ### Production Deployment & Security
 
-Do **not** use `--dev` for production. A production-ready configuration requires:
+Without `--dev` the server runs in production mode and refuses to start unless it has:
 
-| Requirement | Flag / Config | Recommended Value |
-|-------------|---------------|-------------------|
+| Requirement | Flag / Config | Value |
+|-------------|---------------|-------|
 | Replication factor | `--replication-factor` | ≥ 3 |
 | Min in-sync replicas | `--min-insync-replicas` | ≥ 2 |
 | gRPC TLS | `--tls-enabled`, `--tls-cert-file`, `--tls-key-file` | Enabled |
 | Authentication | `--auth-enabled`, `--auth-jwt-secret` or `--auth-jwt-public-key` | Enabled |
+| Authorization policy | `--auth-policy-file` | Required: without it every authenticated subject is an admin |
 | Encryption at rest | `--encryption-enabled`, `--encryption-key-file` | Enabled |
 | Mutual TLS between nodes (replication, membership, Raft) | `--replication-tls-enabled`, `--replication-tls-ca-file`, `--replication-tls-cert-file`, `--replication-tls-key-file` | Enabled, all three files |
 | Fsync mode | `--fsync-mode` | `batch` or `every_event` |
+| Seeds | `--cluster-seeds` | Every node names every node; exactly one node also gets `--cluster-bootstrap` |
 
-Example production startup:
+It also refuses `--experimental-features`, `--exactly-once-commits` and a `--pprof-addr` that is not a loopback address. `--http-tls-enabled` serves the HTTP port (health, metrics, dashboard, admin API) over TLS with the certificate of the client port.
+
+Example startup of the first of three nodes. The other two differ in their ID and addresses, and leave out `--cluster-bootstrap`. With TLS between nodes, each node's gossip, cluster gRPC and Raft addresses must be ones the other nodes can reach, and its certificate must be valid for them:
 
 ```bash
 ./bin/cronos-api \
   --node-id=node1 \
-  --data-dir=./data \
+  --data-dir=/var/lib/cronos \
   --cluster \
+  --cluster-bootstrap \
+  --cluster-seeds=node1.cronos:7946,node2.cronos:7946,node3.cronos:7946 \
+  --cluster-gossip-addr=node1.cronos:7946 \
+  --cluster-grpc-addr=node1.cronos:7947 \
+  --cluster-raft-addr=node1.cronos:7948 \
   --replication-factor=3 \
   --min-insync-replicas=2 \
   --fsync-mode=batch \
   --tls-enabled \
   --tls-cert-file=/etc/cronos/tls/tls.crt \
   --tls-key-file=/etc/cronos/tls/tls.key \
+  --http-tls-enabled \
   --auth-enabled \
   --auth-jwt-secret="${CRONOS_JWT_SECRET}" \
+  --auth-policy-file=/etc/cronos/auth/policy.json \
   --encryption-enabled \
   --encryption-key-file=/etc/cronos/encryption/master.key \
   --replication-tls-enabled \
@@ -469,34 +500,34 @@ Measured on a 3-node cluster on one host (AMD Ryzen 7 6800H, NVMe SSD) with 256-
 
 | Profile | Throughput | Notes |
 |--------|------------|-------|
-| RF=1 raw publish, current branch | **612K events/sec median** | Three runs; dedup bypassed, 32 partitions, 128 MiB segments, batch 4000, 4.8M events each, Go fallback |
+| RF=1 raw publish, development branch of 2026-09-29 | **612K events/sec median** | Three runs; dedup bypassed, 32 partitions, 128 MiB segments, batch 4000, 4.8M events each, Go fallback |
 | RF=1 raw publish, v0.5.0 | **733K events/sec median** | Matched three-run baseline; 16.4% faster |
-| RF=3, minISR=2, current branch | **111K events/sec** | Native Rust/CGO, dedup enabled, 16 partitions, batch 4000, 960K events, one run |
+| RF=3, minISR=2, development branch of 2026-09-29 | **111K events/sec** | Native Rust/CGO, dedup enabled, 16 partitions, batch 4000, 960K events, one run |
 
-The [validation record](docs/CLUSTER_PERFORMANCE_VALIDATION_2026-09-29.md) includes the native/CGO baseline pair, additional RF=3 workloads, and measurement limits. Re-run with your storage, network, and durability settings before sizing a deployment.
+The [validation record](docs/CLUSTER_PERFORMANCE_VALIDATION_2026-09-29.md) includes the native/CGO baseline pair, additional RF=3 workloads, and measurement limits. These runs used `periodic` fsync, which production mode refuses. Re-run with your storage, network, and durability settings before sizing a deployment.
 
 ### Durability & Fault Tolerance
 
-With replication enabled (`--replication-factor=3 --min-insync-replicas=2`), the publish path waits for a follower acknowledgement before returning success. The current branch rejects writes when no replication leader is ready. The three-node completed runs reported zero errors and zero follower lag at the end. A fault campaign must still prove accepted-ID survival through node loss, restart, and leader replacement; see the [production audit](docs/PRODUCTION_AUDIT_2026-09-27.md).
-
-The fail-closed rejection is explicit, e.g.:
+With replication enabled (`--replication-factor=3 --min-insync-replicas=2`), a publish is acknowledged only once the required replicas hold it, and in `batch` or `every_event` fsync mode each of them has it on disk before it answers. Without enough replicas the publish is refused, e.g.:
 
 ```
 replication for partition 13: not enough replicas: min-insync-replicas=2 but no connected followers
 ```
 
-Inspect replication health via the `cronos_replication_lag` metric (`curl http://<node>:8080/metrics | grep replication_lag`). A zero gauge alone does not establish failover safety.
+CI runs a fault campaign against three server processes on every change to `main`: leaders and followers killed, a leader frozen and released, every node restarted, a node replaced with an empty one, the whole cluster killed. It keeps a ledger of every acknowledged event and checks that each was delivered and that the replicas' logs are equal. What each promise rests on, and what it does not cover, is in the [release requirements](docs/PRODUCTION_RELEASE.md#what-a-release-promises-and-what-that-rests-on).
 
-> RF=1 (the default in the `make node*` / benchmark profiles) uses one replica. RF≥3 + minISR≥2 is required for quorum acknowledgements, but production recovery remains under validation.
+Replication health is in the `cronos_replication_lag` metric (`curl http://<node>:8080/metrics | grep replication_lag`, `https://` with `--http-tls-enabled`) and in `cronos-admin admin topology`, which shows the in-sync replicas each partition's leader reports.
+
+> RF=1 (the default in the `make node*` / benchmark profiles) keeps one copy of each event. Production mode requires RF≥3 and minISR≥2.
 
 ### What Makes It Fast
 
 | Optimization | Impact |
 |-------------|--------|
-| Rust bloom filter (FFI) | ~40ns per check, parallel batch via Rayon |
+| Rust bloom filter (FFI, in the image) | Lock-free atomics, parallel batch via Rayon |
 | sync.Pool for timers & buffers | Near-zero GC pressure on hot path |
-| 4MB buffered segment writer | Amortized I/O, background flush |
-| Pre-created next segment | Zero-latency rotation at 90% capacity |
+| Memory-mapped segment writes | No copy through a write buffer |
+| Group commit in `batch` fsync | Writers that append during a sync share the next one |
 | Batch WAL + Batch Schedule | Single lock per 1000 events |
 | 32-shard dispatcher | Lock contention eliminated |
 | PebbleDB NoSync + disabled WAL | Our WAL provides durability |
@@ -525,10 +556,9 @@ Inspect replication health via the `cronos_replication_lag` metric (`curl http:/
 
 ### Flags
 
-Defaults are sourced from `internal/config/defaults.go`. A subset of flags has
-equivalent `CRONOS_*` environment variable overrides (see [Environment
-Variables](#environment-variables) for the exact list — flags not listed there are
-flag-only).
+Defaults are sourced from `internal/config/defaults.go`. Every flag can also be
+set through an environment variable (see [Environment Variables](#environment-variables)).
+`cronos-api --help` lists them all.
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -545,8 +575,9 @@ flag-only).
 | `-backup-interval` | `1h` | How often the node backs up its partitions, at wall-clock multiples of the interval, so the nodes of a cluster back up at the same moment. `0` = no scheduled backups |
 | `-backup-retention` | `168h` | How long a backup is kept. `0` = for good |
 | `-backup-dir` | *(empty)* | Where backups go; default `backups` under `-data-dir`. A backup on the volume of the data it copies does not survive the loss of that volume |
-| `-retention-max-age-hours` | `168` | Delete WAL segments older than this many hours (0 = disable) |
-| `-retention-max-size-gb` | `0` | Keep WAL segments within this many GB by deleting oldest (0 = disable) |
+| `-retention-max-age-hours` | `168` | Remove WAL segments older than this many hours, once every consumer group has finished them and the change feed has exported them; in a cluster only the leader removes, from the start of the log (0 = disable) |
+| `-retention-max-size-gb` | `0` | Keep WAL segments within this many GB by removing the oldest, under the same conditions (0 = disable) |
+| `-compaction-interval` | `10m` | How often finished segments are removed from the start of each log |
 | `-dev` | `false` | Developer mode: disables production security requirements |
 | `-tick-ms` | `10` | Timing wheel tick duration in ms |
 | `-wheel-size` | `600` | Slots per timing wheel level |
@@ -570,7 +601,7 @@ flag-only).
 | `-min-insync-replicas` | `1` | Minimum in-sync replicas (incl. leader) required to ack a write; production target ≥2 |
 | `-snapshot-catchup-threshold` | `10000` | Intended: replication lag (events) above which a follower requests a full snapshot. **Currently a dead config key** — parsed but never read; snapshot install is unconditional on the join/`SyncPartitionFromLeader` path and no lag-driven trigger is wired |
 | `-raft-dir` | `./raft` | Raft data directory |
-| `-raft-join` | *(empty)* | Raft cluster join address |
+| `-raft-join` | *(empty)* | Parsed but not used; nodes join through `-cluster-seeds` |
 | `-cluster` | `false` | Enable cluster mode |
 | `-cluster-gossip-addr` | `:7946` | Cluster membership (gossip) TCP address; other nodes reach this node by it |
 | `-cluster-grpc-addr` | `:7947` | Cluster internal gRPC listener (`InternalGRPCServer`, replication + Raft) |
@@ -593,6 +624,7 @@ flag-only).
 | `-tls-cert-file` | *(empty)* | Path to TLS certificate for public gRPC |
 | `-tls-key-file` | *(empty)* | Path to TLS private key for public gRPC |
 | `-tls-client-auth` | `false` | Require client certificates on public gRPC (mTLS) |
+| `-http-tls-enabled` | `false` | Serve the HTTP port (health, metrics, dashboard, admin API) over TLS with the certificate of the client port |
 | `-replication-tls-enabled` | `false` | Mutual TLS for all traffic between nodes: replication, membership and Raft. Needs the three files below |
 | `-replication-tls-ca-file` | *(empty)* | CA that signed the certificates of the cluster's nodes |
 | `-replication-tls-cert-file` | *(empty)* | This node's certificate, valid for the address other nodes reach it by, for server and client use |
@@ -601,7 +633,7 @@ flag-only).
 | `-auth-jwt-secret` | *(empty)* | HMAC secret for JWT verification |
 | `-auth-jwt-public-key` | *(empty)* | Path to Ed25519/RSA public key for JWT verification |
 | `-auth-policy-file` | *(empty)* | Path to RBAC policy JSON file |
-| `-experimental-features` | `false` | Enable unverified transactions and online splitting; requires `--dev` |
+| `-experimental-features` | `false` | Enable unverified transactions, online splitting and cross-region replication (`CRONOS_REGIONS`); requires `--dev` |
 | `-exactly-once-commits` | `false` | Experimental commit-ID storage; rejected in production, does not provide end-to-end exactly-once delivery |
 | `-follower-reads` | `false` | Allow follower nodes to serve replay reads |
 | `-load-shedding-threshold` | `0.0` | Load shedding threshold (0.0-1.0, 0 = disabled) |
@@ -623,42 +655,12 @@ flag-only).
 
 ### Environment Variables
 
-Only the flags listed below have `CRONOS_*` environment variable overrides; all
-other flags are flag-only. The variables registered in `internal/config/config.go` are:
-
-| Variable | Overrides |
-|----------|-----------|
-| `CRONOS_NODE_ID` | `-node-id` |
-| `CRONOS_DATA_DIR` | `-data-dir` |
-| `CRONOS_GRPC_ADDR` | `-grpc-addr` |
-| `CRONOS_HTTP_ADDR` | `-http-addr` |
-| `CRONOS_DEV` | `-dev` |
-| `CRONOS_CLUSTER` | `-cluster` |
-| `CRONOS_CLUSTER_SEEDS` | `-cluster-seeds` |
-| `CRONOS_CLUSTER_BOOTSTRAP` | `-cluster-bootstrap` |
-| `CRONOS_TLS_ENABLED` | `-tls-enabled` |
-| `CRONOS_TLS_CA_FILE` | `-tls-ca-file` |
-| `CRONOS_TLS_CERT_FILE` | `-tls-cert-file` |
-| `CRONOS_TLS_KEY_FILE` | `-tls-key-file` |
-| `CRONOS_REPLICATION_TLS_ENABLED` | `-replication-tls-enabled` |
-| `CRONOS_REPLICATION_TLS_CA_FILE` | `-replication-tls-ca-file` |
-| `CRONOS_REPLICATION_TLS_CERT_FILE` | `-replication-tls-cert-file` |
-| `CRONOS_REPLICATION_TLS_KEY_FILE` | `-replication-tls-key-file` |
-| `CRONOS_AUTH_ENABLED` | `-auth-enabled` |
-| `CRONOS_AUTH_JWT_SECRET` | `-auth-jwt-secret` |
-| `CRONOS_MIN_IN_SYNC_REPLICAS` | `-min-insync-replicas` |
-| `CRONOS_SNAPSHOT_CATCHUP_THRESHOLD` | `-snapshot-catchup-threshold` |
-| `CRONOS_EXACTLY_ONCE_COMMITS` | `-exactly-once-commits` |
-| `CRONOS_ENCRYPTION_ENABLED` | `-encryption-enabled` |
-| `CRONOS_ENCRYPTION_KEY_FILE` | `-encryption-key-file` |
-| `CRONOS_NODE_RACK` | `-node-rack` |
-| `CRONOS_NODE_ZONE` | `-node-zone` |
-| `CRONOS_NODE_REGION` | `-node-region` |
-| `CRONOS_TRACING_ENABLED` | `-tracing-enabled` |
-| `CRONOS_TRACING_EXPORTER` | `-tracing-exporter` |
-| `CRONOS_TRACING_OTLP_ENDPOINT` | `-tracing-otlp-endpoint` |
-| `CRONOS_TRACING_SAMPLE_RATIO` | `-tracing-sample-ratio` |
-| `CRONOS_TRACING_INSECURE` | `-tracing-insecure` |
+Every flag can be set through `CRONOS_` followed by its name in upper case with
+dashes as underscores: `-cluster-seeds` is `CRONOS_CLUSTER_SEEDS`,
+`-replication-tls-ca-file` is `CRONOS_REPLICATION_TLS_CA_FILE`. Two have
+different names: `CRONOS_DEDUP_TTL_HOURS` sets `-dedup-ttl` and
+`CRONOS_MIN_IN_SYNC_REPLICAS` sets `-min-insync-replicas`. A flag given on the
+command line wins over the variable.
 
 ---
 
@@ -666,35 +668,41 @@ other flags are flag-only. The variables registered in `internal/config/config.g
 
 ```
 cronos_db/
-├── cmd/api/main.go                 # Entry point, bootstrap, graceful shutdown
+├── cmd/api/main.go                 # Server entry point, bootstrap, graceful shutdown
+├── cmd/admin/                      # cronos-admin: operator commands, cluster, restore, check-log
 ├── internal/
 │   ├── api/                        # Public gRPC server + dedicated internal cluster listener
 │   ├── audit/                      # Audit interceptor + structured audit logger
 │   ├── auth/                       # JWT + policy-file authentication
 │   ├── cdc/                        # Change data capture sinks (Kafka, webhook)
-│   ├── cluster/                    # Raft, gossip, hash ring, router, rebalancing
+│   ├── cluster/                    # Raft, membership, hash ring, elections, handoffs, node removal
 │   ├── compliance/                 # Retention enforcer + protected-paths policy
 │   ├── config/                     # Flag parsing, defaults, validation, env overrides, SIGHUP reload
 │   ├── consumer/                   # Consumer groups, persistent offset store
-│   ├── dedup/                      # Bloom filter (Rust FFI) + PebbleDB two-tier
+│   ├── dedup/                      # Bloom filter (Rust FFI, or Go without cgo) + PebbleDB two-tier
 │   │   └── rust/src/lib.rs         # Rust: lock-free bloom, Rayon parallel batch
 │   ├── delivery/                   # Dispatcher (32 shards), circuit breaker, retry heap, DLQ, expiry
 │   ├── metrics/                    # Prometheus metric definitions shared across modules
 │   ├── partition/                  # Partition lifecycle, WAL replay, admission control, recovery snapshot
 │   ├── replay/                     # Time-range and offset-based replay engine
-│   ├── replication/                # Leader/follower replication, mTLS, gRPC snapshot install, cross-region
+│   ├── replication/                # Leader/follower replication, mTLS, gRPC snapshot install, experimental cross-region
 │   ├── scheduler/                  # Hierarchical timing wheel, cold store, hydrator, checkpoint
 │   ├── schema/                     # Topic schema registry, compatibility, Avro/protobuf
 │   ├── slo/                        # SLO recorder (latency, error rate) + bounded windows
 │   ├── storage/                    # WAL v2, segments, sparse index, mmap, fsync coalescer, encryption
-│   ├── tenant/                     # Per-tenant resource accounting + token-bucket controls
+│   ├── sysmem/                     # Memory limit of the process or container, for the memory guard
+│   ├── tenant/                     # Per-tenant accounting and limits (not configurable yet, so not in use)
 │   ├── tracing/                    # OpenTelemetry provider + gRPC interceptor
-│   └── tx/                         # 2PC coordinator + transaction service handler
+│   ├── tlsfiles/                   # Certificates and CAs read again when their files change
+│   └── tx/                         # Experimental 2PC coordinator + transaction service handler
 ├── pkg/
 │   ├── client/                     # Go SDK (connection pool, metadata cache/routing foundation)
 │   ├── types/                      # Config, protobuf generated, errors
 │   └── utils/                      # FNV-1a hashing, CRC32, atomic file writes
-├── proto/events.proto              # Complete gRPC API specification
+├── proto/                          # events.proto (client and cluster APIs), admin.proto (AdminService)
+├── web/dashboard/                  # Admin dashboard (React), compiled into the server
+├── charts/cronos-db/               # Helm chart; values-production.yaml for production mode
+├── tests/acceptance/               # Fault campaign and other tests against real server processes
 ├── Makefile                        # Build, test, cluster, loadtest, docker
 ├── Dockerfile                      # Multi-stage: Rust → Go → Debian slim
 ├── docker-compose.yml              # Single node + 3-node cluster (RF=3 / minISR=2)
@@ -723,10 +731,11 @@ cronos_db/
 |---------|---------|---------|
 | **EventService** | `Publish`, `PublishBatch`, `Subscribe`, `Ack`, `Replay` | Core pub/sub |
 | **PartitionService** | `GetPartition`, `ListPartitions`, `GetWALStatus`, `GetSchedulerStatus`, `Compact`, `RunRetention`, `SplitPartition` | Partition metadata and admin |
-| **ConsumerGroupService** | `Create`, `Get`, `List`, `Rebalance` | Group management |
-| **ReplicationService** | `Append`, `Sync`, `Snapshot` | Internal replication (intra-cluster, internal listener) |
+| **ConsumerGroupService** | `CreateConsumerGroup`, `GetConsumerGroup`, `ListConsumerGroups`, `RebalanceConsumerGroup` | Group management |
+| **ReplicationService** | `Append`, `Sync`, `Snapshot`, `Position`, `LeaderReport`, `SyncConsumerProgress` | Internal: replication, elections, topology (intra-cluster, internal listener) |
 | **RaftService** | `Join`, `Leave`, `Status` | Internal cluster (intra-cluster, internal listener) |
-| **CrossRegionService** | `ReplicateEvents`, `FetchEvents` | Cross-region replication |
+| **CrossRegionService** | `ReplicateEvents`, `FetchEvents` | Experimental cross-region replication; registered only with `--dev --experimental-features` |
+| **AdminService** | `GetClusterTopology`, `GetPartitionHealth`, `GetReplicationLag`, `ListConsumerGroups`, `GetConsumerGroupLag`, `RunRetention`, `RunCompaction`, `ListSchemas`, `GetSchema`, `GetTenantUsage`, `TriggerRebalance` | Operator API, also served as JSON under `/api/admin/` |
 | **TransactionService** | `BeginTransaction`, `PrepareTransaction`, `CommitTransaction`, `AbortTransaction` | Experimental 2PC; registered only with `--dev --experimental-features` |
 
 ### Key RPCs
@@ -747,82 +756,17 @@ See [proto/events.proto](proto/events.proto) for the complete specification.
 
 ## Status
 
-### Core Engine ✅ Complete
-- [x] Append-only WAL with segmented storage
-- [x] CRC32 integrity checks + tail corruption recovery
-- [x] Sparse index for O(log N) seeks
-- [x] Memory-mapped segment reads
-- [x] Pre-created next segment (background, at 90% capacity)
-- [x] Hierarchical timing wheel scheduler
-- [x] Absolute time tracking (no drift on cascade)
-- [x] Crash recovery via incremental WAL replay
-- [x] Two-tier dedup (Rust bloom filter + PebbleDB)
-- [x] Batch bloom check with Rayon parallelism
-- [x] gRPC streaming pub/sub
-- [x] Batch publish API
-- [x] Consumer groups with persistent offsets
-- [x] Credit-based backpressure flow control
-- [x] Dead letter queue
-- [x] Time-range and offset-based replay
+[`v0.6.0-rc.4`](https://github.com/jatin711-debug/cronos_db_golang/releases/tag/v0.6.0-rc.4) is a release candidate. Every pull request and every push to `main` runs:
 
-### Distributed ✅ Complete
-- [x] Multi-node clustering (3+ nodes)
-- [x] Raft consensus for metadata (HashiCorp Raft)
-- [x] Gossip-based membership & failure detection
-- [x] Consistent hashing with virtual nodes
-- [x] Automatic partition rebalancing on join/leave
-- [x] Leader-follower async replication over gRPC (dedicated internal listener)
-- [x] Replication mTLS on internal cluster channel
-- [x] ISR reconciliation from replication leader state
-- [x] Bulk segment snapshot install over gRPC for new node bootstrap / far-behind followers
-- [x] Partition leader election on failure
+- build, vet, and the test suite under the race detector, and once without cgo, with the release archives built for five systems;
+- a fault campaign and other acceptance tests against three server processes, with a ledger of every acknowledged event;
+- links cut between three containers of the image, and the image scanned for known vulnerabilities;
+- the production Helm chart in a disposable Kubernetes cluster: TLS, JWT auth, encryption at rest, mutual TLS between nodes, a rolling restart;
+- `govulncheck` and the dashboard's tests.
 
-### Performance 🔄 Under validation (single machine)
-- [x] Find the RF=1 regression against v0.5.0: an fsynced epoch write under the partition-manager lock on every 5 s leadership reconcile (see the [validation record](docs/CLUSTER_PERFORMANCE_VALIDATION_2026-09-29.md#follow-up--2026-10-06))
-- [ ] Re-run the full 4.8M-event matched comparison on an idle host before setting a production target
-- [x] Durable throughput validated with `batch` fsync
-- [x] Lock-free Rust bloom filter via CGO FFI
-- [x] sync.Pool for timers, record buffers, transport buffers
-- [x] Batch WAL writes (single buffered write per batch)
-- [x] Batch scheduling (single lock per batch)
-- [x] 32-shard dispatcher for reduced contention
-- [x] PebbleDB tuning (64MB memtable, NoSync, disabled WAL)
-- [x] Atomic CAS for credit flow control
-- [x] Background periodic flush (not per-write fsync)
+The acceptance tests also run three times over every night. What each promise rests on, the known limits, and what a final `v0.6.0` still needs are in the [release requirements](docs/PRODUCTION_RELEASE.md); open findings are in the [audit](docs/PRODUCTION_AUDIT_2026-09-27.md).
 
-### Observability ✅ Complete
-- [x] Prometheus metrics (API, WAL, scheduler, dedup, delivery, cluster)
-- [x] HTTP health endpoint with cluster status
-- [x] Periodic stats logging
-- [x] OpenTelemetry tracing integration (provider + interceptor)
-- [x] Per-IP rate limiting with token bucket
-
-### Production Hardening 🔄 In Progress
-- [x] Graceful shutdown with drain (gRPC → partitions → cluster)
-- [x] Docker multi-stage build (Rust + Go + Debian slim)
-- [x] Docker Compose for single + cluster deployments
-- [x] Non-root container user
-- [x] Health checks in Docker
-- [x] Cross-platform Makefile (Windows/Linux/macOS)
-- [x] CI pipeline target (`make ci`; GitHub Actions workflow not currently present)
-- [x] Two-tier scheduler with adaptive hydrator (cold store + hot timing wheel)
-- [x] Non-blocking retry heap (min-heap by retry deadline)
-- [x] Admission control (readyQueue / timingWheel / in-flight limits)
-- [x] Per-subscription circuit breaker (Closed→Open→HalfOpen)
-- [ ] Memberlist (SWIM) membership: an adapter is in the code, the server does not use it
-- [x] Append-only DLQ segments (binary format, CRC32, rotation)
-- [x] Clock skew detection (cross-node heartbeat comparison)
-- [x] TLS/mTLS support (enable in production)
-- [x] JWT auth support (enable in production)
-- [x] At-rest encryption support (enable in production)
-- [x] Consumer-group metadata persistence across restarts
-- [ ] Replication wire checksums
-- [x] Per-entry terms in WAL
-- [x] Chaos testing suite (Docker-based replication failover, below-minISR, follower restart, follower wipe + bulk catch-up)
-
-### Remaining 🚧
-- [x] Admin CLI & dashboard
-- [ ] Topic-level ACLs
+Experimental and refused in production: transactions, online partition splitting, cross-region replication, and exactly-once commits.
 
 ---
 
@@ -830,8 +774,8 @@ See [proto/events.proto](proto/events.proto) for the complete specification.
 
 | Component | Technology | Why |
 |-----------|-----------|-----|
-| **Language** | Go 1.25+ | Concurrency, performance, ecosystem |
-| **Bloom Filter** | Rust (FFI via CGO) | 5-10x faster than pure Go, lock-free atomics |
+| **Language** | Go 1.26.9 | Concurrency, performance, ecosystem |
+| **Bloom Filter** | Rust (FFI via CGO) in the image; Go without cgo | Lock-free atomics |
 | **Storage** | PebbleDB (CockroachDB) | LSM tree, built-in compaction, Go-native |
 | **Consensus** | HashiCorp Raft | Battle-tested, BoltDB backend |
 | **Serialization** | Protocol Buffers | Efficient, typed, gRPC-native |
@@ -851,11 +795,13 @@ automatically on every docs change via `.github/workflows/docs.yml`.
 | Document | Description |
 |----------|-------------|
 | **[mkdocs.yml](mkdocs.yml)** | MkDocs Material site config — root docs are injected at build time by `docs/hooks/github_source_links.py` (single source of truth) |
-| **[ARCHITECTURE.md](ARCHITECTURE.md)** | Deep-dive with 30+ Mermaid diagrams — data flows, sequence diagrams, state machines |
+| **[docs/PRODUCTION_RELEASE.md](docs/PRODUCTION_RELEASE.md)** | What a release promises, the test behind each promise, configuration for production, and what a final release still needs |
+| **[docs/PRODUCTION_AUDIT_2026-09-27.md](docs/PRODUCTION_AUDIT_2026-09-27.md)** | Production-readiness audit: findings, what each hardening batch changed, what remains |
+| **[ARCHITECTURE.md](ARCHITECTURE.md)** | Deep-dive with Mermaid diagrams — data flows, sequence diagrams, state machines |
 | **[docs/architecture/README.md](docs/architecture/README.md)** | Architecture split by feature (cluster, compliance, dedup, delivery, schema, slo, storage, and more) — all diagrams embedded inline so they render on GitHub |
 | [docs/DEVELOPER_ARCHITECTURE_GUIDE.md](docs/DEVELOPER_ARCHITECTURE_GUIDE.md) | Comprehensive developer-oriented architecture and navigation guide |
 | **[docs/system-design/README.md](docs/system-design/README.md)** | Learn system design from this codebase: what is used where, why, and at what cost — with nine SVG diagrams, trade-off tables and the lessons from the audit |
-| [proto/events.proto](proto/events.proto) | Complete gRPC API specification (7 services, 60+ message types) |
+| [proto/events.proto](proto/events.proto), [proto/admin.proto](proto/admin.proto) | gRPC API specification |
 | [pkg/client](pkg/client) | Production Go SDK (producer/consumer/replay/metadata routing) |
 | [pkg.go.dev/client page](https://pkg.go.dev/github.com/jatin711-debug/cronos_db_golang/pkg/client) | Generated API reference and package docs |
 | [examples/pubsub_demo/main.go](examples/pubsub_demo/main.go) | Runnable publish+subscribe demo with scheduled delivery |
@@ -871,7 +817,7 @@ automatically on every docs change via `.github/workflows/docs.yml`.
 This is a reference implementation demonstrating production-grade patterns for distributed systems:
 
 - Hierarchical timing wheels for O(1) scheduling
-- Two-tier deduplication with Rust FFI
+- Two-tier deduplication (bloom filter in Rust or Go, then PebbleDB)
 - gRPC-based replication with mTLS and snapshot install
 - Consistent hashing with virtual nodes
 - Credit-based backpressure flow control

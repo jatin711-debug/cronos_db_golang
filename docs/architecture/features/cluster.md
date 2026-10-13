@@ -6,15 +6,16 @@ The cluster module provides node membership, partition routing, leader assignmen
 
 ## Key Files
 
-- [internal/cluster/manager.go](../../../internal/cluster/manager.go) — `Manager.JoinCluster`, `Manager.reconcileLocalLeadership` (5s tick that wires up `PromoteToLeader` + `AddFollower` after formation).
+- [internal/cluster/manager.go](../../../internal/cluster/manager.go) — `Manager.JoinCluster`, the control loop (5 s tick and 500 ms leader tick), `updateReplicaOffsets` / `noteInSync` (in-sync replicas of the partitions this node leads).
+- [internal/cluster/leadership.go](../../../internal/cluster/leadership.go) — `reconcileLocalLeadership` (acts on committed assignments: `PromoteToLeader`, `DemoteFromLeader`, `AddFollower`), fenced elections (`electNewLeader`, `fencedPositions`), staged handoff (`handoffMayStart`, `advanceTransfers`), `syncClusterState`, `checkPartitionHealth`.
 - [internal/cluster/router.go](../../../internal/cluster/router.go)
 - [internal/cluster/hashring.go](../../../internal/cluster/hashring.go)
 - [internal/cluster/membership.go](../../../internal/cluster/membership.go)
 - [internal/cluster/transport.go](../../../internal/cluster/transport.go) — mutual TLS for the membership and Raft ports.
 - [internal/cluster/memberlist_adapter.go](../../../internal/cluster/memberlist_adapter.go) — not connected; the server refuses `--use-memberlist`.
 - [internal/cluster/raft.go](../../../internal/cluster/raft.go)
-- [internal/cluster/election.go](../../../internal/cluster/election.go) — partition leader election on failure.
-- [internal/cluster/autoscaler.go](../../../internal/cluster/autoscaler.go) — partition-leader health monitoring and reconciliation into Raft.
+- [internal/cluster/election.go](../../../internal/cluster/election.go) — `ChooseFailoverLeader`, the fallback choice used by `electNewLeader` only when no replica-position source is wired; the normal election asks the replicas for their log positions (see leadership.go).
+- [internal/cluster/autoscaler.go](../../../internal/cluster/autoscaler.go) — logs warnings when CPU, memory, disk or partition lag cross a threshold; it changes nothing in the cluster.
 - [internal/cluster/service.go](../../../internal/cluster/service.go), [internal/cluster/types.go](../../../internal/cluster/types.go)
 - [cmd/api/main.go](../../../cmd/api/main.go)
 
@@ -61,6 +62,7 @@ The cluster module provides node membership, partition routing, leader assignmen
 - Rebalance path uses partition accessor hooks to avoid ownership without data.
 - Explicit epoch usage supports leader fencing behavior.
 - New-node join path: `Manager.JoinCluster` iterates `router.GetLocalPartitions()` and calls `PartitionManager.SyncPartitionFromLeader(partitionID, leader.Address)`, which triggers `Follower.InstallSnapshot` (bulk `ReplicationService.Snapshot` install) for each partition the joining node owns.
+- In-sync replicas are known only to each partition's leader. Every node, every 5 s, puts the in-sync replicas and replica offsets of the partitions it leads into its router and logs when a partition is under-replicated or back to full (`updateReplicaOffsets`, `noteInSync` in manager.go). The ISR in the committed assignment is what it was when placement last changed; the admin topology reads the ISR from each partition's leader (`LeaderReport`).
 - `reconcileLocalLeadership` runs whenever a committed assignment changes, and every 5s, and uses **Raft-committed assignments** only to idempotently `PromoteToLeader` / demote / `AddFollower` for local partitions — enabling streaming `ReplicationService.Append` on a healthy cluster. A node that has just joined leads nothing until it has received the assignments.
 - `/health/ready` answers 503 while a partition has no committed leader, while this node is still loading a partition committed to it, or while one of its partitions is being handed over. Publishes for those partitions are refused with a retryable error in the meantime.
 - Under replication factor 1 a handoff copies the log to the target by snapshot; consumer progress does not move with it, so the target may redeliver.
@@ -94,26 +96,27 @@ failure detection; do not rely on the Rebalance button as a manual “reshuffle 
 flowchart LR
     NodeJoin[Node joins or leaves]
     Membership[Membership service emits event]
-    Router[Router updates hash ring assignments]
-    Moves[Compute partition moves]
-    Sync["State transfer from current leader<br/>SyncPartitionFromLeader (bulk snapshot install)"]
-    Promote[Promote local partition leader if assigned]
-    Follower[Register followers and ISR]
-    RaftSync[Persist partition metadata in Raft]
+    Router[Router updates hash ring placement]
+    RaftSync["Raft leader commits placement<br/>(syncClusterState); leader moves by staged handoff"]
+    Promote["Each node acts on the committed assignment<br/>(reconcileLocalLeadership)"]
+    Follower[Leader adds followers; followers catch up]
+    Sync["Joining node: SyncPartitionFromLeader<br/>(bulk snapshot install)"]
     Healthy[Cluster converged]
 
     AdminBtn[Admin TriggerRebalance / UI button]
     SoftStub["Soft stub: no forced reshuffle<br/>Success + explanatory message"]
 
-    NodeJoin --> Membership --> Router --> Moves
-    Moves --> Sync --> Promote --> Follower --> RaftSync --> Healthy
+    NodeJoin --> Membership --> Router --> RaftSync --> Promote --> Follower --> Healthy
+    NodeJoin -.-> Sync -.-> Follower
     AdminBtn --> SoftStub
     SoftStub -.->|does not replace| Membership
 ```
 
 Note: the steps above run across different loops in code (router rebalance
-goroutine, manager `reconcileLocalLeadership`, periodic Raft state sync), so the
-depicted order is logical rather than a single linear sequence.
+goroutine, the Raft leader's `syncClusterState` / `advanceTransfers` every
+500 ms, and `reconcileLocalLeadership` on every committed change and every 5 s),
+so the depicted order is logical rather than a single linear sequence. The ring
+proposes placement; only the Raft-committed assignment makes a node a leader.
 
 ### Related diagrams
 
