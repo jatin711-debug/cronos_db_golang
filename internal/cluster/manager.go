@@ -2,7 +2,9 @@ package cluster
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -138,6 +140,9 @@ func (m *Manager) Start() error {
 			// waiting for the next tick: a deposed leader steps down and a newly
 			// named one takes over within moments of the commit.
 			raft.SetOnPartitionChange(m.kickReconcile)
+			// A node that is removed is forgotten by every node, not only by
+			// the one that was asked to remove it.
+			raft.SetOnNodeRemoved(m.forgetNode)
 
 			// Create the cluster only if there is none; see bootstrap.go.
 			create, err := m.createsCluster(raft.HasState())
@@ -214,15 +219,10 @@ func (m *Manager) Start() error {
 		}
 	})
 
+	// A node leaves the list of members when it is removed (RemoveNode), which
+	// has taken it out of Raft by then.
 	m.membership.OnLeave(func(node *Node) {
 		m.noteMembershipChange()
-		// When a node leaves, remove it from Raft if we're the leader
-		if m.raft != nil && m.raft.IsLeader() {
-			log.Printf("[CLUSTER] Removing node %s from Raft cluster", node.ID)
-			if err := m.raft.Leave(node.ID); err != nil {
-				log.Printf("[CLUSTER] Warning: Failed to remove node %s from Raft: %v", node.ID, err)
-			}
-		}
 	})
 
 	// Start membership (this starts the gossip listener)
@@ -580,29 +580,113 @@ func (m *Manager) AddNode(node *Node) error {
 	return nil
 }
 
-// RemoveNode removes a node from the cluster
+// ErrNotCoordinator is what RemoveNode answers on a node that does not
+// coordinate the cluster: the change has to be made by the one that does.
+var ErrNotCoordinator = errors.New("this node does not coordinate the cluster")
+
+// RemoveNode takes a node that is gone for good out of the cluster.
+//
+// A node that dies stays a member until it is removed. That is what lets it
+// come back: its replicas are kept track of and it is taken back when it is
+// heard from. It also keeps counting towards what a majority is in Raft. A
+// cluster of three with one node dead still has two of three; give it a
+// fourth node to replace the dead one and it needs three of four, which is
+// every node that runs, so that one more failure stops it. Removing the dead
+// node makes it three again.
+//
+// Only a node that is not running can be removed: one that runs is heard
+// from and joins again. Asked of a node that does not coordinate the cluster
+// it answers ErrNotCoordinator; see RemoveNodeAnywhere.
 func (m *Manager) RemoveNode(nodeID string) error {
-	// Remove from membership
-	if err := m.membership.Leave(nodeID); err != nil {
+	m.mu.RLock()
+	raftNode, membership := m.raft, m.membership
+	m.mu.RUnlock()
+	if raftNode == nil || membership == nil {
+		return fmt.Errorf("this node is not part of a cluster")
+	}
+	if nodeID == "" {
+		return fmt.Errorf("a node ID is required")
+	}
+	if nodeID == m.config.NodeID {
+		return fmt.Errorf("node %s was asked to remove itself; stop it and ask another node", nodeID)
+	}
+	if !raftNode.IsLeader() {
+		return ErrNotCoordinator
+	}
+
+	voters, err := raftNode.Voters()
+	if err != nil {
 		return err
 	}
-
-	// If Raft enabled and we're leader, remove from Raft cluster
-	if m.raft != nil && m.raft.IsLeader() {
-		if err := m.raft.Leave(nodeID); err != nil {
-			return fmt.Errorf("remove from raft: %w", err)
-		}
-
-		payload, _ := json.Marshal(nodeID)
-		cmd := &Command{
-			Type:    CommandTypeRemoveNode,
-			Payload: payload,
-		}
-		if err := m.raft.Apply(cmd); err != nil {
-			return fmt.Errorf("apply remove node: %w", err)
+	remaining := len(voters)
+	isVoter := false
+	for _, voter := range voters {
+		if voter.ID == nodeID {
+			isVoter = true
+			remaining--
 		}
 	}
+	node, _ := membership.GetNode(nodeID)
+	if node == nil && !isVoter {
+		return fmt.Errorf("node %s is not a member of the cluster", nodeID)
+	}
+	if node != nil && node.State == NodeStateAlive {
+		return fmt.Errorf("node %s is running; stop it first, since a node that runs joins again", nodeID)
+	}
 
+	if isVoter {
+		if err := raftNode.Leave(nodeID); err != nil {
+			return fmt.Errorf("take node %s out of Raft: %w", nodeID, err)
+		}
+	}
+	// Through the log, so that every node hears of it and forgets the node.
+	payload, _ := json.Marshal(nodeID)
+	if err := raftNode.Apply(&Command{Type: CommandTypeRemoveNode, Payload: payload}); err != nil {
+		return fmt.Errorf("record the removal of node %s: %w", nodeID, err)
+	}
+	log.Printf("[CLUSTER] Node %s was removed from the cluster; %d nodes count towards a majority now", nodeID, remaining)
+	return nil
+}
+
+// forgetNode drops a removed node from this node's list of members. It runs
+// on every node when the removal is applied, which is also when a node reads
+// its log again after a restart: a node that has come back since, and is
+// heard from, is left alone.
+func (m *Manager) forgetNode(nodeID string) {
+	m.mu.RLock()
+	membership := m.membership
+	m.mu.RUnlock()
+	if membership == nil || nodeID == m.config.NodeID {
+		return
+	}
+	node, err := membership.GetNode(nodeID)
+	if err != nil || node == nil || node.State == NodeStateAlive {
+		return
+	}
+	if err := membership.Leave(nodeID); err == nil {
+		log.Printf("[CLUSTER] Node %s was removed from the cluster and is forgotten here", nodeID)
+	}
+}
+
+// RemoveNodeAnywhere removes a node whichever node is asked: the node that
+// coordinates the cluster does it, and any other passes the request on to
+// that one. forwarded says that the request was passed on already, and is
+// not passed on a second time. ask is how to ask the node at an address.
+func (m *Manager) RemoveNodeAnywhere(ctx context.Context, nodeID string, forwarded bool, ask func(ctx context.Context, addr string, clientTLS *tls.Config) error) error {
+	err := m.RemoveNode(nodeID)
+	if !errors.Is(err, ErrNotCoordinator) {
+		return err
+	}
+	if forwarded {
+		return fmt.Errorf("the node that was thought to coordinate the cluster does not; try again")
+	}
+	coordinator := m.GetLeader()
+	if coordinator == nil || coordinator.ID == m.config.NodeID || coordinator.Address == "" {
+		return fmt.Errorf("the cluster has no coordinator at the moment; try again")
+	}
+	if err := ask(ctx, coordinator.Address, m.config.dialTLS()); err != nil {
+		return fmt.Errorf("node %s coordinates the cluster and was asked: %w", coordinator.ID, err)
+	}
 	return nil
 }
 
