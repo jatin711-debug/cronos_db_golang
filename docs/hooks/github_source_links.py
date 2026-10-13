@@ -55,6 +55,10 @@ def on_files(files, config):
 
 def on_page_markdown(markdown, page, config, files):
     page_dir = os.path.dirname(page.file.src_path)
+    # A page at the site root is either a repo-root doc injected by on_files
+    # or a file that lives directly in docs/. Only the first kind has links
+    # written relative to the repo root.
+    is_root_page = page.file.src_path.replace(os.sep, "/") in ROOT_PAGES.values()
     docs_dir_abs = os.path.abspath(config.docs_dir)
     repo_root = os.path.dirname(config.config_file_path)
 
@@ -75,7 +79,7 @@ def on_page_markdown(markdown, page, config, files):
 
         # Site-root pages are the generated repo-root docs: their relative
         # links resolve against the repo root, not docs_dir.
-        base = repo_root if page_dir == "" else os.path.join(docs_dir_abs, page_dir)
+        base = repo_root if is_root_page else os.path.join(docs_dir_abs, page_dir)
         abs_target = os.path.normpath(os.path.join(base, path_part))
         docs_rel = os.path.relpath(abs_target, docs_dir_abs).replace(os.sep, "/")
         repo_rel = os.path.relpath(abs_target, repo_root).replace(os.sep, "/")
@@ -85,7 +89,7 @@ def on_page_markdown(markdown, page, config, files):
             collapsed = re.sub(r"-{2,}", "-", fragment)
             # Root pages resolve against the repo root, so a "docs/..." target
             # must be re-emitted as the site-relative path from the site root.
-            if page_dir == "":
+            if is_root_page:
                 out = docs_rel
                 if collapsed:
                     out += "#" + collapsed
@@ -96,7 +100,7 @@ def on_page_markdown(markdown, page, config, files):
         # Markdown links that escape docs_dir point at a root-level doc:
         # re-relativize to the generated page when there is one.
         if path_part.lower().endswith(".md") and repo_rel in ROOT_PAGES:
-            site_base = docs_dir_abs if page_dir == "" else os.path.join(docs_dir_abs, page_dir)
+            site_base = os.path.join(docs_dir_abs, page_dir)
             site_target = os.path.relpath(
                 os.path.join(docs_dir_abs, ROOT_PAGES[repo_rel]),
                 site_base,
