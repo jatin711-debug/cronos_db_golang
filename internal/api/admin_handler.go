@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/jatin711-debug/cronos_db_golang/internal/auth"
@@ -149,7 +150,10 @@ func statusUnimplementedErr() error {
 
 // GetClusterTopology returns the responding peer's view of the cluster:
 // node list with topology labels and liveness, plus per-partition
-// assignments, ISR, epoch, and per-follower high watermarks.
+// assignments and epochs. The in-sync replicas and the offsets of each
+// partition are asked of the node that leads it, at the time of the call:
+// nothing else knows them. A partition whose leader does not answer is
+// returned with LeaderReported false and no in-sync replicas.
 //
 // In standalone mode (cluster == nil), returns a minimal topology with
 // IsClusterMode=false and only the local node. Operators can still reach
@@ -220,28 +224,8 @@ func (h *AdminServiceHandler) GetClusterTopology(
 		aliveCount = int64(stats.AliveNodes)
 	}
 
-	allParts := h.cluster.GetAllPartitionInfo()
-	adminParts := make([]*types.AdminPartition, 0, len(allParts))
-	for pid, p := range allParts {
-		if p == nil {
-			continue
-		}
-		ap := &types.AdminPartition{
-			PartitionId:     pid,
-			LeaderId:        p.LeaderID,
-			Replicas:        p.Replicas,
-			Isr:             p.ISR,
-			Epoch:           p.Epoch,
-			FollowerOffsets: p.ReplicaOffsets,
-			InSyncCount:     int32(len(p.ISR)),
-		}
-		if p.LeaderID != "" {
-			if off, ok := p.ReplicaOffsets[p.LeaderID]; ok {
-				ap.LeaderHighWatermark = off
-			}
-		}
-		adminParts = append(adminParts, ap)
-	}
+	reports := h.collectLeaderReports(ctx, nodes, localID)
+	adminParts := topologyPartitions(h.cluster.GetAllPartitionInfo(), reports)
 
 	topo := &types.ClusterTopology{
 		LocalNodeId:      localID,
@@ -258,6 +242,84 @@ func (h *AdminServiceHandler) GetClusterTopology(
 		topo.LeaderPartitions = int32(stats.LeaderPartitions)
 	}
 	return topo, nil
+}
+
+// leaderReportTimeout bounds how long the topology waits for the nodes to
+// report the partitions they lead.
+const leaderReportTimeout = 2 * time.Second
+
+// collectLeaderReports gathers the LeaderReport of every partition led by
+// this node or by another node that is alive, keyed by the node that sent it
+// and by partition. A node that does not answer in time is left out.
+func (h *AdminServiceHandler) collectLeaderReports(ctx context.Context, nodes []*cluster.Node, localID string) map[string]map[int32]partition.LeaderReport {
+	reports := make(map[string]map[int32]partition.LeaderReport)
+	if h.pm == nil {
+		return reports
+	}
+	add := func(nodeID string, list []partition.LeaderReport) {
+		byPartition := make(map[int32]partition.LeaderReport, len(list))
+		for _, report := range list {
+			byPartition[report.PartitionID] = report
+		}
+		reports[nodeID] = byPartition
+	}
+	add(localID, h.pm.LeaderReports())
+
+	ctx, cancel := context.WithTimeout(ctx, leaderReportTimeout)
+	defer cancel()
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for _, n := range nodes {
+		if n == nil || n.ID == localID || n.State != cluster.NodeStateAlive || n.Address == "" {
+			continue
+		}
+		wg.Add(1)
+		go func(n *cluster.Node) {
+			defer wg.Done()
+			nodeID, list, err := h.pm.RemoteLeaderReports(ctx, n.Address)
+			if err != nil {
+				h.logger.Debug("node did not report the partitions it leads",
+					slog.String("node_id", n.ID), slog.String("error", err.Error()))
+				return
+			}
+			if nodeID == "" {
+				nodeID = n.ID
+			}
+			mu.Lock()
+			add(nodeID, list)
+			mu.Unlock()
+		}(n)
+	}
+	wg.Wait()
+	return reports
+}
+
+// topologyPartitions describes the partitions of the cluster view, sorted by
+// ID. A partition's in-sync replicas and offsets are taken from the report of
+// the node that leads it; any other node's report on it is out of date.
+func topologyPartitions(infos map[int32]*cluster.PartitionInfo, reports map[string]map[int32]partition.LeaderReport) []*types.AdminPartition {
+	parts := make([]*types.AdminPartition, 0, len(infos))
+	for pid, p := range infos {
+		if p == nil {
+			continue
+		}
+		ap := &types.AdminPartition{
+			PartitionId: pid,
+			LeaderId:    p.LeaderID,
+			Replicas:    p.Replicas,
+			Epoch:       p.Epoch,
+		}
+		if report, ok := reports[p.LeaderID][pid]; ok {
+			ap.LeaderReported = true
+			ap.Isr = report.InSyncReplicas
+			ap.InSyncCount = int32(len(report.InSyncReplicas))
+			ap.FollowerOffsets = report.ReplicaOffsets
+			ap.LeaderHighWatermark = report.ReplicaOffsets[p.LeaderID]
+		}
+		parts = append(parts, ap)
+	}
+	sort.Slice(parts, func(i, j int) bool { return parts[i].PartitionId < parts[j].PartitionId })
+	return parts
 }
 
 // ---------------------------------------------------------------------------

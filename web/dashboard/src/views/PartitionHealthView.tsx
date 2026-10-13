@@ -8,7 +8,7 @@ export function PartitionHealthView() {
   const topology = useClusterTopology();
   const [selectedId, setSelectedId] = useState<number | null>(null);
 
-  const partitionIds = topology.data?.partitions.map((p) => p.partition_id) ?? [];
+  const partitionIds = topology.data?.partitions.map((p) => p.partition_id ?? 0) ?? [];
 
   return (
     <div className="space-y-6">
@@ -21,7 +21,7 @@ export function PartitionHealthView() {
           {topology.loading && <Loading message="Loading partitions..." />}
           {topology.error && <ErrorAlert message={topology.error} onRetry={topology.refetch} isAuth={topology.error.startsWith("401")} />}
           {topology.data && partitionIds.length === 0 && (
-            <p className="text-sm text-[var(--color-muted-foreground)]">No partitions available on this node.</p>
+            <p className="text-sm text-muted-foreground">No partitions available on this node.</p>
           )}
           {topology.data && partitionIds.length > 0 && (
             <div className="flex flex-wrap gap-2">
@@ -31,8 +31,8 @@ export function PartitionHealthView() {
                   onClick={() => setSelectedId(id)}
                   className={`rounded-md border px-3 py-1.5 text-sm transition-colors ${
                     selectedId === id
-                      ? "border-[var(--color-primary)] bg-[var(--color-primary)] text-[var(--color-primary-foreground)]"
-                      : "border-[var(--color-border)] hover:bg-[var(--color-accent)]"
+                      ? "border-(--color-primary) bg-(--color-primary) text-(--color-primary-foreground)"
+                      : "border-(--color-border) hover:bg-(--color-accent)"
                   }`}
                 >
                   Partition {id}
@@ -71,10 +71,10 @@ function HealthDetail({ partitionId }: { partitionId: number }) {
           <Stat label="Cold Store Entries" value={data.cold_store_entries} />
         </div>
         {data.last_error && (
-          <p className="mt-4 text-sm text-[var(--color-destructive)]">Last error: {data.last_error}</p>
+          <p className="mt-4 text-sm text-destructive">Last error: {data.last_error}</p>
         )}
         {data.replay_error && (
-          <p className="mt-2 text-sm text-[var(--color-destructive)]">Replay error: {data.replay_error}</p>
+          <p className="mt-2 text-sm text-destructive">Replay error: {data.replay_error}</p>
         )}
       </CardContent>
     </Card>
@@ -85,7 +85,7 @@ function Stat({ label, value }: { label: string; value: number }) {
   return (
     <div>
       <div className="text-2xl font-semibold">{value}</div>
-      <div className="text-xs text-[var(--color-muted-foreground)]">{label}</div>
+      <div className="text-xs text-muted-foreground">{label}</div>
     </div>
   );
 }

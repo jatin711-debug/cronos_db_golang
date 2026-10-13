@@ -22,7 +22,7 @@ export function ClusterTopologyView() {
               {new Date(data.captured_at_unix_ms).toISOString()}
             </span>
             {updatedAt && (
-              <span className="ml-2 text-[var(--color-muted-foreground)]">
+              <span className="ml-2 text-muted-foreground">
                 Refreshed {Math.round((Date.now() - updatedAt) / 1000)}s ago
               </span>
             )}
@@ -44,10 +44,10 @@ export function ClusterTopologyView() {
         </CardHeader>
         <CardContent>
           {data.nodes.length === 0 ? (
-            <p className="text-sm text-[var(--color-muted-foreground)]">No nodes reported.</p>
+            <p className="text-sm text-muted-foreground">No nodes reported.</p>
           ) : (
             <table className="w-full text-sm">
-              <thead className="text-left text-[var(--color-muted-foreground)]">
+              <thead className="text-left text-muted-foreground">
                 <tr>
                   <th className="py-2 font-medium">Node ID</th>
                   <th className="py-2 font-medium">Address</th>
@@ -57,9 +57,9 @@ export function ClusterTopologyView() {
               </thead>
               <tbody>
                 {data.nodes.map((n) => (
-                  <tr key={n.node_id} className="border-t border-[var(--color-border)]">
+                  <tr key={n.node_id} className="border-t border-(--color-border)">
                     <td className="py-2 font-mono">{n.node_id}</td>
-                    <td className="py-2 font-mono text-[var(--color-muted-foreground)]">{n.address || "-"}</td>
+                    <td className="py-2 font-mono text-muted-foreground">{n.address || "-"}</td>
                     <td className="py-2">
                       <Badge variant={n.is_alive ? "success" : "destructive"}>{n.state}</Badge>
                     </td>
@@ -78,12 +78,12 @@ export function ClusterTopologyView() {
         </CardHeader>
         <CardContent>
           {data.partitions.length === 0 ? (
-            <p className="text-sm text-[var(--color-muted-foreground)]">
+            <p className="text-sm text-muted-foreground">
               No partitions assigned to this node in the current snapshot.
             </p>
           ) : (
             <table className="w-full text-sm">
-              <thead className="text-left text-[var(--color-muted-foreground)]">
+              <thead className="text-left text-muted-foreground">
                 <tr>
                   <th className="py-2 font-medium">ID</th>
                   <th className="py-2 font-medium">Leader</th>
@@ -94,12 +94,20 @@ export function ClusterTopologyView() {
               </thead>
               <tbody>
                 {data.partitions.map((p) => (
-                  <tr key={p.partition_id} className="border-t border-[var(--color-border)]">
-                    <td className="py-2 font-mono">{p.partition_id}</td>
-                    <td className="py-2 font-mono">{p.leader_id}</td>
-                    <td className="py-2 font-mono">{p.replicas.join(", ") || "-"}</td>
-                    <td className="py-2 font-mono">{p.isr.join(", ") || "-"}</td>
-                    <td className="py-2 font-mono">{p.leader_high_watermark}</td>
+                  <tr key={p.partition_id ?? 0} className="border-t border-(--color-border)">
+                    <td className="py-2 font-mono">{p.partition_id ?? 0}</td>
+                    <td className="py-2 font-mono">{p.leader_id || "-"}</td>
+                    <td className="py-2 font-mono">{(p.replicas ?? []).join(", ") || "-"}</td>
+                    {p.leader_reported ? (
+                      <>
+                        <td className="py-2 font-mono">{(p.isr ?? []).join(", ")}</td>
+                        <td className="py-2 font-mono">{p.leader_high_watermark ?? 0}</td>
+                      </>
+                    ) : (
+                      <td className="py-2" colSpan={2}>
+                        <Badge variant="warning">not reported by the leader</Badge>
+                      </td>
+                    )}
                   </tr>
                 ))}
               </tbody>
@@ -115,7 +123,7 @@ function Stat({ label, value }: { label: string; value: number }) {
   return (
     <div>
       <div className="text-2xl font-semibold">{value}</div>
-      <div className="text-xs text-[var(--color-muted-foreground)]">{label}</div>
+      <div className="text-xs text-muted-foreground">{label}</div>
     </div>
   );
 }

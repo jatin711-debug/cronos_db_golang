@@ -333,6 +333,32 @@ message ReplicationPositionResponse {
   bool accepting_writes = 5;
 }
 
+// ReplicationLeaderReportRequest asks a node about the partitions it leads.
+message ReplicationLeaderReportRequest {}
+
+// LeaderPartitionReport is what the leader of a partition knows of its
+// replicas. Only the leader knows which followers are in sync: the cluster
+// state records who leads, not how far the others have come.
+message LeaderPartitionReport {
+  int32 partition_id = 1;
+
+  // Leadership epoch the leader holds the partition at.
+  int64 epoch = 2;
+
+  // The leader and the followers that are connected and in sync.
+  repeated string in_sync_replicas = 3;
+
+  // Offset each replica holds as far as the leader knows: the end of its own
+  // log for the leader, what each follower has confirmed for the others.
+  map<string, int64> replica_offsets = 4;
+}
+
+// ReplicationLeaderReportResponse lists every partition the node leads.
+message ReplicationLeaderReportResponse {
+  string node_id = 1;
+  repeated LeaderPartitionReport partitions = 2;
+}
+
 // ConsumerGroupProgress is one consumer group's delivery progress on a partition.
 message ConsumerGroupProgress {
   string group_id = 1;
@@ -703,6 +729,9 @@ service ReplicationService {
 
   // Internal: Report the end of this replica's log
   rpc Position(ReplicationPositionRequest) returns (ReplicationPositionResponse);
+
+  // Internal: Report the in-sync replicas and offsets of the partitions this node leads
+  rpc LeaderReport(ReplicationLeaderReportRequest) returns (ReplicationLeaderReportResponse);
 
   // Internal: Apply the leader's consumer progress
   rpc SyncConsumerProgress(ReplicationProgressRequest) returns (ReplicationProgressResponse);

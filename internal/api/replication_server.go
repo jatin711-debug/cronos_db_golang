@@ -282,6 +282,30 @@ func (h *ReplicationServiceHandler) Position(ctx context.Context, req *types.Rep
 	}, nil
 }
 
+// LeaderReport reports the in-sync replicas and the offsets of every
+// partition this node leads. The cluster topology is assembled from these:
+// which replicas are in sync is known to a partition's leader alone.
+func (h *ReplicationServiceHandler) LeaderReport(ctx context.Context, _ *types.ReplicationLeaderReportRequest) (*types.ReplicationLeaderReportResponse, error) {
+	_ = ctx
+	if h.partitionManager == nil {
+		return nil, status.Error(codes.Unavailable, "partition manager not initialized")
+	}
+	reports := h.partitionManager.LeaderReports()
+	resp := &types.ReplicationLeaderReportResponse{
+		NodeId:     h.partitionManager.NodeID(),
+		Partitions: make([]*types.LeaderPartitionReport, 0, len(reports)),
+	}
+	for _, report := range reports {
+		resp.Partitions = append(resp.Partitions, &types.LeaderPartitionReport{
+			PartitionId:    report.PartitionID,
+			Epoch:          report.Epoch,
+			InSyncReplicas: report.InSyncReplicas,
+			ReplicaOffsets: report.ReplicaOffsets,
+		})
+	}
+	return resp, nil
+}
+
 // SyncConsumerProgress installs the leader's consumer group progress so this
 // replica can take over without redelivering work that consumers finished.
 func (h *ReplicationServiceHandler) SyncConsumerProgress(ctx context.Context, req *types.ReplicationProgressRequest) (*types.ReplicationProgressResponse, error) {

@@ -630,6 +630,11 @@ func adminTopologyCmd() *cobra.Command {
 					n.GetNodeId(), n.GetAddress(), n.GetIsLocal(), n.GetIsAlive(), n.GetState())
 			}
 			for _, p := range resp.GetPartitions() {
+				if !p.GetLeaderReported() {
+					fmt.Printf("  partition id=%d leader=%s replicas=%v isr=unknown (the leader did not report)\n",
+						p.GetPartitionId(), p.GetLeaderId(), p.GetReplicas())
+					continue
+				}
 				fmt.Printf("  partition id=%d leader=%s replicas=%v isr=%v hwm=%d\n",
 					p.GetPartitionId(), p.GetLeaderId(), p.GetReplicas(), p.GetIsr(), p.GetLeaderHighWatermark())
 			}

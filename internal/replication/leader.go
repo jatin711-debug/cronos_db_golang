@@ -646,11 +646,17 @@ func (l *Leader) appendToFollower(f *FollowerInfo, events []*types.Event, checks
 	if matched >= 0 {
 		next = min(next, matched+1)
 	}
+	// A follower that answers with an empty log while this leader's log is
+	// empty too holds all of it, though there is no entry it could match.
+	// Without this a partition nobody had written to showed its followers
+	// out of sync. Only reports of the in-sync replicas read InSync; what is
+	// replicated is decided from what followers acknowledged.
+	bothEmpty := matched < 0 && resp.GetLastOffset() < 0 && l.wal != nil && l.wal.GetLastOffset() < 0
 
 	f.mu.Lock()
 	f.HighWatermark = min(resp.GetLastOffset(), matched)
 	f.NextOffset = next
-	f.InSync = matched >= 0
+	f.InSync = matched >= 0 || bothEmpty
 	f.Connected = true
 	f.LastAckTS = time.Now().UnixMilli()
 	f.LastError = nil
@@ -1188,6 +1194,28 @@ func (l *Leader) shipConsumerProgress() {
 // With fenceEpoch above zero the replica first stops accepting leaders of an
 // older epoch (see partition.PartitionManager.FenceLocalReplica).
 func QueryPosition(ctx context.Context, addr string, partitionID int32, fenceEpoch int64, tlsConfig *MTLSConfig) (*types.ReplicationPositionResponse, error) {
+	conn, err := dialReplica(addr, tlsConfig)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	return types.NewReplicationServiceClient(conn).Position(ctx, &types.ReplicationPositionRequest{PartitionId: partitionID, FenceEpoch: fenceEpoch})
+}
+
+// QueryLeaderReport asks the node at addr for the in-sync replicas and the
+// offsets of every partition it leads.
+func QueryLeaderReport(ctx context.Context, addr string, tlsConfig *MTLSConfig) (*types.ReplicationLeaderReportResponse, error) {
+	conn, err := dialReplica(addr, tlsConfig)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	return types.NewReplicationServiceClient(conn).LeaderReport(ctx, &types.ReplicationLeaderReportRequest{})
+}
+
+// dialReplica opens a connection to the replication service of the node at
+// addr, with the cluster's certificates when replication TLS is on.
+func dialReplica(addr string, tlsConfig *MTLSConfig) (*grpc.ClientConn, error) {
 	var creds credentials.TransportCredentials = insecure.NewCredentials()
 	if tlsConfig != nil && tlsConfig.Enabled {
 		client, err := BuildClientTLS(tlsConfig)
@@ -1200,8 +1228,7 @@ func QueryPosition(ctx context.Context, addr string, partitionID int32, fenceEpo
 	if err != nil {
 		return nil, fmt.Errorf("dial replica %s: %w", addr, err)
 	}
-	defer conn.Close()
-	return types.NewReplicationServiceClient(conn).Position(ctx, &types.ReplicationPositionRequest{PartitionId: partitionID, FenceEpoch: fenceEpoch})
+	return conn, nil
 }
 
 // Stop stops the leader and closes all follower connections. Safe to call

@@ -10,7 +10,7 @@ export function ReplicationLagView() {
   const topology = useClusterTopology();
   const [selectedId, setSelectedId] = useState<number | undefined>(undefined);
 
-  const partitionIds = topology.data?.partitions.map((p) => p.partition_id) ?? [];
+  const partitionIds = topology.data?.partitions.map((p) => p.partition_id ?? 0) ?? [];
 
   return (
     <div className="space-y-6">
@@ -23,7 +23,7 @@ export function ReplicationLagView() {
           {topology.loading && <Loading message="Loading partitions..." />}
           {topology.error && <ErrorAlert message={topology.error} onRetry={topology.refetch} isAuth={topology.error.startsWith("401")} />}
           {topology.data && partitionIds.length === 0 && (
-            <p className="text-sm text-[var(--color-muted-foreground)]">No partitions available on this node.</p>
+            <p className="text-sm text-muted-foreground">No partitions available on this node.</p>
           )}
           {topology.data && partitionIds.length > 0 && (
             <div className="flex flex-wrap gap-2">
@@ -31,8 +31,8 @@ export function ReplicationLagView() {
                 onClick={() => setSelectedId(undefined)}
                 className={`rounded-md border px-3 py-1.5 text-sm transition-colors ${
                   selectedId === undefined
-                    ? "border-[var(--color-primary)] bg-[var(--color-primary)] text-[var(--color-primary-foreground)]"
-                    : "border-[var(--color-border)] hover:bg-[var(--color-accent)]"
+                    ? "border-(--color-primary) bg-(--color-primary) text-(--color-primary-foreground)"
+                    : "border-(--color-border) hover:bg-(--color-accent)"
                 }`}
               >
                 All partitions
@@ -43,8 +43,8 @@ export function ReplicationLagView() {
                   onClick={() => setSelectedId(id)}
                   className={`rounded-md border px-3 py-1.5 text-sm transition-colors ${
                     selectedId === id
-                      ? "border-[var(--color-primary)] bg-[var(--color-primary)] text-[var(--color-primary-foreground)]"
-                      : "border-[var(--color-border)] hover:bg-[var(--color-accent)]"
+                      ? "border-(--color-primary) bg-(--color-primary) text-(--color-primary-foreground)"
+                      : "border-(--color-border) hover:bg-(--color-accent)"
                   }`}
                 >
                   Partition {id}
@@ -84,7 +84,7 @@ function LagDetail({ partitionId }: { partitionId?: number }) {
         </CardHeader>
         <CardContent>
           {data.followers.length === 0 ? (
-            <p className="text-sm text-[var(--color-muted-foreground)]">No follower offsets reported.</p>
+            <p className="text-sm text-muted-foreground">No follower offsets reported.</p>
           ) : (
             <div className="h-64 w-full">
               <ResponsiveContainer width="100%" height="100%">
@@ -116,10 +116,10 @@ function LagDetail({ partitionId }: { partitionId?: number }) {
         </CardHeader>
         <CardContent>
           {data.followers.length === 0 ? (
-            <p className="text-sm text-[var(--color-muted-foreground)]">No follower offsets reported.</p>
+            <p className="text-sm text-muted-foreground">No follower offsets reported.</p>
           ) : (
             <table className="w-full text-sm">
-              <thead className="text-left text-[var(--color-muted-foreground)]">
+              <thead className="text-left text-muted-foreground">
                 <tr>
                   <th className="py-2 font-medium">Follower</th>
                   <th className="py-2 font-medium">Offset</th>
@@ -130,7 +130,7 @@ function LagDetail({ partitionId }: { partitionId?: number }) {
               </thead>
               <tbody>
                 {data.followers.map((f) => (
-                  <tr key={f.follower_id} className="border-t border-[var(--color-border)]">
+                  <tr key={f.follower_id} className="border-t border-(--color-border)">
                     <td className="py-2 font-mono">{f.follower_id}</td>
                     <td className="py-2 font-mono">{f.offset}</td>
                     <td className="py-2 font-mono">{f.lag_events}</td>
