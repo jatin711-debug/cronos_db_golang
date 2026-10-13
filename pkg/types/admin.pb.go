@@ -124,17 +124,23 @@ func (x *AdminNode) GetRegion() string {
 
 // One partition as seen by the responding peer.
 type AdminPartition struct {
-	state               protoimpl.MessageState `protogen:"open.v1"`
-	PartitionId         int32                  `protobuf:"varint,1,opt,name=partition_id,json=partitionId,proto3" json:"partition_id,omitempty"`
-	LeaderId            string                 `protobuf:"bytes,2,opt,name=leader_id,json=leaderId,proto3" json:"leader_id,omitempty"`
-	Replicas            []string               `protobuf:"bytes,3,rep,name=replicas,proto3" json:"replicas,omitempty"`
-	Isr                 []string               `protobuf:"bytes,4,rep,name=isr,proto3" json:"isr,omitempty"`
-	Epoch               int64                  `protobuf:"varint,5,opt,name=epoch,proto3" json:"epoch,omitempty"`
-	LeaderHighWatermark int64                  `protobuf:"varint,6,opt,name=leader_high_watermark,json=leaderHighWatermark,proto3" json:"leader_high_watermark,omitempty"`
-	FollowerOffsets     map[string]int64       `protobuf:"bytes,7,rep,name=follower_offsets,json=followerOffsets,proto3" json:"follower_offsets,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"`
-	InSyncCount         int32                  `protobuf:"varint,8,opt,name=in_sync_count,json=inSyncCount,proto3" json:"in_sync_count,omitempty"`
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	PartitionId int32                  `protobuf:"varint,1,opt,name=partition_id,json=partitionId,proto3" json:"partition_id,omitempty"`
+	LeaderId    string                 `protobuf:"bytes,2,opt,name=leader_id,json=leaderId,proto3" json:"leader_id,omitempty"`
+	Replicas    []string               `protobuf:"bytes,3,rep,name=replicas,proto3" json:"replicas,omitempty"`
+	// isr, leader_high_watermark, follower_offsets and in_sync_count are what
+	// the partition's leader reported while the topology was gathered. They
+	// are empty when leader_reported is false.
+	Isr                 []string         `protobuf:"bytes,4,rep,name=isr,proto3" json:"isr,omitempty"`
+	Epoch               int64            `protobuf:"varint,5,opt,name=epoch,proto3" json:"epoch,omitempty"`
+	LeaderHighWatermark int64            `protobuf:"varint,6,opt,name=leader_high_watermark,json=leaderHighWatermark,proto3" json:"leader_high_watermark,omitempty"`
+	FollowerOffsets     map[string]int64 `protobuf:"bytes,7,rep,name=follower_offsets,json=followerOffsets,proto3" json:"follower_offsets,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"`
+	InSyncCount         int32            `protobuf:"varint,8,opt,name=in_sync_count,json=inSyncCount,proto3" json:"in_sync_count,omitempty"`
+	// False when the partition has no leader, or its leader did not answer:
+	// which replicas are in sync is then not known.
+	LeaderReported bool `protobuf:"varint,9,opt,name=leader_reported,json=leaderReported,proto3" json:"leader_reported,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *AdminPartition) Reset() {
@@ -221,6 +227,13 @@ func (x *AdminPartition) GetInSyncCount() int32 {
 		return x.InSyncCount
 	}
 	return 0
+}
+
+func (x *AdminPartition) GetLeaderReported() bool {
+	if x != nil {
+		return x.LeaderReported
+	}
+	return false
 }
 
 // Snapshot of the whole cluster topology from the responding peer's view.
@@ -1729,7 +1742,7 @@ const file_proto_admin_proto_rawDesc = "" +
 	"\x05state\x18\x05 \x01(\tR\x05state\x12\x12\n" +
 	"\x04rack\x18\x06 \x01(\tR\x04rack\x12\x12\n" +
 	"\x04zone\x18\a \x01(\tR\x04zone\x12\x16\n" +
-	"\x06region\x18\b \x01(\tR\x06region\"\x91\x03\n" +
+	"\x06region\x18\b \x01(\tR\x06region\"\xba\x03\n" +
 	"\x0eAdminPartition\x12!\n" +
 	"\fpartition_id\x18\x01 \x01(\x05R\vpartitionId\x12\x1b\n" +
 	"\tleader_id\x18\x02 \x01(\tR\bleaderId\x12\x1a\n" +
@@ -1738,7 +1751,8 @@ const file_proto_admin_proto_rawDesc = "" +
 	"\x05epoch\x18\x05 \x01(\x03R\x05epoch\x122\n" +
 	"\x15leader_high_watermark\x18\x06 \x01(\x03R\x13leaderHighWatermark\x12_\n" +
 	"\x10follower_offsets\x18\a \x03(\v24.cronos_db_admin.AdminPartition.FollowerOffsetsEntryR\x0ffollowerOffsets\x12\"\n" +
-	"\rin_sync_count\x18\b \x01(\x05R\vinSyncCount\x1aB\n" +
+	"\rin_sync_count\x18\b \x01(\x05R\vinSyncCount\x12'\n" +
+	"\x0fleader_reported\x18\t \x01(\bR\x0eleaderReported\x1aB\n" +
 	"\x14FollowerOffsetsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\x03R\x05value:\x028\x01\"\x99\x03\n" +

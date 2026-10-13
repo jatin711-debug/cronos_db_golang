@@ -704,15 +704,9 @@ func (m *Manager) checkPartitionHealth() {
 			info := info
 			m.electNewLeader(partitionID, &info)
 		}
-		inSync := 0
-		for _, nodeID := range info.ISR {
-			if _, ok := alive[nodeID]; ok {
-				inSync++
-			}
-		}
-		if inSync < m.config.ReplicationFactor {
-			log.Printf("[CLUSTER] Partition %d under-replicated (ISR=%d, RF=%d)", partitionID, inSync, m.config.ReplicationFactor)
-		}
+		// Under-replication is logged by each partition's leader, which
+		// knows its in-sync replicas (see updateReplicaOffsets); the ISR in
+		// the committed assignment is what it was when placement last changed.
 	}
 }
 

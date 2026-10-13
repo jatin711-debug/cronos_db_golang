@@ -21,11 +21,11 @@ export function ConsumerGroupsView() {
           {groups.loading && <Loading message="Loading consumer groups..." />}
           {groups.error && <ErrorAlert message={groups.error} onRetry={groups.refetch} isAuth={groups.error.startsWith("401")} />}
           {groups.data && groups.data.groups.length === 0 && (
-            <p className="text-sm text-[var(--color-muted-foreground)]">No consumer groups found.</p>
+            <p className="text-sm text-muted-foreground">No consumer groups found.</p>
           )}
           {groups.data && groups.data.groups.length > 0 && (
             <table className="w-full text-sm">
-              <thead className="text-left text-[var(--color-muted-foreground)]">
+              <thead className="text-left text-muted-foreground">
                 <tr>
                   <th className="py-2 font-medium">Group ID</th>
                   <th className="py-2 font-medium">Topic</th>
@@ -35,7 +35,7 @@ export function ConsumerGroupsView() {
               </thead>
               <tbody>
                 {groups.data.groups.map((g) => (
-                  <tr key={g.group_id} className="border-t border-[var(--color-border)]">
+                  <tr key={g.group_id} className="border-t border-(--color-border)">
                     <td className="py-2 font-mono">{g.group_id}</td>
                     <td className="py-2 font-mono">{g.topic || "-"}</td>
                     <td className="py-2 font-mono">{g.partitions.join(", ") || "-"}</td>
@@ -59,7 +59,7 @@ export function ConsumerGroupsView() {
           {topology.data && (
             <div className="flex flex-col gap-4 sm:flex-row">
               <select
-                className="rounded-md border border-[var(--color-border)] bg-[var(--color-background)] px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-[var(--color-ring)]"
+                className="rounded-md border border-(--color-border) bg-(--color-background) px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-(--color-ring)"
                 onChange={(e) =>
                   setSelected((s) => ({
                     groupId: e.target.value,
@@ -76,7 +76,7 @@ export function ConsumerGroupsView() {
                 ))}
               </select>
               <select
-                className="rounded-md border border-[var(--color-border)] bg-[var(--color-background)] px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-[var(--color-ring)]"
+                className="rounded-md border border-(--color-border) bg-(--color-background) px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-(--color-ring)"
                 onChange={(e) =>
                   setSelected((s) => ({
                     groupId: s?.groupId ?? groups.data?.groups[0]?.group_id ?? "",
@@ -87,8 +87,8 @@ export function ConsumerGroupsView() {
               >
                 <option value="">Select partition...</option>
                 {topology.data.partitions.map((p) => (
-                  <option key={p.partition_id} value={p.partition_id}>
-                    {p.partition_id}
+                  <option key={p.partition_id ?? 0} value={p.partition_id ?? 0}>
+                    {p.partition_id ?? 0}
                   </option>
                 ))}
               </select>
@@ -148,7 +148,7 @@ function Stat({ label, value }: { label: string; value: number }) {
   return (
     <div>
       <div className="text-2xl font-semibold">{value}</div>
-      <div className="text-xs text-[var(--color-muted-foreground)]">{label}</div>
+      <div className="text-xs text-muted-foreground">{label}</div>
     </div>
   );
 }

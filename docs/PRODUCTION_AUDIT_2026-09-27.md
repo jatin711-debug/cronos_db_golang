@@ -32,7 +32,7 @@ existing-test review, not a new fault-injection or deployment campaign.
 | F15: backup/retention | Partial | Backups now hold each partition's log, consumer groups with offsets and completions, dedup store, dead-letter queue and epoch, captured in an order that is safe to restore, with the size and CRC of every file in the manifest. `cronos-admin restore` checks every file and restores into an empty data directory, all partitions or none; tests cover damaged, incomplete and misplaced backups, and one backup was restored and served by the real binary. Completion-aware live pruning has regressions. The logs of all partitions on a node are cut at one instant; scheduled backups start at wall-clock multiples of the interval on every node; the manifest identifies the encryption key without containing it, and restore can check a key before writing anything (all tested). A restored cluster needs no Raft metadata: a partition's first leader is the replica with the most complete log, at an epoch above any a replica accepted (tested with stand-in replicas). A cluster now deletes from its logs: the partition's leader removes finished segments from the start of the log, tells the other replicas where its log starts, and they follow; a replica whose log ends before that restarts its log there, which is also how an emptied replica rejoins (tested through the replication channel, across a leader change, and in the fault campaign). Before this, nothing was ever deleted in a cluster. A whole three-node cluster has now been restored from its backups in CI: backups taken while publishes arrive, every node destroyed, each restored from its own backup, and everything acknowledged before the backups present and delivered at its time (`TestClusterRestoredFromBackups`). The backup interval, retention and directory are settings now. Remaining: backups go to the data volume unless `--backup-dir` names another, and the chart mounts no other volume; the backups of different nodes are separate copies that agree only as closely as their clocks; backups are full copies and hold no keys or credentials, the latter by design; in a cluster one event that cannot go yet keeps every later segment; restore exercises on Linux. See the [maintenance validation](MAINTENANCE_VALIDATION_2026-09-29.md). |
 | F16: transactions/splits | Contained for first release | Transactions and splitting are disabled by default and require --dev --experimental-features. Production rejects this opt-in and exactly-once commits. Public-RPC tests verify disabled endpoints; underlying experimental state machines remain unsupported. |
 | F17: overload/latency | Partial | Worker event-count and estimated-byte caps added. Replication returns on quorum instead of waiting for every follower; sends to a slow follower stay ordered and bounded, and a skipped follower is caught up from the WAL; `--replication-timeout` is the Append deadline. `batch` fsync no longer syncs under the WAL lock: writers that append during a sync share the next one. An empty partition no longer allocates its bloom filter and consumer queue up front. CDC no longer runs on the append path or queues in memory: a slow sink makes its feed lag. The delivery settings (ack timeout, retries, backoff, credits, circuit breaker) now reach the dispatcher; they were parsed and ignored. An overload test runs in CI: producers flood three nodes that have a small memory limit and no consumer; the nodes refuse publishes, none dies, they hold less than their limit, and everything acknowledged is delivered once a consumer starts (`TestOverloadIsRefusedAndSurvived`). Byte-bounded queues and measurements of sustained load at production sizes remain; the reads of the log are bounded by bytes at a restart and on the replication, redrive, feed, replay and cross-region paths (eighth batch). |
-| F18: accounting/metrics | Core fix implemented | SLO interceptor counts semantic failure responses. Counters now follow an event per partition: accepted, answered as duplicate, delivered (first attempt or retry), acknowledged (success or failure), timed out, dead-lettered; a histogram records how long after its scheduled time an event was first delivered; gauges show where each log starts and how far its change feed has got (tested through publish, subscribe and acknowledge). The chart's alert rules use them, and the rule that compared one node's leader count with the partition total, which fired on every node of a healthy cluster, is replaced. Remaining: nothing counts events that are never delivered because no consumer group takes their topic, and there is no per-tenant view. |
+| F18: accounting/metrics | Core fix implemented | SLO interceptor counts semantic failure responses. Counters now follow an event per partition: accepted, answered as duplicate, delivered (first attempt or retry), acknowledged (success or failure), timed out, dead-lettered; a histogram records how long after its scheduled time an event was first delivered; gauges show where each log starts and how far its change feed has got (tested through publish, subscribe and acknowledge). The chart's alert rules use them, and the rule that compared one node's leader count with the partition total, which fired on every node of a healthy cluster, is replaced. The topology takes each partition's in-sync replicas and offsets from its leader at the time it is asked; it showed those of the moment placement last changed for most partitions (ninth batch). Remaining: nothing counts events that are never delivered because no consumer group takes their topic, and there is no per-tenant view. |
 | F19: dependencies | Partial | Go module/toolchain at 1.26.9, which fixes the standard-library advisories CI reported, gRPC and dashboard lockfile updates present; Docker Go builder aligned. The archived Avro codec was replaced with a patched fork and explicit decoder limits after the first CI security scan failed. CI now scans the image it builds and fails on a high or critical vulnerability that has a fix. The first scan, of the `v0.6.0-rc.2` image, found seven, all in the base image's `perl-base` package and none in the server binary; the image build now applies Debian's security updates. An audit of the Rust dependencies remains. |
 | F20: release gates | Partial | Linux cgo/race/vet/build/format checks, Rust and dashboard tests, Go/npm scans, chart assertions, and production-mode kind startup workflow added. CI runs for pull requests and for pushes to `main`; a commit of the development branch is checked on request, which is done for the commit of a release. A fault campaign (`tests/acceptance`) now runs there too: three server processes, producers and a consumer group through the client library, a ledger of every acknowledged event, and a comparison of the replicas' logs at the end. The job that builds the image also cuts links between three containers of it. The acceptance tests also run three times over every night on `main`, on processes and on containers, and a release gets binaries for Linux, macOS and Windows, built from its tag and started before they are attached (eighth batch). Remaining: branch protection that makes the jobs required. |
 
@@ -49,6 +49,52 @@ The next release-blocking work should establish the supported feature scope and
 acceptance/loss contract, then finish F03/F06–F09 and F13/F15, wire and exercise
 F14/F20, and measure F04/F17/F18 with a ledger of accepted event IDs. F01's public
 authorization tests and F19's release scans also remain release gates.
+
+### Ninth hardening batch — 2026-10-13
+
+This batch is on the development branch and in no release. The verdict above
+is unchanged. The table row for F18 describes what moved.
+
+- **The topology shows each partition's in-sync replicas as its leader has
+  them.** Which followers keep up with a partition is known to its leader
+  alone; the cluster state records who leads, and the in-sync replicas of the
+  moment placement last changed. Each node used to put the in-sync replicas
+  and offsets of the partitions it led into its own view, and only while it
+  also coordinated the cluster. `/api/admin/topology`, the dashboard and
+  `cronos-admin topology` read that view, so every other partition was shown
+  with stale in-sync replicas, often one node alone and not always the
+  leader, on every node; the release check of `v0.6.0-rc.4` found it, and
+  rc.3 behaves the same. A node
+  now asks every node that is alive, over the port the nodes use with each
+  other and with the cluster's certificates, for the partitions it leads
+  (`ReplicationService.LeaderReport`), and takes a partition's in-sync
+  replicas and offsets from its leader's answer. A partition whose leader
+  does not answer within two seconds is marked `leader_reported: false`, with
+  nothing in sync, where it used to show what was last known. The partitions
+  come sorted by ID. `TestTopologyShowsWhatEachLeaderReports` asks every node
+  of three processes while a workload runs, kills a node and starts it again,
+  and expects every partition reported by its leader, the same in every
+  answer, with the running nodes in sync. Replication itself was not
+  affected: elections ask the replicas where their logs end.
+- **Under-replication is logged by the partition's leader.** The node that
+  coordinated the cluster logged every partition whose recorded in-sync
+  replicas were fewer than the replication factor, every five seconds, from
+  the same stale record: it reported partitions that were fully replicated
+  and missed ones that were not. Each node now logs a partition it leads when
+  the number of replicas in sync with it changes below the replication
+  factor, and when it is whole again.
+- **The followers of a partition nobody has written to are in sync.** A
+  follower counted as in sync once it had confirmed an entry of the leader's
+  log, which on an empty log it never can; a new partition showed its leader
+  alone in sync, and was logged as under-replicated, until its first
+  publish. A follower that answers with an empty log while the leader's is
+  empty now counts. Only the reports of in-sync replicas read this: what is
+  replicated, and what may be delivered, is decided from the offsets the
+  followers acknowledge.
+- **The dashboard shows partition 0.** Fields that are zero or empty are left
+  out of the dashboard's JSON, so partition 0 came without an ID: its row in
+  the topology had none, and the partition lists of the other views had an
+  empty entry for it.
 
 ### Eighth hardening batch — 2026-10-09 to 2026-10-13
 

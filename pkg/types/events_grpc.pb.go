@@ -847,6 +847,7 @@ const (
 	ReplicationService_Sync_FullMethodName                 = "/cronos_db.ReplicationService/Sync"
 	ReplicationService_Snapshot_FullMethodName             = "/cronos_db.ReplicationService/Snapshot"
 	ReplicationService_Position_FullMethodName             = "/cronos_db.ReplicationService/Position"
+	ReplicationService_LeaderReport_FullMethodName         = "/cronos_db.ReplicationService/LeaderReport"
 	ReplicationService_SyncConsumerProgress_FullMethodName = "/cronos_db.ReplicationService/SyncConsumerProgress"
 )
 
@@ -862,6 +863,8 @@ type ReplicationServiceClient interface {
 	Snapshot(ctx context.Context, in *ReplicationSnapshotRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ReplicationSnapshotChunk], error)
 	// Internal: Report the end of this replica's log
 	Position(ctx context.Context, in *ReplicationPositionRequest, opts ...grpc.CallOption) (*ReplicationPositionResponse, error)
+	// Internal: Report the in-sync replicas and offsets of the partitions this node leads
+	LeaderReport(ctx context.Context, in *ReplicationLeaderReportRequest, opts ...grpc.CallOption) (*ReplicationLeaderReportResponse, error)
 	// Internal: Apply the leader's consumer progress
 	SyncConsumerProgress(ctx context.Context, in *ReplicationProgressRequest, opts ...grpc.CallOption) (*ReplicationProgressResponse, error)
 }
@@ -932,6 +935,16 @@ func (c *replicationServiceClient) Position(ctx context.Context, in *Replication
 	return out, nil
 }
 
+func (c *replicationServiceClient) LeaderReport(ctx context.Context, in *ReplicationLeaderReportRequest, opts ...grpc.CallOption) (*ReplicationLeaderReportResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReplicationLeaderReportResponse)
+	err := c.cc.Invoke(ctx, ReplicationService_LeaderReport_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *replicationServiceClient) SyncConsumerProgress(ctx context.Context, in *ReplicationProgressRequest, opts ...grpc.CallOption) (*ReplicationProgressResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ReplicationProgressResponse)
@@ -954,6 +967,8 @@ type ReplicationServiceServer interface {
 	Snapshot(*ReplicationSnapshotRequest, grpc.ServerStreamingServer[ReplicationSnapshotChunk]) error
 	// Internal: Report the end of this replica's log
 	Position(context.Context, *ReplicationPositionRequest) (*ReplicationPositionResponse, error)
+	// Internal: Report the in-sync replicas and offsets of the partitions this node leads
+	LeaderReport(context.Context, *ReplicationLeaderReportRequest) (*ReplicationLeaderReportResponse, error)
 	// Internal: Apply the leader's consumer progress
 	SyncConsumerProgress(context.Context, *ReplicationProgressRequest) (*ReplicationProgressResponse, error)
 	mustEmbedUnimplementedReplicationServiceServer()
@@ -977,6 +992,9 @@ func (UnimplementedReplicationServiceServer) Snapshot(*ReplicationSnapshotReques
 }
 func (UnimplementedReplicationServiceServer) Position(context.Context, *ReplicationPositionRequest) (*ReplicationPositionResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Position not implemented")
+}
+func (UnimplementedReplicationServiceServer) LeaderReport(context.Context, *ReplicationLeaderReportRequest) (*ReplicationLeaderReportResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method LeaderReport not implemented")
 }
 func (UnimplementedReplicationServiceServer) SyncConsumerProgress(context.Context, *ReplicationProgressRequest) (*ReplicationProgressResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SyncConsumerProgress not implemented")
@@ -1060,6 +1078,24 @@ func _ReplicationService_Position_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ReplicationService_LeaderReport_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReplicationLeaderReportRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ReplicationServiceServer).LeaderReport(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ReplicationService_LeaderReport_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ReplicationServiceServer).LeaderReport(ctx, req.(*ReplicationLeaderReportRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _ReplicationService_SyncConsumerProgress_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ReplicationProgressRequest)
 	if err := dec(in); err != nil {
@@ -1092,6 +1128,10 @@ var ReplicationService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Position",
 			Handler:    _ReplicationService_Position_Handler,
+		},
+		{
+			MethodName: "LeaderReport",
+			Handler:    _ReplicationService_LeaderReport_Handler,
 		},
 		{
 			MethodName: "SyncConsumerProgress",

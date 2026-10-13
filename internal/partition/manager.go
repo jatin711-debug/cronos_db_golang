@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1899,6 +1900,70 @@ func (pm *PartitionManager) GetPartitionInSyncReplicas(partitionID int32) []stri
 		}
 	}
 	return isr
+}
+
+// LeaderReport is what the leader of a partition knows of its replicas.
+type LeaderReport struct {
+	// PartitionID is the partition the report is about.
+	PartitionID int32
+	// Epoch is the leadership epoch the partition is held at.
+	Epoch int64
+	// InSyncReplicas lists the leader and the followers that are connected
+	// and in sync.
+	InSyncReplicas []string
+	// ReplicaOffsets holds the end of the leader's log for the leader, and
+	// what each follower has confirmed for the others.
+	ReplicaOffsets map[string]int64
+}
+
+// NodeID returns the ID of the node this manager holds partitions for.
+func (pm *PartitionManager) NodeID() string {
+	return pm.nodeID
+}
+
+// LeaderReports returns a LeaderReport for every partition this node leads.
+// The cluster state records which node leads a partition, but only that node
+// knows which of the other replicas keep up with it.
+func (pm *PartitionManager) LeaderReports() []LeaderReport {
+	pm.mu.RLock()
+	var reports []LeaderReport
+	for id, p := range pm.partitions {
+		if p != nil && p.IsLeader() {
+			reports = append(reports, LeaderReport{PartitionID: id, Epoch: p.Epoch()})
+		}
+	}
+	pm.mu.RUnlock()
+
+	for i := range reports {
+		report := &reports[i]
+		report.ReplicaOffsets = pm.GetPartitionReplicaOffsets(report.PartitionID)
+		report.InSyncReplicas = pm.GetPartitionInSyncReplicas(report.PartitionID)
+		if len(report.InSyncReplicas) == 0 {
+			// A partition without followers, at a replication factor of one.
+			report.InSyncReplicas = []string{pm.nodeID}
+		}
+	}
+	sort.Slice(reports, func(i, j int) bool { return reports[i].PartitionID < reports[j].PartitionID })
+	return reports
+}
+
+// RemoteLeaderReports asks the node at addr for the LeaderReport of every
+// partition it leads. It returns the node ID the reports came with.
+func (pm *PartitionManager) RemoteLeaderReports(ctx context.Context, addr string) (string, []LeaderReport, error) {
+	resp, err := replication.QueryLeaderReport(ctx, addr, pm.replicationTLSConfig())
+	if err != nil {
+		return "", nil, err
+	}
+	reports := make([]LeaderReport, 0, len(resp.GetPartitions()))
+	for _, p := range resp.GetPartitions() {
+		reports = append(reports, LeaderReport{
+			PartitionID:    p.GetPartitionId(),
+			Epoch:          p.GetEpoch(),
+			InSyncReplicas: p.GetInSyncReplicas(),
+			ReplicaOffsets: p.GetReplicaOffsets(),
+		})
+	}
+	return resp.GetNodeId(), reports, nil
 }
 
 // PartitionLoadStatus exposes backpressure and queue-depth signals for a partition.

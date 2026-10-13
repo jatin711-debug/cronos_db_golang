@@ -30,8 +30,15 @@ const MOCK_TOPOLOGY: api.ClusterTopology = {
       isr: ["node-a"],
       epoch: 1,
       leader_high_watermark: 42,
-      follower_offsets: { "node-b": 30 },
+      follower_offsets: { "node-a": 42, "node-b": 30 },
       in_sync_count: 1,
+      leader_reported: true,
+    },
+    {
+      // Partition 0 and its empty fields are left out of the server's JSON.
+      leader_id: "node-b",
+      replicas: ["node-b", "node-a"],
+      epoch: 2,
     },
   ],
   captured_at_unix_ms: 1_700_000_000_000,
@@ -66,6 +73,13 @@ describe("ClusterTopologyView", () => {
     // Partitions table
     const partitionsTable = screen.getByText("Leader").closest("table") as HTMLElement;
     expect(within(partitionsTable).getByText("42")).toBeInTheDocument();
+    const reported = within(partitionsTable).getByText("1").closest("tr") as HTMLElement;
+    expect(within(reported).getByText("node-a", { selector: "td:nth-child(4)" })).toBeInTheDocument();
+
+    // A partition whose leader did not report shows no in-sync replicas.
+    const unreported = within(partitionsTable).getByText("0").closest("tr") as HTMLElement;
+    expect(within(unreported).getByText("not reported by the leader")).toBeInTheDocument();
+    expect(within(unreported).getByText("node-b, node-a")).toBeInTheDocument();
   });
 
   it("shows loading state", () => {

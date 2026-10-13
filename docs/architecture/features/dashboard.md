@@ -81,6 +81,17 @@ Same handler code as gRPC AdminService
 - **gRPC status → HTTP.** NotFound→404, PermissionDenied→403, etc.
 - **Schemas and tenant usage are live** when schema registry / tenant
   accountant are initialized at process start (they are in `cmd/api/main.go`).
+- **The topology asks the leaders.** Which replicas of a partition are in
+  sync, and their offsets, are known to the node that leads it alone.
+  `GetClusterTopology` asks every node that is alive for the partitions it
+  leads (`ReplicationService.LeaderReport` on the port the nodes use with
+  each other, with the replication certificates) and waits at most two
+  seconds. A partition whose leader did not answer comes with
+  `leader_reported: false` and no in-sync replicas, and the view says so.
+- **Zero values are not in the JSON.** `json.Marshal` of a proto response
+  leaves out empty and zero fields: partition 0 has no `partition_id`, and an
+  unreported partition has no `isr`. The SPA's types mark such fields
+  optional.
 - **`make build` depends on dashboard stage** so release binaries include UI.
 
 ## Debug Pointers

@@ -38,6 +38,9 @@ type Manager struct {
 	// partitions this node is copying for a handoff. Both are guarded by mu.
 	transferRetryAt map[int32]time.Time
 	pulling         map[int32]bool
+	// inSyncSeen is how many replicas were last seen in sync for each
+	// partition this node leads. Only updateReplicaOffsets uses it.
+	inSyncSeen map[int32]int
 
 	started bool
 	stopCh  chan struct{}
@@ -337,6 +340,7 @@ func (m *Manager) leaderTasks() {
 			// replication is established on initial cluster formation, not only
 			// after a failover.
 			m.reconcileLocalLeadership()
+			m.updateReplicaOffsets()
 			if m.IsLeader() {
 				m.performLeaderTasks()
 			}
@@ -346,28 +350,31 @@ func (m *Manager) leaderTasks() {
 
 // performLeaderTasks performs leader-only tasks
 func (m *Manager) performLeaderTasks() {
-	// Check for under-replicated partitions and dead leaders
+	// Elect a leader for partitions whose leader is dead
 	m.checkPartitionHealth()
-
-	// Refresh replica offsets for partitions this node leads so failover can be
-	// lag-aware. Remote leaders will report their own offsets when they run this
-	// same path, and the router state is synced through Raft below.
-	m.updateReplicaOffsets()
 
 	// Update cluster state in Raft
 	m.syncClusterState()
 }
 
-// updateReplicaOffsets queries local partition leaders and pushes their
-// follower/high-watermark offsets and current ISR into the router.
+// updateReplicaOffsets puts the offsets and the in-sync replicas of the
+// partitions this node leads into its router, and logs when the number of
+// replicas in sync with one of them changes while it is below the
+// replication factor, or reaches it again. Every node does this for the
+// partitions it leads: which followers keep up is known to the leader alone,
+// and the cluster state does not record it.
 func (m *Manager) updateReplicaOffsets() {
 	if m.partitionAccessor == nil || m.router == nil {
 		return
+	}
+	if m.inSyncSeen == nil {
+		m.inSyncSeen = make(map[int32]int)
 	}
 
 	partitions := m.router.GetAllPartitions()
 	for partitionID, info := range partitions {
 		if info.LeaderID != m.config.NodeID {
+			delete(m.inSyncSeen, partitionID)
 			continue
 		}
 		offsets := m.partitionAccessor.GetPartitionReplicaOffsets(partitionID)
@@ -378,6 +385,23 @@ func (m *Manager) updateReplicaOffsets() {
 		if len(isr) > 0 {
 			m.router.UpdatePartitionISR(partitionID, isr)
 		}
+		m.noteInSync(partitionID, max(len(isr), 1))
+	}
+}
+
+// noteInSync logs a change in the number of replicas in sync with a
+// partition this node leads, when the number is or was below the replication
+// factor. The leader itself counts.
+func (m *Manager) noteInSync(partitionID int32, inSync int) {
+	want := m.config.ReplicationFactor
+	before, seen := m.inSyncSeen[partitionID]
+	m.inSyncSeen[partitionID] = inSync
+	switch {
+	case seen && before == inSync:
+	case inSync < want:
+		log.Printf("[CLUSTER] Partition %d under-replicated: %d of %d replicas in sync", partitionID, inSync, want)
+	case seen && before < want:
+		log.Printf("[CLUSTER] Partition %d has all %d replicas in sync again", partitionID, inSync)
 	}
 }
 

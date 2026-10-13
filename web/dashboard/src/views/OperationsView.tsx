@@ -8,7 +8,7 @@ import { useToast } from "@/components/ToastProvider";
 
 export function OperationsView() {
   const topology = useClusterTopology();
-  const partitionIds = topology.data?.partitions.map((p) => p.partition_id) ?? [];
+  const partitionIds = topology.data?.partitions.map((p) => p.partition_id ?? 0) ?? [];
 
   return (
     <div className="space-y-6">
@@ -21,7 +21,7 @@ export function OperationsView() {
           {topology.loading && <Loading message="Loading partitions..." />}
           {topology.error && <ErrorAlert message={topology.error} onRetry={topology.refetch} isAuth={topology.error.startsWith("401")} />}
           {topology.data && partitionIds.length === 0 && (
-            <p className="text-sm text-[var(--color-muted-foreground)]">No partitions available on this node.</p>
+            <p className="text-sm text-muted-foreground">No partitions available on this node.</p>
           )}
           {topology.data && partitionIds.length > 0 && (
             <>
@@ -64,13 +64,13 @@ function RetentionPanel({ partitions }: { partitions: number[] }) {
   }, [retention.data, retention.error, addToast]);
 
   return (
-    <div className="rounded-lg border border-[var(--color-border)] p-4">
+    <div className="rounded-lg border border-(--color-border) p-4">
       <h3 className="mb-3 text-sm font-medium">Run Retention</h3>
       <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
-        <label className="flex flex-col gap-1 text-xs text-[var(--color-muted-foreground)]">
+        <label className="flex flex-col gap-1 text-xs text-muted-foreground">
           Partition
           <select
-            className="rounded-md border border-[var(--color-border)] bg-[var(--color-background)] px-3 py-2 text-sm text-[var(--color-foreground)] outline-none focus:ring-1 focus:ring-[var(--color-ring)]"
+            className="rounded-md border border-(--color-border) bg-(--color-background) px-3 py-2 text-sm text-(--color-foreground) outline-none focus:ring-1 focus:ring-(--color-ring)"
             value={partitionId}
             onChange={(e) => setPartitionId(parseInt(e.target.value, 10))}
           >
@@ -79,14 +79,14 @@ function RetentionPanel({ partitions }: { partitions: number[] }) {
             ))}
           </select>
         </label>
-        <label className="flex flex-col gap-1 text-xs text-[var(--color-muted-foreground)]">
+        <label className="flex flex-col gap-1 text-xs text-muted-foreground">
           Max age (hours)
           <input
             type="number"
             min={0}
             value={maxAgeHours}
             onChange={(e) => setMaxAgeHours(parseInt(e.target.value, 10) || 0)}
-            className="rounded-md border border-[var(--color-border)] bg-[var(--color-background)] px-3 py-2 text-sm text-[var(--color-foreground)] outline-none focus:ring-1 focus:ring-[var(--color-ring)]"
+            className="rounded-md border border-(--color-border) bg-(--color-background) px-3 py-2 text-sm text-(--color-foreground) outline-none focus:ring-1 focus:ring-(--color-ring)"
           />
         </label>
         <Button
@@ -128,13 +128,13 @@ function CompactionPanel({ partitions }: { partitions: number[] }) {
   }, [compaction.data, compaction.error, addToast]);
 
   return (
-    <div className="rounded-lg border border-[var(--color-border)] p-4">
+    <div className="rounded-lg border border-(--color-border) p-4">
       <h3 className="mb-3 text-sm font-medium">Run Compaction</h3>
       <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
-        <label className="flex flex-col gap-1 text-xs text-[var(--color-muted-foreground)]">
+        <label className="flex flex-col gap-1 text-xs text-muted-foreground">
           Partition
           <select
-            className="rounded-md border border-[var(--color-border)] bg-[var(--color-background)] px-3 py-2 text-sm text-[var(--color-foreground)] outline-none focus:ring-1 focus:ring-[var(--color-ring)]"
+            className="rounded-md border border-(--color-border) bg-(--color-background) px-3 py-2 text-sm text-(--color-foreground) outline-none focus:ring-1 focus:ring-(--color-ring)"
             value={partitionId}
             onChange={(e) => setPartitionId(parseInt(e.target.value, 10))}
           >
@@ -178,9 +178,9 @@ function RebalancePanel() {
   }, [rebalance.data, rebalance.error, addToast]);
 
   return (
-    <div className="rounded-lg border border-[var(--color-border)] p-4">
+    <div className="rounded-lg border border-(--color-border) p-4">
       <h3 className="mb-3 text-sm font-medium">Cluster Rebalance</h3>
-      <p className="mb-3 text-xs text-[var(--color-muted-foreground)]">
+      <p className="mb-3 text-xs text-muted-foreground">
         Trigger an explicit leadership rebalance. In the current implementation this is a
         no-op notification; the control plane reconciles leadership every 5 seconds.
       </p>

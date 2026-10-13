@@ -96,15 +96,20 @@ export interface AdminNode {
   region: string;
 }
 
+// Empty and zero fields are left out of the server's JSON, so every field of
+// a partition may be missing; partition 0 comes without partition_id.
 export interface AdminPartition {
-  partition_id: number;
-  leader_id: string;
-  replicas: string[];
-  isr: string[];
-  epoch: number;
-  leader_high_watermark: number;
-  follower_offsets: Record<string, number>;
-  in_sync_count: number;
+  partition_id?: number;
+  leader_id?: string;
+  replicas?: string[];
+  isr?: string[];
+  epoch?: number;
+  leader_high_watermark?: number;
+  follower_offsets?: Record<string, number>;
+  in_sync_count?: number;
+  // True when the partition's leader reported its in-sync replicas and
+  // offsets; otherwise they are not known.
+  leader_reported?: boolean;
 }
 
 export interface ClusterTopology {

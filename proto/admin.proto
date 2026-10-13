@@ -38,11 +38,17 @@ message AdminPartition {
   int32 partition_id = 1;
   string leader_id = 2;
   repeated string replicas = 3;
+  // isr, leader_high_watermark, follower_offsets and in_sync_count are what
+  // the partition's leader reported while the topology was gathered. They
+  // are empty when leader_reported is false.
   repeated string isr = 4;
   int64 epoch = 5;
   int64 leader_high_watermark = 6;
   map<string, int64> follower_offsets = 7;
   int32 in_sync_count = 8;
+  // False when the partition has no leader, or its leader did not answer:
+  // which replicas are in sync is then not known.
+  bool leader_reported = 9;
 }
 
 // Snapshot of the whole cluster topology from the responding peer's view.
