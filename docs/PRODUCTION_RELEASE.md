@@ -1,9 +1,11 @@
 # Production release requirements
 
-CronosDB is still undergoing production hardening. The
+`v0.6.0` is the first final release. Hardening goes on: the
 [audit closure table](PRODUCTION_AUDIT_2026-09-27.md#finding-closure-review)
-tracks unresolved guarantees. A green CI run is necessary but does not establish
-the complete release acceptance contract.
+tracks unresolved guarantees, and
+[what the release was cut without](#what-v060-was-released-without) is listed
+below. A green CI run is necessary but does not establish the complete release
+acceptance contract.
 
 ## Supported scope under validation
 
@@ -154,9 +156,12 @@ chart with security enabled. It runs for pull requests and for pushes to
 commit there is checked on request with
 `gh workflow run ci.yml --ref developement`, which is done for every commit a
 release is cut from.
-Make these jobs required in repository branch protection before treating them as
-enforced merge gates. A vulnerability finding fails its job; it is not silently
-waived.
+The five jobs (`go`, `fault-campaign`, `dashboard-and-chart`, `go-security`,
+`production-chart-startup`) are required checks on `main` since 2026-10-13, for
+administrators as well: `main` moves only to a commit on which all five have
+passed, so a commit of the development branch is checked on request first and
+`main` is fast-forwarded to it afterwards. A vulnerability finding fails its
+job; it is not silently waived.
 
 Run chart assertions locally with `python scripts/check-production-chart.py`
 (Helm and PyYAML required). `scripts/production-chart-smoke.sh` requires the
@@ -298,19 +303,18 @@ second; the last column says what they do not show.
 No throughput, payload-size or latency figure is promised. None has been
 measured on production hardware.
 
-## Before a final release
+## What `v0.6.0` was released without
 
-Release candidates are cut from the development branch when CI is green on
-the commit. The current one is `v0.6.0-rc.4`. It is published as the latest
-release and as the `latest` image, in place of `v0.6.0-rc.3`, which takes its
-undelivered backlog into memory at every start; it is a release candidate
-all the same. A final `v0.6.0` still needs:
+Releases are cut from the development branch when CI is green on the
+commit. `v0.6.0` is the first final release, after four release candidates;
+it is published as the latest release and as the `latest` image. Of what a
+final release was to have, one thing was done for it: the five CI jobs are
+required checks on `main` (see [Checks](#checks)).
 
-- The five CI jobs made required in branch protection. Today a red run does
-  not stop a merge:
-  `gh api -X PUT repos/<owner>/<repo>/branches/main/protection` with
-  `required_status_checks.contexts` set to `go`, `fault-campaign`,
-  `dashboard-and-chart`, `go-security` and `production-chart-startup`.
+The rest was not done, and `v0.6.0` was released without it. These are
+limits of what has been shown, not defects that are known; a deployment
+that depends on one of them has to show it for itself first:
+
 - A run on more than one machine. Everything above was shown on one host,
   with processes or with containers; links were cut between containers.
 - A replica refilled from a partition larger than 1 GiB. The transfer has no
@@ -320,9 +324,9 @@ all the same. A final `v0.6.0` still needs:
   the memory that the backlog it allows needs.
 - A scan of the image that is published, as a step of the release. CI scans
   the image it builds from the same Dockerfile, not the published one. The
-  `v0.6.0-rc.4` image was scanned by hand before it was pushed (Trivy
-  0.75.0, no HIGH or CRITICAL vulnerability that has a fix); nothing does it
-  for every release yet.
+  images of `v0.6.0-rc.4` and `v0.6.0` were scanned by hand before they were
+  pushed, with the settings of CI (Trivy, HIGH and CRITICAL vulnerabilities
+  that have a fix); nothing does it for every release yet.
 
 Known limits of what is released are in the
 [audit](PRODUCTION_AUDIT_2026-09-27.md): log entries are removed from the

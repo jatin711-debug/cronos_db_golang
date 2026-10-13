@@ -6,9 +6,9 @@
 [![Rust](https://img.shields.io/badge/Rust-FFI-dea584.svg)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/jatin711-debug/cronos_db_golang?include_prereleases)](https://github.com/jatin711-debug/cronos_db_golang/releases)
-[![Status](https://img.shields.io/badge/status-release%20candidate-yellow.svg)](#status)
+[![Release](https://img.shields.io/badge/release-v0.6.0-blue.svg)](#status)
 
-> **Production Readiness:** The current release is the release candidate [`v0.6.0-rc.4`](https://github.com/jatin711-debug/cronos_db_golang/releases/tag/v0.6.0-rc.4). What a release promises, the test behind each promise, and what a final `v0.6.0` still needs are in the [release requirements](docs/PRODUCTION_RELEASE.md); open findings are in the [audit](docs/PRODUCTION_AUDIT_2026-09-27.md). Transactions, online partition splitting and cross-region replication are disabled by default and require `--dev --experimental-features`; they are unsupported in production. End-to-end exactly-once delivery is not supported.
+> **Production Readiness:** The current release is [`v0.6.0`](https://github.com/jatin711-debug/cronos_db_golang/releases/tag/v0.6.0). What a release promises, the test behind each promise, and what has not been shown yet are in the [release requirements](docs/PRODUCTION_RELEASE.md); open findings are in the [audit](docs/PRODUCTION_AUDIT_2026-09-27.md). Transactions, online partition splitting and cross-region replication are disabled by default and require `--dev --experimental-features`; they are unsupported in production. End-to-end exactly-once delivery is not supported.
 
 CronosDB is a distributed database purpose-built for **timestamp-triggered event processing**. Publish events with a future timestamp — CronosDB stores them durably and delivers them precisely when the time arrives.
 
@@ -142,7 +142,7 @@ For the details see **[ARCHITECTURE.md](ARCHITECTURE.md)** and the per-feature d
 Each release has binaries of the server and of `cronos-admin` for Linux and macOS (amd64, arm64) and Windows (amd64), with `SHA256SUMS`, on the [releases page](https://github.com/jatin711-debug/cronos_db_golang/releases). They are built without cgo and use the bloom filter written in Go. The container image uses the one written in Rust:
 
 ```bash
-docker pull johnny711dock/cronos-db:0.6.0-rc.4    # also :latest
+docker pull johnny711dock/cronos-db:0.6.0    # also :latest
 ```
 
 ### Prerequisites to build
@@ -756,7 +756,7 @@ See [proto/events.proto](proto/events.proto) for the complete specification.
 
 ## Status
 
-[`v0.6.0-rc.4`](https://github.com/jatin711-debug/cronos_db_golang/releases/tag/v0.6.0-rc.4) is a release candidate. Every pull request and every push to `main` runs:
+[`v0.6.0`](https://github.com/jatin711-debug/cronos_db_golang/releases/tag/v0.6.0) is the current release. Every pull request and every push to `main` runs the following, and `main` moves only to a commit on which all of it has passed:
 
 - build, vet, and the test suite under the race detector, and once without cgo, with the release archives built for five systems;
 - a fault campaign and other acceptance tests against three server processes, with a ledger of every acknowledged event;
@@ -764,7 +764,7 @@ See [proto/events.proto](proto/events.proto) for the complete specification.
 - the production Helm chart in a disposable Kubernetes cluster: TLS, JWT auth, encryption at rest, mutual TLS between nodes, a rolling restart;
 - `govulncheck` and the dashboard's tests.
 
-The acceptance tests also run three times over every night. What each promise rests on, the known limits, and what a final `v0.6.0` still needs are in the [release requirements](docs/PRODUCTION_RELEASE.md); open findings are in the [audit](docs/PRODUCTION_AUDIT_2026-09-27.md).
+The acceptance tests also run three times over every night. What each promise rests on, the known limits, and what `v0.6.0` was released without are in the [release requirements](docs/PRODUCTION_RELEASE.md); open findings are in the [audit](docs/PRODUCTION_AUDIT_2026-09-27.md).
 
 Experimental and refused in production: transactions, online partition splitting, cross-region replication, and exactly-once commits.
 
@@ -795,7 +795,7 @@ automatically on every docs change via `.github/workflows/docs.yml`.
 | Document | Description |
 |----------|-------------|
 | **[mkdocs.yml](mkdocs.yml)** | MkDocs Material site config — root docs are injected at build time by `docs/hooks/github_source_links.py` (single source of truth) |
-| **[docs/PRODUCTION_RELEASE.md](docs/PRODUCTION_RELEASE.md)** | What a release promises, the test behind each promise, configuration for production, and what a final release still needs |
+| **[docs/PRODUCTION_RELEASE.md](docs/PRODUCTION_RELEASE.md)** | What a release promises, the test behind each promise, configuration for production, and what has not been shown yet |
 | **[docs/PRODUCTION_AUDIT_2026-09-27.md](docs/PRODUCTION_AUDIT_2026-09-27.md)** | Production-readiness audit: findings, what each hardening batch changed, what remains |
 | **[ARCHITECTURE.md](ARCHITECTURE.md)** | Deep-dive with Mermaid diagrams — data flows, sequence diagrams, state machines |
 | **[docs/architecture/README.md](docs/architecture/README.md)** | Architecture split by feature (cluster, compliance, dedup, delivery, schema, slo, storage, and more) — all diagrams embedded inline so they render on GitHub |

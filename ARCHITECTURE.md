@@ -1794,7 +1794,7 @@ These are **documented product/architecture gaps**, not accidental omissions fro
 the design docs. Each is implemented enough to operate safely; the deferred
 piece is called out so operators and contributors know what not to rely on yet.
 
-The list of what is open before a final release is kept in
+The list of what has not been shown yet is kept in
 [docs/PRODUCTION_RELEASE.md](docs/PRODUCTION_RELEASE.md), and the findings
 behind it in [docs/PRODUCTION_AUDIT_2026-09-27.md](docs/PRODUCTION_AUDIT_2026-09-27.md).
 Where this section and those two differ, they are right.
