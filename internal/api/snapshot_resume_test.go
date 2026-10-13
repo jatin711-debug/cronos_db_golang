@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jatin711-debug/cronos_db_golang/internal/partition"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
@@ -44,10 +45,27 @@ func (f *flakySnapshots) Snapshot(req *types.ReplicationSnapshotRequest, stream 
 	return err
 }
 
-func (f *flakySnapshots) transfer(i int) snapshotTransfer {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.transfers[i]
+// transfer returns what the transfer with that number sent. A transfer is
+// recorded when the server's handler returns, which is a moment after the
+// replica has everything and its call has returned, so the record is waited
+// for.
+func (f *flakySnapshots) transfer(t *testing.T, i int) snapshotTransfer {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		f.mu.Lock()
+		recorded := len(f.transfers)
+		if i < recorded {
+			transfer := f.transfers[i]
+			f.mu.Unlock()
+			return transfer
+		}
+		f.mu.Unlock()
+		if time.Now().After(deadline) {
+			t.Fatalf("transfer %d was not recorded; %d were", i, recorded)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 type countingSnapshotStream struct {
@@ -132,7 +150,7 @@ func TestSnapshot_InterruptedTransferResumes(t *testing.T) {
 	if got := len(replica.log()); got != 0 {
 		t.Fatalf("replica log has %d entries after a failed transfer; nothing may be installed", got)
 	}
-	first := service.transfer(0)
+	first := service.transfer(t, 0)
 	if first.sentFiles != 20 || first.reusedFiles != 0 {
 		t.Fatalf("first transfer sent %d files and reused %d, want 20 and 0", first.sentFiles, first.reusedFiles)
 	}
@@ -143,7 +161,7 @@ func TestSnapshot_InterruptedTransferResumes(t *testing.T) {
 	if err := replica.pm.SyncPartitionFromLeader(0, addr); err != nil {
 		t.Fatalf("retry: %v", err)
 	}
-	second := service.transfer(1)
+	second := service.transfer(t, 1)
 	if second.reusedFiles != 20 {
 		t.Fatalf("retry reused %d files, want the 20 that had arrived", second.reusedFiles)
 	}
@@ -160,7 +178,7 @@ func TestSnapshot_InterruptedTransferResumes(t *testing.T) {
 	if err := fresh.pm.SyncPartitionFromLeader(0, addr); err != nil {
 		t.Fatal(err)
 	}
-	full := service.transfer(2)
+	full := service.transfer(t, 2)
 	if full.reusedFiles != 0 || second.sentBytes >= full.sentBytes {
 		t.Fatalf("resumed transfer sent %d bytes, a full one %d (reused %d files)", second.sentBytes, full.sentBytes, full.reusedFiles)
 	}
@@ -200,7 +218,7 @@ func TestSnapshot_ResumeDoesNotTrustStagedFilesBlindly(t *testing.T) {
 	if err := replica.pm.SyncPartitionFromLeader(0, addr); err != nil {
 		t.Fatalf("retry: %v", err)
 	}
-	second := service.transfer(1)
+	second := service.transfer(t, 1)
 	if second.reusedFiles == 0 || second.reusedFiles >= 20 {
 		t.Fatalf("retry reused %d files; the damaged one must be sent again and the others kept", second.reusedFiles)
 	}
