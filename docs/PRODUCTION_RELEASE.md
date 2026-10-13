@@ -61,8 +61,8 @@ caller that has not presented a certificate signed by the CA in `ca.crt`, and a
 node checks that the certificate of the node it calls is valid for the address
 it called. `ca.crt` may hold more than one CA certificate.
 
-Certificates are replaced without a restart (development branch; `v0.6.0-rc.3`
-reads them once, at a start). A node reads a certificate, its key and its CA
+Certificates are replaced without a restart (since `v0.6.0-rc.4`; earlier
+releases read them once, at a start). A node reads a certificate, its key and its CA
 file again when they change, and uses what they hold for the next connection
 it makes or accepts, on every port: the client port, the HTTP port,
 replication, membership and Raft. It looks at the files when a connection is
@@ -101,7 +101,7 @@ two that are left. Production mode refuses to start a node without
 state.
 
 A node that is lost for good is removed from the cluster by hand
-(development branch; not in `v0.6.0-rc.3`). Until then it stays a member,
+(since `v0.6.0-rc.4`). Until then it stays a member,
 which is what lets a node come back, and it keeps counting towards what a
 majority is in Raft: a cluster of four with one node lost needs three of
 four, which is every node that still runs. Once the node is certain not to
@@ -137,8 +137,7 @@ the bearer token. Prometheus does not verify the pods' certificate unless
 `metrics.serviceMonitor.tlsConfig` names the CA and the server name. Without
 the setting the port is plain HTTP, and the token and the answers cross the
 network unencrypted; leave it off only when something in front of the pods
-ends TLS for that port. This is on the development branch: `v0.6.0-rc.3` has
-no such setting.
+ends TLS for that port. The setting is there since `v0.6.0-rc.4`.
 
 The image builds dashboard assets from the npm lockfile and the Rust library from
 the Cargo lockfile. Its Go builder matches the module's minimum version. Pin the
@@ -227,9 +226,9 @@ bloom filter written in Go; the image is built with cgo and uses the one in
 Rust, which is faster. Neither keeps anything on disk, so a data directory
 can go from one to the other. The `go` job of CI runs the suite once without
 cgo and builds the five archives, so that a release is not the first to find
-out that one of them does not build. The first release with binaries is the
-one after `v0.6.0-rc.3`: before it the server did not build for macOS, and
-needed cgo and the Rust library everywhere but on Windows.
+out that one of them does not build. The first release with binaries is
+`v0.6.0-rc.4`: before it the server did not build for macOS, and needed cgo
+and the Rust library everywhere but on Windows.
 
 ## Memory and overload
 
@@ -260,10 +259,10 @@ quarter larger than the memory limit they are restarted with, and must stay
 below it until a consumer has received everything. In
 `TestRestartInContainersWithABacklogLargerThanTheirMemory` three containers of
 the image, which the kernel kills above 384 MiB, take in a gigabyte, are
-killed, come back and deliver it; in CI the fullest held 141 MiB. This is on
-the development branch. `v0.6.0-rc.3` and everything before it reads the
-backlog into memory at a start, and a node there whose backlog exceeds its
-memory is killed on every start.
+killed, come back and deliver it; in CI the fullest held 141 MiB. This holds
+since `v0.6.0-rc.4`. `v0.6.0-rc.3` and everything before it reads the backlog
+into memory at a start, and a node there whose backlog exceeds its memory is
+killed on every start.
 
 What this does not bound: events that are not due yet and fall in the hot
 window are in memory after a restart as they were before it. The queues
@@ -288,12 +287,12 @@ second; the last column says what they do not show.
 | The replicas of a partition hold the same log | `TestFaultCampaign` compares them entry for entry | |
 | A partition takes publishes again within 90 seconds of its leader's death | The bound the campaign enforces | Typical times; behavior under load |
 | Any node, the first included, can be replaced with an empty one | `TestFaultCampaign`, `TestFirstNodeReplaced`, the kind job on the chart | Two at once |
-| A node that is lost for good is removed, and no longer counts towards a majority (development branch; not in `v0.6.0-rc.3`) | `TestLostNodeIsRemoved`: one of four nodes lost and removed through `cronos-admin`, then a second node killed | A node added to a running cluster: clients that are connected do not learn its address |
+| A node that is lost for good is removed, and no longer counts towards a majority (since `v0.6.0-rc.4`) | `TestLostNodeIsRemoved`: one of four nodes lost and removed through `cronos-admin`, then a second node killed | A node added to a running cluster: clients that are connected do not learn its address |
 | A cluster that is lost entirely comes back from its nodes' backups with everything acknowledged before the earliest of them | `TestClusterRestoredFromBackups` | Restore to a point between backups; getting backups off the node, which is the operator's to arrange |
 | Producers that outrun the cluster are refused, and no node dies of it | `TestOverloadIsRefusedAndSurvived` | Load at production sizes |
-| A node comes back with more waiting for consumers than it has memory, and delivers it (development branch; not in `v0.6.0-rc.3`) | `TestRestartWithABacklogLargerThanMemory`; `TestRestartInContainersWithABacklogLargerThanTheirMemory`, with a limit of 384 MiB that the kernel enforces and a backlog of 1 GiB | Backlogs beyond a gigabyte; events not yet due, which are held in memory for the hot window |
+| A node comes back with more waiting for consumers than it has memory, and delivers it (since `v0.6.0-rc.4`) | `TestRestartWithABacklogLargerThanMemory`; `TestRestartInContainersWithABacklogLargerThanTheirMemory`, with a limit of 384 MiB that the kernel enforces and a backlog of 1 GiB | Backlogs beyond a gigabyte; events not yet due, which are held in memory for the hot window |
 | Traffic between nodes is encrypted and only nodes that hold the cluster's certificate take part | `TestTransportTLS_*`, the kind job | |
-| Certificates and their CA are replaced without a restart, and the HTTP port is served over TLS (development branch; not in `v0.6.0-rc.3`) | `TestCertificatesAndTheirCAReplacedWhileRunning` on three running nodes; `TestNodes_ReplaceCertificatesAndTheirCAWhileRunning`, `TestCredentials_VerifyAgainstTheCAOfTheMoment`, `TestBuildHTTPTLSConfig_ServesTheHTTPPortOverTLS`; the kind job asks the HTTP port over TLS and checks that it does not answer without | The certificate of the client port and of the HTTP port replaced under load; a certificate that expires while a connection is open |
+| Certificates and their CA are replaced without a restart, and the HTTP port is served over TLS (since `v0.6.0-rc.4`) | `TestCertificatesAndTheirCAReplacedWhileRunning` on three running nodes; `TestNodes_ReplaceCertificatesAndTheirCAWhileRunning`, `TestCredentials_VerifyAgainstTheCAOfTheMoment`, `TestBuildHTTPTLSConfig_ServesTheHTTPPortOverTLS`; the kind job asks the HTTP port over TLS and checks that it does not answer without | The certificate of the client port and of the HTTP port replaced under load; a certificate that expires while a connection is open |
 | One tenant cannot read, replay or acknowledge another's events | `TestIsolation_*` | |
 
 No throughput, payload-size or latency figure is promised. None has been
@@ -302,10 +301,10 @@ measured on production hardware.
 ## Before a final release
 
 Release candidates are cut from the development branch when CI is green on
-the commit. The current one is `v0.6.0-rc.3`. It is published as the latest
-release and as the `latest` image, in place of v0.5.0 and v0.4.0, which have
-defects it fixes; it is a release candidate all the same. A final `v0.6.0`
-still needs:
+the commit. The current one is `v0.6.0-rc.4`. It is published as the latest
+release and as the `latest` image, in place of `v0.6.0-rc.3`, which takes its
+undelivered backlog into memory at every start; it is a release candidate
+all the same. A final `v0.6.0` still needs:
 
 - The five CI jobs made required in branch protection. Today a red run does
   not stop a merge:
@@ -325,7 +324,7 @@ still needs:
 Known limits of what is released are in the
 [audit](PRODUCTION_AUDIT_2026-09-27.md): log entries are removed from the
 start of a log only, so one event that cannot go yet keeps every later
-segment; a restart of `v0.6.0-rc.3` reads the undelivered backlog into memory,
-which the development branch no longer does; a consumer group's finished work
-in a partition shared by several topics is carried over a failover only in
-part, and may be delivered again.
+segment; a node that joins a running cluster is not found by clients that are
+already connected; a consumer group's finished work in a partition shared by
+several topics is carried over a failover only in part, and may be delivered
+again.

@@ -50,10 +50,10 @@ acceptance/loss contract, then finish F03/F06–F09 and F13/F15, wire and exerci
 F14/F20, and measure F04/F17/F18 with a ledger of accepted event IDs. F01's public
 authorization tests and F19's release scans also remain release gates.
 
-### Eighth hardening batch — 2026-10-09
+### Eighth hardening batch — 2026-10-09 to 2026-10-13
 
-This batch is on the development branch and in no release. The verdict above
-is unchanged. The table rows for F04, F14, F17 and F19 describe what moved.
+This batch is released as `v0.6.0-rc.4`. The verdict above is unchanged. The
+table rows for F04, F08, F12, F14, F17, F19 and F20 describe what moved.
 
 - **The Go toolchain is 1.26.9.** govulncheck and the image scan reported
   reachable standard-library advisories in 1.26.7 (`html/template`,
@@ -131,8 +131,8 @@ is unchanged. The table rows for F04, F14, F17 and F19 describe what moved.
   five systems from a release's tag, starts the Linux server it built, and
   attaches the archives; CI builds the same archives and runs the suite once
   without cgo. `nightly.yml` runs the acceptance tests three times over each
-  night. Neither workflow has run for a release or on a schedule yet: both
-  start when this reaches `main`.
+  night. Both are on `main` since 2026-10-13, and `v0.6.0-rc.4` is the first
+  release that `release.yml` builds binaries for.
 - **Certificates are replaced without a restart, and the HTTP port has
   TLS.** A node read its certificates once, when it started, and went on
   presenting them until it was restarted; when they expired no other node
@@ -187,8 +187,8 @@ note listed it by mistake.
 
 ### Seventh hardening batch — 2026-10-07
 
-This batch is on the development branch and in no release. The verdict above
-is unchanged. The table rows for F06, F08 and F20 describe what moved.
+This batch is released as `v0.6.0-rc.4`. The verdict above is unchanged. The
+table rows for F06, F08 and F20 describe what moved.
 
 Until now every fault in the tests stopped a process. `TestNetworkPartitions`
 leaves all three nodes running and reachable by applications, and drops what
