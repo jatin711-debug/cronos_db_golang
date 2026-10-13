@@ -1,6 +1,6 @@
 # Production release requirements
 
-`v0.6.0` is the first final release. Hardening goes on: the
+`v0.6.0` is the final release of 0.6.0. Hardening goes on: the
 [audit closure table](PRODUCTION_AUDIT_2026-09-27.md#finding-closure-review)
 tracks unresolved guarantees, and
 [what the release was cut without](#what-v060-was-released-without) is listed
@@ -306,7 +306,7 @@ measured on production hardware.
 ## What `v0.6.0` was released without
 
 Releases are cut from the development branch when CI is green on the
-commit. `v0.6.0` is the first final release, after four release candidates;
+commit. `v0.6.0` is the final release of 0.6.0, after four release candidates;
 it is published as the latest release and as the `latest` image. Of what a
 final release was to have, one thing was done for it: the five CI jobs are
 required checks on `main` (see [Checks](#checks)).
