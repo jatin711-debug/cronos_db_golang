@@ -238,6 +238,10 @@ type Config struct {
 	// other nodes with. Both or neither.
 	ServerTLS *tls.Config
 	ClientTLS *tls.Config
+	// ClientTLSNow, when set, gives the configuration to dial with at this
+	// moment, and is asked at every dial in place of ClientTLS: the CA a node
+	// verifies the others against can be replaced while it runs.
+	ClientTLSNow func() *tls.Config
 	// Bootstrap names this node as the one that creates the cluster, which it
 	// does only when it has no state and no other seed belongs to a cluster.
 	Bootstrap bool
@@ -294,8 +298,9 @@ type ClusterConfig struct {
 	UseMemberlist bool `json:"use_memberlist"`
 	// ServerTLS and ClientTLS put the membership and Raft ports behind mutual
 	// TLS; see Config.
-	ServerTLS *tls.Config `json:"-"`
-	ClientTLS *tls.Config `json:"-"`
+	ServerTLS    *tls.Config        `json:"-"`
+	ClientTLS    *tls.Config        `json:"-"`
+	ClientTLSNow func() *tls.Config `json:"-"`
 	// Bootstrap names this node as the one that creates the cluster; see Config.
 	Bootstrap bool `json:"bootstrap"`
 	// Rack is this node's rack topology label.

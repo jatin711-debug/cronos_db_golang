@@ -339,11 +339,11 @@ func cleanupFile(f *os.File) {
 // mTLS when configured, otherwise insecure (dev mode).
 func (f *Follower) dialCredentials() (credentials.TransportCredentials, error) {
 	if f.tlsConfig != nil && f.tlsConfig.Enabled {
-		tlsCfg, err := BuildClientTLSConfig(f.tlsConfig)
+		client, err := BuildClientTLS(f.tlsConfig)
 		if err != nil {
 			return nil, err
 		}
-		return credentials.NewTLS(tlsCfg), nil
+		return client.Credentials(), nil
 	}
 	return insecure.NewCredentials(), nil
 }

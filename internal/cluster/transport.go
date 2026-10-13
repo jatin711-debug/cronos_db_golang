@@ -50,12 +50,12 @@ func dialPeer(ctx context.Context, addr string, timeout time.Duration, clientTLS
 type tlsStreamLayer struct {
 	net.Listener
 	advertise net.Addr
-	clientTLS *tls.Config
+	clientTLS func() *tls.Config // the configuration to dial with now
 }
 
 // Dial implements raft.StreamLayer.
 func (l *tlsStreamLayer) Dial(address raft.ServerAddress, timeout time.Duration) (net.Conn, error) {
-	return dialPeer(context.Background(), string(address), timeout, l.clientTLS)
+	return dialPeer(context.Background(), string(address), timeout, l.clientTLS())
 }
 
 // Addr returns the address other nodes are told, as raft.TCPStreamLayer does.
@@ -80,7 +80,7 @@ func newRaftTransport(config *ClusterConfig) (*raft.NetworkTransport, error) {
 	if err != nil {
 		return nil, err
 	}
-	stream := &tlsStreamLayer{Listener: listener, advertise: advertise, clientTLS: config.ClientTLS}
+	stream := &tlsStreamLayer{Listener: listener, advertise: advertise, clientTLS: config.dialTLS}
 	return raft.NewNetworkTransport(stream, raftMaxPool, raftTimeout, os.Stderr), nil
 }
 
@@ -90,6 +90,15 @@ const (
 	// raftTimeout bounds a Raft connection attempt and each of its I/O steps.
 	raftTimeout = 10 * time.Second
 )
+
+// dialTLS returns the configuration to dial another node with now, or nil
+// when the nodes do not use TLS with each other.
+func (c *ClusterConfig) dialTLS() *tls.Config {
+	if c.ClientTLSNow != nil {
+		return c.ClientTLSNow()
+	}
+	return c.ClientTLS
+}
 
 // checkTransportTLS refuses a configuration that secures one direction only:
 // a node that listens with TLS and dials without it, or the other way round,

@@ -112,7 +112,8 @@ func newContainerCluster(t *testing.T, extraArgs ...string) *cluster {
 	}
 	// The image runs as a user of its own, which has to be able to read what
 	// is mounted into it.
-	c.caFile, c.certFile, c.keyFile = nodeCertificates(t, c.certDir, names...)
+	c.certHosts = names
+	c.ca, c.caFile, c.certFile, c.keyFile = nodeCertificates(t, c.certDir, c.certHosts...)
 	for _, path := range []string{c.certDir, c.caFile, c.certFile, c.keyFile} {
 		mode := os.FileMode(0o644)
 		if path == c.certDir {

@@ -142,7 +142,7 @@ func (m *Manager) createsCluster(hasState bool) (bool, error) {
 			wg.Add(1)
 			go func(addr string) {
 				defer wg.Done()
-				answer, err := probeNode(m.ctx, addr, m.config.NodeID, m.config.ClientTLS)
+				answer, err := probeNode(m.ctx, addr, m.config.NodeID, m.config.dialTLS())
 				mu.Lock()
 				defer mu.Unlock()
 				switch {

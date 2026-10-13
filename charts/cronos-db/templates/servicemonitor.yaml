@@ -15,6 +15,11 @@ spec:
   endpoints:
     - port: http
       path: /metrics
+      {{- if and .Values.tls.enabled .Values.tls.http }}
+      scheme: https
+      tlsConfig:
+        {{- toYaml .Values.metrics.serviceMonitor.tlsConfig | nindent 8 }}
+      {{- end }}
       interval: {{ .Values.metrics.serviceMonitor.interval }}
       scrapeTimeout: {{ .Values.metrics.serviceMonitor.scrapeTimeout }}
 {{- end }}

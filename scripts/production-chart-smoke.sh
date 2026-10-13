@@ -45,11 +45,19 @@ for ordinal in 0 1 2; do
     test "$CRONOS_AUTH_ENABLED" = true
     test "$CRONOS_REPLICATION_TLS_ENABLED" = true
     test -s "$CRONOS_AUTH_POLICY_FILE"
-    curl -fsS http://localhost:8080/health/ready >/dev/null
-    curl -fsS http://localhost:8080/ui/ | grep -q "<html"
+    test "$CRONOS_HTTP_TLS_ENABLED" = true
+    # The HTTP port is served over TLS with a certificate that the cluster
+    # CA vouches for, and without TLS it gives nothing away.
+    https="curl -sS --cacert /etc/cronos/tls/ca.crt"
+    $https -f https://localhost:8080/health/ready >/dev/null
+    $https -f https://localhost:8080/ui/ | grep -q "<html"
     /app/cronos-admin check-log --help >/dev/null
     /app/cronos-admin restore --help >/dev/null
-    test "$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/api/admin/topology)" = 401
+    test "$($https -o /dev/null -w "%{http_code}" https://localhost:8080/api/admin/topology)" = 401
+    if curl -fsS http://localhost:8080/health/ready >/dev/null 2>&1; then
+      echo "the HTTP port answered a request without TLS" >&2
+      exit 1
+    fi
   '
 done
 

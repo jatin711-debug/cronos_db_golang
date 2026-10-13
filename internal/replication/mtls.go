@@ -2,9 +2,9 @@ package replication
 
 import (
 	"crypto/tls"
-	"crypto/x509"
 	"fmt"
-	"os"
+
+	"github.com/jatin711-debug/cronos_db_golang/internal/tlsfiles"
 )
 
 // MTLSConfig holds internal mutual-TLS configuration for replication channels.
@@ -27,11 +27,24 @@ type MTLSConfig struct {
 	InsecureSkipVerify bool
 }
 
-// BuildClientTLSConfig returns a tls.Config for a replication client. The
+// peerCipherSuites are the cipher suites nodes use with each other.
+var peerCipherSuites = []uint16{
+	tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+	tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+	tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+	tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+}
+
+// BuildClientTLS returns the TLS configuration of a replication client. The
 // client presents its certificate and verifies the server certificate against
 // the configured CA. If mTLS is disabled or misconfigured, it returns an error
 // so callers can fail closed rather than silently falling back to plaintext.
-func BuildClientTLSConfig(cfg *MTLSConfig) (*tls.Config, error) {
+//
+// The certificate, its key and the CA are read from their files again when
+// the files change (see tlsfiles). What is returned gives the configuration to
+// make a connection with at that moment, and gRPC credentials that do so for
+// every connection of a client.
+func BuildClientTLS(cfg *MTLSConfig) (*tlsfiles.Client, error) {
 	if cfg == nil || !cfg.Enabled {
 		return nil, fmt.Errorf("replication mTLS is disabled")
 	}
@@ -42,42 +55,43 @@ func BuildClientTLSConfig(cfg *MTLSConfig) (*tls.Config, error) {
 		return nil, fmt.Errorf("replication mTLS requires ca-file or insecure-skip-verify")
 	}
 
-	cert, err := tls.LoadX509KeyPair(cfg.CertFile, cfg.KeyFile)
+	pair, err := tlsfiles.LoadKeyPair(cfg.CertFile, cfg.KeyFile)
 	if err != nil {
 		return nil, fmt.Errorf("load replication client cert/key: %w", err)
 	}
 
 	tlsCfg := &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		MinVersion:   tls.VersionTLS12,
-		CipherSuites: []uint16{
-			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-			tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-			tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-		},
-		ServerName:         cfg.ServerName,
-		InsecureSkipVerify: cfg.InsecureSkipVerify,
+		GetClientCertificate: pair.GetClientCertificate,
+		MinVersion:           tls.VersionTLS12,
+		CipherSuites:         peerCipherSuites,
+		ServerName:           cfg.ServerName,
+		InsecureSkipVerify:   cfg.InsecureSkipVerify,
 	}
 
+	var pool *tlsfiles.Pool
 	if cfg.CAFile != "" {
-		caPEM, err := os.ReadFile(cfg.CAFile)
-		if err != nil {
+		if pool, err = tlsfiles.LoadPool(cfg.CAFile); err != nil {
 			return nil, fmt.Errorf("read replication CA file: %w", err)
 		}
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(caPEM) {
-			return nil, fmt.Errorf("parse replication CA file: no certs loaded")
-		}
-		tlsCfg.RootCAs = pool
 	}
+	return tlsfiles.NewClient(tlsCfg, pool), nil
+}
 
-	return tlsCfg, nil
+// BuildClientTLSConfig returns the tls.Config of a replication client as its
+// files are now. A caller that keeps what it gets does not see a CA that is
+// replaced later; BuildClientTLS is for those.
+func BuildClientTLSConfig(cfg *MTLSConfig) (*tls.Config, error) {
+	client, err := BuildClientTLS(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return client.Config(), nil
 }
 
 // BuildServerTLSConfig returns a tls.Config for a replication server. It
 // requires and verifies a client certificate, ensuring only cluster members can
-// connect to the replication socket.
+// connect to the replication socket. Its certificate, key and CA follow their
+// files, as a client's do.
 func BuildServerTLSConfig(cfg *MTLSConfig) (*tls.Config, error) {
 	if cfg == nil || !cfg.Enabled {
 		return nil, fmt.Errorf("replication mTLS is disabled")
@@ -89,30 +103,21 @@ func BuildServerTLSConfig(cfg *MTLSConfig) (*tls.Config, error) {
 		return nil, fmt.Errorf("replication mTLS server requires ca-file")
 	}
 
-	cert, err := tls.LoadX509KeyPair(cfg.CertFile, cfg.KeyFile)
+	pair, err := tlsfiles.LoadKeyPair(cfg.CertFile, cfg.KeyFile)
 	if err != nil {
 		return nil, fmt.Errorf("load replication server cert/key: %w", err)
 	}
-
-	caPEM, err := os.ReadFile(cfg.CAFile)
+	pool, err := tlsfiles.LoadPool(cfg.CAFile)
 	if err != nil {
 		return nil, fmt.Errorf("read replication CA file: %w", err)
 	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(caPEM) {
-		return nil, fmt.Errorf("parse replication CA file: no certs loaded")
-	}
 
-	return &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		ClientCAs:    pool,
-		ClientAuth:   tls.RequireAndVerifyClientCert,
-		MinVersion:   tls.VersionTLS12,
-		CipherSuites: []uint16{
-			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-			tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-			tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-		},
-	}, nil
+	tlsCfg := &tls.Config{
+		GetCertificate: pair.GetCertificate,
+		ClientAuth:     tls.RequireAndVerifyClientCert,
+		MinVersion:     tls.VersionTLS12,
+		CipherSuites:   peerCipherSuites,
+	}
+	tlsfiles.FollowClientCAs(tlsCfg, pool)
+	return tlsCfg, nil
 }

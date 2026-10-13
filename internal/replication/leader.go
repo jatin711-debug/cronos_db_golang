@@ -181,11 +181,11 @@ func NewLeader(partitionID int32, batchSize int32, flushInterval time.Duration, 
 // mTLS when configured, otherwise insecure (dev mode).
 func (l *Leader) dialCredentials() (credentials.TransportCredentials, error) {
 	if l.tlsConfig != nil && l.tlsConfig.Enabled {
-		tlsCfg, err := BuildClientTLSConfig(l.tlsConfig)
+		client, err := BuildClientTLS(l.tlsConfig)
 		if err != nil {
 			return nil, err
 		}
-		return credentials.NewTLS(tlsCfg), nil
+		return client.Credentials(), nil
 	}
 	return insecure.NewCredentials(), nil
 }
@@ -1190,11 +1190,11 @@ func (l *Leader) shipConsumerProgress() {
 func QueryPosition(ctx context.Context, addr string, partitionID int32, fenceEpoch int64, tlsConfig *MTLSConfig) (*types.ReplicationPositionResponse, error) {
 	var creds credentials.TransportCredentials = insecure.NewCredentials()
 	if tlsConfig != nil && tlsConfig.Enabled {
-		tlsCfg, err := BuildClientTLSConfig(tlsConfig)
+		client, err := BuildClientTLS(tlsConfig)
 		if err != nil {
 			return nil, err
 		}
-		creds = credentials.NewTLS(tlsCfg)
+		creds = client.Credentials()
 	}
 	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(creds))
 	if err != nil {

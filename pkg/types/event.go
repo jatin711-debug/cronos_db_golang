@@ -162,6 +162,10 @@ type Config struct {
 	TLSKeyFile string
 	// TLSClientAuth requires client certificates (mTLS) on the public gRPC server.
 	TLSClientAuth bool
+	// HTTPTLSEnabled serves the HTTP port (health, metrics, the admin API and
+	// the dashboard) over TLS, with the certificate and key of the gRPC
+	// server. Clients are not asked for a certificate there.
+	HTTPTLSEnabled bool
 
 	// ReplicationTLSEnabled enables mTLS for internal leader↔follower replication.
 	ReplicationTLSEnabled bool

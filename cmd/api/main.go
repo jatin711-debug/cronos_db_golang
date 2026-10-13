@@ -341,12 +341,13 @@ func main() {
 				slog.Error("Failed to load the TLS certificates for membership and Raft", "error", tlsErr)
 				os.Exit(1)
 			}
-			clientTLS, tlsErr := replication.BuildClientTLSConfig(peerTLS)
+			clientTLS, tlsErr := replication.BuildClientTLS(peerTLS)
 			if tlsErr != nil {
 				slog.Error("Failed to load the TLS certificates for membership and Raft", "error", tlsErr)
 				os.Exit(1)
 			}
-			clusterConfig.ServerTLS, clusterConfig.ClientTLS = serverTLS, clientTLS
+			clusterConfig.ServerTLS, clusterConfig.ClientTLS = serverTLS, clientTLS.Config()
+			clusterConfig.ClientTLSNow = clientTLS.Config
 		}
 
 		clusterMgr = cluster.NewManager(clusterConfig)
@@ -622,10 +623,25 @@ func main() {
 		IdleTimeout:       60 * time.Second,
 	}
 
+	if cfg.HTTPTLSEnabled {
+		httpTLS, err := api.BuildHTTPTLSConfig(cfg.TLSCertFile, cfg.TLSKeyFile)
+		if err != nil {
+			slog.Error("Failed to load the TLS certificate for the HTTP port", "error", err)
+			os.Exit(1)
+		}
+		healthServer.TLSConfig = httpTLS
+	}
+
 	healthErr := make(chan error, 1)
 	utils.GoSafe("health-server", func() {
-		slog.Info("Starting health check server", "address", cfg.HTTPAddress)
-		if err := healthServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		slog.Info("Starting health check server", "address", cfg.HTTPAddress, "tls", cfg.HTTPTLSEnabled)
+		serve := healthServer.ListenAndServe
+		if cfg.HTTPTLSEnabled {
+			// The certificate comes from the TLS configuration, which reads
+			// it again when its files change.
+			serve = func() error { return healthServer.ListenAndServeTLS("", "") }
+		}
+		if err := serve(); err != nil && err != http.ErrServerClosed {
 			healthErr <- err
 		}
 	})

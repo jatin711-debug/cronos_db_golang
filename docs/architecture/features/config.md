@@ -129,6 +129,7 @@ Defaults from `internal/config/defaults.go` unless noted. Flags marked **env** h
 | `--tls-cert-file` | *(empty)* | Server certificate path (**env**) |
 | `--tls-key-file` | *(empty)* | Server private key path (**env**) |
 | `--tls-client-auth` | `false` | Require client certificates (mTLS) |
+| `--http-tls-enabled` | `false` | Serve the HTTP port (health, metrics, admin API, dashboard) over TLS, with `--tls-cert-file` and `--tls-key-file`. Callers are not asked for a certificate (**env**) |
 | `--replication-tls-enabled` | `false` | Mutual TLS for all traffic between nodes: replication, membership and Raft. Requires the three files below (**env**) |
 | `--replication-tls-ca-file` | *(empty)* | CA that signed the nodes' certificates (**env**) |
 | `--replication-tls-cert-file` | *(empty)* | This node's certificate, for server and client use (**env**) |

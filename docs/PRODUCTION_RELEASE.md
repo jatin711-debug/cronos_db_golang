@@ -59,8 +59,28 @@ The `cronos-db-replication-tls` secret secures all traffic between nodes:
 replication, membership and Raft. Each of the three ports reads nothing from a
 caller that has not presented a certificate signed by the CA in `ca.crt`, and a
 node checks that the certificate of the node it calls is valid for the address
-it called. Certificates are read when a node starts; `ca.crt` may hold more
-than one CA certificate.
+it called. `ca.crt` may hold more than one CA certificate.
+
+Certificates are replaced without a restart (development branch; `v0.6.0-rc.3`
+reads them once, at a start). A node reads a certificate, its key and its CA
+file again when they change, and uses what they hold for the next connection
+it makes or accepts, on every port: the client port, the HTTP port,
+replication, membership and Raft. It looks at the files when a connection is
+made, at most every two seconds, so nothing has to be signalled. Connections
+that are open keep the certificate they were made with. A certificate whose
+key has not arrived yet, or a file that cannot be read, leaves the one read
+before in use and is reported in the log once.
+
+To replace the CA that issues the nodes' certificates: put the old and the
+new CA in every node's `ca.crt`; then give each node a certificate of the new
+CA; then take the old CA out of `ca.crt`. Every step can be made on running
+nodes and in any order of nodes.
+`TestCertificatesAndTheirCAReplacedWhileRunning` does it to three running
+nodes that producers and a consumer group are using, and then restarts one of
+them. That node comes back with the new files only, and has to be let in by
+the two that were never restarted, and let them in, on the membership, Raft
+and replication ports; the cluster is then made to depend on it by killing
+one of the two.
 
 A cluster that runs 0.6.0-rc.2 or earlier with replication TLS cannot be
 upgraded one pod at a time: those versions speak plain TCP on the membership
@@ -80,10 +100,17 @@ two that are left. Production mode refuses to start a node without
 `--cluster-seeds`, because such a node creates a cluster whenever it has no
 state.
 
-The HTTP port (health, metrics, dashboard and the admin API) is plain HTTP. The
-admin API checks the bearer token, but the token and the answers cross the
-network unencrypted. Keep the port on a trusted private network and terminate
-TLS in front of it before exposing the dashboard or the admin API.
+The HTTP port (health, metrics, dashboard and the admin API) is served over
+TLS with `--http-tls-enabled`, with the certificate of the client port
+(`--tls-cert-file`, `--tls-key-file`). The production values of the chart
+turn it on (`tls.http`), and the probes and the ServiceMonitor then use HTTPS.
+Callers are not asked for a certificate on that port: the admin API checks
+the bearer token. Prometheus does not verify the pods' certificate unless
+`metrics.serviceMonitor.tlsConfig` names the CA and the server name. Without
+the setting the port is plain HTTP, and the token and the answers cross the
+network unencrypted; leave it off only when something in front of the pods
+ends TLS for that port. This is on the development branch: `v0.6.0-rc.3` has
+no such setting.
 
 The image builds dashboard assets from the npm lockfile and the Rust library from
 the Cargo lockfile. Its Go builder matches the module's minimum version. Pin the
@@ -236,7 +263,8 @@ second; the last column says what they do not show.
 | A cluster that is lost entirely comes back from its nodes' backups with everything acknowledged before the earliest of them | `TestClusterRestoredFromBackups` | Restore to a point between backups; getting backups off the node, which is the operator's to arrange |
 | Producers that outrun the cluster are refused, and no node dies of it | `TestOverloadIsRefusedAndSurvived` | Load at production sizes |
 | A node comes back with more waiting for consumers than it has memory, and delivers it (development branch; not in `v0.6.0-rc.3`) | `TestRestartWithABacklogLargerThanMemory`; `TestRestartInContainersWithABacklogLargerThanTheirMemory`, with a limit of 384 MiB that the kernel enforces and a backlog of 1 GiB | Backlogs beyond a gigabyte; events not yet due, which are held in memory for the hot window |
-| Traffic between nodes is encrypted and only nodes that hold the cluster's certificate take part | `TestTransportTLS_*`, the kind job | The HTTP port; replacing certificates without a restart |
+| Traffic between nodes is encrypted and only nodes that hold the cluster's certificate take part | `TestTransportTLS_*`, the kind job | |
+| Certificates and their CA are replaced without a restart, and the HTTP port is served over TLS (development branch; not in `v0.6.0-rc.3`) | `TestCertificatesAndTheirCAReplacedWhileRunning` on three running nodes; `TestNodes_ReplaceCertificatesAndTheirCAWhileRunning`, `TestCredentials_VerifyAgainstTheCAOfTheMoment`, `TestBuildHTTPTLSConfig_ServesTheHTTPPortOverTLS`; the kind job asks the HTTP port over TLS and checks that it does not answer without | The certificate of the client port and of the HTTP port replaced under load; a certificate that expires while a connection is open |
 | One tenant cannot read, replay or acknowledge another's events | `TestIsolation_*` | |
 
 No throughput, payload-size or latency figure is promised. None has been

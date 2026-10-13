@@ -4,10 +4,14 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"io"
 	"math/big"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
@@ -148,5 +152,76 @@ func TestNewGRPCServer_NoTLSWorks(t *testing.T) {
 	}
 	if server == nil {
 		t.Fatal("expected non-nil server")
+	}
+}
+
+// TestBuildHTTPTLSConfig_ServesTheHTTPPortOverTLS serves an HTTP handler with
+// the configuration the HTTP port gets. A client that verifies the server's
+// certificate is answered; one that speaks plain HTTP is not.
+func TestBuildHTTPTLSConfig_ServesTheHTTPPortOverTLS(t *testing.T) {
+	dir := t.TempDir()
+	certPath, keyPath := generateTestCert(t, dir)
+
+	if _, err := BuildHTTPTLSConfig("", keyPath); err == nil {
+		t.Fatal("a configuration without a certificate was built")
+	}
+	if _, err := BuildHTTPTLSConfig(certPath, filepath.Join(dir, "no.key")); err == nil {
+		t.Fatal("a configuration with a key that does not exist was built")
+	}
+	tlsCfg, err := BuildHTTPTLSConfig(certPath, keyPath)
+	if err != nil {
+		t.Fatalf("BuildHTTPTLSConfig failed: %v", err)
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &http.Server{
+		TLSConfig: tlsCfg,
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = io.WriteString(w, "ready")
+		}),
+	}
+	go func() { _ = server.ServeTLS(listener, "", "") }()
+	defer server.Close()
+
+	// The test certificate is its own authority and is valid for localhost.
+	certPEM, err := os.ReadFile(certPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots := x509.NewCertPool()
+	roots.AppendCertsFromPEM(certPEM)
+	client := &http.Client{
+		Timeout:   5 * time.Second,
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, ServerName: "localhost"}},
+	}
+	resp, err := client.Get("https://" + listener.Addr().String() + "/health")
+	if err != nil {
+		t.Fatalf("a client that trusts the certificate was not answered: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || string(body) != "ready" {
+		t.Fatalf("answer over TLS: status %d, body %q", resp.StatusCode, body)
+	}
+
+	plain := &http.Client{Timeout: 5 * time.Second}
+	if resp, err := plain.Get("http://" + listener.Addr().String() + "/health"); err == nil {
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			t.Fatalf("a client without TLS was answered: %q", body)
+		}
+	}
+
+	strangers := &http.Client{
+		Timeout:   5 * time.Second,
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: x509.NewCertPool(), ServerName: "localhost"}},
+	}
+	if resp, err := strangers.Get("https://" + listener.Addr().String() + "/health"); err == nil {
+		resp.Body.Close()
+		t.Fatal("a client that does not trust the certificate went on with the connection")
 	}
 }

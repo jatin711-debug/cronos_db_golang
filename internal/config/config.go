@@ -201,6 +201,7 @@ func LoadConfig() (*types.Config, error) {
 	flag.StringVar(&config.TLSCertFile, "tls-cert-file", "", "Path to TLS certificate file")
 	flag.StringVar(&config.TLSKeyFile, "tls-key-file", "", "Path to TLS private key file")
 	flag.BoolVar(&config.TLSClientAuth, "tls-client-auth", false, "Require client certificates (mTLS)")
+	flag.BoolVar(&config.HTTPTLSEnabled, "http-tls-enabled", false, "Serve the HTTP port (health, metrics, admin API, dashboard) over TLS, with the certificate of --tls-cert-file and --tls-key-file")
 
 	// Internal replication mTLS flags
 	flag.BoolVar(&config.ReplicationTLSEnabled, "replication-tls-enabled", false, "Enable mutual TLS for all traffic between nodes: replication, membership and Raft")
@@ -295,6 +296,9 @@ func LoadConfig() (*types.Config, error) {
 		if config.TLSCertFile == "" || config.TLSKeyFile == "" {
 			return nil, fmt.Errorf("tls-enabled requires tls-cert-file and tls-key-file")
 		}
+	}
+	if config.HTTPTLSEnabled && (config.TLSCertFile == "" || config.TLSKeyFile == "") {
+		return nil, fmt.Errorf("http-tls-enabled requires tls-cert-file and tls-key-file")
 	}
 
 	// Validate auth config if enabled

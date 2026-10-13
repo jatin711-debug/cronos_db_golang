@@ -71,6 +71,7 @@ func NewManager(cfg *Config) *Manager {
 		VirtualNodes:      cfg.VirtualNodes,
 		ServerTLS:         cfg.ServerTLS,
 		ClientTLS:         cfg.ClientTLS,
+		ClientTLSNow:      cfg.ClientTLSNow,
 		Bootstrap:         cfg.Bootstrap,
 		Rack:              cfg.Rack,
 		Zone:              cfg.Zone,
