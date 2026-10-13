@@ -6,20 +6,19 @@ Date: 2026-09-27. Audited commit: `1de04d6575a810c79f716dfe48b54e1744b42a33`.
 
 The audit itself (from "Verdict" on) describes commit `1de04d6` and is kept as
 it was. This table and the hardening batches after it are kept current: the
-latest release is `v0.6.0-rc.4`, and the ninth batch is on the development
-branch.
+latest release is `v0.6.0`, which holds all nine batches.
 
 ### Finding closure review
 
-**The remediation program is incomplete; `v0.6.0-rc.4` is a release candidate,
-not a final release.** This table compares the code with each finding's full
+**The remediation program is incomplete. `v0.6.0`, the first final release,
+was cut with the findings as this table gives them.** It compares the code with each finding's full
 required outcome. "Core fix implemented" means the specific code defect has been
 addressed; it does not mean its production release validation is complete.
 "Partial" means material requirements remain. The evidence is the test suite,
 and since the third batch also fault injection: the acceptance fault campaign
 against three server processes and the partition tests between containers,
 both in CI, and the production chart in a disposable Kubernetes cluster. What a
-release promises, and what a final release still needs, is in
+release promises, and what `v0.6.0` was released without, is in
 [the release requirements](PRODUCTION_RELEASE.md).
 
 | Finding | Status | Implemented work and remaining requirement |
@@ -43,7 +42,7 @@ release promises, and what a final release still needs, is in
 | F17: overload/latency | Partial | Worker event-count and estimated-byte caps added. Replication returns on quorum instead of waiting for every follower; sends to a slow follower stay ordered and bounded, and a skipped follower is caught up from the WAL; `--replication-timeout` is the Append deadline. `batch` fsync no longer syncs under the WAL lock: writers that append during a sync share the next one. An empty partition no longer allocates its bloom filter and consumer queue up front. CDC no longer runs on the append path or queues in memory: a slow sink makes its feed lag. The delivery settings (ack timeout, retries, backoff, credits, circuit breaker) now reach the dispatcher; they were parsed and ignored. An overload test runs in CI: producers flood three nodes that have a small memory limit and no consumer; the nodes refuse publishes, none dies, they hold less than their limit, and everything acknowledged is delivered once a consumer starts (`TestOverloadIsRefusedAndSurvived`). Byte-bounded queues and measurements of sustained load at production sizes remain; the reads of the log are bounded by bytes at a restart and on the replication, redrive, feed, replay and cross-region paths (eighth batch). |
 | F18: accounting/metrics | Core fix implemented | SLO interceptor counts semantic failure responses. Counters now follow an event per partition: accepted, answered as duplicate, delivered (first attempt or retry), acknowledged (success or failure), timed out, dead-lettered; a histogram records how long after its scheduled time an event was first delivered; gauges show where each log starts and how far its change feed has got (tested through publish, subscribe and acknowledge). The chart's alert rules use them, and the rule that compared one node's leader count with the partition total, which fired on every node of a healthy cluster, is replaced. The topology takes each partition's in-sync replicas and offsets from its leader at the time it is asked; it showed those of the moment placement last changed for most partitions (ninth batch). Remaining: nothing counts events that are never delivered because no consumer group takes their topic, and there is no per-tenant view. |
 | F19: dependencies | Partial | Go module/toolchain at 1.26.9, which fixes the standard-library advisories CI reported, gRPC and dashboard lockfile updates present; Docker Go builder aligned. The archived Avro codec was replaced with a patched fork and explicit decoder limits after the first CI security scan failed. CI now scans the image it builds and fails on a high or critical vulnerability that has a fix. The first scan, of the `v0.6.0-rc.2` image, found seven, all in the base image's `perl-base` package and none in the server binary; the image build now applies Debian's security updates. An audit of the Rust dependencies remains. |
-| F20: release gates | Partial | Linux cgo/race/vet/build/format checks, Rust and dashboard tests, Go/npm scans, chart assertions, and production-mode kind startup workflow added. CI runs for pull requests and for pushes to `main`; a commit of the development branch is checked on request, which is done for the commit of a release. A fault campaign (`tests/acceptance`) now runs there too: three server processes, producers and a consumer group through the client library, a ledger of every acknowledged event, and a comparison of the replicas' logs at the end. The job that builds the image also cuts links between three containers of it. The acceptance tests also run three times over every night on `main`, on processes and on containers, and a release gets binaries for Linux, macOS and Windows, built from its tag and started before they are attached (eighth batch). Remaining: branch protection that makes the jobs required. |
+| F20: release gates | Core fix implemented | Linux cgo/race/vet/build/format checks, Rust and dashboard tests, Go/npm scans, chart assertions, and production-mode kind startup workflow added. CI runs for pull requests and for pushes to `main`; a commit of the development branch is checked on request, which is done for the commit of a release. A fault campaign (`tests/acceptance`) now runs there too: three server processes, producers and a consumer group through the client library, a ledger of every acknowledged event, and a comparison of the replicas' logs at the end. The job that builds the image also cuts links between three containers of it. The acceptance tests also run three times over every night on `main`, on processes and on containers, and a release gets binaries for Linux, macOS and Windows, built from its tag and started before they are attached (eighth batch). The five jobs are required checks on `main` since 2026-10-13, for administrators as well. Remaining: the image that is published is scanned by hand, not by a step of the release. |
 
 The first pushed production-checks run found reachable decoder advisories in the
 archived `hamba/avro` module. The follow-up migrates schema validation to
@@ -55,13 +54,13 @@ a reachable call. The historical F19 findings below describe the original audite
 dependency; CI now scans every image it builds, and the F19 row says what the scans found.
 
 The supported scope and the acceptance and loss contract are now set in
-[the release requirements](PRODUCTION_RELEASE.md), which also lists what a final
-`v0.6.0` still needs. The "Remaining" part of each row above is what is still
-open for that finding.
+[the release requirements](PRODUCTION_RELEASE.md), which also lists what
+`v0.6.0` was released without. The "Remaining" part of each row above is what
+is still open for that finding.
 
 ### Ninth hardening batch — 2026-10-13
 
-This batch is on the development branch and in no release. The verdict above
+This batch is in `v0.6.0`; `v0.6.0-rc.4` does not have it. The verdict above
 is unchanged. The table row for F18 describes what moved.
 
 - **The topology shows each partition's in-sync replicas as its leader has
