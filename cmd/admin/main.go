@@ -52,6 +52,9 @@ var (
 	cgClient types.ConsumerGroupServiceClient
 	// adminClient is the AdminService client after dial.
 	adminClient types.AdminServiceClient
+	// raftClient is the client of the service the nodes use with each other,
+	// for the commands that are asked on that port.
+	raftClient types.RaftServiceClient
 )
 
 func main() {
@@ -139,6 +142,7 @@ func dial() error {
 	partClient = types.NewPartitionServiceClient(conn)
 	cgClient = types.NewConsumerGroupServiceClient(conn)
 	adminClient = types.NewAdminServiceClient(conn)
+	raftClient = types.NewRaftServiceClient(conn)
 	return nil
 }
 
@@ -304,7 +308,69 @@ func clusterCmd() *cobra.Command {
 		},
 	}
 
-	cmd.AddCommand(statusCmd)
+	votersCmd := &cobra.Command{
+		Use:   "voters",
+		Short: "List the nodes that count towards a majority in Raft, as the node asked has them",
+		Long: `List the nodes that count towards a majority in Raft.
+
+Ask a node on the port the nodes use with each other (--cluster-grpc-addr),
+with the cluster's certificates:
+
+  cronos-admin cluster voters --server node-1:7947 --tls \
+    --tls-ca ca.crt --tls-cert tls.crt --tls-key tls.key`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			resp, err := raftClient.Status(ctx, &types.RaftStatusRequest{})
+			if err != nil {
+				return err
+			}
+			role := "does not coordinate the cluster"
+			if resp.GetIsLeader() {
+				role = "coordinates the cluster"
+			}
+			fmt.Printf("Node %s %s (term %d).\n", resp.GetNodeId(), role, resp.GetTerm())
+			fmt.Printf("%d nodes count towards a majority:\n", len(resp.GetPeers()))
+			for _, peer := range resp.GetPeers() {
+				fmt.Printf("  %s\n", peer)
+			}
+			return nil
+		},
+	}
+
+	removeNodeCmd := &cobra.Command{
+		Use:   "remove-node [node-id]",
+		Short: "Remove a node that is gone for good from the cluster",
+		Long: `Remove a node that is gone for good from the cluster.
+
+A node that dies stays a member until it is removed, and keeps counting
+towards what a majority is. Remove a node that will not come back, after
+its replacement has joined: a cluster of three that gets a fourth node in
+place of a dead one needs three of four until the dead one is removed.
+
+The node must not be running: one that runs joins again. Any node can be
+asked, on the port the nodes use with each other (--cluster-grpc-addr),
+with the cluster's certificates:
+
+  cronos-admin cluster remove-node node-3 --server node-1:7947 --tls \
+    --tls-ca ca.crt --tls-cert tls.crt --tls-key tls.key`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			resp, err := raftClient.Leave(ctx, &types.RaftLeaveRequest{NodeId: args[0]})
+			if err != nil {
+				return err
+			}
+			if !resp.GetSuccess() {
+				return fmt.Errorf("node %s was not removed: %s", args[0], resp.GetError())
+			}
+			fmt.Printf("Node %s was removed from the cluster.\n", args[0])
+			return nil
+		},
+	}
+
+	cmd.AddCommand(statusCmd, votersCmd, removeNodeCmd)
 	return cmd
 }
 

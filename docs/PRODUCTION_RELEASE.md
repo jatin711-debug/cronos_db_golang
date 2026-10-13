@@ -100,6 +100,34 @@ two that are left. Production mode refuses to start a node without
 `--cluster-seeds`, because such a node creates a cluster whenever it has no
 state.
 
+A node that is lost for good is removed from the cluster by hand
+(development branch; not in `v0.6.0-rc.3`). Until then it stays a member,
+which is what lets a node come back, and it keeps counting towards what a
+majority is in Raft: a cluster of four with one node lost needs three of
+four, which is every node that still runs. Once the node is certain not to
+return, from a machine that has the cluster's certificates:
+
+```
+cronos-admin cluster remove-node <node-id> --server <any-node>:<cluster-grpc-port> \
+  --tls --tls-ca ca.crt --tls-cert tls.crt --tls-key tls.key
+```
+
+Any node can be asked; one that does not coordinate the cluster passes the
+request on. A node that is running is refused: it would join again at once.
+`cronos-admin cluster voters` lists the nodes that count. A removed node that
+is started again with its data joins as a member again. In
+`TestLostNodeIsRemoved` one of four nodes is lost and removed, and the
+cluster then loses a second node and carries on with two of three.
+
+A node cannot be added to a running cluster for applications that are
+already connected. Partition metadata names a leader by its node ID, and a
+client turns that into an address only for the nodes it was started with or
+was given in `NodeIDToAddress`. A node that joins later takes over leadership
+of some partitions, and clients that do not know its address cannot publish
+to those. Replace a node under the name and address of the one it replaces,
+as a StatefulSet does, and restart or reconfigure clients before growing a
+cluster.
+
 The HTTP port (health, metrics, dashboard and the admin API) is served over
 TLS with `--http-tls-enabled`, with the certificate of the client port
 (`--tls-cert-file`, `--tls-key-file`). The production values of the chart
@@ -260,6 +288,7 @@ second; the last column says what they do not show.
 | The replicas of a partition hold the same log | `TestFaultCampaign` compares them entry for entry | |
 | A partition takes publishes again within 90 seconds of its leader's death | The bound the campaign enforces | Typical times; behavior under load |
 | Any node, the first included, can be replaced with an empty one | `TestFaultCampaign`, `TestFirstNodeReplaced`, the kind job on the chart | Two at once |
+| A node that is lost for good is removed, and no longer counts towards a majority (development branch; not in `v0.6.0-rc.3`) | `TestLostNodeIsRemoved`: one of four nodes lost and removed through `cronos-admin`, then a second node killed | A node added to a running cluster: clients that are connected do not learn its address |
 | A cluster that is lost entirely comes back from its nodes' backups with everything acknowledged before the earliest of them | `TestClusterRestoredFromBackups` | Restore to a point between backups; getting backups off the node, which is the operator's to arrange |
 | Producers that outrun the cluster are refused, and no node dies of it | `TestOverloadIsRefusedAndSurvived` | Load at production sizes |
 | A node comes back with more waiting for consumers than it has memory, and delivers it (development branch; not in `v0.6.0-rc.3`) | `TestRestartWithABacklogLargerThanMemory`; `TestRestartInContainersWithABacklogLargerThanTheirMemory`, with a limit of 384 MiB that the kernel enforces and a backlog of 1 GiB | Backlogs beyond a gigabyte; events not yet due, which are held in memory for the hot window |

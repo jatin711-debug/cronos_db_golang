@@ -171,6 +171,32 @@ func (n *RaftNode) Leave(nodeID string) error {
 	return nil
 }
 
+// Voter is a node that counts towards a majority in Raft.
+type Voter struct {
+	ID      string
+	Address string
+}
+
+// Voters returns the nodes of the Raft configuration, as this node has it.
+func (n *RaftNode) Voters() ([]Voter, error) {
+	future := n.raft.GetConfiguration()
+	if err := future.Error(); err != nil {
+		return nil, fmt.Errorf("get raft configuration: %w", err)
+	}
+	servers := future.Configuration().Servers
+	voters := make([]Voter, 0, len(servers))
+	for _, srv := range servers {
+		voters = append(voters, Voter{ID: string(srv.ID), Address: string(srv.Address)})
+	}
+	return voters, nil
+}
+
+// SetOnNodeRemoved registers what is to happen on this node when a node is
+// removed from the cluster.
+func (n *RaftNode) SetOnNodeRemoved(fn func(nodeID string)) {
+	n.fsm.SetOnNodeRemoved(fn)
+}
+
 // HasState reports whether this node belongs to a cluster: it created one or
 // was added to one, and has the log or a snapshot to show for it.
 func (n *RaftNode) HasState() bool {
@@ -357,6 +383,17 @@ type ClusterFSM struct {
 	// onPartitionChange is called after a partition assignment is applied. It
 	// runs on Raft's apply path and must not block.
 	onPartitionChange func()
+	// onNodeRemoved is called, on a goroutine of its own, after the removal of
+	// a node is applied.
+	onNodeRemoved func(nodeID string)
+}
+
+// SetOnNodeRemoved registers what is to happen on this node when a node is
+// removed from the cluster.
+func (f *ClusterFSM) SetOnNodeRemoved(fn func(nodeID string)) {
+	f.mu.Lock()
+	f.onNodeRemoved = fn
+	f.mu.Unlock()
 }
 
 // SetOnPartitionChange registers a non-blocking callback for applied
@@ -456,6 +493,9 @@ func (f *ClusterFSM) applyRemoveNode(payload json.RawMessage) interface{} {
 	f.state.UpdatedAt = time.Now()
 
 	log.Printf("[FSM] Removed node %s", nodeID)
+	if f.onNodeRemoved != nil {
+		go f.onNodeRemoved(nodeID)
+	}
 	return nil
 }
 
