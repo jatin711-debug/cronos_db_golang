@@ -177,7 +177,7 @@ and killed while it is refilled, the whole cluster killed). It fails if an
 acknowledged event was not delivered, if one arrived before its time, or if
 the replicas of a partition do not end with the same log. Its nodes speak
 mutual TLS with each other, as production nodes do. Run it locally with
-`go test -tags acceptance -count=1 -timeout 20m ./tests/acceptance/`; it needs
+`go test -tags acceptance -count=1 -timeout 25m ./tests/acceptance/`; it needs
 about 500 MB of memory. It stops and kills processes, and it publishes about
 60 events a second, so it says nothing about behavior under load.
 
@@ -192,8 +192,8 @@ for the other faults. It runs in the `production-chart-startup` job, which
 has built the image, and locally with
 `CRONOS_IMAGE=<image> go test -tags acceptance -run TestNetworkPartitions ./tests/acceptance/`.
 
-The same job restores a whole cluster from backups
-(`TestClusterRestoredFromBackups`): three nodes back up while publishes
+The `fault-campaign` job also restores a whole cluster from backups
+(`TestClusterRestoredFromBackups`, on processes): three nodes back up while publishes
 arrive, all three are destroyed, each is restored from its own backup, and
 what was acknowledged before the backups is there and is delivered at its
 time. Backups go to `backups` under the data directory unless `--backup-dir`
@@ -318,8 +318,11 @@ all the same. A final `v0.6.0` still needs:
   only been run on megabytes.
 - Throughput and latency measured on the hardware a deployment will use, with
   the memory that the backlog it allows needs.
-- A scan of the image that is published. CI scans the image it builds from
-  the same Dockerfile, not the published one.
+- A scan of the image that is published, as a step of the release. CI scans
+  the image it builds from the same Dockerfile, not the published one. The
+  `v0.6.0-rc.4` image was scanned by hand before it was pushed (Trivy
+  0.75.0, no HIGH or CRITICAL vulnerability that has a fix); nothing does it
+  for every release yet.
 
 Known limits of what is released are in the
 [audit](PRODUCTION_AUDIT_2026-09-27.md): log entries are removed from the

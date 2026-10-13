@@ -13,7 +13,10 @@ The audit module records important actions and security-relevant requests for co
 ## Main Flow
 
 1. Audit logger is created during startup.
-2. API interceptor writes request-level audit events.
+2. The unary and stream audit interceptors write request-level audit events,
+   but only when authentication is on (`--auth-enabled`). Without it every
+   subject is anonymous and the interceptors record nothing
+   (`internal/api/grpc_server.go`).
 3. Records are appended to audit files with structured payloads.
 
 ## Production Decisions

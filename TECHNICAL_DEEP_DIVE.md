@@ -1,5 +1,15 @@
 # CronosDB Technical Deep-Dive: Algorithms, Data Structures & Design Patterns
 
+> **Note: historical document.** This was written in July 2026 as a theory
+> manual. Its explanations of general techniques (timing wheels, bloom
+> filters, consistent hashing, WAL design) still hold, but its replication,
+> membership, client and recovery sections describe an older version of
+> CronosDB. A few statements known to be wrong have been corrected in place;
+> others may remain. For current behavior read
+> [ARCHITECTURE.md](ARCHITECTURE.md),
+> [docs/architecture/features/](docs/architecture/features/) and
+> [docs/PRODUCTION_RELEASE.md](docs/PRODUCTION_RELEASE.md).
+
 > **Purpose**: This document explains every technical concept, algorithm, and data structure used in CronosDB so you can understand the codebase before reading it. Think of this as the "theory manual" that makes the "code manual" readable.
 
 ---
@@ -30,7 +40,7 @@
 **CronosDB**:
 - Publish message with `schedule_ts = 1719846000000` (some future timestamp)
 - System stores it durably
-- **Exactly** at that timestamp, it delivers to consumers
+- At that timestamp, within one scheduler tick (10 ms by default), it delivers to consumers, at least once
 - Think: "distributed cron + message queue + database"
 
 **Why this matters**: Enables scheduled tasks, delayed jobs, temporal workflows, event sourcing with time-based triggers.
@@ -89,10 +99,13 @@ routing key; it is only a fallback on internal partition-creation paths).
 
 ```
 segments/
-  segment-0000000000000000000.log   (offsets 0-99999)
-  segment-0000000000000100000.log   (offsets 100000-199999)
-  segment-0000000000000200000.log   (offsets 200000+, ACTIVE)
+  00000000000000000000.log   (offsets 0-99999)
+  00000000000000100000.log   (offsets 100000-199999)
+  00000000000000200000.log   (offsets 200000+, ACTIVE)
 ```
+
+Each file is named after its first offset, zero-padded to 20 digits
+(`%020d.log`).
 
 **Benefits**:
 - **Compaction**: Delete entire segments when all data is consumed
@@ -222,12 +235,12 @@ Overflow levels cascade with span = tickMs × wheelSize per level
 (Historical illustrations sometimes used 100ms × 60; the product is still a 6s root span.)
 ```
 
-**How it works**:
-1. Event scheduled for 5 seconds → Level 0, slot 50
-2. Event scheduled for 5 minutes → Level 1, slot 50
-3. Event scheduled for 5 hours → Level 2, slot 50
+**How it works** (defaults: 10 ms tick, 600 slots; examples assume the hand is at slot 0):
+1. Event scheduled for 5 seconds → Level 0, 500 ticks ahead (slot 500)
+2. Event scheduled for 5 minutes → Level 1 (6 s per slot), slot 50
+3. Event scheduled for 5 hours → beyond the hot window (60 minutes by default), so it goes to the cold store and is moved into the wheel by the hydrator as it gets close
 
-**Cascade**: When Level 0 completes a full rotation (60 ticks = 6 seconds), events from Level 1's current slot "cascade" down to Level 0.
+**Cascade**: When Level 0 completes a full rotation (600 ticks = 6 seconds), events from Level 1's current slot "cascade" down to Level 0.
 
 ```
 Level 0 rotation complete → Take Level 1 slot 0 → Recalculate positions in Level 0 → Insert
@@ -369,15 +382,12 @@ Tier 2: PebbleDB (persistent, exact)
 - Go's goroutines + GC = overhead for lock-free bit operations
 - Rust: `AtomicU64` with `fetch_or` = true lock-free operations
 - Rayon: Parallel batch processing (1000 items at once)
-- 5-10x faster than pure Go
+- Speed: not measured on its own. In the recorded three-node runs the pure-Go build was not slower end to end ([CLUSTER_PERFORMANCE_VALIDATION_2026-09-29.md](docs/CLUSTER_PERFORMANCE_VALIDATION_2026-09-29.md)). Builds without cgo, including the release binaries, use the pure-Go filter.
 
-**CGO FFI**: Go calls Rust functions directly.
-```go
-// Go side
-// #cgo LDFLAGS: -lcronos_dedup
-// extern void bloom_add(const char* key);
-import "C"
-C.bloom_add(C.CString(key))
+**CGO FFI**: Go calls Rust functions directly. The filter is an opaque pointer, and keys are passed as pointer and length:
+```c
+// Rust export (internal/dedup/rust/src/lib.rs)
+void bloom_add(BloomFilter* ptr, const uint8_t* key_ptr, size_t key_len);
 ```
 
 **In code**: `internal/dedup/rust_bloom_unix.go`, `internal/dedup/rust/src/lib.rs`
@@ -471,7 +481,7 @@ Process loop (every 100ms):
 **Solution**: After max retries, send to DLQ.
 
 ```
-DLQ: Append-only binary segments (same format as WAL)
+DLQ: Append-only binary segments in their own format (magic "CRNDLQ1", 64 MB per segment; internal/delivery/dlq_segment.go)
   → Can be inspected later
   → Can be replayed
   → Can be archived
@@ -546,13 +556,11 @@ Node A: "I'm alive, here's my info"
 3. **No ack**: Ask 2 other nodes to ping it indirectly
 4. **Still no ack**: Mark as suspect, then dead
 
-**Why SWIM?**
-- No central coordinator
-- Fault-tolerant (messages can be lost)
-- Converges quickly (O(log N) rounds)
-- Used by HashiCorp Memberlist (same as Consul, Nomad)
+**SWIM in general** (as in HashiCorp memberlist, used by Consul and Nomad): no central coordinator, tolerates lost messages, converges in O(log N) rounds.
 
-**In code**: `internal/cluster/membership.go`, `internal/cluster/memberlist_adapter.go`
+**What CronosDB actually uses**: not SWIM. The server runs its own membership protocol over TCP: every node sends heartbeats every 1 s, and a node not heard from for 5 s is marked failed. In production these connections, like Raft's, use mutual TLS with the replication certificates, which are re-read from disk without a restart. `--use-memberlist` is refused at start, in every mode, so the memberlist adapter in `internal/cluster/memberlist_adapter.go` is never reached.
+
+**In code**: `internal/cluster/membership.go`, `internal/cluster/transport.go`, `internal/cluster/manager.go`
 
 ### 6.3 Replication: Leader-Follower
 
@@ -725,8 +733,10 @@ Same concept as server-side, but for client → server connections.
 ```
 Node A keeps failing → Circuit opens → Stop sending to Node A
 → Try Node B instead
-→ After 30s, try Node A again (half-open)
+→ After the breaker timeout, try Node A again (half-open)
 ```
+
+Defaults: 10 s for the client (`pkg/client/config.go`); 5 s for the producer, whose breaker is disabled by default (`pkg/client/producer.go`).
 
 **In code**: `pkg/client/internal/circuitbreaker/`
 
@@ -734,9 +744,11 @@ Node A keeps failing → Circuit opens → Stop sending to Node A
 
 **Concept**: Send request to primary. If it takes too long, send to backup. Use whichever responds first.
 
+**In CronosDB**: hedging is disabled by default (`hedging.DefaultPolicy`: `Enabled: false`). It cannot help publishes: only a partition's leader accepts them, and any other node refuses.
+
 ```
 Send to Node A (primary)
-Wait 15ms (default hedge delay)...
+Wait 15ms (hedge delay, when enabled)...
 Node A hasn't responded? Send to Node B (hedge)
 Node B responds first? Use B's response, cancel A
 ```
@@ -754,12 +766,13 @@ Node B responds first? Use B's response, cancel A
 
 **Solution**: Backoff + jitter.
 
+CronosDB client defaults (`pkg/client/internal/retry/policy.go`): 4 attempts, `MinBackoff` 50 ms, `MaxBackoff` 2 s, ±20% jitter. Retry n waits `50ms × 2^n`, capped at 2 s (as the producer uses it):
+
 ```
-Attempt 1: Wait 0ms
-Attempt 2: Wait 100ms × random(0.5-1.5) = 120ms
-Attempt 3: Wait 200ms × random(0.5-1.5) = 180ms
-Attempt 4: Wait 400ms × random(0.5-1.5) = 350ms
-...
+Attempt 1: no wait
+Attempt 2: about 100ms (±20%)
+Attempt 3: about 200ms (±20%)
+Attempt 4: about 400ms (±20%)
 ```
 
 **Why jitter?**
@@ -865,23 +878,11 @@ atomic.AddInt32(&credits, -1)
 
 **Used in**: Credit tracking, in-flight counters, circuit breaker state, bloom filter bits
 
-### 9.5 Pre-created Segments
+### 9.5 Segment Rotation (pre-creation removed)
 
-**Problem**: When active segment fills up, creating a new segment takes time (file creation, header write).
+An earlier version created the next segment in the background before the active one was full. That was removed: a segment named in advance could get its first offset wrong. Rotation is now synchronous: when the active segment is full, `rotateSegment` creates the next one, named after the last offset actually appended plus one, while holding the WAL lock. The write that triggers it pays for the file creation.
 
-**Solution**: Create the next segment in background when current segment is 90% full.
-
-```
-Segment 2 is active (at 90% capacity)
-Background goroutine: Create Segment 3, write header
-Segment 2 fills up → Instant swap to Segment 3 (already ready)
-```
-
-**Why?**
-- Zero-latency rotation
-- No pause in write path
-
-**In code**: `internal/storage/wal.go`
+**In code**: `rotateSegment` in `internal/storage/wal.go`
 
 ---
 
@@ -961,7 +962,7 @@ Segment 2 fills up → Instant swap to Segment 3 (already ready)
 | `internal/cluster/hashring.go` | Consistent hashing with vnodes | Minimal data movement on node changes |
 | `internal/replication/protocol.go` | *(removed)* | Replaced by `ReplicationService.Append / Sync / Snapshot` over gRPC (`internal/replication/follower.go`, `internal/api/replication_server.go`) |
 | `internal/replication/follower.go` | `Follower.InstallSnapshot`, `dialCredentials` | Bulk snapshot install + per-file CRC32 + atomic dir swap; mTLS-aware |
-| `internal/replication/mtls.go` | `BuildClientTLSConfig`, `BuildServerTLSConfig` | Optional CA-pinned mTLS on the internal replication channel |
+| `internal/replication/mtls.go` | `BuildClientTLSConfig`, `BuildServerTLSConfig` | CA-pinned mTLS on the internal replication channel; required in production, also used for membership and Raft, certificates reloaded without a restart |
 | `pkg/utils/hash.go` | FNV-1a, CRC32 | Fast hashing for routing/integrity |
 | `pkg/client/internal/connpool/` | Connection pooling | Reuse expensive connections |
 | `pkg/client/internal/hedging/` | Request hedging | Reduce tail latency |
@@ -983,7 +984,7 @@ Segment 2 fills up → Instant swap to Segment 3 (already ready)
 | Circuit breaker | Atomic state machine | Instant isolation, no goroutine leaks |
 | Retry heap | Min-heap by timestamp | O(log N) retries, responsive timeoutLoop |
 | Raft consensus | HashiCorp Raft | Strong metadata consistency |
-| Custom replication | gRPC (internal listener) | Throughput over consistency for data |
+| Custom replication | gRPC (internal listener) | Writes acknowledged by a quorum (min-insync); without it they fail |
 | Consistent hashing | SHA-256 + 2048 vnodes | Minimal data movement |
 | FNV-1a routing | Fast non-cryptographic hash | 5ns vs 400ns for SHA-256 |
 | sync.Pool | Object reuse | Near-zero GC pressure |

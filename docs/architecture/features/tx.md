@@ -1,8 +1,16 @@
 # Transactions (2PC) Architecture
 
+> **Experimental. Not supported in production.** Transactions are disabled by
+> default. The `TransactionService` is registered only when the server runs
+> with `--dev --experimental-features`; without `--dev`,
+> `--experimental-features` is refused at start ("transactions, online
+> splitting and cross-region replication are not supported in production",
+> `internal/config/config.go`). Nothing on this page is a supported guarantee.
+
 ## Purpose
 
-Transaction module coordinates prepare and commit phases for multi-step consistency workflows.
+The transaction module is an experimental two-phase commit coordinator: it
+runs prepare and commit phases across partition participants.
 
 ## Key Files
 
@@ -17,12 +25,21 @@ Transaction module coordinates prepare and commit phases for multi-step consiste
 3. Commit path applies phase-2 commit operations from prepared state.
 4. Recovery path replays durable transaction log on restart.
 
-## Production Decisions
+## Design of the Experimental Implementation
 
-- Prepare and commit are explicitly separated to avoid phase conflation.
-- State transitions are persisted (`tx_log.json`) for restart safety.
-- `tx.NewHandler(pm)` injects the **PartitionManager** into the coordinator so gRPC Begin/Prepare/Commit write real partition participants (not PM-nil no-ops).
-- Idempotent recovery rehydrates prepared/committing transactions after crash.
+These describe what the code does. They are not tested or supported as
+guarantees.
+
+- Prepare and commit are separate phases.
+- State transitions are written to `tx_log.json` in the data directory, so the
+  coordinator can find in-flight transactions after a restart.
+- `tx.NewHandler(pm)` gives the coordinator the **PartitionManager**, so
+  Begin/Prepare/Commit write to real partitions. `cmd/api/main.go` creates it
+  only with `--experimental-features`.
+- A recovery loop (every 30 s) re-drives Commit for Prepared and Committing
+  transactions and aborts Pending ones past their timeout. Whether this holds
+  up across crashes, failovers and replicated partitions has not been
+  verified.
 
 ## Debug Pointers
 

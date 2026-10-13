@@ -118,9 +118,11 @@ validation:
 
 nav:
   - Home: index.md
+  - Release:
+      - Release Requirements: PRODUCTION_RELEASE.md
+      - Production Audit: PRODUCTION_AUDIT_2026-09-27.md
   - Architecture:
       - Overview: ARCHITECTURE.md
-      - Technical Deep Dive: TECHNICAL_DEEP_DIVE.md
       - Developer Guide: DEVELOPER_ARCHITECTURE_GUIDE.md
       - Learn System Design: system-design/README.md
       - By Feature:
@@ -148,8 +150,13 @@ nav:
           - Transactions (2PC): architecture/features/tx.md
   - Operations:
       - Docker: DOCKER.md
-      - Performance & Benchmarks: PERFORMANCE.md
+      - Three-node publish validation (2026-09-29): CLUSTER_PERFORMANCE_VALIDATION_2026-09-29.md
+      - Maintenance validation (2026-09-29): MAINTENANCE_VALIDATION_2026-09-29.md
   - Project:
-      - Remediation Plan: plan.md
       - Contributing: CONTRIBUTING.md
       - Code of Conduct: CODE_OF_CONDUCT.md
+  - History:
+      - Remediation Plan (July 2026): plan.md
+      - Technical Deep Dive (July 2026): TECHNICAL_DEEP_DIVE.md
+      - Performance Baseline (July 2026): PERFORMANCE.md
+      - Audit Probes: audit-probes/README.md

@@ -1,12 +1,22 @@
 # CronosDB — Correctness & Reliability Remediation Plan
 
+> **Historical document.** This plan was worked through in July 2026 and has not
+> been kept up since. It is superseded by the
+> [production-readiness audit](docs/PRODUCTION_AUDIT_2026-09-27.md), whose status
+> table and hardening batches are current, and by the
+> [release requirements](docs/PRODUCTION_RELEASE.md). Behaviour described below
+> may have changed since; for example, a restart no longer delivers events that
+> came due while the node was down at once (since `v0.6.0-rc.4` they stay in the
+> log for their subscriptions to read), and CI runs again (`production-checks`,
+> `nightly`, `release-binaries`). It is kept as a record of what was fixed and why.
+
 Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` won't-fix/deferred
 
 > **Authority note:** Trust the **Progress summary** below over individual item
 > checkboxes later in this file. Historical body items may still show `[ ]` even
 > after the fix landed; they are retained as audit notes, not a live backlog.
-> Architecture docs (`ARCHITECTURE.md`, `docs/architecture/*`) describe **current**
-> runtime behavior after Phases 1–5.
+> Architecture docs (`ARCHITECTURE.md`, `docs/architecture/*`) describe current
+> runtime behavior, which has moved well past Phases 1–5.
 
 ## Progress summary (this pass)
 - **Phase 1 (storage data-loss): DONE** — 1.1 restart prealloc corruption, 1.2 rotated-segment
@@ -22,9 +32,10 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` won't-fix/
 - **Phase 5 (client SDK): DONE** — 5.1 CB threshold-0 disabled, 5.2 hedging first-success,
   5.3 capability probes round-trip, 5.4 async send/close race hardened (RWMutex).
 - **Phase 6 (observability/CI): partially done** — 6.1 metrics/alert fixes landed; CI was
-  restored (0868cbc) but **removed again** in `0861b0a` — `.github/workflows` is currently
-  absent on both `main` and `developement`, so **6.2 is open again**.
-  Remaining: restore CI, flaky client test stabilization, lag-driven snapshot auto-trigger.
+  restored (0868cbc) and removed again in `0861b0a`, as of July 2026. It has since been
+  restored for good: `.github/workflows` holds `ci.yml` (`production-checks`), `nightly.yml`,
+  `release.yml` and `docs.yml` (audit F20). Remaining then: flaky client test stabilization,
+  lag-driven snapshot auto-trigger.
 
 Known pre-existing flaky test: `pkg/client` →
 `TestSendAsyncContextCancellation` fails intermittently in some full-suite runs.

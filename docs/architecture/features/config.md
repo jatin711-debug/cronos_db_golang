@@ -20,30 +20,31 @@ The config module defines defaults, merges runtime settings, and supports safe i
 ## Production Decisions
 
 - `--dev` disables production security requirements and is intended for local development only.
-- Production validation requires TLS, JWT auth **and** `--auth-policy-file`, encryption at rest, replication mTLS, `--replication-factor>=3`, and `--min-insync-replicas>=2` (unless `--dev`).
+- Production validation (`ValidateConfig`, unless `--dev`) requires TLS, JWT auth **and** `--auth-policy-file`, encryption at rest with a key file, replication mTLS, `--replication-factor>=3`, `--min-insync-replicas>=2`, `--fsync-mode` `batch` or `every_event`, and `--cluster-seeds` when `--cluster` is set. It refuses `--experimental-features`, `--exactly-once-commits`, and a `--pprof-addr` that is not a loopback address.
 - Auth flags: `--auth-enabled`, `--auth-jwt-secret`, `--auth-jwt-public-key`, `--auth-policy-file` (there is **no** `--auth-token` static token flag).
 - Key defaults (`internal/config/defaults.go`): fsync `batch`, tick **10ms**, wheel **600**, virtual nodes **2048**, retention max-age **168h**, minISR **1** (prod forces ≥2).
-- Only a subset of flags has `CRONOS_*` environment overrides (see table below); the rest are flag-only. This matters for container/Helm deployments that configure via env.
-- Helm `config.dev` defaults to `true`; `values-production.yaml` disables dev and requires TLS/auth/encryption/replication-mTLS secrets. **Known gap:** the chart's ConfigMap sets env vars the binary does not read (e.g. `CRONOS_PARTITION_COUNT`, `CRONOS_FSYNC_MODE`), and there is no `CRONOS_AUTH_POLICY_FILE` env var, so `values-production.yaml` currently fails validation at boot.
-- Feature flags gate risky behavior (`--follower-reads`, `--exactly-once-commits`, tracing, TLS, auth).
+- Every flag can also be set by an environment variable `CRONOS_<FLAG>` (flag name upper-cased, `-` replaced by `_`); an explicit command-line flag takes precedence. See [Environment Variables](#environment-variables).
+- Helm `config.dev` defaults to `true`; `values-production.yaml` disables dev and requires TLS/auth/encryption/replication-mTLS secrets. The chart configures the binary through `CRONOS_*` variables (ConfigMap and StatefulSet), including `CRONOS_AUTH_POLICY_FILE`.
+- Feature flags gate behavior that is off by default (`--follower-reads`, tracing, TLS, auth). `--experimental-features` enables transactions, online partition splitting and cross-region replication; it requires `--dev`. `--exactly-once-commits` is also refused in production.
 - SIGHUP reload updates selected safe runtime fields only; data-dir/partition-count/seeds still require restart. SIGHUP is a no-op on Windows.
 - **Snapshot threshold:** `--snapshot-catchup-threshold` (default `10000`) is currently a **dead config key** — parsed but never read anywhere; `SyncPartitionFromLeader` installs snapshots unconditionally. **Known limitation (documented):** automatic mid-flight lag-driven InstallSnapshot is not wired (connected followers use incremental catch-up only). Full write-up: [replication.md](replication.md), [ARCHITECTURE.md § Known Limitations](../../../ARCHITECTURE.md#known-limitations).
 
 ## Full Flag Reference
 
-Defaults from `internal/config/defaults.go` unless noted. Flags marked **env** have a `CRONOS_*` override (see next section).
+Defaults from `internal/config/defaults.go` unless noted. Every flag has a `CRONOS_*` environment variable (see [Environment Variables](#environment-variables)). Flags marked **reload-only env** are also re-read from the environment on SIGHUP.
 
 ### Core
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--node-id` | *(empty)* | Unique node identifier (**env**) |
-| `--data-dir` | `./data` | Data directory for WAL, dedup, offsets, snapshots (**env**) |
-| `--grpc-addr` | `:9000` | Public gRPC listen address (**env**) |
-| `--http-addr` | `:8080` | HTTP health/metrics/dashboard address (**env**) |
+| `--node-id` | *(empty)* | Unique node identifier |
+| `--data-dir` | `./data` | Data directory for WAL, dedup, offsets, snapshots |
+| `--grpc-addr` | `:9000` | Public gRPC listen address |
+| `--http-addr` | `:8080` | HTTP health/metrics/dashboard address |
 | `--partition-count` | `1` | Number of partitions (standalone mode) |
 | `--replication-factor` | `1` | Replicas per partition (prod requires ≥3) |
-| `--dev` | `false` | Developer mode: bypasses production validation (**env**) |
+| `--dev` | `false` | Developer mode: bypasses production validation |
+| `--experimental-features` | `false` | Enables transactions, online partition splitting and cross-region replication. Requires `--dev`; refused in production |
 
 ### Storage
 
@@ -54,9 +55,9 @@ Defaults from `internal/config/defaults.go` unless noted. Flags marked **env** h
 | `--fsync-mode` | `batch` | `every_event` \| `batch` \| `periodic`. Production mode refuses `periodic`: it acknowledges before the data is on disk |
 | `--flush-interval` | `1000` | Background flush interval (ms) for batch/periodic fsync |
 | `--compaction-interval` | `10m` | How often a partition looks for log segments whose events are all finished and removes them |
-| `--backup-interval` | `1h` | How often the node backs up its partitions, at wall-clock multiples of the interval. `0` = no scheduled backups (**env**) |
-| `--backup-retention` | `168h` | How long a backup is kept. `0` = for good (**env**) |
-| `--backup-dir` | *(empty)* | Where backups go; default `backups` under `--data-dir` (**env**) |
+| `--backup-interval` | `1h` | How often the node backs up its partitions, at wall-clock multiples of the interval. `0` = no scheduled backups |
+| `--backup-retention` | `168h` | How long a backup is kept. `0` = for good |
+| `--backup-dir` | *(empty)* | Where backups go; default `backups` under `--data-dir` |
 | `--retention-max-age-hours` | `168` | Delete WAL segments older than this (0 = disable) |
 | `--retention-max-size-gb` | `0` | Size-based WAL retention in GB (0 = disable) |
 
@@ -89,7 +90,7 @@ Defaults from `internal/config/defaults.go` unless noted. Flags marked **env** h
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--dedup-ttl` | `168` | Dedup claim retention (hours) |
+| `--dedup-ttl` | `168` | Dedup claim retention (hours). Env: `CRONOS_DEDUP_TTL_HOURS` |
 | `--bloom-capacity` | `100000000` | Bloom filter capacity per partition |
 
 ### Replication & Cluster
@@ -98,13 +99,13 @@ Defaults from `internal/config/defaults.go` unless noted. Flags marked **env** h
 |------|---------|-------------|
 | `--replication-batch` | `100` | Events per replication batch |
 | `--replication-timeout` | `10s` | Replication RPC timeout |
-| `--min-insync-replicas` | `1` | Min ISR **including leader** to ack a write (prod ≥2) (**env**) |
-| `--snapshot-catchup-threshold` | `10000` | **Dead config key** — parsed, never read (**env**) |
-| `--cluster` | `false` | Enable cluster mode (**env**) |
-| `--cluster-seeds` | *(empty)* | Comma-separated membership addresses of the cluster's nodes. Name every node, on every node; production mode requires it (**env**) |
-| `--cluster-bootstrap` | `false` | This node creates the cluster, if it has no state and no other node in `--cluster-seeds` belongs to one. Give it to exactly one node (**env**) |
-| `--cluster-expected-nodes` | `0` | Nodes a new cluster starts with; first partition leaders are assigned as soon as that many are up. `0` = unknown (**env**) |
-| `--cluster-formation-wait` | `5s` | When the expected nodes are unknown or not all up: how long membership must be unchanged before first leaders are assigned. `0` assigns at once (**env**) |
+| `--min-insync-replicas` | `1` | Min ISR **including leader** to ack a write (prod ≥2). Env: `CRONOS_MIN_IN_SYNC_REPLICAS` |
+| `--snapshot-catchup-threshold` | `10000` | **Dead config key** — parsed, never read |
+| `--cluster` | `false` | Enable cluster mode |
+| `--cluster-seeds` | *(empty)* | Comma-separated membership addresses of the cluster's nodes. Name every node, on every node; production mode requires it |
+| `--cluster-bootstrap` | `false` | This node creates the cluster, if it has no state and no other node in `--cluster-seeds` belongs to one. Give it to exactly one node |
+| `--cluster-expected-nodes` | `0` | Nodes a new cluster starts with; first partition leaders are assigned as soon as that many are up. `0` = unknown |
+| `--cluster-formation-wait` | `5s` | When the expected nodes are unknown or not all up: how long membership must be unchanged before first leaders are assigned. `0` assigns at once |
 | `--cluster-gossip-addr` | `:7946` | Membership gossip listen address |
 | `--cluster-grpc-addr` | `:7947` | Internal gRPC (replication/raft/cross-region) address |
 | `--cluster-raft-addr` | `:7948` | Raft transport listen address |
@@ -116,30 +117,30 @@ Defaults from `internal/config/defaults.go` unless noted. Flags marked **env** h
 | `--suspect-timeout` | `3s` | Time a node stays suspect before failure |
 | `--use-memberlist` | `false` | Not supported; the server refuses to start with it |
 | `--clock-skew-threshold-ms` | `5000` | Max allowed clock skew from leader (0 = disabled) |
-| `--node-rack` | *(empty)* | Rack/AZ label for topology-aware placement (**env**) |
-| `--node-zone` | *(empty)* | Zone label (**env**) |
-| `--node-region` | *(empty)* | Region label (**env**) |
+| `--node-rack` | *(empty)* | Rack/AZ label for topology-aware placement |
+| `--node-zone` | *(empty)* | Zone label |
+| `--node-region` | *(empty)* | Region label |
 
 ### Security
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--tls-enabled` | `false` | TLS for the public gRPC listener (**env**) |
-| `--tls-ca-file` | *(empty)* | CA certificate path (**env**) |
-| `--tls-cert-file` | *(empty)* | Server certificate path (**env**) |
-| `--tls-key-file` | *(empty)* | Server private key path (**env**) |
+| `--tls-enabled` | `false` | TLS for the public gRPC listener |
+| `--tls-ca-file` | *(empty)* | CA certificate path |
+| `--tls-cert-file` | *(empty)* | Server certificate path |
+| `--tls-key-file` | *(empty)* | Server private key path |
 | `--tls-client-auth` | `false` | Require client certificates (mTLS) |
-| `--http-tls-enabled` | `false` | Serve the HTTP port (health, metrics, admin API, dashboard) over TLS, with `--tls-cert-file` and `--tls-key-file`. Callers are not asked for a certificate (**env**) |
-| `--replication-tls-enabled` | `false` | Mutual TLS for all traffic between nodes: replication, membership and Raft. Requires the three files below (**env**) |
-| `--replication-tls-ca-file` | *(empty)* | CA that signed the nodes' certificates (**env**) |
-| `--replication-tls-cert-file` | *(empty)* | This node's certificate, for server and client use (**env**) |
-| `--replication-tls-key-file` | *(empty)* | Private key of that certificate (**env**) |
-| `--auth-enabled` | `false` | Enable JWT authentication (**env**) |
-| `--auth-jwt-secret` | *(empty)* | HMAC secret (visible in `ps`; prefer the env var) (**env**) |
+| `--http-tls-enabled` | `false` | Serve the HTTP port (health, metrics, admin API, dashboard) over TLS, with `--tls-cert-file` and `--tls-key-file`. Callers are not asked for a certificate |
+| `--replication-tls-enabled` | `false` | Mutual TLS for all traffic between nodes: replication, membership and Raft. Requires the three files below |
+| `--replication-tls-ca-file` | *(empty)* | CA that signed the nodes' certificates |
+| `--replication-tls-cert-file` | *(empty)* | This node's certificate, for server and client use |
+| `--replication-tls-key-file` | *(empty)* | Private key of that certificate |
+| `--auth-enabled` | `false` | Enable JWT authentication |
+| `--auth-jwt-secret` | *(empty)* | HMAC secret (visible in `ps`; prefer the env var) |
 | `--auth-jwt-public-key` | *(empty)* | Ed25519/RSA public key file for asymmetric JWTs |
-| `--auth-policy-file` | *(empty)* | RBAC policy JSON (required in production) — **flag-only, no env var** |
-| `--encryption-enabled` | `false` | AES-256-GCM encryption at rest for WAL segments (**env**) |
-| `--encryption-key-file` | *(empty)* | Path to 32-byte master key file (**env**) |
+| `--auth-policy-file` | *(empty)* | RBAC policy JSON (required in production) |
+| `--encryption-enabled` | `false` | AES-256-GCM encryption at rest for WAL segments |
+| `--encryption-key-file` | *(empty)* | Path to 32-byte master key file |
 
 ### Guardrails
 
@@ -154,33 +155,33 @@ Defaults from `internal/config/defaults.go` unless noted. Flags marked **env** h
 | `--max-ingest-rate` | `0` | Max events/sec per partition (0 = unlimited) |
 | `--ingest-burst-size` | `0` | Ingest token-bucket burst size |
 | `--follower-reads` | `false` | Allow followers to serve Replay reads |
-| `--exactly-once-commits` | `false` | Exactly-once consumer offset commits (**env**) |
+| `--exactly-once-commits` | `false` | Exactly-once consumer offset commits. Refused in production |
 
 ### Tracing
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--tracing-enabled` | `false` | Enable OpenTelemetry tracing (**env**) |
-| `--tracing-exporter` | `none` | `none` \| `stdout` \| `otlp` (**env**) |
-| `--tracing-otlp-endpoint` | `127.0.0.1:4317` | OTLP gRPC endpoint (**env**) |
-| `--tracing-sample-ratio` | `0.01` | Sampling ratio 0.0–1.0 (**env** + **reload-only env**) |
-| `--tracing-insecure` | `true` | Plaintext OTLP (no TLS) (**env**) |
+| `--tracing-enabled` | `false` | Enable OpenTelemetry tracing |
+| `--tracing-exporter` | `none` | `none` \| `stdout` \| `otlp` |
+| `--tracing-otlp-endpoint` | `127.0.0.1:4317` | OTLP gRPC endpoint |
+| `--tracing-sample-ratio` | `0.01` | Sampling ratio 0.0–1.0 (**reload-only env**) |
+| `--tracing-insecure` | `true` | Plaintext OTLP (no TLS) |
+
+### Profiling
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--pprof-addr` | *(empty)* | Serve `net/http/pprof` runtime profiles on this address; empty disables. Production mode requires a loopback address |
 
 ## Environment Variables
 
-Registered in `internal/config/config.go` (startup): `CRONOS_NODE_ID`,
-`CRONOS_DATA_DIR`, `CRONOS_GRPC_ADDR`, `CRONOS_HTTP_ADDR`, `CRONOS_DEV`,
-`CRONOS_CLUSTER`, `CRONOS_CLUSTER_SEEDS`, `CRONOS_TLS_ENABLED`,
-`CRONOS_TLS_CA_FILE`, `CRONOS_TLS_CERT_FILE`, `CRONOS_TLS_KEY_FILE`,
-`CRONOS_REPLICATION_TLS_ENABLED`, `CRONOS_REPLICATION_TLS_CA_FILE`,
-`CRONOS_REPLICATION_TLS_CERT_FILE`, `CRONOS_REPLICATION_TLS_KEY_FILE`,
-`CRONOS_AUTH_ENABLED`, `CRONOS_AUTH_JWT_SECRET`,
-`CRONOS_MIN_IN_SYNC_REPLICAS`, `CRONOS_SNAPSHOT_CATCHUP_THRESHOLD`,
-`CRONOS_EXACTLY_ONCE_COMMITS`, `CRONOS_ENCRYPTION_ENABLED`,
-`CRONOS_ENCRYPTION_KEY_FILE`, `CRONOS_NODE_RACK`, `CRONOS_NODE_ZONE`,
-`CRONOS_NODE_REGION`, `CRONOS_TRACING_ENABLED`, `CRONOS_TRACING_EXPORTER`,
-`CRONOS_TRACING_OTLP_ENDPOINT`, `CRONOS_TRACING_SAMPLE_RATIO`,
-`CRONOS_TRACING_INSECURE`.
+At startup (`LoadConfig` in `internal/config/config.go`) every registered flag
+reads the environment variable `CRONOS_` + the flag name upper-cased with `-`
+replaced by `_` (for example `--fsync-mode` reads `CRONOS_FSYNC_MODE`,
+`--auth-policy-file` reads `CRONOS_AUTH_POLICY_FILE`). Two flags use a different
+name: `--dedup-ttl` reads `CRONOS_DEDUP_TTL_HOURS` and `--min-insync-replicas`
+reads `CRONOS_MIN_IN_SYNC_REPLICAS`. Environment values are applied before the
+command line is parsed, so an explicit flag wins. An invalid value fails startup.
 
 Reload-only (SIGHUP, `internal/config/reload.go`): `CRONOS_MAX_CREDITS`,
 `CRONOS_ACK_TIMEOUT`, `CRONOS_MAX_RETRIES`, `CRONOS_LOAD_SHEDDING_THRESHOLD`,
@@ -189,6 +190,9 @@ Reload-only (SIGHUP, `internal/config/reload.go`): `CRONOS_MAX_CREDITS`,
 
 CDC sinks (read by the composition root, `cmd/api/main.go`):
 `CRONOS_CDC_KAFKA_BROKERS`, `CRONOS_CDC_KAFKA_TOPIC`, `CRONOS_CDC_WEBHOOK_URL`.
+
+Cross-region replication (experimental, `cmd/api/main.go`): `CRONOS_REGIONS`.
+The server refuses to start when it is set without `--dev --experimental-features`.
 
 ## Debug Pointers
 

@@ -9,27 +9,54 @@ subsystem docs independently.
   older layouts requires a clean data directory.
 - **Encryption at rest v2** uses a **random 12-byte GCM nonce per record**;
   legacy v1 counter nonces remain decrypt-only.
-- **Persistent consumer group metadata** and optional exactly-once commit IDs
-  in `OffsetStore`.
+- **Persistent consumer group metadata** in `OffsetStore`. Exactly-once commit
+  IDs exist in `OffsetStore`, but `--exactly-once-commits` is refused in
+  production and the Ack path does not read it.
 - **DLQ wired per partition** at create time (`NewDispatcherWithDLQ`).
 - **Dedup crash recovery** reseeds claims from the WAL tail on partition start.
-- **Scheduler recovery** rebases ticks from wall clock; timers matured during
-  downtime are delivered immediately (not dropped).
-- **2PC handler injects PartitionManager** so prepare/commit write durable markers.
-- **Change feed for CDC and cross-region replication**: accepted events only,
-  in log order, from the partition's leader, with a position that survives
-  restarts and failovers. A failing sink makes its feed lag; nothing is dropped.
-- **Retention enforcer** protects active segments/system dirs and deletes aged
-  or size-eligible segments plus matching `.index` files.
+- **Restart does not load the backlog**: timer replay schedules only events
+  whose time has not come; events already due stay in the log and each
+  subscription reads them at its consumers' pace (`redriveRetained`).
+- **Change feed for CDC** (and experimental cross-region replication):
+  accepted events only, in log order, from the partition's leader, with a
+  position that survives restarts and failovers. A failing sink makes its feed
+  lag; nothing is dropped.
+- **Log-start pruning**: compaction and retention remove segments only through
+  `Partition.PruneWAL`, only once their events are due, finished by every
+  group and exported. In a cluster only the partition's leader prunes, and
+  only from the start of the log; followers follow its log start.
+- **Backups and restore**: scheduled checkpoints of every partition at
+  wall-clock multiples of `--backup-interval`; `cronos-admin restore`, and
+  `cronos-admin check-log` to report or cut a damaged segment.
+- **Memory guard**: publishes are refused while the process holds
+  `--max-memory-percent` of its memory limit (cgroup limit by default).
 - **Listener split:**
-  - Public gRPC `:9000` — Event, Partition, ConsumerGroup, Transaction, **Admin**
-  - Internal gRPC `:7947` — **Replication, Raft, CrossRegion** (optional mTLS)
-  - HTTP `:8080` — health, metrics, `/ui/` dashboard, `/api/admin/*`
+  - Public gRPC `:9000` — Event, Partition, ConsumerGroup, **Admin**
+    (Transaction only with `--dev --experimental-features`)
+  - Internal gRPC `:7947` — **Replication, Raft** (mTLS in production;
+    CrossRegion only with `--dev --experimental-features`)
+  - HTTP `:8080` — health, metrics, `/ui/` dashboard, `/api/admin/*`;
+    TLS with `--http-tls-enabled`
+- **Certificate hot reload**: public TLS, HTTP TLS and node-to-node mTLS
+  certificates, keys and CAs are re-read when their files change.
 - **Bulk snapshot install** (`ReplicationService.Snapshot`) for join/wipe recovery.
 - **Raft-authoritative leadership** for local promote/demote reconcile (not
-  gossip-only).
+  gossip-only); the hash ring only proposes placement.
+- **Fenced elections and staged handoff**: an election first commits that the
+  partition has no leader, fences the replicas at that epoch, then picks the
+  most complete one; a planned leader move waits until the target's log ends
+  at the same entry.
+- **Topology from leaders**: the admin topology reads each partition's
+  in-sync replicas from its leader (`ReplicationService.LeaderReport`).
+- **Node removal**: `cronos-admin cluster remove-node <node-id>` takes a lost
+  node out of Raft and off every node's member list.
+- **Experimental gate**: transactions (2PC), online partition splitting and
+  cross-region replication run only with `--dev --experimental-features`.
 - **Production security gate** (unless `--dev`): TLS, JWT auth **and** policy
-  file, encryption at rest, replication mTLS, RF≥3, minISR≥2.
+  file, encryption at rest, replication mTLS, RF≥3, minISR≥2, fsync mode
+  `batch` or `every_event`, `--cluster-seeds` in cluster mode; refuses
+  `--experimental-features`, `--exactly-once-commits` and a non-loopback
+  `--pprof-addr`.
 
 ## Known Limitations (documented gaps)
 
@@ -40,7 +67,7 @@ Details and mermaid: [ARCHITECTURE.md § Known Limitations](../../ARCHITECTURE.m
 |-----|------------|---------------------|-------------|
 | **Lag-driven snapshot** | Bulk `InstallSnapshot` on join / `SyncPartitionFromLeader`; `--snapshot-catchup-threshold` (default 10000) | Mid-flight auto-snapshot when a connected follower’s lag exceeds threshold | [replication.md](features/replication.md) |
 | **Admin TriggerRebalance** | Automatic rebalance on membership + Raft reconcile (~5s) | On-demand `TriggerRebalance` RPC/UI is a soft stub (descriptive response) | [cluster.md](features/cluster.md), [dashboard.md](features/dashboard.md) |
-| **Delivery redrive** | Credits, CB, DLQ, backpressure metrics; held-back events are redelivered from the WAL when credits return; backlog drained on subscribe | Progress for a group with no connected subscriber; replicated completion state | [delivery.md](features/delivery.md) |
+| **Delivery redrive** | Credits, CB, DLQ, backpressure metrics; held-back events are redelivered from the WAL when credits return; backlog drained on subscribe; consumer progress replicated to followers (`SyncConsumerProgress`) | Progress for a group with no connected subscriber; completions recorded since the leader last sent consumer progress (one maintenance tick) can be redelivered after a failover; a replication-factor-1 handoff does not carry consumer progress | [delivery.md](features/delivery.md) |
 
 ## Start Here
 
@@ -72,7 +99,7 @@ Details and mermaid: [ARCHITECTURE.md § Known Limitations](../../ARCHITECTURE.m
 - Storage and WAL: [features/storage.md](features/storage.md)
 - Tenant Accounting: [features/tenant.md](features/tenant.md)
 - Tracing: [features/tracing.md](features/tracing.md)
-- Transactions (2PC): [features/tx.md](features/tx.md)
+- Transactions (2PC, experimental): [features/tx.md](features/tx.md)
 
 ## Recommended Reading Path
 
@@ -121,7 +148,7 @@ flowchart TB
     end
 
     subgraph Data_Plane[Data plane]
-      EventH[Event / Partition / CG / Tx handlers]
+      EventH["Event / Partition / CG handlers<br/>Tx: experimental only"]
       AdminH[AdminService handler]
       PM[Partition Manager]
       Partition[Per partition runtime]
@@ -140,7 +167,7 @@ flowchart TB
       Membership[Gossip membership]
       Raft[Raft metadata]
       Replication[Leader follower ReplicationService]
-      CrossRegion[CrossRegionService]
+      CrossRegion[CrossRegionService experimental]
     end
 
     subgraph Guardrails[Guardrails]

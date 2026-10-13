@@ -59,10 +59,14 @@ GitHub). In brief:
 - The **data plane** (handlers → partition manager → per-partition WAL, scheduler,
   worker, dispatcher, consumer groups, DLQ, dedup) serves event traffic.
 - The **control plane** (cluster manager, hash-ring router, gossip membership, Raft
-  metadata, leader-follower replication, cross-region) manages placement and consistency.
+  metadata, leader-follower replication, and experimental cross-region replication)
+  manages placement and consistency.
 - **Guardrails** (JWT+RBAC, audit, schema registry, tenant accounting, SLO/metrics/tracing,
-  retention/backup) and **production security** (public TLS, encryption at rest v2,
-  replication mTLS, `--dev` bypass) wrap both planes.
+  retention/backup) and **production security** (public TLS, optional HTTP TLS,
+  encryption at rest v2, replication mTLS, `--dev` bypass) wrap both planes.
+- **Experimental features** — transactions (2PC), online partition splitting and
+  cross-region replication — run only with `--dev --experimental-features`;
+  production validation refuses the flag.
 
 ## 4. Startup Composition and Lifecycle
 
@@ -70,17 +74,17 @@ GitHub). In brief:
 
 The runtime is composed in `cmd/api/main.go` in this order:
 
-1. Load config (includes production validation unless `--dev`) and install hot-reload listener.
+1. Load config (includes production validation unless `--dev`), determine the memory limit (`--memory-limit`, else the cgroup limit, else machine memory), start the optional `--pprof-addr` listener, and install the hot-reload listener.
 2. Initialize guardrails (`audit`, `schema`, `tenant`, `cdc`, `slo`, `tracing`).
-3. Initialize partition manager with shared Pebble cache, and give it the change feed for CDC and cross-region replication before any partition exists.
+3. Initialize partition manager with shared Pebble cache (its backpressure manager refuses publishes above `--max-memory-percent`), and give it the change feed for CDC and, when `CRONOS_REGIONS` is set with `--experimental-features`, cross-region replication before any partition exists.
 4. Start operational loops (`disk_pressure`, `backup_scheduler`, retention enforcer).
 5. If cluster mode: start cluster manager (`raft` + membership + router), join seeds.
 6. Create initial partitions (standalone: all; cluster: partition 0 then lazy-create). Each partition created, now or later, starts its change feed.
-7. Build **public** gRPC (`:9000`): Event, ConsumerGroup, Partition, Admin + Transaction handler (PM-injected).
-8. Build **internal** gRPC (`:7947`): Replication, Raft, CrossRegion (optional replication mTLS).
-9. Start HTTP (`:8080`): health, metrics, embedded dashboard `/ui/`, `/api/admin/*`.
-10. Start serve monitors, stats loop, optional autoscaler.
-11. On signal: graceful stop public/internal gRPC and HTTP, stop partitions, stop cluster.
+7. Build **public** gRPC (`:9000`): Event, ConsumerGroup, Partition, Admin; the Transaction handler (`tx.NewHandler(pm)`) only with `--experimental-features`.
+8. Build **internal** gRPC (`:7947`): Replication, Raft (cluster mode); CrossRegion only with `--experimental-features` (replication mTLS in production).
+9. Start HTTP (`:8080`): health, metrics, embedded dashboard `/ui/`, `/api/admin/*`; over TLS with `--http-tls-enabled`.
+10. Start serve monitors, the autoscaler (always started; it only logs CPU, memory, disk and lag threshold warnings), and the stats loop.
+11. On signal: graceful stop public/internal gRPC and HTTP, stop retention and backups, stop partitions, stop the cluster manager, then a final WAL flush.
 
 ### 4.2 Startup and Shutdown Sequence
 
@@ -100,9 +104,10 @@ sequenceDiagram
 
     Main->>Config: LoadConfig + ValidateConfig
     Main->>Main: --dev relaxes production security gates
+    Main->>Main: Memory limit, optional pprof listener, SIGHUP reload
     Main->>Guard: Init audit, schema, tenant, CDC sinks, tracing, SLO
     Main->>PM: NewPartitionManagerWithCache(shared Pebble cache)
-    Main->>PM: SetChangeFeed (CDC sinks + cross-region, echo guard)
+    Main->>PM: SetChangeFeed (CDC sinks + experimental cross-region, echo guard)
     Main->>BG: Disk monitor, backup scheduler, retention ticker
     alt cluster enabled
         Main->>Cluster: NewManager + SetPartitionAccessor
@@ -111,22 +116,28 @@ sequenceDiagram
     end
     Main->>PM: Create/start partitions<br/>(standalone: all, cluster: partition 0 then lazy)
     Main->>Pub: NewGRPCServer + interceptors
-    Main->>Pub: SetTransactionHandler (PM-injected 2PC)
-    Main->>Pub: RegisterServices: Event, ConsumerGroup, Partition, Admin, Transaction
+    opt --experimental-features
+        Main->>Pub: SetTransactionHandler (PM-injected 2PC)
+    end
     Main->>Int: NewInternalGRPCServer
-    Main->>Int: Register Replication, Raft, CrossRegion
-    Main->>HTTP: Health + metrics + WebHandler /ui + /api/admin
+    Main->>Int: Register Replication, Raft (cluster)
+    opt --experimental-features
+        Main->>Int: Register CrossRegion
+    end
+    Main->>Pub: RegisterServices: Event, ConsumerGroup, Partition, Admin (+ Transaction if set)
+    Main->>HTTP: Health + metrics + WebHandler /ui + /api/admin (TLS if --http-tls-enabled)
     Main->>Pub: Start + ServeError monitor
     Main->>Int: Start + ServeError monitor
     Main->>HTTP: ListenAndServe with timeouts
-    Main->>BG: Stats loop + autoscaler
+    Main->>BG: Autoscaler (logs only) + stats loop
     Note over Main,BG: SIGINT / SIGTERM
     Main->>Pub: GracefulStopWithTimeout 25s then Stop
     Main->>Int: GracefulStopWithTimeout then Stop
     Main->>HTTP: Shutdown
+    Main->>BG: Stop retention enforcer and backup scheduler
     Main->>PM: Close (stop all partitions)
-    Main->>PM: Final WAL flush across partitions
     Main->>Cluster: Stop when enabled
+    Main->>PM: Final WAL flush across partitions
     Note over Main,Cluster: 60s overall shutdown budget
 ```
 
@@ -163,9 +174,9 @@ sequenceDiagram
     Scheduler->>Worker: ready notification
     Worker->>Dispatcher: dispatch batch
     Dispatcher->>Consumer: delivery stream message
-    Consumer->>API: Ack(delivery_id, next_offset)
-    API->>Group: CommitOffset(group, partition, next_offset)
-    Group-->>API: committed
+    Consumer->>API: Ack stream (delivery_id, success)
+    API->>Group: CommitDeliveries (acks read ahead, one durable write per partition per batch)
+    Group-->>API: completions recorded
 ```
 
 ### 5.2 Delivery Reliability State Machine
@@ -200,28 +211,31 @@ This section is organized by feature area and tells you where to read first, wha
 - Purpose: external and internal RPC surface.
 - Key files:
   - `internal/api/grpc_server.go` (public listener on `:9000`)
-  - `internal/api/internal_grpc_server.go` (internal cluster listener on `:7947`, registers `ReplicationServiceServer` + `RaftServiceServer` + `CrossRegionServiceServer`)
+  - `internal/api/internal_grpc_server.go` (internal cluster listener on `:7947`; registers `ReplicationServiceServer`, `RaftServiceServer` in cluster mode, and `CrossRegionServiceServer` only with `--experimental-features`)
   - `internal/api/handlers.go`
   - `internal/api/consumer_handler.go`
   - `internal/api/partition_handler.go`
   - `internal/api/replication_server.go`
-  - `internal/api/raft_server.go`
-  - `internal/api/crossregion_server.go`
-  - `internal/api/transaction_handler.go` (registered on public listener via `RegisterTransactionServiceServer`)
+  - `internal/api/raft_server.go` (Raft join/leave/status, node removal)
+  - `internal/api/crossregion_server.go` (experimental)
+  - `internal/tx/transaction_handler.go` (registered on the public listener via `RegisterTransactionServiceServer` only with `--experimental-features`)
+  - `internal/api/tls.go` (public gRPC and HTTP TLS configuration; certificates re-read when their files change)
   - `internal/api/admin_handler.go` (operator-facing `AdminService`)
   - `internal/api/web_handler.go` (HTTP JSON proxy for `AdminService` + embedded dashboard SPA)
   - `internal/api/health.go`
 - Main flow:
   - Requests enter interceptor chain (tracing, SLO, version, auth, topic limit, audit, metrics, IP limit).
   - Handlers enforce request validation, routing, dedup, and downstream invocation.
-  - Partition admin methods provide WAL/scheduler status, compaction, retention, split.
+  - Partition admin methods provide WAL/scheduler status, compaction, retention, and split (split refused unless `--experimental-features`).
 - Reliability decisions:
   - Explicit gRPC message size limits and keepalive policy.
   - `Start()` returns listen errors; asynchronous serve errors are surfaced via `ServeError()`.
   - `GracefulStopWithTimeout(ctx)` drains in-flight RPCs and falls back to forced `Stop` if the context expires.
   - Health/metrics server startup errors are propagated so the node fails fast on bind or serving failures.
   - Unavailable vs failed precondition semantics for cluster ownership and follower-read gating.
-  - Exactly-once commit mode enforces monotonic ack offsets when enabled.
+  - Acks on a stream are read ahead and recorded in batches (up to 256), one durable write per partition (`processAcks`).
+  - `--exactly-once-commits` is refused in production; the Ack path does not read it.
+  - With `--http-tls-enabled` the HTTP port serves TLS with the `--tls-cert-file` certificate; `--pprof-addr` is a separate listener, loopback-only in production.
 
 ### 6.2 Configuration and Runtime Reload
 
@@ -233,31 +247,35 @@ This section is organized by feature area and tells you where to read first, wha
   - `charts/cronos-db/values.yaml`
   - `charts/cronos-db/values-production.yaml`
 - Main flow:
-  - Config is loaded once at startup from flags and environment variables.
+  - Config is loaded once at startup from flags and environment variables. Every flag reads `CRONOS_<FLAG>` (upper-cased, `-` replaced by `_`; aliases `CRONOS_DEDUP_TTL_HOURS`, `CRONOS_MIN_IN_SYNC_REPLICAS`); an explicit flag wins.
   - SIGHUP listener allows reload updates without process restart.
   - New flags include retention controls (`--retention-max-age-hours`, `--retention-max-size-gb`) and the full security surface (TLS, auth, replication mTLS, encryption at rest).
 - Reliability decisions:
   - Default WAL fsync mode is `batch`.
-  - `--dev` disables production security requirements; production mode requires TLS, auth, encryption at rest, replication mTLS, `--replication-factor>=3`, and `--min-insync-replicas>=2`.
-  - New environment variables: `CRONOS_DEV`, `CRONOS_MIN_IN_SYNC_REPLICAS`, `CRONOS_EXACTLY_ONCE_COMMITS`, `CRONOS_ENCRYPTION_ENABLED`, `CRONOS_ENCRYPTION_KEY_FILE`.
+  - `--dev` disables production security requirements; production mode requires TLS, auth with a policy file, encryption at rest, replication mTLS, `--replication-factor>=3`, `--min-insync-replicas>=2`, fsync mode `batch` or `every_event`, and `--cluster-seeds` in cluster mode, and refuses `--experimental-features`, `--exactly-once-commits` and a non-loopback `--pprof-addr`.
+  - Environment variables: every flag has one (see above). Others read by the binary: SIGHUP-reloadable `CRONOS_*` tunables (`internal/config/reload.go`), CDC sinks (`CRONOS_CDC_*`), and `CRONOS_REGIONS` (experimental cross-region; refused without `--experimental-features`).
   - Helm chart defaults to `config.dev=true`; `values-production.yaml` disables dev mode and requires TLS, auth, encryption, and replication-mTLS secrets.
   - Conservative defaults for durability and cluster behavior.
-  - Feature flags for controlled rollout (`follower-reads`, `exactly-once-commits`, tracing, TLS, auth).
+  - Feature flags for controlled rollout (`follower-reads`, tracing, TLS, auth); `--experimental-features` (requires `--dev`) gates transactions, online splitting and cross-region replication.
 
 ### 6.3 Partition Runtime and Lifecycle
 
 - Purpose: aggregate per-partition components and lifecycle operations.
 - Key files:
   - `internal/partition/manager.go`
-  - `internal/partition/split.go`
+  - `internal/partition/retention.go` (`PruneWAL`, `FollowLogStart`)
+  - `internal/partition/split.go` (experimental)
   - `internal/partition/disk_pressure.go`
+  - `internal/partition/backpressure.go` (admission control and the memory guard)
 - Main flow:
   - Partition creation wires WAL, scheduler, dedup, consumer group, dispatcher, worker.
+  - A partition start replays timers (`replayWALTimers`) only for events whose time has not come. Events already due stay in the log; each subscription reads what its group has not finished at its consumers' pace (`redriveRetained`), so a restart does not load the backlog into memory.
   - Lookup can be lazy in cluster mode via hash-derived partition IDs.
   - Manager also handles leader promotion/demotion and follower registration.
 - Reliability decisions:
   - Epoch fencing to reduce split-brain risk.
   - Admission control across ready queue, timing wheel depth, and in-flight deliveries.
+  - Memory guard: publishes are refused while the process holds `--max-memory-percent` (default 80) of its memory limit.
   - Disk-pressure callback triggers emergency compaction.
 
 ### 6.4 Storage (WAL, segments, index, backup, crypto)
@@ -273,8 +291,9 @@ This section is organized by feature area and tells you where to read first, wha
   - `pkg/utils/atomicfile.go`
 - Main flow:
   - Append assigns offsets and writes WAL v2 records to the active segment; each record carries an 8-byte Raft term and a 4-byte trailing checksum, and the sparse index is updated.
-  - Segment rotation and compaction reduce long-term storage cost.
-  - Backup scheduler snapshots WAL data by interval and retention policy.
+  - Segment rotation and compaction reduce long-term storage cost. Compaction runs every `--compaction-interval` and removes closed segments whose events are due, finished by every consumer group and exported by the change feed (`Partition.PruneWAL`).
+  - In a cluster only the partition's leader prunes, and only from the start of the log; followers drop what lies below the leader's log start (`FollowLogStart`), and a replica whose log ends before it restarts its log there.
+  - Backup scheduler checkpoints every partition at wall-clock multiples of `--backup-interval` and keeps backups for `--backup-retention`. `cronos-admin restore` copies a backup into an empty data directory, checking every file against the manifest; `cronos-admin check-log` reports (and with `--repair` cuts) a damaged segment.
 - Reliability decisions:
   - WAL v2 record format includes a Raft term and trailing checksum; upgrading from older builds requires a clean `--data-dir`.
   - CRC32 validation for integrity checks.
@@ -341,16 +360,20 @@ This section is organized by feature area and tells you where to read first, wha
   - `internal/consumer/offset_store.go`
 - Main flow:
   - Subscribe/ack APIs feed into group manager.
-  - Offsets, group metadata/assignments, and exactly-once commit IDs are persisted in the PebbleDB `OffsetStore`.
+  - Offsets, group metadata/assignments and per-event completions are persisted in the PebbleDB `OffsetStore`.
 - Reliability decisions:
   - Delivery ID parsing routes ack to correct partition path.
-  - Exactly-once commit guard (feature-flagged) enforces forward-only commits and stores commit IDs for idempotency.
+  - `OffsetStore.CommitOffsetExactlyOnce` (commit IDs) exists but is not called by the Ack path; `--exactly-once-commits` is refused in production.
+  - The leader sends consumer progress to followers (`SyncConsumerProgress`) on each maintenance tick when it changed, and at least every 30 s. Completions recorded since the last send can be redelivered after a failover; a replication-factor-1 handoff does not carry progress.
 
 ### 6.9 Cluster Control Plane (membership, router, raft)
 
 - Purpose: ownership, routing, and metadata consensus for distributed mode.
 - Key files:
   - `internal/cluster/manager.go`
+  - `internal/cluster/leadership.go` — `reconcileLocalLeadership`, fenced elections (`electNewLeader`, `fencedPositions`), staged handoff (`handoffMayStart`, `advanceTransfers`), `syncClusterState`
+  - `internal/cluster/election.go` — `ChooseFailoverLeader`, fallback used only without a replica-position source
+  - `internal/cluster/autoscaler.go` — logs CPU, memory, disk and lag threshold warnings; changes nothing
   - `internal/cluster/router.go`
   - `internal/cluster/membership.go`
   - `internal/cluster/transport.go` — mutual TLS for the membership and Raft ports
@@ -358,14 +381,17 @@ This section is organized by feature area and tells you where to read first, wha
   - `internal/cluster/raft.go`
   - `internal/cluster/hashring.go`
 - Main flow:
-  - Membership events update ring and partition assignments.
-  - Router decides leaders/replicas from consistent hashing.
-  - Raft stores authoritative metadata and leader elections.
-  - Manager reconciles partition state into Raft (`syncClusterState`).
+  - Membership events update the ring, which proposes replicas and a preferred leader per partition.
+  - The Raft-committed assignment is the only source of leadership: each node leads what is committed to it, follows what it is a replica of, and releases the rest (`reconcileLocalLeadership`). A partition with no committed assignment has no leader.
+  - The Raft leader commits ring placement (`syncClusterState`). A move of a live leader is a staged handoff: the intent is committed, the leader refuses publishes, and leadership changes once the target's log ends at the same entry; a handoff that takes too long is abandoned.
+  - A dead leader is replaced by a fenced election: the Raft leader first commits that the partition has no leader at a new epoch, asks the replicas where their logs end (`ReplicationService.Position` with `fence_epoch`; each replica refuses older leaders before it answers), and commits the most complete one at a higher epoch.
+  - Each node logs under-replication for the partitions it leads (`updateReplicaOffsets`, `noteInSync`); the admin topology reads in-sync replicas from each partition's leader (`ReplicationService.LeaderReport`).
+  - `cronos-admin cluster remove-node <node-id>` removes a node that is lost for good from Raft and from every node's member list; a running node is refused.
 - Reliability decisions:
   - Configured virtual nodes reduce leadership skew.
   - Join/rebalance includes state transfer hooks to avoid empty ownership.
   - Raft persistence via Bolt-backed log store.
+  - Membership and Raft ports use the replication mTLS certificates; certificates, keys and CAs are re-read when their files change (`internal/tlsfiles`).
 
 ### 6.10 Cluster Rebalance Flow
 
@@ -373,16 +399,15 @@ This section is organized by feature area and tells you where to read first, wha
 flowchart LR
     NodeJoin[Node joins or leaves]
     Membership[Membership service emits event]
-    Router[Router updates hash ring assignments]
-    Moves[Compute partition moves]
-    Sync[State transfer from current leader]
-    Promote[Promote local partition leader if assigned]
-    Follower[Register followers and ISR]
-    RaftSync[Persist partition metadata in Raft]
+    Router[Router updates hash ring placement]
+    RaftSync["Raft leader commits placement<br/>leader moves by staged handoff"]
+    Promote["Each node acts on the committed assignment<br/>reconcileLocalLeadership"]
+    Follower[Leader adds followers; followers catch up]
+    Sync["Joining node: bulk snapshot install<br/>SyncPartitionFromLeader"]
     Healthy[Cluster converged]
 
-    NodeJoin --> Membership --> Router --> Moves
-    Moves --> Sync --> Promote --> Follower --> RaftSync --> Healthy
+    NodeJoin --> Membership --> Router --> RaftSync --> Promote --> Follower --> Healthy
+    NodeJoin -.-> Sync -.-> Follower
 ```
 
 ### 6.11 Replication (intra-cluster and cross-region)
@@ -392,33 +417,35 @@ flowchart LR
 - Key files:
   - `internal/replication/leader.go` — `Leader.Replicate`, `Leader.catchUpFollower`, `FollowerInfo` and ISR/quorum accounting.
   - `internal/replication/follower.go` — `Follower.InstallSnapshot`, `Follower.dialCredentials`.
-  - `internal/replication/mtls.go` — `MTLSConfig`, `BuildClientTLSConfig`, `BuildServerTLSConfig`.
-  - `internal/replication/region.go` — `CrossRegionReplicator`, per-region batched async push.
-  - `internal/api/replication_server.go` — `ReplicationServiceHandler.Append`, `.Sync`, `.Snapshot`.
+  - `internal/replication/mtls.go` — `MTLSConfig`, `BuildClientTLS` (re-reads certificate, key and CA when their files change), `BuildClientTLSConfig`, `BuildServerTLSConfig`.
+  - `internal/replication/region.go` — `CrossRegionReplicator`, per-region batched async push (experimental).
+  - `internal/api/replication_server.go` — `ReplicationServiceHandler.Append`, `.Sync`, `.Snapshot`, `.Position`, `.LeaderReport`, `.SyncConsumerProgress`.
   - `internal/api/internal_grpc_server.go` — `InternalGRPCServer` on the dedicated internal listener (default `:7947`).
   - `internal/api/crossregion_server.go` — `CrossRegionServiceServer`.
   - `internal/partition/manager.go` — `PartitionManager.SyncPartitionFromLeader` (trigger for bulk install).
   - `internal/cluster/manager.go` — `Manager.JoinCluster` (calls `SyncPartitionFromLeader` on join; the cluster router also calls it during partition moves).
 - Main flow:
   - **Happy path** — `Leader.Replicate(events)` fans the contiguous batch out concurrently to every connected follower via gRPC `ReplicationService.Append` on the internal listener. The call carries `PartitionId`, `Events`, `ExpectedNextOffset`, `Term`, `PrevLogTerm`, and an IEEE CRC32 batch checksum.
-  - **Quorum** — `Leader.Replicate` returns success to the client only after `min-insync-replicas` replicas **including the leader** have appended via `WAL.AppendReplicatedBatch`. (A follower ack reflects an in-memory append; in `batch`/`periodic` fsync modes it does not imply the follower has fsynced.)
+  - **Quorum** — `Leader.Replicate` returns success to the client only after `min-insync-replicas` replicas **including the leader** have appended via `WAL.AppendReplicatedBatch`. In `every_event` and `batch` fsync modes a follower syncs the batch before it acknowledges (`batch` through group commit); only `periodic` acknowledges before the data is on disk, and production mode refuses `periodic`.
   - **Incremental catch-up** — when a follower reports `NextOffset < events[0].Offset`, `Leader.catchUpFollower` slices `[from, to)` from the leader's WAL into `batchSize`-sized chunks and replays them through `Append`. For very long ranges the leader also serves the server-streaming `ReplicationService.Sync` RPC.
-  - **Bulk install** — `Follower.InstallSnapshot(ctx, leaderAddr, partitionID, 0)` dials the leader over the internal listener and calls `ReplicationService.Snapshot`. The leader flushes its active segment and streams each segment + sparse-index file with a `ReplicationSnapshotHeader` (per-file IEEE CRC32, first/last offset, file size, `is_index`) followed by 1 MB data chunks and a final trailer carrying `{success, last_offset, epoch}`. The follower stages files under `<dataDir>/snapshot-staging/{segments,index}/`, verifies the last-file CRC32, closes the local WAL, atomically renames `segments`/`index` to `*.old`, moves the staged dirs into place, removes `*.old`, and calls `wal.ReloadSegments()`.
+  - **Bulk install** — `Follower.InstallSnapshot(ctx, leaderAddr, partitionID, 0)` dials the leader over the internal listener and calls `ReplicationService.Snapshot`. The leader flushes its active segment and streams each segment + sparse-index file with a `ReplicationSnapshotHeader` (per-file IEEE CRC32, first/last offset, file size, `is_index`) followed by 1 MB data chunks and a final trailer carrying `{success, last_offset, epoch}`. The follower stages files under `<dataDir>/snapshot-staging/{segments,index}/` and checks every file's size and CRC32 against its header as it completes. An interrupted transfer resumes: staged files are reported to the leader, which answers unchanged ones with a `reuse` header. A trailer epoch below the epoch this replica has accepted is refused. `WAL.InstallCheckpoint` then swaps the logs under a journal (`snapshot-install.state`): old `segments`/`index` moved to `*.old`, staged dirs moved in, the new log loaded and verified, then `*.old` removed; a crash before completion restores the old log.
   - **Trigger** — bulk install is invoked by `PartitionManager.SyncPartitionFromLeader` under a 10-minute context, called from `Manager.JoinCluster` when a node joins and iterates its `router.GetLocalPartitions()`, and from the router during partition moves. After formation, `Manager.reconcileLocalLeadership` runs every 5s and idempotently wires up `PromoteToLeader` + `AddFollower` on every locally-led partition, which is what enables streaming `Append` on a healthy cluster.
-  - **Cross-region** — `CrossRegionReplicator` queues per region, batches (100 events / 100 ms), and pushes via `CrossRegionService.ReplicateEvents`. Best-effort, no ISR semantics.
+  - **Cross-region (experimental)** — `CrossRegionReplicator` queues per region, batches (100 events / 100 ms), and pushes via `CrossRegionService.ReplicateEvents`. Best-effort, no ISR semantics. Runs only with `--dev --experimental-features`.
 - Reliability decisions:
   - **Channel isolation** — replication traffic runs over `InternalGRPCServer` (default `:7947`), a separate listener from the public API on `:9000`. Public clients cannot reach replication.
-  - **Per-batch CRC32** on `ReplicationAppendRequest` — computed and sent by the leader, but currently **not verified** by the follower handler (per-record WAL CRCs still protect on disk).
-  - **Per-file CRC32** on `ReplicationSnapshotHeader`; the follower verifies the final file's CRC and aborts + cleans up on mismatch (earlier files' CRCs are sent but unverified).
-  - **Term fencing** in `ReplicationServiceHandler.Append`: rejects `req.Term < p.Epoch`, steps up on newer terms. Prevents stale-leader replays after a leadership change.
-  - **Gap rejection** — `WAL.AppendReplicatedBatch` rejects non-contiguous batches ("replicated batch gap"), which drives leader-side catch-up. (The `ExpectedNextOffset` proto field is set by the leader but unused server-side.)
+  - **Per-batch CRC32** on `ReplicationAppendRequest` — computed by the leader and verified by the follower handler before anything is applied, along with each event's payload checksum and contiguous offsets.
+  - **Per-file CRC32 and size** on `ReplicationSnapshotHeader`; the follower verifies every file and aborts on a mismatch, leaving the local log untouched.
+  - **Term fencing** in `ReplicationServiceHandler.Append`: rejects `req.Term < p.Epoch`, rejects a second leader at the current term, and on a newer term persists it to `epoch.json` (stepping down first if this node was leading) before applying the sender's entries. Elections use fence epochs (`fence_epoch` on `Position`), so a replaced leader cannot gather confirmations once the replicas have answered.
+  - **Gap rejection** — the handler rejects a batch whose `ExpectedNextOffset` does not match its first event and a batch that starts beyond the local log end ("log gap: catch-up required"); `WAL.AppendReplicatedBatch` also rejects non-contiguous offsets. Both drive leader-side catch-up.
   - **Quorum durability** — `min-insync-replicas` enforced before client ack. With RF=3 / minISR=2 the leader + at least one follower must ack; cluster degradation below minISR fails closed rather than silently succeeding on leader-only.
-  - **Atomic swap** during snapshot install — WAL closed before rename, matching `StopPartition`'s ordering; avoids Windows file-lock contention.
-  - **mTLS between nodes** — `--replication-tls-enabled` plus `--replication-tls-{ca,cert,key}-file`, all three required. The same certificates secure the membership and Raft ports (`internal/cluster/transport.go`). Server enforces `tls.RequireAndVerifyClientCert`; both sides pin against the cluster CA. `Follower.dialCredentials` falls back to insecure credentials when the flag is off (intentional for `--dev`, refused by `config.ValidateConfig` in production).
-  - **Cross-region** is intentionally separate from intra-cluster — no ISR, last-write-wins conflict handling, fire-and-forget.
+  - **Journaled swap** during snapshot install — WAL closed before rename; every crash point recovers to one complete generation (`RecoverSnapshot` on WAL open).
+  - **mTLS between nodes** — `--replication-tls-enabled` plus `--replication-tls-{ca,cert,key}-file`, all three required. The same certificates secure the membership and Raft ports (`internal/cluster/transport.go`). Server enforces `tls.RequireAndVerifyClientCert`; both sides pin against the cluster CA. Certificates, keys and CAs are re-read when their files change, so they are replaced without a restart. `Follower.dialCredentials` falls back to insecure credentials when the flag is off (intentional for `--dev`, refused by `config.ValidateConfig` in production).
+  - **Cross-region** (experimental) is intentionally separate from intra-cluster — no ISR, last-write-wins conflict handling, fire-and-forget.
   - **Trigger caveat** — `--snapshot-catchup-threshold` (default `10000`) is a **dead config key** (parsed, never read). Automatic mid-flight lag-driven InstallSnapshot is **not** wired; a far-behind connected follower still uses incremental `Sync`/`Append` catch-up.
 
 ### 6.12 Cross-Region Topology
+
+Experimental: only with `--dev --experimental-features` and `CRONOS_REGIONS`.
 
 ```mermaid
 flowchart TB
@@ -455,7 +482,7 @@ flowchart TB
 
 ### 6.14 Transactions (2PC coordinator)
 
-- Purpose: multi-step prepare/commit orchestration with crash recovery.
+- Purpose: multi-step prepare/commit orchestration with crash recovery. **Experimental**: `TransactionService` is registered only with `--dev --experimental-features`.
 - Key files:
   - `internal/tx/coordinator.go`
   - `internal/tx/transaction_handler.go`
@@ -507,8 +534,8 @@ stateDiagram-v2
   - `internal/compliance/retention.go`
   - `internal/api/partition_handler.go` (admin compaction/retention)
 - Main flow:
-  - Runtime loop enforces max age and max size policies.
-  - The retention enforcer parses each segment's 64-byte header (`firstOffset`, `createdTS`) to decide eligibility and always preserves the active segment per partition.
+  - An hourly loop applies the max age and max size policies (`--retention-max-age-hours`, `--retention-max-size-gb`).
+  - The retention enforcer parses each segment's header (`firstOffset`, `createdTS`) to pick candidates and always preserves the active segment per partition. It removes nothing itself: each candidate goes through the partition (`PartitionManager.RemoveRetainedSegment` then `Partition.PruneWAL`), with the same checks as compaction. In a cluster only the partition's leader removes segments, and only from the start of the log.
   - Matching `.index` files are deleted alongside reclaimed segments.
   - Partition admin RPC can trigger immediate retention and compaction actions.
 - Reliability decisions:
@@ -596,11 +623,11 @@ stateDiagram-v2
 
 ```mermaid
 flowchart TB
-    WAL[WAL segments] --> Compaction[Compaction by offset or timestamp]
-    WAL --> Retention[Retention by age and size]
+    WAL[WAL segments] --> Compaction["Compaction: segments whose events are<br/>finished by every group and exported"]
+    WAL --> Retention["Retention by age and size<br/>through PruneWAL; leader-only in a cluster"]
     WAL --> Backup[Backup scheduler snapshots]
     Disk[Disk monitor threshold] --> Compaction
-    Metrics[SLO and Prometheus metrics] --> Alerts[Alerting and autoscaling decisions]
+    Metrics[SLO and Prometheus metrics] --> Alerts["Alerting; autoscaler logs threshold warnings"]
     Traces[OpenTelemetry traces] --> Metrics
     Audit[Audit logs] --> Compliance[Compliance reviews]
     Retention --> Compliance
@@ -609,16 +636,17 @@ flowchart TB
 ### 7.2 Reliability Matrix
 
 - Durability:
-  - WAL v2 (term + trailing checksum) + CRC32 + fsync modes + backup scheduler + atomic metadata writes.
+  - WAL v2 (term + trailing checksum) + CRC32 + fsync modes + backup scheduler (`cronos-admin restore`) + atomic metadata writes.
 - Correctness:
   - Dedup, schema validation, epoch checks, transaction state machine.
 - Backpressure:
-  - Credits, admission control, rate limiters, tenant accounting, `cronos_dispatcher_backpressure_skips_total`.
+  - Credits, admission control, memory guard (`--max-memory-percent`), rate limiters, tenant accounting, `cronos_dispatcher_backpressure_skips_total`.
+  - A restart schedules only future timers; due events are read from the log at consumer pace.
   - Events held back by flow control are redelivered from the WAL when credits return; redrive needs a connected subscriber ([delivery.md](architecture/features/delivery.md), [ARCHITECTURE known limitations](../ARCHITECTURE.md#known-limitations)).
 - Fault isolation:
   - Circuit breaker, retry queue, DLQ, service-level error boundaries.
 - Operability:
-  - Health endpoints, metrics, tracing, audit logs, periodic stats, admin dashboard.
+  - Health endpoints, metrics, tracing, audit logs, periodic stats, admin dashboard; topology ISR from each partition's leader (`LeaderReport`); `cronos-admin cluster remove-node`; certificate hot reload; HTTP TLS.
   - **Gap (documented):** `TriggerRebalance` admin RPC is a soft stub; membership-driven rebalance works ([cluster.md](architecture/features/cluster.md)).
 - Replication catch-up:
   - Join bulk snapshot + incremental follower catch-up.

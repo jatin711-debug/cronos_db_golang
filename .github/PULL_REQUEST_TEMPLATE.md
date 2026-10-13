@@ -18,6 +18,7 @@ Fixes # (issue)
 
 - [ ] Unit Tests
 - [ ] Integration Tests
+- [ ] Acceptance tests against server processes (`go test -tags acceptance ./tests/acceptance/`), for changes to replication, the cluster or recovery
 
 ## Checklist:
 

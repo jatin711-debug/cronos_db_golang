@@ -188,6 +188,11 @@ identical logs on the survivors.
 
 ## Container release implication
 
+> Superseded: images of `v0.6.0-rc.2`, `rc.3` and `rc.4` have been published
+> since, built from source without the quorum defect; the current one,
+> `v0.6.0-rc.4`, was scanned before it was pushed (audit F19 has the scan
+> history). The paragraph below is what held on 2026-09-29.
+
 The rc.1 CI built a container and started the production Helm chart in kind,
 but it did not publish or scan a release image. There is no Docker CLI on this
 Windows host. Do not publish an image from the rc.1 tag: it contains the quorum

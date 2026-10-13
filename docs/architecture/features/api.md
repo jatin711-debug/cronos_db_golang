@@ -6,15 +6,15 @@ The API layer is the system entrypoint for all client and internal RPC traffic. 
 
 ## Key Files
 
-- [internal/api/grpc_server.go](../../../internal/api/grpc_server.go) — public listener on `:9000`; registers `EventService`, `PartitionService`, `ConsumerGroupService`, `TransactionService`, and **`AdminService`**.
-- [internal/api/internal_grpc_server.go](../../../internal/api/internal_grpc_server.go) — dedicated internal listener (`InternalGRPCServer`, default `:7947`); registers **`ReplicationService`**, **`RaftService`**, and **`CrossRegionService`**. Peer traffic never shares the public client port.
+- [internal/api/grpc_server.go](../../../internal/api/grpc_server.go) — public listener on `:9000`; registers `EventService`, `PartitionService`, `ConsumerGroupService`, and **`AdminService`**; `TransactionService` only with `--experimental-features` (which requires `--dev`).
+- [internal/api/internal_grpc_server.go](../../../internal/api/internal_grpc_server.go) — dedicated internal listener (`InternalGRPCServer`, default `:7947`); registers **`ReplicationService`** and, in cluster mode, **`RaftService`**; **`CrossRegionService`** only with `--experimental-features` (`cmd/api/main.go`). Peer traffic never shares the public client port.
 - [internal/api/handlers.go](../../../internal/api/handlers.go) — `EventService` handlers (`Publish`, `PublishBatch`, `Subscribe`, `Ack`, `Replay`) with dedup claim/rollback.
 - [internal/api/admin_handler.go](../../../internal/api/admin_handler.go) — operator AdminService (topology, health, lag, retention, compaction, schemas, tenants; **`TriggerRebalance` soft-stub** — see Known Limitations).
 - [internal/api/web_handler.go](../../../internal/api/web_handler.go) — embedded SPA + `/api/admin/*` JSON proxy on HTTP `:8080`.
 - [internal/api/consumer_handler.go](../../../internal/api/consumer_handler.go)
 - [internal/api/partition_handler.go](../../../internal/api/partition_handler.go) — partition metadata + admin compact/retention/split (authz gated).
-- [internal/api/replication_server.go](../../../internal/api/replication_server.go) — `Append`, `Sync`, `Snapshot` on the internal listener.
-- [internal/api/raft_server.go](../../../internal/api/raft_server.go) — Raft join/leave/status (internal).
+- [internal/api/replication_server.go](../../../internal/api/replication_server.go) — `Append`, `Sync`, `Snapshot`, `Position`, `LeaderReport`, `SyncConsumerProgress` on the internal listener.
+- [internal/api/raft_server.go](../../../internal/api/raft_server.go) — Raft join/leave/status and node removal (`cronos-admin cluster remove-node`) (internal).
 - [internal/api/crossregion_server.go](../../../internal/api/crossregion_server.go) — CrossRegion inject/fetch with LWW (internal only).
 - [internal/api/audit_interceptor.go](../../../internal/api/audit_interceptor.go) — request-level audit interceptor.
 - [internal/api/health.go](../../../internal/api/health.go) — HTTP health endpoints.
@@ -29,9 +29,10 @@ The API layer is the system entrypoint for all client and internal RPC traffic. 
 
 | Listener | Default | Services |
 |----------|---------|----------|
-| Public gRPC | `:9000` | Event, Partition, ConsumerGroup, Transaction, Admin |
-| Internal gRPC | `:7947` | Replication, Raft, CrossRegion |
-| HTTP | `:8080` | `/health*`, `/metrics`, `/ui/`, `/api/admin/*` |
+| Public gRPC | `:9000` | Event, Partition, ConsumerGroup, Admin; Transaction (experimental only) |
+| Internal gRPC | `:7947` | Replication, Raft (cluster mode); CrossRegion (experimental only) |
+| HTTP | `:8080` | `/health*`, `/metrics`, `/ui/`, `/api/admin/*`; TLS with `--http-tls-enabled` (certificate from `--tls-cert-file` / `--tls-key-file`, no client certificate) |
+| pprof | off | `/debug/pprof/*` on `--pprof-addr` when set; a separate listener, loopback-only in production (`cmd/api/pprof.go`) |
 
 ## Main Request Flow
 
@@ -48,14 +49,16 @@ The API layer is the system entrypoint for all client and internal RPC traffic. 
 - Message size and keepalive limits are configured in server options to avoid unbounded payload and idle-connection risk.
 - Partition ownership checks in handlers prevent writes on non-owner nodes and fence stale leaders.
 - Replay path respects follower-read policy flags for consistency control.
-- Ack path supports stricter monotonic commit behavior when exactly-once commit mode is enabled.
+- Acks on one stream are read ahead and recorded in batches (up to 256): each partition's completions in a batch are written with one durable commit (`processAcks` in handlers.go).
+- `--exactly-once-commits` is refused in production; the Ack path records per-event completions and does not read the flag.
 
 ## Known Limitations (API surface)
 
 | RPC / path | Status | Detail |
 |------------|--------|--------|
 | `AdminService.TriggerRebalance` | Soft stub | Membership-driven rebalance works; on-demand trigger does not move partitions. [cluster.md](cluster.md), [ARCHITECTURE](../../../ARCHITECTURE.md#known-limitations) |
-| Cross-region on public port | **Not exposed** | Only on internal `:7947` (by design, not a gap) |
+| Cross-region on public port | **Not exposed** | Only on internal `:7947`, and only with `--dev --experimental-features` |
+| `TransactionService` | Experimental | Registered only with `--dev --experimental-features` |
 | Subscribe control-stream `Recv` | Not used for credits | Flow control via credits/Ack path; control Recv is unused |
 
 ## Debug Pointers
@@ -117,8 +120,8 @@ sequenceDiagram
     Scheduler->>Worker: ready events
     Worker->>Dispatcher: dispatch
     Dispatcher->>Consumer: Subscribe delivery stream
-    Consumer->>API: Ack
-    API->>Group: CommitOffset
+    Consumer->>API: Ack stream
+    API->>Group: CommitDeliveries: completions of a batch of acks, one durable write per partition
 ```
 
 ### Related diagrams
