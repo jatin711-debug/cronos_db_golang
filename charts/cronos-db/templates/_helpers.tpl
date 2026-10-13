@@ -81,3 +81,10 @@ Cluster seeds based on StatefulSet pod names and headless service.
 {{- end }}
 {{- join "," $seeds }}
 {{- end }}
+
+{{/*
+How the HTTP port is spoken to: HTTPS when the pods serve it over TLS.
+*/}}
+{{- define "cronos-db.httpScheme" -}}
+{{- if and .Values.tls.enabled .Values.tls.http -}}HTTPS{{- else -}}HTTP{{- end -}}
+{{- end }}

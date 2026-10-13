@@ -254,6 +254,21 @@ func TestLoadConfig_TLSValidation(t *testing.T) {
 			flags:       []string{"-tls-enabled=false"},
 			expectError: false,
 		},
+		{
+			name:        "TLS on the HTTP port without a certificate",
+			flags:       []string{"-http-tls-enabled"},
+			expectError: true,
+		},
+		{
+			name:        "TLS on the HTTP port without a key",
+			flags:       []string{"-http-tls-enabled", "-tls-cert-file=/tmp/cert.pem"},
+			expectError: true,
+		},
+		{
+			name:        "TLS on the HTTP port with a certificate and its key",
+			flags:       []string{"-http-tls-enabled", "-tls-cert-file=/tmp/cert.pem", "-tls-key-file=/tmp/key.pem"},
+			expectError: false,
+		},
 	}
 
 	for _, tc := range tests {

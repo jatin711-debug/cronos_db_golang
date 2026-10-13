@@ -361,7 +361,7 @@ func (m *Membership) logRefusedPeer(remote net.Addr, err error) {
 
 // dial connects to the membership port of another node.
 func (m *Membership) dial(ctx context.Context, addr string, timeout time.Duration) (net.Conn, error) {
-	return dialPeer(ctx, addr, timeout, m.config.ClientTLS)
+	return dialPeer(ctx, addr, timeout, m.config.dialTLS())
 }
 
 // GossipMessage is the wire format for the custom TCP gossip protocol

@@ -142,8 +142,11 @@ type cluster struct {
 	extraArgs []string
 	nodeArgs  func(n *node) []string
 	// caFile, certFile and keyFile are what the nodes secure their traffic
-	// with each other with: replication, membership and Raft.
+	// with each other with: replication, membership and Raft. ca issued the
+	// certificate, which is valid for certHosts.
 	caFile, certFile, keyFile string
+	ca                        *authority
+	certHosts                 []string
 
 	// For a cluster in containers: the image the nodes run, the network they
 	// share, and the directory with their certificates, which each mounts.
@@ -162,7 +165,8 @@ func newCluster(t *testing.T, extraArgs ...string) *cluster {
 	if err := os.MkdirAll(filepath.Join(c.dir, "logs"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	c.caFile, c.certFile, c.keyFile = nodeCertificates(t, c.dir, "127.0.0.1")
+	c.certHosts = []string{"127.0.0.1"}
+	c.ca, c.caFile, c.certFile, c.keyFile = nodeCertificates(t, c.dir, c.certHosts...)
 	for i := 0; i < 3; i++ {
 		addr := func(k int) string { return fmt.Sprintf("127.0.0.1:%d", ports[i*5+k]) }
 		id := fmt.Sprintf("node%d", i+1)

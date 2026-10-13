@@ -47,6 +47,10 @@ tls:
   enabled: true
   existingSecret: cronos-db-tls
   caCertEnabled: true
+  # The admin API and the dashboard are on the HTTP port, and a token sent to
+  # them is as good as the node. Turn this off only when something in front
+  # of the pods ends TLS for that port.
+  http: true
 
 auth:
   enabled: true

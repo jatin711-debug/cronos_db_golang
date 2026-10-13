@@ -98,6 +98,10 @@ spec:
             - name: CRONOS_TLS_CA_FILE
               value: "/etc/cronos/tls/ca.crt"
             {{- end }}
+            {{- if .Values.tls.http }}
+            - name: CRONOS_HTTP_TLS_ENABLED
+              value: "true"
+            {{- end }}
             {{- end }}
             {{- if .Values.auth.enabled }}
             - name: CRONOS_AUTH_ENABLED
@@ -149,6 +153,7 @@ spec:
             httpGet:
               path: /health
               port: http
+              scheme: {{ include "cronos-db.httpScheme" . }}
             periodSeconds: {{ .Values.startupProbe.periodSeconds }}
             failureThreshold: {{ .Values.startupProbe.failureThreshold }}
             timeoutSeconds: 3
@@ -156,6 +161,7 @@ spec:
             httpGet:
               path: /health
               port: http
+              scheme: {{ include "cronos-db.httpScheme" . }}
             initialDelaySeconds: 10
             periodSeconds: 30
             timeoutSeconds: 5
@@ -164,6 +170,7 @@ spec:
             httpGet:
               path: /health/ready
               port: http
+              scheme: {{ include "cronos-db.httpScheme" . }}
             initialDelaySeconds: 5
             periodSeconds: 10
             timeoutSeconds: 3

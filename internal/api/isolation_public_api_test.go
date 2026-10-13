@@ -318,11 +318,26 @@ func TestIsolation_AcknowledgementsBelongToTheirRecipient(t *testing.T) {
 			return nil
 		})
 	}()
+	// state says what the server and her consumer make of the event, for the
+	// message of a failure.
+	state := func() string {
+		stats := ts.p.Dispatcher.GetStats()
+		committed, _ := ts.p.ConsumerGroup.GetCommittedOffset("group-a", 0)
+		ended := "is still running"
+		select {
+		case err := <-subscribed:
+			ended = fmt.Sprintf("ended with: %v", err)
+		default:
+		}
+		return fmt.Sprintf("the log ends at offset %d and may be delivered through %d; the server has %d subscriptions, %d deliveries waiting for an acknowledgement and %d waiting to be sent again; the group has finished everything below offset %d; her handler was called %d times, last with %v; her subscription %s",
+			ts.p.Wal.GetLastOffset(), ts.p.DeliverableThrough(), stats.ActiveSubscriptions, stats.ActiveDeliveries, stats.RetryQueueDepth,
+			committed, calls.Load(), lastCall.Load(), ended)
+	}
 	var held client.Delivery
 	select {
 	case held = <-delivered:
 	case <-time.After(20 * time.Second):
-		t.Fatal("alice did not receive her event")
+		t.Fatalf("alice did not receive her event: %s", state())
 	}
 
 	// Bob acknowledges it with alice's delivery ID.
@@ -351,14 +366,8 @@ func TestIsolation_AcknowledgementsBelongToTheirRecipient(t *testing.T) {
 			// Whether the server still waits for this delivery says on which
 			// side the acknowledgement was lost.
 			_, _, _, serverSays := ts.p.Dispatcher.ValidateAck(held.DeliveryID, "alice", held.LastOffset()+1, true)
-			ended := "is still running"
-			select {
-			case err := <-subscribed:
-				ended = fmt.Sprintf("ended with: %v", err)
-			default:
-			}
-			t.Fatalf("alice's own acknowledgement of delivery %s did not finish her event; the server says of an acknowledgement of it now: %v; her handler was called %d times, last with %v; her subscription %s",
-				held.DeliveryID, serverSays, calls.Load(), lastCall.Load(), ended)
+			t.Fatalf("alice's own acknowledgement of delivery %s did not finish her event; the server says of an acknowledgement of it now: %v; %s",
+				held.DeliveryID, serverSays, state())
 		}
 		time.Sleep(20 * time.Millisecond)
 	}

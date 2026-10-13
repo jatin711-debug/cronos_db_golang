@@ -36,6 +36,11 @@ def check(ephemeral=False):
     assert "--cluster-seeds" not in app["args"][0]
     assert pod["terminationGracePeriodSeconds"] > 60
     assert app["startupProbe"]["httpGet"]["path"] == "/health"
+    # The HTTP port carries the admin API: in production it is served over
+    # TLS, and the probes have to speak it.
+    assert env["CRONOS_HTTP_TLS_ENABLED"] == "true"
+    for probe in ["startupProbe", "livenessProbe", "readinessProbe"]:
+        assert app[probe]["httpGet"]["scheme"] == "HTTPS"
     assert pod["nodeSelector"]["pool"] == "database"
     assert pod["tolerations"][0]["key"] == "database"
     assert volumes["encryption"]["emptyDir"]["medium"] == "Memory"

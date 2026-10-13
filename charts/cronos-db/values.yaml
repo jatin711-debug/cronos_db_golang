@@ -91,6 +91,11 @@ config:
 tls:
   enabled: false
   caCertEnabled: false
+  # http serves the HTTP port (health, metrics, the admin API and the
+  # dashboard) over TLS as well, with the same certificate. The probes then
+  # use HTTPS. Leave it off when TLS is ended in front of the pods for that
+  # port. It needs tls.enabled.
+  http: false
   # existingSecret: cronos-db-tls
 
 # Enable only when an authentication secret is provided.
@@ -122,6 +127,11 @@ metrics:
     interval: 30s
     scrapeTimeout: 10s
     labels: {}
+    # tlsConfig is how Prometheus verifies the pods when tls.http is on. As
+    # it stands the certificate is not verified; name the CA and the server
+    # name here to have it verified.
+    tlsConfig:
+      insecureSkipVerify: true
 
 alerts:
   enabled: false
