@@ -10,8 +10,9 @@ latest release is `v0.6.0`, which holds all nine batches.
 
 ### Finding closure review
 
-**The remediation program is incomplete. `v0.6.0`, the first final release,
-was cut with the findings as this table gives them.** It compares the code with each finding's full
+**The remediation program is incomplete. `v0.6.0`, the first release since
+this audit that is not a release candidate, was cut with the findings as this
+table gives them.** It compares the code with each finding's full
 required outcome. "Core fix implemented" means the specific code defect has been
 addressed; it does not mean its production release validation is complete.
 "Partial" means material requirements remain. The evidence is the test suite,
