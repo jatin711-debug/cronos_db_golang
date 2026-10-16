@@ -64,7 +64,10 @@ func TestOverloadIsRefusedAndSurvived(t *testing.T) {
 		most     = 40000    // events; the nodes must have refused long before
 	)
 	// Segments large enough for these events; the other tests use tiny ones.
-	c := newCluster(t, "--segment-size=8388608")
+	// Give this test enough scheduler space to reach the process memory
+	// guard. The default bounded scheduler spills to disk first, which is
+	// covered by the backlog restart and scheduler budget tests.
+	c := newCluster(t, "--segment-size=8388608", "--scheduler-memory=536870912")
 	c.startAll()
 	// The limit is set from what the nodes hold when idle, so that the test
 	// needs to send megabytes and not gigabytes to reach it.

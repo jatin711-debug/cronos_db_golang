@@ -90,6 +90,11 @@ func (cs *ColdStore) StoreBatch(entries []struct {
 // ScanRange returns all offsets with schedule_ts in [startTS, endTS].
 // The returned offsets are sorted by schedule_ts ascending.
 func (cs *ColdStore) ScanRange(startTS, endTS int64) ([]int64, error) {
+	return cs.ScanRangeLimit(startTS, endTS, 0)
+}
+
+// ScanRangeLimit bounds the reference slice; zero retains the legacy API.
+func (cs *ColdStore) ScanRangeLimit(startTS, endTS int64, limit int) ([]int64, error) {
 	startKey := cs.buildKey(startTS, 0)
 	// Upper bound is the maximum possible key at endTS (max offset = max uint64)
 	endKey := cs.buildKey(endTS, 0)
@@ -111,6 +116,9 @@ func (cs *ColdStore) ScanRange(startTS, endTS int64) ([]int64, error) {
 	for iter.First(); iter.Valid(); iter.Next() {
 		offset := cs.parseOffsetFromKey(iter.Key())
 		offsets = append(offsets, offset)
+		if limit > 0 && len(offsets) >= limit {
+			break
+		}
 	}
 	if err := iter.Error(); err != nil {
 		return nil, fmt.Errorf("cold store scan: %w", err)

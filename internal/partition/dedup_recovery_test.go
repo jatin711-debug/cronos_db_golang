@@ -1,9 +1,12 @@
 package partition
 
 import (
+	"errors"
 	"fmt"
 	"testing"
+	"time"
 
+	"github.com/jatin711-debug/cronos_db_golang/internal/dedup"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 )
 
@@ -34,6 +37,79 @@ func TestPartitionWiresDLQ(t *testing.T) {
 	// non-negative value confirms the dispatcher was constructed with one.
 	if got := p.Dispatcher.GetStats().DLQSize; got != 0 {
 		t.Fatalf("expected empty DLQ, got size %d", got)
+	}
+}
+
+func TestRecoverDedupBeyondFormerCutoff(t *testing.T) {
+	pm := NewPartitionManager("node", &types.Config{DataDir: t.TempDir(), PartitionCount: 1, TickMS: 100, WheelSize: 60, DedupTTLHours: 24})
+	defer pm.StopAllPartitions()
+	if err := pm.CreatePartition(0, "t"); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := pm.GetInternalPartition(0)
+	const count = 500_002
+	now := time.Now().UnixMilli()
+	for start := 0; start < count; start += 5000 {
+		batch := make([]*types.Event, 0, 5000)
+		for i := start; i < min(start+5000, count); i++ {
+			created := int64(1) // expired filler still counts toward the old cutoff
+			if i == 0 || i == count-1 {
+				created = now
+			}
+			batch = append(batch, &types.Event{MessageId: fmt.Sprintf("id-%d", i), Topic: "t", CreatedTs: created, ScheduleTs: now})
+		}
+		if err := p.Wal.AppendBatch(batch); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := pm.recoverDedupFromWAL(p); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists, err := p.DedupStore.GetOffset("id-0"); err != nil || !exists {
+		t.Fatalf("oldest live ID missing: exists=%v err=%v", exists, err)
+	}
+	point, err := p.DedupStore.LoadRecoveryPoint()
+	if err != nil || point == nil || point.Offset != count-1 {
+		t.Fatalf("checkpoint=%+v err=%v", point, err)
+	}
+	if err := p.Wal.AppendEvent(&types.Event{MessageId: "suffix", CreatedTs: now, ScheduleTs: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := pm.recoverDedupFromWAL(p); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists, err := p.DedupStore.GetOffset("suffix"); err != nil || !exists {
+		t.Fatalf("suffix missing: exists=%v err=%v", exists, err)
+	}
+}
+
+type brokenRecoveryStore struct{ *dedup.MemoryStore }
+
+func (s brokenRecoveryStore) GetOffset(string) (int64, bool, error) {
+	return 0, false, errors.New("injected dedup read failure")
+}
+
+func TestDedupRecoveryFailureBlocksStartupAndAdmission(t *testing.T) {
+	pm := NewPartitionManager("node", &types.Config{DataDir: t.TempDir(), PartitionCount: 1, TickMS: 100, WheelSize: 60})
+	defer pm.StopAllPartitions()
+	if err := pm.CreatePartition(0, "t"); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := pm.GetInternalPartition(0)
+	if err := p.Wal.AppendEvent(&types.Event{MessageId: "id", CreatedTs: time.Now().UnixMilli()}); err != nil {
+		t.Fatal(err)
+	}
+	original := p.DedupStore
+	defer original.Close()
+	p.DedupStore = dedup.NewManager(brokenRecoveryStore{dedup.NewMemoryStore()})
+	if err := pm.startPartitionInternal(p); err == nil {
+		t.Fatal("startup ignored recovery failure")
+	}
+	if p.started || p.GetReplayError() == nil {
+		t.Fatal("partition marked started/healthy after failed recovery")
+	}
+	if _, err := pm.GetOrCreateInternalPartition(0, "t"); err == nil {
+		t.Fatal("existing partition bypassed recovery error")
 	}
 }
 

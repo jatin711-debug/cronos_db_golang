@@ -238,6 +238,9 @@ type Config struct {
 	// MemoryLimitBytes is the memory this process may use. Zero means the
 	// container's limit, or the machine's memory when there is none.
 	MemoryLimitBytes int64
+	// SchedulerMemoryBytes bounds retained scheduler payloads across this node.
+	// Zero uses 64 MiB; WAL references beyond the budget remain on disk.
+	SchedulerMemoryBytes int64
 
 	// MaxIngestRatePerPartition caps events/sec accepted per partition (0 = unlimited).
 	MaxIngestRatePerPartition int64

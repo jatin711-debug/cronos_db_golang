@@ -56,7 +56,11 @@ type Leader struct {
 
 	// progressSource returns the partition's consumer progress and a version
 	// that changes whenever it does. Nil disables progress replication.
-	progressSource func() (uint64, []*types.ConsumerGroupProgress)
+	progressSource    func() (uint64, []*types.ConsumerGroupProgress)
+	progressVersion   func() uint64
+	progressPage      func(types.ProgressCursor) ([]*types.ConsumerGroupProgress, types.ProgressCursor, bool, error)
+	deadLetterVersion func() uint64
+	deadLetterPage    func(types.DeadLetterCursor) ([]*types.DeadLetterRecord, types.DeadLetterCursor, bool, error)
 	// quorumObserver is told, on every maintenance tick, how far the log is
 	// replicated to a quorum. Nil when nothing needs to know.
 	quorumObserver func(offset int64)
@@ -105,9 +109,20 @@ type FollowerInfo struct {
 
 	// progressSent is the consumer-progress version this follower last
 	// acknowledged; progressSending marks a send in flight. Guarded by mu.
-	progressSent    uint64
-	progressSentAt  time.Time
-	progressSending bool
+	progressSent           uint64
+	progressSentAt         time.Time
+	progressSending        bool
+	progressCursor         types.ProgressCursor
+	progressRoundVersion   uint64
+	progressRoundActive    bool
+	progressRoundLogEnd    int64
+	progressRoundReach     int64
+	progressSentReach      int64
+	deadLetterCursor       types.DeadLetterCursor
+	deadLetterRoundVersion uint64
+	deadLetterActive       bool
+	deadLetterSent         uint64
+	deadLetterSentAt       time.Time
 	// progressSentLogEnd is where this follower's log ended, as far as the
 	// leader knew, when that progress was sent. Guarded by mu.
 	progressSentLogEnd int64
@@ -262,6 +277,9 @@ func (l *Leader) connectFollower(id, address string) {
 	f.client = client
 	f.Connected = true
 	f.progressSentAt = time.Time{} // a reconnected follower gets progress again
+	f.progressRoundActive = false
+	f.deadLetterActive = false
+	f.deadLetterSentAt = time.Time{}
 	f.mu.Unlock()
 
 	log.Printf("[LEADER] Connected to follower %s at %s (gRPC replication)", id, address)
@@ -573,7 +591,11 @@ func (l *Leader) appendToFollower(f *FollowerInfo, events []*types.Event, checks
 		req.HasPrevLog, req.PrevLogOffset, req.PrevLogTerm = true, prev, l.getPrevLogTerm(prev)
 	}
 	if l.wal != nil {
-		req.LogStartOffset = l.wal.GetFirstOffset()
+		// A new replica cannot skip the discarded WAL prefix until it has
+		// durable copies of the failed deliveries that prefix contained.
+		if l.followerHasDeadLetters(f) {
+			req.LogStartOffset = l.wal.GetFirstOffset()
+		}
 		// Where this log ends. A follower that holds more, written under
 		// another leader, drops it: a new leader that takes no publishes
 		// would otherwise never send anything that replaces such a tail.
@@ -864,9 +886,13 @@ func (l *Leader) GetInSyncReplicas() []string {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	var isr []string
+	var dlqVersion uint64
+	if l.deadLetterVersion != nil {
+		dlqVersion = l.deadLetterVersion()
+	}
 	for id, follower := range l.followers {
 		follower.mu.Lock()
-		ok := follower.InSync && follower.Connected
+		ok := follower.InSync && follower.Connected && (dlqVersion == 0 || (follower.deadLetterSent >= dlqVersion && !follower.deadLetterSentAt.IsZero()))
 		follower.mu.Unlock()
 		if ok {
 			isr = append(isr, id)
@@ -1120,6 +1146,11 @@ func progressReach(groups []*types.ConsumerGroupProgress) int64 {
 // has caught up with what the progress is about.
 func (l *Leader) shipConsumerProgress() {
 	l.mu.RLock()
+	if l.progressPage != nil {
+		l.mu.RUnlock()
+		l.shipPagedConsumerProgress()
+		return
+	}
 	source := l.progressSource
 	feedSource := l.changeFeedSource
 	followers := make([]*FollowerInfo, 0, len(l.followers))

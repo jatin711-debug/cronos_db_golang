@@ -24,19 +24,20 @@ import (
 // Follower applies streamed WAL appends and bulk snapshots from the partition
 // leader onto the local WAL for a single partition replica.
 type Follower struct {
-	mu           sync.RWMutex
-	partitionID  int32
-	epoch        int64
-	leaderID     string
-	leaderAddr   string
-	nextOffset   int64
-	wal          *storage.WAL
-	quit         chan struct{}
-	lastSyncTime time.Time
-	syncInterval time.Duration
-	catchupMode  bool // True when catching up with leader
-	nodeID       string
-	tlsConfig    *MTLSConfig // optional mTLS for replication connections
+	mu               sync.RWMutex
+	partitionID      int32
+	epoch            int64
+	leaderID         string
+	leaderAddr       string
+	nextOffset       int64
+	wal              *storage.WAL
+	quit             chan struct{}
+	lastSyncTime     time.Time
+	syncInterval     time.Duration
+	catchupMode      bool // True when catching up with leader
+	nodeID           string
+	tlsConfig        *MTLSConfig // optional mTLS for replication connections
+	applyDeadLetters func([]*types.DeadLetterRecord) error
 }
 
 // NewFollower creates a new follower. tlsConfig may be nil for plaintext dev mode.
@@ -51,6 +52,13 @@ func NewFollower(partitionID int32, wal *storage.WAL, nodeID string, tlsConfig *
 		syncInterval: 1 * time.Second,
 		catchupMode:  false,
 	}
+}
+
+// SetDeadLetterSink installs the durable journal writer used during catch-up.
+func (f *Follower) SetDeadLetterSink(apply func([]*types.DeadLetterRecord) error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.applyDeadLetters = apply
 }
 
 // InstallSnapshot pulls a bulk segment snapshot from the leader over the
@@ -70,6 +78,7 @@ func (f *Follower) InstallSnapshot(ctx context.Context, leaderAddr string, parti
 	f.catchupMode = true
 	walDataDir := f.wal.GetDataDir()
 	acceptedEpoch := f.epoch
+	applyDeadLetters := f.applyDeadLetters
 	f.mu.Unlock()
 
 	defer func() {
@@ -123,10 +132,11 @@ func (f *Follower) InstallSnapshot(ctx context.Context, leaderAddr string, parti
 
 	client := types.NewReplicationServiceClient(conn)
 	stream, err := client.Snapshot(ctx, &types.ReplicationSnapshotRequest{
-		PartitionId: partitionID,
-		StartOffset: startOffset,
-		MaxBytes:    1<<63 - 1,
-		Have:        have,
+		PartitionId:         partitionID,
+		StartOffset:         startOffset,
+		MaxBytes:            1<<63 - 1,
+		Have:                have,
+		SupportsDeadLetters: applyDeadLetters != nil,
 	})
 	if err != nil {
 		return fmt.Errorf("snapshot RPC: %w", err)
@@ -162,6 +172,18 @@ func (f *Follower) InstallSnapshot(ctx context.Context, leaderAddr string, parti
 		if recvErr != nil {
 			cleanupFile(currentFile)
 			return fmt.Errorf("receive snapshot chunk: %w", recvErr)
+		}
+
+		if page := chunk.GetDeadLetters(); page != nil {
+			if page.GetEpoch() < acceptedEpoch || applyDeadLetters == nil {
+				cleanupFile(currentFile)
+				return fmt.Errorf("dead-letter snapshot has stale epoch or no durable sink")
+			}
+			if err := applyDeadLetters(page.GetRecords()); err != nil {
+				cleanupFile(currentFile)
+				return fmt.Errorf("install dead-letter snapshot: %w", err)
+			}
+			continue
 		}
 
 		if header := chunk.GetHeader(); header != nil {

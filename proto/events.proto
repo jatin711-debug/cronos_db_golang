@@ -385,11 +385,26 @@ message ReplicationProgressRequest {
   // has_change_feed_offset is set; -1 means nothing has been delivered.
   bool has_change_feed_offset = 5;
   int64 change_feed_offset = 6;
+  // A bounded journal page, durably installed before consumer progress.
+  repeated DeadLetterRecord dead_letters = 7;
+  bool require_dead_letter_ack = 8;
 }
 
 message ReplicationProgressResponse {
   bool success = 1;
   string error = 2;
+  bool dead_letters_durable = 3;
+}
+
+message DeadLetterRecord {
+  Event event = 1;
+  string delivery_id = 2;
+  int32 attempts = 3;
+  string last_error = 4;
+  int64 failed_at = 5;
+  string subscriber = 6;
+  int32 partition_id = 7;
+  bool tombstone = 8;
 }
 
 message ReplicationSyncRequest {
@@ -430,6 +445,9 @@ message ReplicationSnapshotRequest {
   // contents of a file that is unchanged; it answers with a header marked
   // reuse instead.
   repeated ReplicationSnapshotHeader have = 4;
+
+  // Receiver can durably apply dead-letter journal pages before the WAL.
+  bool supports_dead_letters = 5;
 }
 
 message ReplicationSnapshotHeader {
@@ -467,11 +485,17 @@ message ReplicationSnapshotTrailer {
   int64 epoch = 4;
 }
 
+message ReplicationSnapshotDeadLetters {
+  repeated DeadLetterRecord records = 1;
+  int64 epoch = 2;
+}
+
 message ReplicationSnapshotChunk {
   oneof payload {
     ReplicationSnapshotHeader header = 1;
     bytes data = 2;
     ReplicationSnapshotTrailer trailer = 3;
+    ReplicationSnapshotDeadLetters dead_letters = 4;
   }
 }
 
@@ -512,6 +536,10 @@ message ListPartitionsRequest {
 
 message ListPartitionsResponse {
   repeated PartitionInfo partitions = 1;
+  // Public client endpoints, never internal replication or Raft addresses.
+  map<string, string> node_addresses = 2;
+  // Address metadata format version (zero on servers predating discovery).
+  uint32 discovery_version = 3;
 }
 
 // ============================================================================

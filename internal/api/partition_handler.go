@@ -231,8 +231,16 @@ func (h *PartitionServiceHandler) ListPartitions(ctx context.Context, req *types
 		result = append(result, info)
 	}
 
+	addresses := make(map[string]string)
+	if h.clusterManager != nil && h.clusterManager.GetMembership() != nil {
+		for _, node := range h.clusterManager.GetMembership().GetAliveNodes() {
+			if node.ID != "" && node.Address != "" {
+				addresses[node.ID] = node.Address
+			}
+		}
+	}
 	return &types.ListPartitionsResponse{
-		Partitions: result,
+		Partitions: result, NodeAddresses: addresses, DiscoveryVersion: 1,
 	}, nil
 }
 

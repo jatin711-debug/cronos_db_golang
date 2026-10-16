@@ -353,6 +353,11 @@ func TestCutCheckpointsCutsEveryLogAtOneInstant(t *testing.T) {
 	}
 	a, b := open(), open()
 
+	// Bound the producer while checkpoint copies fsync. An unbounded producer
+	// can outgrow each copy on a slow disk, making every round larger than the
+	// previous one even though the concurrency invariant is already exercised.
+	permits := make(chan struct{}, 12*32)
+	written := make(chan struct{}, 12*32)
 	stop, stopped := make(chan struct{}), make(chan error, 1)
 	go func() {
 		for i := 0; ; i++ {
@@ -360,7 +365,7 @@ func TestCutCheckpointsCutsEveryLogAtOneInstant(t *testing.T) {
 			case <-stop:
 				stopped <- nil
 				return
-			default:
+			case <-permits:
 			}
 			for _, w := range []*WAL{a, b} {
 				if err := w.AppendEvent(&types.Event{MessageId: fmt.Sprintf("pair-%d", i), Topic: "t", Payload: make([]byte, 64), ScheduleTs: 1}); err != nil {
@@ -368,12 +373,16 @@ func TestCutCheckpointsCutsEveryLogAtOneInstant(t *testing.T) {
 					return
 				}
 			}
-			time.Sleep(200 * time.Microsecond)
+			written <- struct{}{}
 		}
 	}()
 
 	const rounds = 12
 	for round := 0; round < rounds; round++ {
+		for i := 0; i < 32; i++ {
+			permits <- struct{}{}
+		}
+		<-written
 		cuts, err := CutCheckpoints([]*WAL{a, b})
 		if err != nil {
 			t.Fatal(err)

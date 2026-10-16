@@ -208,6 +208,9 @@ func (h *EventServiceHandler) ensureClusterPartitionWritable(partitionID int32) 
 // caller has already announced the publish with Partition.BeginPublish, which
 // is what makes a refusal here definitive for a leadership handoff.
 func (h *EventServiceHandler) ensurePublishAllowed(partitionID int32) error {
+	if p, err := h.partitionManager.GetInternalPartition(partitionID); err == nil && p.GetReplayError() != nil {
+		return status.Errorf(codes.Unavailable, "partition %d recovery failed: %v", partitionID, p.GetReplayError())
+	}
 	if h.clusterRouter != nil && !h.clusterRouter.IsPartitionWritable(partitionID) {
 		return status.Errorf(codes.Unavailable,
 			"partition %d does not take publishes on this node now: its leadership is moving, or this node cannot reach enough of its replicas; retry against the partition leader", partitionID)
@@ -605,12 +608,15 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 		}
 	}
 
+	var reservation *tenant.PublishReservation
 	// Tenant quota check. It comes after the duplicate check, so that a retry
 	// of an accepted publish is not charged again, and a refusal gives back the
 	// message ID this publish claimed: nothing was appended.
 	if h.tenantAccountant != nil && h.tenantAccountant.HasConfiguredLimits() {
 		tenantID := publishTenant(ctx)
-		if !h.tenantAccountant.ReservePublishBatch(tenantID, 1, int64(len(event.Payload))) {
+		var allowed bool
+		reservation, allowed = h.tenantAccountant.ReservePublishBatchWithReceipt(tenantID, 1, int64(len(event.Payload)))
+		if !allowed {
 			if dedupMgr != nil {
 				if rbErr := dedupMgr.RollbackBatch([]string{event.GetMessageId()}); rbErr != nil {
 					slog.Warn("dedup rollback after quota refusal failed",
@@ -633,6 +639,7 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 	// then holds it unaccepted, and a retry finishes this publish instead of
 	// appending the event again.
 	rollbackDedup := func() {
+		reservation.Refund(1, int64(len(event.Payload)))
 		if dedupMgr == nil {
 			return
 		}
@@ -906,35 +913,6 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 		partitionInternals[pid] = partitionInternal
 	}
 
-	// Tenant accounting is disabled unless at least one tenant has configured
-	// limits. In the common unrestricted case this removes a map lookup,
-	// atomic increment, and metadata allocation from every event.
-	if h.tenantAccountant != nil && h.tenantAccountant.HasConfiguredLimits() && len(partitionEvents) > 0 {
-		tenantID := publishTenant(ctx)
-		var eventCount, payloadBytes int64
-		for _, events := range partitionEvents {
-			eventCount += int64(len(events))
-			for _, event := range events {
-				payloadBytes += int64(len(event.Payload))
-			}
-		}
-		if !h.tenantAccountant.ReservePublishBatch(tenantID, eventCount, payloadBytes) {
-			setError(int32(eventCount), "tenant quota exceeded")
-			for pid := range partitionEvents {
-				delete(partitionEvents, pid)
-			}
-		} else {
-			for _, events := range partitionEvents {
-				for _, event := range events {
-					if event.Meta == nil {
-						event.Meta = make(map[string]string, 1)
-					}
-					event.Meta["tenant_id"] = string(tenantID)
-				}
-			}
-		}
-	}
-
 	// Batch dedup per partition. This turns N point lookups into one batched
 	// bloom-filter + Pebble write-batch operation, which is much cheaper under
 	// concurrent publish load. Each partition uses its OWN dedup store (bloom
@@ -1002,6 +980,47 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 		}
 	}
 
+	var batchReservation *tenant.PublishReservation
+	// Tenant accounting is disabled unless at least one tenant has configured
+	// limits. In the common unrestricted case this removes a map lookup,
+	// atomic increment, and metadata allocation from every event.
+	if h.tenantAccountant != nil && h.tenantAccountant.HasConfiguredLimits() && len(partitionEvents) > 0 {
+		tenantID := publishTenant(ctx)
+		var eventCount, payloadBytes int64
+		for _, events := range partitionEvents {
+			eventCount += int64(len(events))
+			for _, event := range events {
+				payloadBytes += int64(len(event.Payload))
+			}
+		}
+		var allowed bool
+		batchReservation, allowed = h.tenantAccountant.ReservePublishBatchWithReceipt(tenantID, eventCount, payloadBytes)
+		if !allowed {
+			setError(int32(eventCount), "tenant quota exceeded")
+			for pid, events := range partitionEvents {
+				if !req.AllowDuplicate {
+					ids := make([]string, len(events))
+					for i, event := range events {
+						ids[i] = event.MessageId
+					}
+					if err := partitionInternals[pid].DedupStore.RollbackBatch(ids); err != nil {
+						slog.Warn("dedup rollback after batch quota refusal failed", "partition", pid, "error", err)
+					}
+				}
+				delete(partitionEvents, pid)
+			}
+		} else {
+			for _, events := range partitionEvents {
+				for _, event := range events {
+					if event.Meta == nil {
+						event.Meta = make(map[string]string, 1)
+					}
+					event.Meta["tenant_id"] = string(tenantID)
+				}
+			}
+		}
+	}
+
 	// Parallel batch write to each partition's WAL and schedule
 	var wg sync.WaitGroup
 
@@ -1043,6 +1062,13 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 			// the append's own included (storage.EventsAppended), leaves it held
 			// by the partition instead, for a retry to finish.
 			rollbackDedup := func() {
+				if batchReservation != nil {
+					var bytes int64
+					for _, e := range evts {
+						bytes += int64(len(e.Payload))
+					}
+					batchReservation.Refund(int64(len(evts)), bytes)
+				}
 				if req.AllowDuplicate || partitionInternal.DedupStore == nil {
 					return
 				}

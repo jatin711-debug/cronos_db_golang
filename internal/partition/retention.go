@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"path/filepath"
+	"time"
 
 	"github.com/jatin711-debug/cronos_db_golang/internal/metrics"
 	"github.com/jatin711-debug/cronos_db_golang/internal/storage"
@@ -62,10 +63,40 @@ func (p *Partition) PruneWAL(ctx context.Context, opts storage.PruneOptions) (in
 	// Nothing above the accepted watermark goes: a replicated entry is only
 	// known to be the partition's once it is on enough replicas.
 	accepted := p.AcceptedThrough()
+	var blocker *types.Event
+	var blockerReason string
+	now := time.Now().UnixMilli()
+	defer func() {
+		if blocker == nil {
+			metrics.SetRetentionBlocker(p.ID, -1, "", 0)
+			return
+		}
+		age := float64(0)
+		if blocker.CreatedTs > 0 {
+			age = float64(now-blocker.CreatedTs) / 1000
+		}
+		metrics.SetRetentionBlocker(p.ID, blocker.Offset, blockerReason, age)
+	}()
 
 	deleted, err := p.ConsumerGroup.WithRetentionCheck(func(eligible func(*types.Event) bool) (int, error) {
 		check := func(event *types.Event) bool {
-			return (!p.replicated || event.Offset <= accepted) && (!feeding || event.Offset <= exported) && eligible(event)
+			reason := ""
+			switch {
+			case p.followed && !p.deadLettersSafeToPrune():
+				reason = "dead_letter_replication"
+			case p.replicated && event.Offset > accepted:
+				reason = "unaccepted"
+			case feeding && event.Offset > exported:
+				reason = "change_feed"
+			case event.ScheduleTs > now:
+				reason = "future_schedule"
+			case !eligible(event):
+				reason = "consumer_completion"
+			}
+			if reason != "" && (blocker == nil || event.Offset < blocker.Offset) {
+				blocker, blockerReason = event, reason
+			}
+			return reason == ""
 		}
 		if opts.PrefixOnly && p.pruneWaitsAt >= p.Wal.GetFirstOffset() {
 			// The entry that stopped the last attempt is asked first. Without
@@ -91,6 +122,14 @@ func (p *Partition) PruneWAL(ctx context.Context, opts storage.PruneOptions) (in
 		}
 	}
 	return deleted, err
+}
+
+func (p *Partition) deadLettersSafeToPrune() bool {
+	if p.DLQ == nil || p.DLQ.Version() == 0 {
+		return true
+	}
+	leader := p.replQuorum.Load()
+	return leader != nil && leader.DeadLettersReplicated(p.DLQ.Version())
 }
 
 // FollowLogStart brings this replica's log in line with where its leader's

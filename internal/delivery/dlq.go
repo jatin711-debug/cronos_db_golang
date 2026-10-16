@@ -2,6 +2,7 @@ package delivery
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -59,7 +60,10 @@ type DeadLetterQueue struct {
 	// cipher encrypts entries when the node encrypts at rest; nil otherwise.
 	cipher EntryCipher
 	// damage is what could not be read when the queue was opened.
-	damage DLQDamage
+	damage  DLQDamage
+	version uint64
+	seen    map[[32]byte]struct{}
+	removed map[string]bool
 
 	// Background retry worker
 	retryQuit chan struct{}
@@ -158,22 +162,7 @@ func (d *DeadLetterQueue) Add(event *types.Event, deliveryID string, attempts in
 		PartitionID: event.GetPartitionId(),
 	}
 
-	// Evict oldest if at capacity
-	if len(d.entries) >= d.maxSize {
-		d.entries = d.entries[1:]
-	}
-
-	d.entries = append(d.entries, entry)
-
-	// Persist to segment
-	data, err := json.Marshal(entry)
-	if err != nil {
-		return fmt.Errorf("marshal dlq entry: %w", err)
-	}
-	if data, err = d.seal(data); err != nil {
-		return err
-	}
-	return d.writer.WriteEntry(data)
+	return d.appendEntry(entry)
 }
 
 // Get returns a copy of all in-memory DLQ entries.
@@ -205,10 +194,9 @@ func (d *DeadLetterQueue) Remove(deliveryID string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	for i, entry := range d.entries {
+	for _, entry := range d.entries {
 		if entry.DeliveryID == deliveryID {
-			d.entries = append(d.entries[:i], d.entries[i+1:]...)
-			return d.writeTombstone(deliveryID)
+			return d.writeTombstone(entry)
 		}
 	}
 	return fmt.Errorf("entry %s not found", deliveryID)
@@ -220,11 +208,10 @@ func (d *DeadLetterQueue) Retry(deliveryID string) (*DLQEntry, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	for i, entry := range d.entries {
+	for _, entry := range d.entries {
 		if entry.DeliveryID == deliveryID {
 			// Remove from DLQ
-			d.entries = append(d.entries[:i], d.entries[i+1:]...)
-			if err := d.writeTombstone(deliveryID); err != nil {
+			if err := d.writeTombstone(entry); err != nil {
 				return nil, err
 			}
 			return entry, nil
@@ -235,20 +222,15 @@ func (d *DeadLetterQueue) Retry(deliveryID string) (*DLQEntry, error) {
 
 // writeTombstone appends a tombstone record for the given delivery ID to the
 // segment log. This makes Remove/Retry durable across restarts.
-func (d *DeadLetterQueue) writeTombstone(deliveryID string) error {
+func (d *DeadLetterQueue) writeTombstone(entry *DLQEntry) error {
 	tombstone := &DLQEntry{
-		DeliveryID: deliveryID,
-		Tombstone:  true,
-		FailedAt:   time.Now().UnixMilli(),
+		DeliveryID:  entry.DeliveryID,
+		PartitionID: entry.PartitionID,
+		Event:       &types.Event{Offset: entry.Event.GetOffset(), MessageId: entry.Event.GetMessageId(), PartitionId: entry.PartitionID},
+		Tombstone:   true,
+		FailedAt:    time.Now().UnixMilli(),
 	}
-	data, err := json.Marshal(tombstone)
-	if err != nil {
-		return fmt.Errorf("marshal dlq tombstone: %w", err)
-	}
-	if data, err = d.seal(data); err != nil {
-		return err
-	}
-	return d.writer.WriteEntry(data)
+	return d.appendEntry(tombstone)
 }
 
 // Checkpoint copies the queue's segment files into destDir for a backup. The
@@ -270,16 +252,39 @@ func (d *DeadLetterQueue) Count() int {
 	return len(d.entries)
 }
 
-// Clear removes all in-memory entries and compacts segment files to empty.
+// Clear durably tombstones all entries, including those evicted from memory.
 func (d *DeadLetterQueue) Clear() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	d.entries = make([]*DLQEntry, 0)
-	if d.writer != nil {
-		return d.writer.Compact(nil)
+	// Keep removals in the journal so disconnected replicas also learn them.
+	var cursor types.DeadLetterCursor
+	for {
+		records, next, done, err := d.writer.readPage(cursor)
+		if err != nil {
+			return err
+		}
+		for _, raw := range records {
+			data, err := d.unseal(raw)
+			if err != nil {
+				return err
+			}
+			var e DLQEntry
+			if err := json.Unmarshal(data, &e); err != nil {
+				return err
+			}
+			if !e.Tombstone && !d.removed[e.DeliveryID] && !d.removed[deadLetterIdentity(&e)] {
+				if err := d.writeTombstone(&e); err != nil {
+					return err
+				}
+			}
+		}
+		if done {
+			return nil
+		}
+		cursor = next
 	}
-	return nil
+
 }
 
 // load reads DLQ from segment files, filtering out entries whose DeliveryID
@@ -311,23 +316,14 @@ func (d *DeadLetterQueue) load() error {
 		decoded = append(decoded, entry)
 	}
 
-	tombstones := make(map[string]bool)
-	for _, marker := range decoded {
-		if marker.Tombstone {
-			tombstones[marker.DeliveryID] = true
+	for _, e := range decoded {
+		data, err := json.Marshal(e)
+		if err != nil {
+			return err
 		}
+		d.remember(e, sha256.Sum256(data))
 	}
 
-	for _, decodedEntry := range decoded {
-		entry := *decodedEntry
-		if entry.Tombstone {
-			continue
-		}
-		if tombstones[entry.DeliveryID] {
-			continue // This entry was removed/retried before the restart.
-		}
-		d.entries = append(d.entries, &entry)
-	}
 	return nil
 }
 

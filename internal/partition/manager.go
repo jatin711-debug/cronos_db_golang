@@ -306,7 +306,8 @@ type PartitionManager struct {
 	releasing map[int32]bool
 	// diskGuard refuses publishes while the data disk is nearly full; nil
 	// when there is none.
-	diskGuard *DiskGuard
+	diskGuard       *DiskGuard
+	schedulerBudget *scheduler.MemoryBudget
 }
 
 // tenantAccountant is the minimal interface needed for delivery callbacks.
@@ -317,7 +318,12 @@ type tenantAccountant interface {
 // NewPartitionManager creates a partition manager for the given node.
 // When config.FlushIntervalMS > 0, a shared FsyncCoalescer is started.
 func NewPartitionManager(nodeID string, config *types.Config) *PartitionManager {
+	budgetBytes := config.SchedulerMemoryBytes
+	if budgetBytes <= 0 {
+		budgetBytes = 64 << 20
+	}
 	pm := &PartitionManager{
+		schedulerBudget: scheduler.NewMemoryBudget(budgetBytes),
 		partitions:      make(map[int32]*Partition),
 		nodeID:          nodeID,
 		config:          config,
@@ -435,12 +441,13 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 
 	// Create scheduler with two-tier cold store support
 	hotWindowMinutes := pm.config.HotWindowMinutes
-	if hotWindowMinutes <= 0 {
-		hotWindowMinutes = 60 // Default 1 hour if not configured
-	}
 	sched, err := scheduler.NewScheduler(dataDir, partitionID, int32(pm.config.TickMS), int32(pm.config.WheelSize), hotWindowMinutes, wal, pm.pebbleCache)
 	if err != nil {
 		return fmt.Errorf("create scheduler: %w", err)
+	}
+	if err := sched.SetMemoryBudget(pm.schedulerBudget, pm.config.PartitionCount, pm.pebbleCache); err != nil {
+		sched.Stop()
+		return fmt.Errorf("configure scheduler budget: %w", err)
 	}
 	// Configure adaptive hydrator intervals if specified
 	if pm.config.HydratorMinIntervalMs > 0 || pm.config.HydratorMaxIntervalMs > 0 {
@@ -634,8 +641,7 @@ func (pm *PartitionManager) GetPartitionForTopic(topic string) (*types.Partition
 	// Start the newly created partition synchronously (before returning)
 	partition := pm.partitions[partitionID]
 	if err := pm.startPartitionInternal(partition); err != nil {
-		log.Printf("Failed to start auto-created partition %d: %v", partitionID, err)
-		// Continue anyway - partition is created but may not deliver
+		return nil, fmt.Errorf("start partition %d: %w", partitionID, err)
 	}
 
 	return &types.Partition{
@@ -683,8 +689,7 @@ func (pm *PartitionManager) GetPartitionForKey(key string) (*types.Partition, er
 	// Start the newly created partition synchronously (before returning)
 	partition := pm.partitions[partitionID]
 	if err := pm.startPartitionInternal(partition); err != nil {
-		log.Printf("Failed to start auto-created partition %d: %v", partitionID, err)
-		// Continue anyway - partition is created but may not deliver
+		return nil, fmt.Errorf("start partition %d: %w", partitionID, err)
 	}
 
 	return &types.Partition{
@@ -783,7 +788,7 @@ func (pm *PartitionManager) GetOrCreateInternalPartition(partitionID int32, topi
 	pm.mu.RLock()
 	if partition, exists := pm.partitions[partitionID]; exists {
 		pm.mu.RUnlock()
-		return partition, nil
+		return partition, partition.GetReplayError()
 	}
 	pm.mu.RUnlock()
 
@@ -793,7 +798,7 @@ func (pm *PartitionManager) GetOrCreateInternalPartition(partitionID int32, topi
 
 	// Double-checked locking
 	if partition, exists := pm.partitions[partitionID]; exists {
-		return partition, nil
+		return partition, partition.GetReplayError()
 	}
 
 	// Auto-create
@@ -804,7 +809,7 @@ func (pm *PartitionManager) GetOrCreateInternalPartition(partitionID int32, topi
 	// Start the newly created partition synchronously
 	partition := pm.partitions[partitionID]
 	if err := pm.startPartitionInternal(partition); err != nil {
-		log.Printf("Failed to start auto-created partition %d: %v", partitionID, err)
+		return nil, fmt.Errorf("start partition %d: %w", partitionID, err)
 	}
 
 	return partition, nil
@@ -839,12 +844,13 @@ func (pm *PartitionManager) startPartitionInternal(partition *Partition) error {
 			return err
 		}
 	}
-	partition.started = true
-
 	// Re-seed the dedup store from the WAL tail. The dedup Pebble store runs with
 	// DisableWAL + NoSync for throughput, so claims made just before a crash may be
 	// missing; the WAL is the durable record of what was actually accepted.
-	pm.recoverDedupFromWAL(partition)
+	if err := pm.recoverDedupFromWAL(partition); err != nil {
+		return err
+	}
+	partition.started = true
 
 	// Start scheduler
 	partition.Scheduler.Start()
@@ -936,31 +942,36 @@ func (pm *PartitionManager) startPartitionInternal(partition *Partition) error {
 	return nil
 }
 
-// maxDedupRecoveryEvents bounds how many trailing WAL events are re-driven into
-// the dedup store on boot. The dedup store uses PebbleDB with DisableWAL + NoSync
-// for throughput, so recent claims can be lost on a crash; on restart we re-Put
-// the message IDs of the WAL tail (the durable source of truth) so duplicates are
-// still detected. The bound caps boot time on very large WALs — anything older is
-// almost certainly already flushed to the dedup Pebble store or past the TTL.
-const maxDedupRecoveryEvents = 500000
-
-// recoverDedupFromWAL re-populates the dedup store from the tail of the WAL so
-// message IDs accepted just before a crash (and lost from the NoSync dedup
-// Pebble memtable) are still recognized as duplicates after restart. It is
-// bounded by maxDedupRecoveryEvents and skips events already older than the
-// dedup TTL, since those would be pruned from the dedup store anyway.
-func (pm *PartitionManager) recoverDedupFromWAL(partition *Partition) {
+// recoverDedupFromWAL replays a byte-bounded suffix after a durable checkpoint.
+// Without a matching checkpoint it scans the entire retained log. No event
+// count is evidence of durability, especially on a newly promoted follower.
+func (pm *PartitionManager) recoverDedupFromWAL(partition *Partition) (retErr error) {
+	defer func() {
+		if retErr != nil {
+			partition.setReplayError(retErr)
+		}
+	}()
 	if partition.DedupStore == nil || partition.Wal == nil {
-		return
+		return nil
 	}
 	lastOffset := partition.Wal.GetLastOffset()
 	if lastOffset < 0 {
-		return
+		return nil
 	}
 
-	startOffset := int64(0)
-	if lastOffset-maxDedupRecoveryEvents+1 > 0 {
-		startOffset = lastOffset - maxDedupRecoveryEvents + 1
+	startOffset := partition.Wal.GetFirstOffset()
+	point, err := partition.DedupStore.LoadRecoveryPoint()
+	if err != nil {
+		return fmt.Errorf("load dedup recovery point: %w", err)
+	}
+	if point != nil && point.Offset >= startOffset && point.Offset <= lastOffset {
+		event, err := partition.Wal.ReadEvent(point.Offset)
+		if err != nil {
+			return fmt.Errorf("validate dedup recovery point: %w", err)
+		}
+		if event.Term == point.Term && event.MessageId == point.MessageID {
+			startOffset = point.Offset + 1
+		}
 	}
 
 	ttlMs := int64(pm.config.DedupTTLHours) * 60 * 60 * 1000
@@ -974,8 +985,7 @@ func (pm *PartitionManager) recoverDedupFromWAL(partition *Partition) {
 		to := min(from+logWalkEvents-1, lastOffset)
 		events, err := partition.Wal.ReadEventsWithin(from, to, logWalkBytes)
 		if err != nil {
-			log.Printf("[Partition %d] Dedup recovery read failed at offsets %d-%d: %v", partition.ID, from, to, err)
-			return
+			return fmt.Errorf("partition %d dedup recovery read %d-%d: %w", partition.ID, from, to, err)
 		}
 		if len(events) == 0 {
 			from = to + 1 // removed from the log meanwhile
@@ -993,7 +1003,7 @@ func (pm *PartitionManager) recoverDedupFromWAL(partition *Partition) {
 			}
 			stored, exists, err := partition.DedupStore.GetOffset(mid)
 			if err != nil {
-				continue
+				return fmt.Errorf("dedup recovery lookup %q: %w", mid, err)
 			}
 			if outcome, _ := dedup.DecodeOffset(stored); exists && (outcome == dedup.Accepted || stored == dedup.AppendedAt(ev.Offset)) {
 				continue
@@ -1002,8 +1012,7 @@ func (pm *PartitionManager) recoverDedupFromWAL(partition *Partition) {
 			// was accepted. Recording where it is lets a retry finish that
 			// publish instead of appending the event a second time.
 			if err := partition.DedupStore.Put(mid, dedup.AppendedAt(ev.Offset), ev.GetCreatedTs()); err != nil {
-				log.Printf("[Partition %d] Dedup recovery Put failed for %q: %v", partition.ID, mid, err)
-				continue
+				return fmt.Errorf("dedup recovery put %q: %w", mid, err)
 			}
 			recovered++
 		}
@@ -1012,6 +1021,16 @@ func (pm *PartitionManager) recoverDedupFromWAL(partition *Partition) {
 		log.Printf("[Partition %d] Dedup recovery: re-seeded %d message IDs from WAL tail (offsets %d-%d)",
 			partition.ID, recovered, startOffset, lastOffset)
 	}
+	if startOffset <= lastOffset {
+		event, err := partition.Wal.ReadEvent(lastOffset)
+		if err != nil {
+			return fmt.Errorf("read dedup recovery end: %w", err)
+		}
+		if err := partition.DedupStore.SaveRecoveryPoint(dedup.RecoveryPoint{Offset: event.Offset, Term: event.Term, MessageID: event.MessageId}); err != nil {
+			return fmt.Errorf("save dedup recovery point: %w", err)
+		}
+	}
+	return nil
 }
 
 // logWalkBytes and logWalkEvents bound one read of a walk through the log at
@@ -1490,6 +1509,9 @@ func (pm *PartitionManager) SyncPartitionFromLeader(partitionID int32, leaderAdd
 	pm.mu.Lock()
 	if partition.Follower == nil {
 		partition.Follower = replication.NewFollower(partitionID, partition.Wal, pm.nodeID, pm.replicationTLSConfig())
+		partition.Follower.SetDeadLetterSink(func(records []*types.DeadLetterRecord) error {
+			return partition.DLQ.ApplyReplica(partitionID, records)
+		})
 	}
 	pm.mu.Unlock()
 
@@ -1541,7 +1563,7 @@ func (pm *PartitionManager) PromoteToLeader(partitionID int32, epoch int64) erro
 		}
 		partition = pm.partitions[partitionID]
 		if err := pm.startPartitionInternal(partition); err != nil {
-			log.Printf("[PARTITION] Failed to start partition %d on promotion: %v", partitionID, err)
+			return fmt.Errorf("start partition %d on promotion: %w", partitionID, err)
 		}
 	}
 
@@ -1586,7 +1608,9 @@ func (pm *PartitionManager) PromoteToLeader(partitionID int32, epoch int64) erro
 			pm.replayWALTimers(partition)
 		}
 		if wasStarted {
-			pm.recoverDedupFromWAL(partition)
+			if err := pm.recoverDedupFromWAL(partition); err != nil {
+				return err
+			}
 		}
 		if err := partition.GetReplayError(); err != nil {
 			return err
@@ -1605,9 +1629,10 @@ func (pm *PartitionManager) PromoteToLeader(partitionID int32, epoch int64) erro
 	// Followers receive this group progress so a failover does not redeliver
 	// what consumers already finished.
 	consumerGroup := partition.ConsumerGroup
-	leader.SetProgressSource(func() (uint64, []*types.ConsumerGroupProgress) {
-		return consumerGroup.ExportProgress(partitionID)
+	leader.SetProgressPageSource(consumerGroup.ProgressVersion, func(cursor types.ProgressCursor) ([]*types.ConsumerGroupProgress, types.ProgressCursor, bool, error) {
+		return consumerGroup.ExportProgressPage(partitionID, cursor)
 	})
+	leader.SetDeadLetterSource(partition.DLQ.Version, partition.DLQ.ExportPage)
 	// A publish whose replication failed is finished once catch-up has taken
 	// its events to a quorum, even if nobody retries it.
 	leader.SetQuorumObserver(func(offset int64) {

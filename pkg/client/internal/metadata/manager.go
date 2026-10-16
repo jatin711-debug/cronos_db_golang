@@ -3,7 +3,9 @@ package metadata
 import (
 	"context"
 	"fmt"
+	"net"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -32,8 +34,10 @@ type Config struct {
 
 // Manager caches partition/leader metadata and refreshes it periodically.
 type Manager struct {
-	pool *connpool.Pool // connection pool used to fetch metadata
-	cfg  Config         // TTL, refresh, and mapping settings
+	refreshMu sync.Mutex
+	bootstrap map[string]bool
+	pool      *connpool.Pool // connection pool used to fetch metadata
+	cfg       Config         // TTL, refresh, and mapping settings
 
 	mu             sync.RWMutex                   // guards partitions, leaderAddrByID, lastUpdated
 	partitions     map[int32]*types.PartitionInfo // partition ID → last known info
@@ -51,7 +55,14 @@ func NewManager(pool *connpool.Pool, cfg Config) *Manager {
 	if cfg.NodeIDToAddress == nil {
 		cfg.NodeIDToAddress = map[string]string{}
 	}
+	bootstrap := make(map[string]bool)
+	if pool != nil {
+		for _, addr := range pool.Addresses() {
+			bootstrap[addr] = true
+		}
+	}
 	return &Manager{
+		bootstrap:      bootstrap,
 		pool:           pool,
 		cfg:            cfg,
 		partitions:     map[int32]*types.PartitionInfo{},
@@ -98,6 +109,8 @@ func (m *Manager) MarkStale() {
 
 // Refresh fetches metadata from cluster nodes.
 func (m *Manager) Refresh(ctx context.Context) error {
+	m.refreshMu.Lock()
+	defer m.refreshMu.Unlock()
 	start := time.Now()
 	var refreshErr error
 	defer func() {
@@ -106,7 +119,7 @@ func (m *Manager) Refresh(ctx context.Context) error {
 		}
 	}()
 
-	addresses := m.pool.Addresses()
+	addresses := m.CandidateAddresses(-1)
 	if len(addresses) == 0 {
 		refreshErr = fmt.Errorf("no cluster addresses available")
 		return refreshErr
@@ -115,6 +128,11 @@ func (m *Manager) Refresh(ctx context.Context) error {
 	var lastErr error
 	for _, addr := range addresses {
 		client, err := m.pool.PartitionClient(addr)
+		if err != nil {
+			if addErr := m.pool.AddNode(ctx, addr); addErr == nil {
+				client, err = m.pool.PartitionClient(addr)
+			}
+		}
 		if err != nil {
 			lastErr = err
 			continue
@@ -130,6 +148,23 @@ func (m *Manager) Refresh(ctx context.Context) error {
 
 		partitions := make(map[int32]*types.PartitionInfo, len(resp.GetPartitions()))
 		leaderAddrByID := cloneStringMap(m.cfg.NodeIDToAddress)
+		// Keep discovered endpoints when refreshing through an older server
+		// during a rolling upgrade. Explicit client mappings take precedence
+		// (for example, when clients connect through a proxy).
+		m.mu.RLock()
+		if resp.GetDiscoveryVersion() == 0 {
+			for id, address := range m.leaderAddrByID {
+				if _, configured := leaderAddrByID[id]; !configured {
+					leaderAddrByID[id] = address
+				}
+			}
+		}
+		m.mu.RUnlock()
+		for id, address := range resp.GetNodeAddresses() {
+			if _, configured := m.cfg.NodeIDToAddress[id]; !configured && id != "" && validPublicAddress(address) {
+				leaderAddrByID[id] = address
+			}
+		}
 		for _, info := range resp.GetPartitions() {
 			cloned := clonePartitionInfo(info)
 			partitions[cloned.GetPartitionId()] = cloned
@@ -146,10 +181,22 @@ func (m *Manager) Refresh(ctx context.Context) error {
 		}
 
 		m.mu.Lock()
+		oldAddresses := m.leaderAddrByID
 		m.partitions = partitions
 		m.leaderAddrByID = leaderAddrByID
 		m.lastUpdated = time.Now()
 		m.mu.Unlock()
+		if resp.GetDiscoveryVersion() > 0 {
+			keep := make(map[string]bool, len(leaderAddrByID))
+			for _, address := range leaderAddrByID {
+				keep[address] = true
+			}
+			for _, address := range oldAddresses {
+				if !keep[address] && !m.bootstrap[address] {
+					m.pool.RemoveNode(address)
+				}
+			}
+		}
 		m.stale.Store(false)
 		return nil
 	}
@@ -238,8 +285,36 @@ func (m *Manager) CandidateAddresses(partitionID int32) []string {
 		seen[addr] = struct{}{}
 		out = append(out, addr)
 	}
+	// Also retain metadata sources which have not served traffic yet. This
+	// lets a client refresh after every original bootstrap node has left.
+	m.mu.RLock()
+	discovered := make([]string, 0, len(m.leaderAddrByID))
+	for _, addr := range m.leaderAddrByID {
+		discovered = append(discovered, addr)
+	}
+	m.mu.RUnlock()
+	sort.Strings(discovered)
+	for _, addr := range discovered {
+		if _, exists := seen[addr]; !exists && addr != "" {
+			seen[addr] = struct{}{}
+			out = append(out, addr)
+		}
+	}
 
 	return out
+}
+
+func validPublicAddress(address string) bool {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil || host == "" {
+		return false
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 1 || n > 65535 {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip == nil || !ip.IsUnspecified()
 }
 
 func cloneStringMap(in map[string]string) map[string]string {

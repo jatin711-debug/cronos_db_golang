@@ -243,6 +243,7 @@ func LoadConfig() (*types.Config, error) {
 	flag.Float64Var(&config.MaxMemoryUsagePercent, "max-memory-percent", DefaultMaxMemoryUsagePercent, "Publishes are refused while this process holds this share of its memory limit or more (0 = never)")
 	flag.Int64Var(&config.MemoryCheckIntervalMs, "memory-check-interval", DefaultMemoryCheckIntervalMs, "Memory check interval in milliseconds")
 	flag.Int64Var(&config.MemoryLimitBytes, "memory-limit", 0, "Memory this process may use, in bytes (0 = the container's limit, or the machine's memory)")
+	flag.Int64Var(&config.SchedulerMemoryBytes, "scheduler-memory", 64<<20, "Node-wide scheduler payload budget in bytes (minimum 32 MiB)")
 
 	// Ingest rate limiting per partition
 	flag.Int64Var(&config.MaxIngestRatePerPartition, "max-ingest-rate", DefaultMaxIngestRatePerPartition, "Max events/sec per partition (0 = unlimited)")
@@ -355,6 +356,9 @@ func ValidateConfig(c *types.Config) error {
 	}
 	if c.MemoryLimitBytes < 0 || c.MaxMemoryUsagePercent < 0 || c.MaxMemoryUsagePercent > 100 {
 		return fmt.Errorf("memory-limit must be >= 0 and max-memory-percent between 0 and 100")
+	}
+	if c.SchedulerMemoryBytes != 0 && c.SchedulerMemoryBytes < 32<<20 {
+		return fmt.Errorf("scheduler-memory must be zero (default) or at least 32 MiB")
 	}
 	if c.MaxDiskUsage != 0 && (c.MaxDiskUsage < 0.05 || c.MaxDiskUsage > 1) {
 		// Publishes are taken again two points below the limit, so a limit
