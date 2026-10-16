@@ -43,6 +43,13 @@ import (
 )
 
 func main() {
+	os.Exit(run())
+}
+
+// run starts the server, serves until it is told to stop or a partition's log
+// fails, shuts down, and returns the exit status. It returns rather than
+// exiting so that its deferred closes run, among them the audit log's flush.
+func run() int {
 	// Setup structured logging
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
@@ -246,6 +253,12 @@ func main() {
 	})
 	diskMonitor.Start()
 	defer diskMonitor.Stop()
+	if cfg.MaxDiskUsage > 0 {
+		diskGuard := partition.NewDiskGuard(cfg.DataDir, cfg.MaxDiskUsage)
+		diskGuard.Start()
+		defer diskGuard.Stop()
+		pm.SetDiskGuard(diskGuard)
+	}
 
 	// Start the backup scheduler: every partition's log, consumer state, dedup
 	// store, dead-letter queue and epoch. Restore with `cronos-admin restore`.
@@ -780,8 +793,18 @@ func main() {
 		}
 	})
 
-	// Wait for shutdown signal
-	<-sigChan
+	// Wait for a shutdown signal, or for a partition's log to fail. A failed
+	// log takes no more writes and its disk cannot be trusted until it is read
+	// again, so the node stops: it is restarted, reopens its logs from what the
+	// disk holds, and meanwhile other replicas lead its partitions.
+	exitCode := 0
+	select {
+	case <-sigChan:
+	case <-storage.LogFailed():
+		slog.Error("A partition's log failed after a write to disk failed; stopping the node so that it restarts and recovers its logs from disk",
+			"node_id", cfg.NodeID)
+		exitCode = 1
+	}
 	slog.Info("Shutting down...", "node_id", cfg.NodeID)
 	cancel() // Stop background tasks (stats, etc.)
 
@@ -849,4 +872,5 @@ func main() {
 		grpcServer.Stop()
 		internalServer.Stop()
 	}
+	return exitCode
 }

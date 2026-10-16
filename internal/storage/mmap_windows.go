@@ -3,9 +3,11 @@
 package storage
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"reflect"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -112,9 +114,21 @@ func syncMmap(data []byte) error {
 	addr := uintptr(unsafe.Pointer(&data[0]))
 	size := uintptr(len(data))
 
-	if err := windows.FlushViewOfFile(addr, size); err != nil {
+	// FlushViewOfFile fails with ERROR_LOCK_VIOLATION while another flush of
+	// the same pages is under way. That flushed nothing and lost nothing, so
+	// it is tried again; any other error, or one that persists, is a failed
+	// write, which stops the log.
+	// Windows' own writer of mapped pages can hold them for a while under
+	// heavy I/O, so this waits up to about five seconds.
+	var err error
+	for attempt := 0; attempt < 250; attempt++ {
+		if err = windows.FlushViewOfFile(addr, size); !errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
+			break
+		}
+		time.Sleep(time.Duration(min(attempt+1, 20)) * time.Millisecond)
+	}
+	if err != nil {
 		return fmt.Errorf("FlushViewOfFile: %w", err)
 	}
-
 	return nil
 }

@@ -213,6 +213,11 @@ type Config struct {
 	// LoadSheddingThreshold is a load fraction [0.0, 1.0] above which work may be shed (0 = disabled).
 	LoadSheddingThreshold float64
 
+	// MaxDiskUsage is the used fraction (0, 1] of the filesystem holding
+	// DataDir at which publishes are refused; they are taken again two points
+	// below it. 0 disables the check.
+	MaxDiskUsage float64
+
 	// FollowerReadsEnabled allows serving some read/replay traffic from followers.
 	FollowerReadsEnabled bool
 

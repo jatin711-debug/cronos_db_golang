@@ -80,6 +80,11 @@ func (h *ReplicationServiceHandler) Append(ctx context.Context, req *types.Repli
 	reject := func(reason string) (*types.ReplicationAppendResponse, error) {
 		return &types.ReplicationAppendResponse{Success: false, Error: reason, LastOffset: p.Wal.GetLastOffset(), NextOffset: p.Wal.GetNextOffset(), Term: p.Epoch()}, nil
 	}
+	// A replica whose log failed cannot say that it holds anything durably,
+	// not even entries it holds already and would skip below.
+	if err := p.Wal.Failure(); err != nil {
+		return reject(err.Error())
+	}
 	if req.GetTerm() <= 0 || req.GetTerm() < p.Epoch() {
 		return reject(fmt.Sprintf("invalid or stale term %d; current %d", req.GetTerm(), p.Epoch()))
 	}

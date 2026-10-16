@@ -199,7 +199,7 @@ func (s *Segment) allEventsMatch(ctx context.Context, eligible func(*types.Event
 			return false, err
 		}
 		length := int64(binary.BigEndian.Uint32(lengthBytes[:]))
-		if length < 32 || length > 10*1024*1024 || length > s.sizeBytes-pos {
+		if length < 32 || length > MaxRecordLength || length > s.sizeBytes-pos {
 			return false, fmt.Errorf("invalid record length %d at %d", length, pos)
 		}
 		if cap(record) < int(length-4) {

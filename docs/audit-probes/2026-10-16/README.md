@@ -20,4 +20,6 @@ Executed here on Windows, Go 1.26.9. Six test functions have nine leaf cases and
 
 The local term and retry probes use existing test helpers. The follower term helper uses periodic fsync; its assertion concerns authority and replication contents, not power-loss durability. Other local probes use the existing batch-fsync audit helper.
 
+`evidence.txt` is the output on the audited v0.6.0 source and is kept as it was. The probes of the findings fixed since are ordinary tests now; see the status table in the audit. Run on a later source, the rotation probe fails at its first step, because the publish that fills a segment no longer fails, and the dead-letter probe still fails until finding 4 is fixed.
+
 After a fix, promote its probe into ordinary tests and add public-transport, restart, encrypted-storage, or fault-campaign coverage as appropriate. Do not change these assertions merely to match the current defect.

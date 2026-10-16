@@ -30,6 +30,7 @@ type Segment struct {
 	mmapWritePos    int64     // current write cursor within mmapData (bytes)
 	mmapSize        int64     // mapped length in bytes (tracks len(mmapData))
 	mmapFlushedPos  int64     // mmap prefix already handed to the OS by syncMmap; guarded by flushMu
+	writeErr        error     // first failed write-out or sync, returned by every later one; guarded by flushMu (see failedWriteLocked)
 	firstOffset     int64     // first event offset stored in this segment
 	lastOffset      int64     // last event offset; -1 when empty
 	firstTS         int64     // schedule timestamp of first event (ms); 0 if unknown
@@ -854,14 +855,34 @@ func (s *Segment) writeRecordBuffered(record []byte) (int64, error) {
 	return int64(n), err
 }
 
+// failedWriteLocked records err, if it is the segment's first failed write-out
+// or sync, and returns the first one, or nil when none has failed.
+//
+// A failure sticks. Linux reports a failed writeback once, to the next fsync,
+// and may drop the pages it could not write; an fsync after that succeeds
+// without them. A flush that started after a failed one, and found nothing
+// wrong, could otherwise make an append look durable before the log learned
+// of the failure. The caller must hold flushMu.
+func (s *Segment) failedWriteLocked(err error) error {
+	if err != nil && s.writeErr == nil {
+		s.writeErr = err
+	}
+	return s.writeErr
+}
+
 // remapMmap remaps the file with a new size.
 func (s *Segment) remapMmap(newSize int64) error {
 	s.flushMu.Lock()
 	defer s.flushMu.Unlock()
+	if err := s.failedWriteLocked(nil); err != nil {
+		return err
+	}
 
 	if s.mmapData != nil {
+		// The mapping is written out before it goes, and a failure is the
+		// append's: what the mapping held may not be on disk.
 		if err := syncMmap(s.mmapData); err != nil {
-			log.Printf("[SEGMENT] mmap sync before remap failed: %v", err)
+			return s.failedWriteLocked(fmt.Errorf("sync mapping before remap: %w", err))
 		}
 		if err := munmapFile(s.mmapData); err != nil {
 			return fmt.Errorf("unmap old mmap: %w", err)
@@ -933,7 +954,7 @@ func (s *Segment) readEventMmap(targetOffset int64, startPos int64) (*types.Even
 			break
 		}
 		length := int64(binary.BigEndian.Uint32(data[pos : pos+4]))
-		if length <= 4 || length > 10*1024*1024 {
+		if length <= 4 || length > MaxRecordLength {
 			break
 		}
 
@@ -997,7 +1018,7 @@ func (s *Segment) readEventFile(targetOffset int64, startPos int64) (*types.Even
 		currentPos += 4
 
 		length := int64(binary.BigEndian.Uint32(lengthBytes))
-		if length <= 0 || length > 10*1024*1024 { // Sanity check
+		if length <= 0 || length > MaxRecordLength { // Sanity check
 			break
 		}
 
@@ -1214,7 +1235,7 @@ func (s *Segment) TruncateAfterOffset(keepThroughOffset int64) (int, error) {
 			return 0, fmt.Errorf("read length: %w", err)
 		}
 		length := int64(binary.BigEndian.Uint32(lengthBytes))
-		if length <= 4 || length > 10*1024*1024 {
+		if length <= 4 || length > MaxRecordLength {
 			break
 		}
 		recordLen := int(length - 4)
@@ -1333,7 +1354,7 @@ func (s *Segment) scan() error {
 			}
 			break
 		}
-		if length <= 4 || length > 10*1024*1024 { // Sanity check: must be > 4 bytes, max 10MB record
+		if length <= 4 || length > MaxRecordLength { // Sanity check: must be > 4 bytes, max 10MB record
 			invalid = fmt.Sprintf("a record length of %d", length)
 			break
 		}
@@ -1547,10 +1568,16 @@ func (s *Segment) FlushBuffer() error {
 	if mapped {
 		s.flushMu.Lock()
 		defer s.flushMu.Unlock()
-		if s.closed || s.mmapData == nil {
-			return nil // closed or deactivated meanwhile; both flush before unmapping
+		if s.closed {
+			return nil
 		}
-		return s.syncMmapTailLocked(pos)
+		if err := s.failedWriteLocked(nil); err != nil {
+			return err
+		}
+		if s.mmapData == nil {
+			return nil // deactivated meanwhile, which flushes before unmapping
+		}
+		return s.failedWriteLocked(s.syncMmapTailLocked(pos))
 	}
 	// Buffered writer is not thread-safe, so flush it under the exclusive lock.
 	s.mu.Lock()
@@ -1560,7 +1587,7 @@ func (s *Segment) FlushBuffer() error {
 	if s.closed {
 		return nil
 	}
-	return s.flushWriter()
+	return s.failedWriteLocked(s.flushWriter())
 }
 
 // Sync persists the segment file to disk (fdatasync).
@@ -1582,12 +1609,15 @@ func (s *Segment) Sync() error {
 	if s.closed {
 		return nil
 	}
+	if err := s.failedWriteLocked(nil); err != nil {
+		return err
+	}
 	if s.mmapData != nil {
 		if err := s.syncMmapTailLocked(pos); err != nil {
-			return err
+			return s.failedWriteLocked(err)
 		}
 	}
-	return s.segmentFile.Sync()
+	return s.failedWriteLocked(s.segmentFile.Sync())
 }
 
 // mmapPageSize aligns partial flushes: msync rejects unaligned addresses.
@@ -1678,7 +1708,7 @@ func (s *Segment) Deactivate() error {
 
 	s.isActive = false
 	// NOTE: segmentFile and index intentionally stay open for reads.
-	return errors.Join(errs...)
+	return s.failedWriteLocked(errors.Join(errs...))
 }
 
 // closeLocked performs the actual close logic. Caller must hold s.mu.
