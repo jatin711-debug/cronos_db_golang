@@ -7,6 +7,10 @@ tracks unresolved guarantees, and
 below. A green CI run is necessary but does not establish the complete release
 acceptance contract.
 
+## Preparing v0.7.0
+
+The next release adds scheduler payload budgeting, durable dedup recovery checkpoints, paged completion and dead-letter replication, client discovery, and automated image evidence. See [hardening and upgrade behavior](HARDENING_V0.7.0.md), including the Docker Hub secret names and optional separate backup PVC.
+
 ## Supported scope under validation
 
 The first release targets fixed partitions and telemetry with explicit loss,
@@ -121,7 +125,7 @@ is started again with its data joins as a member again. In
 `TestLostNodeIsRemoved` one of four nodes is lost and removed, and the
 cluster then loses a second node and carries on with two of three.
 
-A node cannot be added to a running cluster for applications that are
+In `v0.6.0`, a node cannot be added to a running cluster for applications that are
 already connected. Partition metadata names a leader by its node ID, and a
 client turns that into an address only for the nodes it was started with or
 was given in `NodeIDToAddress`. A node that joins later takes over leadership
@@ -129,6 +133,11 @@ of some partitions, and clients that do not know its address cannot publish
 to those. Replace a node under the name and address of the one it replaces,
 as a StatefulSet does, and restart or reconfigure clients before growing a
 cluster.
+
+The upcoming `v0.7.0` metadata response advertises public node endpoints, and
+updated clients refresh their address map when membership changes. Explicit
+`NodeIDToAddress` overrides still take precedence. Upgrade clients as well as
+servers to use discovery, and advertise addresses reachable from those clients.
 
 The HTTP port (health, metrics, dashboard and the admin API) is served over
 TLS with `--http-tls-enabled`, with the certificate of the client port
@@ -293,10 +302,10 @@ second; the last column says what they do not show.
 | The replicas of a partition hold the same log | `TestFaultCampaign` compares them entry for entry | |
 | A partition takes publishes again within 90 seconds of its leader's death | The bound the campaign enforces | Typical times; behavior under load |
 | Any node, the first included, can be replaced with an empty one | `TestFaultCampaign`, `TestFirstNodeReplaced`, the kind job on the chart | Two at once |
-| A node that is lost for good is removed, and no longer counts towards a majority (since `v0.6.0-rc.4`) | `TestLostNodeIsRemoved`: one of four nodes lost and removed through `cronos-admin`, then a second node killed | A node added to a running cluster: clients that are connected do not learn its address |
+| A node that is lost for good is removed, and no longer counts towards a majority (since `v0.6.0-rc.4`) | `TestLostNodeIsRemoved`: one of four nodes lost and removed through `cronos-admin`, then a second node killed | Growing the cluster with connected clients is not covered by this test; `v0.7.0` adds endpoint discovery with separate client regression tests |
 | A cluster that is lost entirely comes back from its nodes' backups with everything acknowledged before the earliest of them | `TestClusterRestoredFromBackups` | Restore to a point between backups; getting backups off the node, which is the operator's to arrange |
 | Producers that outrun the cluster are refused, and no node dies of it | `TestOverloadIsRefusedAndSurvived` | Load at production sizes |
-| A node comes back with more waiting for consumers than it has memory, and delivers it (since `v0.6.0-rc.4`) | `TestRestartWithABacklogLargerThanMemory`; `TestRestartInContainersWithABacklogLargerThanTheirMemory`, with a limit of 384 MiB that the kernel enforces and a backlog of 1 GiB | Backlogs beyond a gigabyte; events not yet due, which are held in memory for the hot window |
+| A node comes back with more waiting for consumers than it has memory, and delivers it (since `v0.6.0-rc.4`) | `TestRestartWithABacklogLargerThanMemory`; `TestRestartInContainersWithABacklogLargerThanTheirMemory`, with a limit of 384 MiB that the kernel enforces and a backlog of 1 GiB | Backlogs beyond a gigabyte; future events under production load. `v0.7.0` adds a separate scheduler payload budget for future events |
 | Traffic between nodes is encrypted and only nodes that hold the cluster's certificate take part | `TestTransportTLS_*`, the kind job | |
 | Certificates and their CA are replaced without a restart, and the HTTP port is served over TLS (since `v0.6.0-rc.4`) | `TestCertificatesAndTheirCAReplacedWhileRunning` on three running nodes; `TestNodes_ReplaceCertificatesAndTheirCAWhileRunning`, `TestCredentials_VerifyAgainstTheCAOfTheMoment`, `TestBuildHTTPTLSConfig_ServesTheHTTPPortOverTLS`; the kind job asks the HTTP port over TLS and checks that it does not answer without | The certificate of the client port and of the HTTP port replaced under load; a certificate that expires while a connection is open |
 | One tenant cannot read, replay or acknowledge another's events | `TestIsolation_*` | |

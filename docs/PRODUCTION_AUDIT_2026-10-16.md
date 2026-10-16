@@ -13,17 +13,19 @@ On branch `hardening-v0.7.0`:
 | 1. Unreadable records | Fixed. One record limit for writers, readers and recovery; publishes check it before claiming an ID. |
 | 2. Producer-chosen terms | Fixed. A log stores its own term for every entry it appends for itself; followers store the leader's. |
 | 3. Append errors and dedup | Fixed. Appends report whether their events reached the log, and publishes hold those for the retry instead of releasing the ID. A failed write or fsync stops the log and the node; a failed rotation no longer fails the append. |
-| 4. Dead-letter copy not replicated | Open. |
+| 4. Dead-letter copy not replicated | Implemented. Bounded journal pages include payloads and tombstones; followers fsync before acknowledging. Completion transfer and retention wait for the copy. |
 | 5. Whole-segment startup verification | Fixed. The second, whole-segment read was removed; opening a segment already checks every record one at a time. |
-| 6. Scheduler memory | Open. |
-| 7. Dedup recovery cutoff | Open. |
-| 8. Pinned log and disk admission | Partly fixed. Publishes are refused at `--max-disk-usage` (default 95%) with hysteresis. While refusing, a retry that would only finish an earlier, held publish is refused too. Metrics for what pins the log, retention policy, and refusing replicated appends on a full follower are open. |
-| 9. Sparse completion transfer | Open. |
-| 10. Client discovery of new nodes | Open. |
-| 11. Quota refusal strands an ID | Fixed for the stranded ID: a single publish refused for its quota gives back the ID it claimed. Returning reservations of publishes that fail later, and the batch path charging duplicates, are open. |
-| 12. Release evidence | Open. |
+| 6. Scheduler memory | Implemented. A shared node payload budget spills overflow to WAL references; hydration is paged and can evict later timers for earlier work. |
+| 7. Dedup recovery cutoff | Implemented. Durable checkpoints replace the count cutoff; startup and promotion fail closed on recovery errors. |
+| 8. Pinned log and disk admission | Implemented. Disk admission covers new follower appends; retries of already stored entries remain possible. Retention exports the blocking offset, age and reason. An optional separate backup PVC is available. Retention remains conservative; unfinished events are not discarded to reclaim space. |
+| 9. Sparse completion transfer | Implemented. Per-follower cursors send 4,096 completions per page, across all groups, with versioned retry rounds. |
+| 10. Client discovery of new nodes | Implemented. Metadata advertises public endpoints; clients refresh routing and preserve explicit overrides and mixed-version discoveries. |
+| 11. Quota refusal strands an ID | Implemented. Both publish paths release refused claims, charge after deduplication, and refund reservations on definite pre-append failure. |
+| 12. Release evidence | Workflow implemented. The release image is built once, scanned, tested, pushed and attested by digest. Publishing requires repository credentials and a successful CI run; no v0.7.0 artifact has been published by this change. |
 
 The probes of findings 1, 2, 3 and 11 are now ordinary tests ([internal/api/publish_integrity_test.go](../internal/api/publish_integrity_test.go), [internal/storage/append_outcome_test.go](../internal/storage/append_outcome_test.go)). The probe of finding 3 changed with the fix: the publish that fills a segment now succeeds, and the test checks that its retry does not append the event again.
+
+The second batch implementation and upgrade behavior are described in [v0.7.0 hardening](HARDENING_V0.7.0.md). The checks below describe the original audit, not a claim that the new release has shipped.
 
 **What was checked**
 

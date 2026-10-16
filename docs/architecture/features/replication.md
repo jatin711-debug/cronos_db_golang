@@ -97,14 +97,18 @@ Newly joined replicas or freshly wiped followers are initialized via
    completes. The trailer carries the source's epoch: a source behind the
    epoch this replica has accepted was superseded as leader, and its snapshot
    is refused without touching the local log.
-5. `WAL.InstallCheckpoint` then swaps the generations under a journal
+5. Dead-letter journal pages, including payloads and removal tombstones, are
+   applied and synced before the WAL is installed. A failed journal write
+   leaves the existing WAL in place. A snapshot with dead-letter history
+   requires a receiver that supports these pages.
+6. `WAL.InstallCheckpoint` then swaps the generations under a journal
    (`snapshot-install.state`): it writes `prepared`, moves `segments` and
    `index` aside as `*.old`, moves the staged directories into place, loads
    and verifies them against the announced last offset, writes `installed`,
    and removes the old directories. A failure, or a crash before `installed`,
    restores the old log; `RecoverSnapshot` finishes or undoes an interrupted
    install whenever the WAL is opened.
-6. The installed epoch is persisted, so the replica refuses appends from an
+7. The installed epoch is persisted, so the replica refuses appends from an
    older leader after a restart as well.
 
 The full install is wrapped in a 10-minute `context` by
@@ -205,6 +209,15 @@ paused only while it notes where each file ends.
   redeliver it. The same message carries the position of the partition's
   change feed, so a promoted follower continues exporting where the old
   leader stopped (see [cdc.md](cdc.md)).
+- **Sparse completion pages.** Each follower has its own cursor over pages
+  of at most 4,096 completed offsets across consumer groups. Failed pages are
+  retried; version changes and periodic refreshes cover additions behind a
+  cursor.
+- **Dead-letter disposition.** Durable journal pages carry failed payloads
+  and removal tombstones. A follower syncs them before acknowledging, and
+  the leader withholds completion transfer until that copy is durable.
+  Retention also waits for every assigned follower to acknowledge the
+  journal. See [rolling upgrade behavior](../../HARDENING_V0.7.0.md#completion-and-dead-letter-replication).
 - **Progress stops at the end of the log.** Completion is recorded by
   offset, so it is worth as much as the entry at that offset. A replica keeps
   none at or beyond the end of its own log: a follower takes its leader's
@@ -243,6 +256,8 @@ when a partition is idle, names the offset the leader's log starts at
   them: they were finished before the leader removed them. This is how a
   replica with an empty disk joins a partition that has already removed
   entries, and how one that was away for long comes back, without a snapshot.
+  It must durably receive the leader's dead-letter journal before skipping
+  that prefix; an older follower that cannot acknowledge it is refused.
 - Either way the entries below that offset count as complete for every
   consumer group on that replica, so that it does not look for them if it
   leads next.
@@ -251,11 +266,12 @@ A follower never removes anything by its own decision: its copy of the
 consumer progress trails the leader's. A new leader removes nothing until it
 has heard from enough followers to know what a quorum holds.
 
-What this does not do: the leader does not wait for a follower that is behind
-or down before it removes entries. That follower restarts its log at the
-leader's start when it returns, which costs nothing that is still needed but
-means that, for a while, the removed range existed on fewer replicas than the
-replication factor. It was finished by then.
+For ordinary completed events, the leader need not wait for a follower that
+is behind or down before removing entries. That follower restarts its log at
+the leader's start when it returns, so the completed range may temporarily
+exist on fewer replicas than the replication factor. Dead-letter journal
+replication adds a separate retention gate: every assigned follower must
+have acknowledged that journal before pruning can proceed.
 
 ## Publishes that fail after the append
 
