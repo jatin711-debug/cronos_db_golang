@@ -1,0 +1,201 @@
+package api
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/jatin711-debug/cronos_db_golang/internal/tenant"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
+)
+
+// Each probe asserts a production invariant, not the present defective behavior.
+// The runner adds this file through a Go overlay; ordinary CI is unchanged.
+func TestAudit20261016PublicRecordMustRemainReadable(t *testing.T) {
+	for _, batch := range []bool{false, true} {
+		t.Run(fmt.Sprintf("batch=%v", batch), func(t *testing.T) {
+			pm := auditManager(t)
+			p, _ := pm.GetInternalPartition(0)
+			h := NewEventServiceHandler(pm, p.DedupStore, p.ConsumerGroup)
+			e := orders("large-metadata", 1)[0]
+			e.Meta = make(map[string]string)
+			for i := 0; i < 180; i++ {
+				e.Meta[fmt.Sprintf("key-%03d", i)] = strings.Repeat("x", 60*1024)
+			}
+			if n := proto.Size(&types.PublishRequest{Event: e}); n >= DefaultConfig().MaxRecvMsgSize {
+				t.Fatalf("probe exceeds public transport limit: %d", n)
+			}
+			var accepted bool
+			if batch {
+				r, err := h.PublishBatch(context.Background(), &types.PublishBatchRequest{Events: []*types.Event{e}})
+				accepted = err == nil && r.GetSuccess() && r.GetPublishedCount() == 1
+			} else {
+				r, err := h.Publish(context.Background(), &types.PublishRequest{Event: e})
+				accepted = err == nil && r.GetSuccess()
+			}
+			if !accepted {
+				return // Rejecting an oversized record before acceptance is safe.
+			}
+			got, err := p.Wal.ReadEvent(e.Offset)
+			if err != nil || got == nil || got.MessageId != e.MessageId {
+				t.Fatalf("accepted event (%d protobuf bytes) is unreadable immediately: event=%v err=%v", proto.Size(e), got, err)
+			}
+		})
+	}
+}
+
+func TestAudit20261016ProducerCannotChooseLogTerm(t *testing.T) {
+	for _, batch := range []bool{false, true} {
+		t.Run(fmt.Sprintf("batch=%v", batch), func(t *testing.T) {
+			pm := auditManager(t)
+			p, _ := pm.GetInternalPartition(0)
+			p.Wal.SetCurrentTerm(7)
+			h := NewEventServiceHandler(pm, p.DedupStore, p.ConsumerGroup)
+			e := orders("producer-term", 1)[0]
+			e.Term = 999999
+			var accepted bool
+			if batch {
+				r, err := h.PublishBatch(context.Background(), &types.PublishBatchRequest{Events: []*types.Event{e}})
+				accepted = err == nil && r.GetSuccess() && r.GetPublishedCount() == 1
+			} else {
+				r, err := h.Publish(context.Background(), &types.PublishRequest{Event: e})
+				accepted = err == nil && r.GetSuccess()
+			}
+			if !accepted {
+				return // An explicit rejection is also safe.
+			}
+			got, err := p.Wal.ReadEvent(e.Offset)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Term != 7 {
+				t.Fatalf("public producer supplied stored term %d, leader term is 7", got.Term)
+			}
+		})
+	}
+}
+
+func TestAudit20261016ProducerTermReachesFollower(t *testing.T) {
+	leader := newPublisher(t)
+	follower := newReplicaLog(t, "term-follower")
+	if err := leader.pm.AddFollower(0, "term-follower", follower.serveReplication()); err != nil {
+		t.Fatal(err)
+	}
+	e := orders("replicated-producer-term", 1)[0]
+	e.Term = 999999
+	r := leader.publish([]*types.Event{e})
+	if !r.GetSuccess() {
+		return // A validated refusal would preserve the invariant.
+	}
+	got := follower.log()
+	if len(got) != 1 || got[0].Term != leader.p.Epoch() {
+		t.Fatalf("follower log %s contains producer term; leader epoch=%d", describe(got), leader.p.Epoch())
+	}
+}
+
+func TestAudit20261016DeadLetterDispositionMustKeepRecoverableCopy(t *testing.T) {
+	pm := auditManager(t)
+	p, _ := pm.GetInternalPartition(0)
+	h := NewEventServiceHandler(pm, p.DedupStore, p.ConsumerGroup)
+	e := orders("dead-letter", 1)[0]
+	e.Term = 1
+	r, err := h.Publish(context.Background(), &types.PublishRequest{Event: e})
+	if err != nil || !r.GetSuccess() {
+		t.Fatalf("setup publish: %v %v", r, err)
+	}
+	followerPM := auditManager(t)
+	follower, _ := followerPM.GetInternalPartition(0)
+	rh := NewReplicationServiceHandler(followerPM)
+	appendResult, err := rh.Append(context.Background(), &types.ReplicationAppendRequest{
+		PartitionId: 0, Term: 1, LeaderId: "audit", Events: []*types.Event{e},
+	})
+	if err != nil || !appendResult.GetSuccess() {
+		t.Fatalf("setup follower: %v %v", appendResult, err)
+	}
+	if err := p.ConsumerGroup.CreateGroup("workers", "orders", []int32{0}); err != nil {
+		t.Fatal(err)
+	}
+	// Exercise the same persistence ordering as Dispatcher.sendToDLQ:
+	// local durable DLQ entry, completion, then replication of that progress.
+	if err := p.DLQ.Add(e, "failed-delivery", 3, "poison", "subscriber"); err != nil {
+		t.Fatal(err)
+	}
+	p.Dispatcher.OnDeadLettered("workers", []*types.Event{e})
+	_, groups := p.ConsumerGroup.ExportProgress(0)
+	progress, err := rh.SyncConsumerProgress(context.Background(), &types.ReplicationProgressRequest{
+		PartitionId: 0, Term: 1, LeaderId: "audit", Groups: groups,
+	})
+	if err != nil || !progress.GetSuccess() {
+		t.Fatalf("replicate disposition: %v %v", progress, err)
+	}
+	if follower.ConsumerGroup.IsCompleted("workers", 0, e.Offset) && follower.DLQ.Count() == 0 {
+		t.Fatal("follower marks event complete but has no dead-letter copy; loss of leader disk leaves no DLQ entry and suppresses redelivery")
+	}
+}
+
+func TestAudit20261016QuotaRefusalDoesNotClaimID(t *testing.T) {
+	pm := auditManager(t)
+	p, _ := pm.GetInternalPartition(0)
+	h := NewEventServiceHandler(pm, p.DedupStore, p.ConsumerGroup)
+	a := tenant.NewAccountant()
+	a.SetLimits("default", tenant.Limits{MaxStorageBytes: 1})
+	h.SetTenantAccountant(a)
+	e := orders("quota-refusal", 1)[0]
+	_, err := h.Publish(context.Background(), &types.PublishRequest{Event: e})
+	if status.Code(err) != codes.ResourceExhausted {
+		t.Fatalf("expected quota refusal, got %v", err)
+	}
+	a.SetLimits("default", tenant.Limits{MaxStorageBytes: 10000})
+	r, err := h.Publish(context.Background(), &types.PublishRequest{Event: e})
+	if err != nil || !r.GetSuccess() {
+		t.Fatalf("retry after quota lifted is still refused despite no WAL append: response=%v err=%v nextOffset=%d", r, err, p.Wal.GetNextOffset())
+	}
+}
+
+func TestAudit20261016RotationFailureDoesNotAppendRetryTwice(t *testing.T) {
+	for _, batch := range []bool{false, true} {
+		t.Run(fmt.Sprintf("batch=%v", batch), func(t *testing.T) {
+			pm := auditManager(t) // 1 MiB segments
+			p, _ := pm.GetInternalPartition(0)
+			h := NewEventServiceHandler(pm, p.DedupStore, p.ConsumerGroup)
+			e := orders("rotation-failure", 1)[0]
+			e.Payload = make([]byte, 1<<20)
+			// Deterministically fail the next segment open, after the event was
+			// appended. The path is owned by this test's temporary directory.
+			blocked := filepath.Join(p.Wal.GetDataDir(), "segments", fmt.Sprintf("%020d.log", 1))
+			if err := os.Mkdir(blocked, 0755); err != nil {
+				t.Fatal(err)
+			}
+			publish := func() (bool, string) {
+				if batch {
+					r, err := h.PublishBatch(context.Background(), &types.PublishBatchRequest{Events: []*types.Event{e}})
+					return err == nil && r.GetSuccess(), fmt.Sprintf("%v / %v", r, err)
+				}
+				r, err := h.Publish(context.Background(), &types.PublishRequest{Event: e})
+				return err == nil && r.GetSuccess(), fmt.Sprintf("%v / %v", r, err)
+			}
+			if ok, desc := publish(); ok || !strings.Contains(desc, "rotate segment") {
+				t.Fatalf("expected injected rotation failure: %s", desc)
+			}
+			if err := os.Remove(blocked); err != nil {
+				t.Fatal(err)
+			}
+			if ok, desc := publish(); !ok {
+				t.Fatalf("retry failed: %s", desc)
+			}
+			got, err := p.Wal.ReadEvents(0, p.Wal.GetLastOffset())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != 1 {
+				t.Fatalf("retry appended same message ID %d times after failed rotation; want one log entry", len(got))
+			}
+		})
+	}
+}
