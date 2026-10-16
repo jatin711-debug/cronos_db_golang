@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CHART = ROOT / "charts" / "cronos-db"
 
 
-def check(ephemeral=False):
+def check(ephemeral=False, separate_backup=False):
     args = ["helm", "template", "cronos", str(CHART), "--namespace", "cronos-ci",
             "-f", str(CHART / "values-production.yaml"),
             "--set", "headlessService.gossipPort=17946",
@@ -17,6 +17,9 @@ def check(ephemeral=False):
             "--set", "tolerations[0].operator=Exists"]
     if ephemeral:
         args += ["--set", "persistence.enabled=false"]
+    if separate_backup:
+        args += ["--set", "backupPersistence.enabled=true",
+                 "--set", "backupPersistence.storageClass=backup-storage"]
     docs = list(yaml.safe_load_all(subprocess.check_output(args, text=True)))
     sts = next(d for d in docs if d and d["kind"] == "StatefulSet")
     config = next(d["data"] for d in docs if d and d["kind"] == "ConfigMap")
@@ -47,11 +50,19 @@ def check(ephemeral=False):
     assert volumes["encryption-source"]["secret"]["defaultMode"] == 0o440
     assert "chmod 600" in pod["initContainers"][0]["args"][0]
     assert ("data" in volumes) == ephemeral
-    assert ("volumeClaimTemplates" in sts["spec"]) != ephemeral
+    claims = {claim["metadata"]["name"]: claim for claim in sts["spec"].get("volumeClaimTemplates", [])}
+    assert ("data" in claims) != ephemeral
+    assert ("backups" in claims) == separate_backup
+    if separate_backup:
+        assert env["CRONOS_BACKUP_DIR"] == "/backups"
+        assert any(v["name"] == "backups" and v["mountPath"] == "/backups" for v in app["volumeMounts"])
+        assert claims["backups"]["spec"]["storageClassName"] == "backup-storage"
 
 
 if __name__ == "__main__":
     subprocess.run(["helm", "lint", str(CHART), "-f", str(CHART / "values-production.yaml")], check=True)
     check()
     check(ephemeral=True)
-    print("Production chart assertions passed (persistent and ephemeral volumes).")
+    check(separate_backup=True)
+    check(ephemeral=True, separate_backup=True)
+    print("Production chart assertions passed (persistent/ephemeral data and separate backup volumes).")

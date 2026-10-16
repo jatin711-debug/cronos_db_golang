@@ -71,3 +71,8 @@ docker-compose.*.yml
 *.tmp
 *.temp
 *.bak
+
+# Local validation output and alternate build checkouts
+build/
+site/
+dist/
