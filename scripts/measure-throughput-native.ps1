@@ -5,7 +5,10 @@ param(
     [string]$Plan = '1:1,1:4,100:1,100:4,100:8,1000:1,1000:4,1000:8,1000:16',
     [ValidateRange(256,512)][int]$NodeMemoryMiB = 384,
     [ValidateSet(1,2)][int]$NodeCPUs = 2,
-    [ValidateRange(1536,16384)][int]$AbortFreeMiB = 1536
+    [ValidateRange(1536,16384)][int]$AbortFreeMiB = 1536,
+    # A server built elsewhere, e.g. from an earlier release for a matched
+    # comparison. Empty builds ./cmd/api from this checkout.
+    [string]$ServerBinary = ''
 )
 
 # The same measurement as measure-throughput.ps1, with the three nodes as plain
@@ -28,7 +31,7 @@ $privateDir = Join-Path $runDir 'private'
 $go = Join-Path $env:USERPROFILE 'go/pkg/mod/golang.org/toolchain@v0.0.1-go1.26.9.windows-amd64/bin/go.exe'
 if (-not (Test-Path -LiteralPath $go)) { throw 'The amd64 Go toolchain is missing' }
 $harnessBinary = Join-Path $repo 'build/throughput/throughput.exe'
-$serverBinary = Join-Path $repo 'build/throughput/cronos-api.exe'
+$serverBinary = if ($ServerBinary) { (Resolve-Path -LiteralPath $ServerBinary).Path } else { Join-Path $repo 'build/throughput/cronos-api.exe' }
 $nodes = @()
 $harness = $null
 $guardReason = $null
@@ -97,16 +100,19 @@ $env:CGO_ENABLED='0'; $env:GOTOOLCHAIN='local'; $env:GOARCH='amd64'; $env:GOMAXP
 Push-Location $repo
 try {
     & $go build -p 1 -o $harnessBinary ./tools/throughput; if ($LASTEXITCODE -ne 0) { throw 'Load generator build failed' }
-    & $go build -p 1 -o $serverBinary ./cmd/api; if ($LASTEXITCODE -ne 0) { throw 'Server build failed' }
+    if (-not $ServerBinary) { & $go build -p 1 -o $serverBinary ./cmd/api; if ($LASTEXITCODE -ne 0) { throw 'Server build failed' } }
 }
 finally { Pop-Location }
 $names = @('node1','node2','node3')
 & $harnessBinary -mode=init "-dir=$privateDir" "-names=$($names -join ',')"
 if ($LASTEXITCODE -ne 0) { throw 'Credential setup failed' }
+# Servers before v0.7.0 have no scheduler memory budget; they would refuse the flag.
+$serverHelp = (& $serverBinary -h 2>&1) -join "`n"
+$schedulerMemory = if ($serverHelp -match 'scheduler-memory') { @('--scheduler-memory=33554432') } else { @() }
 $secret = ((Get-Content (Join-Path $privateDir 'server.env')) | Where-Object { $_ -like 'CRONOS_AUTH_JWT_SECRET=*' }) -replace '^CRONOS_AUTH_JWT_SECRET=',''
 
 try {
-    [ordered]@{started=(Get-Date -Format o);runner='native-windows';commit=(git -C $repo rev-parse HEAD);node_memory_mib=$NodeMemoryMiB;node_cpus=$NodeCPUs;abort_host_free_mib=$AbortFreeMiB;payload_bytes=$Payload;rf=3;min_isr=2;fsync='batch';dedup=$true;public_tls=$true;replication_mtls=$true;auth=$true;encryption=$true;partitions=3;plan=$Plan;seconds_per_trial=$Seconds;max_events_per_trial=$MaxEvents} |
+    [ordered]@{started=(Get-Date -Format o);runner='native-windows';commit=(git -C $repo rev-parse HEAD);server_binary=$serverBinary;server_sha256=(Get-FileHash -LiteralPath $serverBinary).Hash;node_memory_mib=$NodeMemoryMiB;node_cpus=$NodeCPUs;abort_host_free_mib=$AbortFreeMiB;payload_bytes=$Payload;rf=3;min_isr=2;fsync='batch';dedup=$true;public_tls=$true;replication_mtls=$true;auth=$true;encryption=$true;partitions=3;plan=$Plan;seconds_per_trial=$Seconds;max_events_per_trial=$MaxEvents} |
         ConvertTo-Json | Set-Content (Join-Path $runDir 'config.json')
     $ports = @{}
     foreach ($name in $names) { $ports[$name] = @{grpc=FreePort;http=FreePort;gossip=FreePort;cluster=FreePort;raft=FreePort} }
@@ -117,10 +123,11 @@ try {
         $p = $ports[$name]
         $data = Join-Path $runDir "$name-data"
         New-Item -ItemType Directory -Force -Path $data | Out-Null
-        $server = @("--node-id=$name",'--cluster','--cluster-expected-nodes=3',"--cluster-seeds=$seeds",'--partition-count=3','--replication-factor=3','--min-insync-replicas=2','--fsync-mode=batch','--flush-interval=2','--segment-size=16777216','--bloom-capacity=1000000','--compaction-interval=2s','--backup-interval=0','--scheduler-memory=33554432','--max-memory-percent=65','--memory-check-interval=250','--max-ready-queue=30000','--max-in-flight=10000',
+        $server = @("--node-id=$name",'--cluster','--cluster-expected-nodes=3',"--cluster-seeds=$seeds",'--partition-count=3','--replication-factor=3','--min-insync-replicas=2','--fsync-mode=batch','--flush-interval=2','--segment-size=16777216','--bloom-capacity=1000000','--compaction-interval=2s','--backup-interval=0','--max-memory-percent=65','--memory-check-interval=250','--max-ready-queue=30000','--max-in-flight=10000',
             "--memory-limit=$($NodeMemoryMiB*1MB)","--data-dir=$data","--raft-dir=$data/raft","--grpc-addr=127.0.0.1:$($p.grpc)","--http-addr=127.0.0.1:$($p.http)","--cluster-gossip-addr=127.0.0.1:$($p.gossip)","--cluster-grpc-addr=127.0.0.1:$($p.cluster)","--cluster-raft-addr=127.0.0.1:$($p.raft)",
             '--tls-enabled',"--tls-ca-file=$config/ca.crt","--tls-cert-file=$config/tls.crt","--tls-key-file=$config/tls.key",'--http-tls-enabled','--auth-enabled',"--auth-policy-file=$config/policy.json",
             '--replication-tls-enabled',"--replication-tls-ca-file=$config/ca.crt","--replication-tls-cert-file=$config/tls.crt","--replication-tls-key-file=$config/tls.key",'--encryption-enabled',"--encryption-key-file=$config/master.key")
+        $server += $schedulerMemory
         if ($name -eq 'node1') { $server += '--cluster-bootstrap' }
         $env:CRONOS_AUTH_JWT_SECRET = $secret; $env:GOMEMLIMIT = '150MiB'; $env:GOMAXPROCS = "$NodeCPUs"
         $process = Start-Process -FilePath $serverBinary -ArgumentList $server -WorkingDirectory $data -WindowStyle Hidden -PassThru `
