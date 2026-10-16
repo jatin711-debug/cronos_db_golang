@@ -52,6 +52,15 @@ persistence:
   accessMode: ReadWriteOnce
   size: 10Gi
 
+# A separate per-pod PVC keeps backups when the data PVC is lost. Choose a
+# storage class on a separate failure domain; retain these claims during restore.
+backupPersistence:
+  enabled: false
+  mountPath: /backups
+  storageClass: ""
+  accessMode: ReadWriteOnce
+  size: 20Gi
+
 service:
   type: ClusterIP
   grpcPort: 9000

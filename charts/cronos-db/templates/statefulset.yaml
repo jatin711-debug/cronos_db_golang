@@ -71,6 +71,10 @@ spec:
               fi
               exec /app/cronos-api
           env:
+            {{- if .Values.backupPersistence.enabled }}
+            - name: CRONOS_BACKUP_DIR
+              value: {{ .Values.backupPersistence.mountPath | quote }}
+            {{- end }}
             - name: POD_NAME
               valueFrom:
                 fieldRef:
@@ -180,6 +184,10 @@ spec:
           volumeMounts:
             - name: data
               mountPath: {{ .Values.config.dataDir }}
+            {{- if .Values.backupPersistence.enabled }}
+            - name: backups
+              mountPath: {{ .Values.backupPersistence.mountPath }}
+            {{- end }}
             {{- if .Values.tls.enabled }}
             - name: tls
               mountPath: /etc/cronos/tls
@@ -233,8 +241,9 @@ spec:
         - name: data
           emptyDir: {}
         {{- end }}
-  {{- if .Values.persistence.enabled }}
+  {{- if or .Values.persistence.enabled .Values.backupPersistence.enabled }}
   volumeClaimTemplates:
+    {{- if .Values.persistence.enabled }}
     - metadata:
         name: data
       spec:
@@ -246,4 +255,18 @@ spec:
         resources:
           requests:
             storage: {{ .Values.persistence.size }}
+    {{- end }}
+    {{- if .Values.backupPersistence.enabled }}
+    - metadata:
+        name: backups
+      spec:
+        accessModes:
+          - {{ .Values.backupPersistence.accessMode }}
+        {{- if .Values.backupPersistence.storageClass }}
+        storageClassName: {{ .Values.backupPersistence.storageClass }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.backupPersistence.size }}
+    {{- end }}
   {{- end }}

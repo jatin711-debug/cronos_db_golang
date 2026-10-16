@@ -115,6 +115,10 @@ jobs:
       - run: cargo build --release --locked --manifest-path internal/dedup/rust/Cargo.toml
       - run: go install golang.org/x/vuln/cmd/govulncheck@latest
       - run: govulncheck ./internal/... ./pkg/... ./cmd/...
+      - name: Audit locked Rust dependencies
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit --file internal/dedup/rust/Cargo.lock
 
   production-chart-startup:
     runs-on: ubuntu-latest
