@@ -152,6 +152,7 @@ nav:
           - Transactions (2PC): architecture/features/tx.md
   - Operations:
       - Docker: DOCKER.md
+      - Three-node throughput validation (2026-10-16): CLUSTER_PERFORMANCE_VALIDATION_2026-10-16.md
       - Three-node publish validation (2026-09-29): CLUSTER_PERFORMANCE_VALIDATION_2026-09-29.md
       - Maintenance validation (2026-09-29): MAINTENANCE_VALIDATION_2026-09-29.md
   - Project:

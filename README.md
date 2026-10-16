@@ -16,22 +16,25 @@ It combines the durability of a write-ahead log, the precision of a hierarchical
 
 ## Key Numbers
 
-The publish rates below were measured on 2026-09-29, on the development branch
-of that day, with three processes on one AMD Ryzen 7 6800H laptop and
-`periodic` fsync, which production mode refuses. They show what the code
-accepts on one machine; they are not a capacity to plan a deployment on, and
-no throughput or latency figure is promised. See the
-[measurement settings and baseline comparison](docs/CLUSTER_PERFORMANCE_VALIDATION_2026-09-29.md).
+Measured on 2026-10-16 on the `hardening-v0.7.0` branch with three server
+processes on one AMD Ryzen 7 6800H laptop (16 threads, one NVMe SSD), 256-byte
+payloads and the Go bloom filter, alternating with `v0.6.0` under the same
+conditions. They show what the code does on one machine; they are not a
+capacity to plan a deployment on, and no throughput or latency figure is
+promised. See the
+[validation record](docs/CLUSTER_PERFORMANCE_VALIDATION_2026-10-16.md).
 
 | Metric | Value |
 |--------|-------|
-| **RF=1 raw publish** | **~612K events/sec median** — Go bloom filter, dedup bypassed, 32 partitions, 4.8M events; 16.4% below matched v0.5.0 median |
-| **RF=3, minISR=2** | **~111K events/sec** — native Rust/CGO, dedup enabled, 16 partitions, 960K events; one sample |
-| **Reported publish errors** | **0** in the listed completed profiles; delivery and failover are separate checks |
+| **Production settings, delivered** | **~17–19K events/sec** accepted, every event checked as delivered — RF=3, minISR=2, `batch` fsync, dedup, TLS, mTLS, auth and encryption at rest; batches of 1,000, 3 partitions, nodes capped at 2 CPUs. v0.6.0: ~17–18K |
+| **RF=3, minISR=2 publish** | **~204K events/sec median** — `periodic` fsync, dedup enabled, 16 partitions, batch 4,000, 240K events, three runs, publish answers only. v0.6.0: ~191K |
+| **RF=1 raw publish** | **647K–856K events/sec** — `periodic` fsync, dedup bypassed, 32 partitions, batch 4,000, 4.8M events, two runs, publish answers only. v0.6.0: 357K–705K |
+| **Single-event publish, production settings** | **~50 events/sec per publisher**, ~19 ms median: each publish waits for its fsync, so batch for throughput |
+| **Reported publish errors** | **0** in every completed profile |
 | **Timer Precision** | 10ms tick default (`-tick-ms`; configurable) |
 | **Dedup False Positive Rate** | <1% (bloom filter, confirmed against PebbleDB) |
 
-> Earlier ~790K RF=1, ~200K RF=3, and 1M+ claims used different conditions or lack preserved evidence. They are not capacity targets.
+> The RF=1 and RF=3 publish profiles use `periodic` fsync, which production mode refuses, and no consumer. The 1M+ figure of earlier versions of this README was not reproduced and has no preserved evidence.
 
 ---
 
@@ -496,15 +499,15 @@ Use `-addr` to target a different node. Run `make demo` if a node is already up.
 
 ### Benchmarks (3-Node Cluster on Single Machine)
 
-Measured on a 3-node cluster on one host (AMD Ryzen 7 6800H, NVMe SSD) with 256-byte payloads and periodic fsync:
+Measured on 2026-10-16 with three server processes on one host (AMD Ryzen 7 6800H, NVMe SSD) and 256-byte payloads, alternating the current branch with `v0.6.0` under the same conditions:
 
-| Profile | Throughput | Notes |
-|--------|------------|-------|
-| RF=1 raw publish, development branch of 2026-09-29 | **612K events/sec median** | Three runs; dedup bypassed, 32 partitions, 128 MiB segments, batch 4000, 4.8M events each, Go fallback |
-| RF=1 raw publish, v0.5.0 | **733K events/sec median** | Matched three-run baseline; 16.4% faster |
-| RF=3, minISR=2, development branch of 2026-09-29 | **111K events/sec** | Native Rust/CGO, dedup enabled, 16 partitions, batch 4000, 960K events, one run |
+| Profile | Current branch | v0.6.0 | Settings |
+|--------|------------|-------|-------|
+| Production settings, delivered | **18.6K / 17.5K events/sec** | 18.1K / 16.6K | RF=3, minISR=2, `batch` fsync, dedup, TLS, mTLS, auth, encryption at rest; 3 partitions, batch 1,000, one publisher, nodes capped at 2 CPUs and a 384 MiB budget; every accepted event checked as delivered |
+| RF=3, minISR=2 publish | **204K events/sec median** | 191K | `periodic` fsync, dedup enabled, 16 partitions, batch 4,000, 240K events, three runs |
+| RF=1 raw publish | **856K / 647K events/sec** | 705K / 357K | `periodic` fsync, dedup bypassed, 32 partitions, batch 4,000, 4.8M events |
 
-The [validation record](docs/CLUSTER_PERFORMANCE_VALIDATION_2026-09-29.md) includes the native/CGO baseline pair, additional RF=3 workloads, and measurement limits. These runs used `periodic` fsync, which production mode refuses. Re-run with your storage, network, and durability settings before sizing a deployment.
+With production settings, delivery rather than publishing set the ceiling: one consumer group with one worker per partition fell 2–6 seconds behind at batches of 1,000, and more publishers only grew the backlog. A single-event publish waits for its fsync, about 19 ms here. The `periodic` profiles count publish answers only, with no consumer; RF=3 at 960K events outgrew this laptop's memory on both builds. Runs on this host vary by ±20% and more, and the three nodes share one CPU and SSD, so the [validation record](docs/CLUSTER_PERFORMANCE_VALIDATION_2026-10-16.md) lists every run and its limits; the [2026-09-29 record](docs/CLUSTER_PERFORMANCE_VALIDATION_2026-09-29.md) has the earlier v0.5.0 comparison. Re-run with your storage, network, and durability settings before sizing a deployment.
 
 ### Durability & Fault Tolerance
 

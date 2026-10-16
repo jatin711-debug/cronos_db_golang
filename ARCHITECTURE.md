@@ -1608,7 +1608,7 @@ flowchart TD
 
 The historical claim of 1,010,933 events/s across 96 million events has no
 preserved benchmark artifact or durability verification. The current
-[three-node validation](docs/CLUSTER_PERFORMANCE_VALIDATION_2026-09-29.md)
+[three-node validation](docs/CLUSTER_PERFORMANCE_VALIDATION_2026-10-16.md)
 reports the exact workloads, accepted-event rates, baseline comparison, and
 remaining correctness limits. All three nodes ran on one physical machine.
 
