@@ -7,10 +7,12 @@
 package delivery
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"log"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -822,6 +824,14 @@ func (d *Dispatcher) dispatchGroupBatch(partitionID int32, events []*types.Event
 			continue
 		}
 
+		// A batch goes out in offset order. Events reach it in the order the
+		// scheduler hands them over, which mixes timing-wheel slots with events
+		// re-driven from the log, while an acknowledgement names the offset
+		// after the batch's last event and is refused unless that is the one
+		// after its highest (ValidateAck). Out of order, every acknowledgement
+		// of the batch was refused, its redeliveries' too, and the
+		// subscription's credits stayed taken for good.
+		sortByOffset(batchEvents)
 		delivery := deliveryMessagePool.Get().(*DeliveryMessage)
 		delivery.Event = nil
 		delivery.Batch = batchEvents
@@ -952,6 +962,17 @@ func makeDeliveryID(subID string, offset int64) string {
 
 // makeDeliveryIDBatch creates a batch delivery ID of the form
 // "<subID>-batch-<offset>-<count>".
+// sortByOffset puts events in offset order. They nearly always are already,
+// which costs one pass to find out.
+func sortByOffset(events []*types.Event) {
+	for i := 1; i < len(events); i++ {
+		if events[i].Offset < events[i-1].Offset {
+			slices.SortFunc(events, func(a, b *types.Event) int { return cmp.Compare(a.Offset, b.Offset) })
+			return
+		}
+	}
+}
+
 func makeDeliveryIDBatch(subID string, offset int64, count int) string {
 	need := len(subID) + 7 + 20 + 1 + 10 // subID + "-batch-" + offset + '-' + count
 	if need <= maxDeliveryIDBuf {
