@@ -4,6 +4,27 @@ Audited `developement` at `f8cc2063534be4aa97ffac602d9297b15d636e56`. The workin
 
 The next work should close correctness and bounded-resource gaps before adding features. Much of the prior hardening is present: durable batch fsync, quorum completion, epoch fencing, log matching, restart/redrive, consumer-progress replication, authenticated internal traffic, and CI fault/restore/overload campaigns. They should be preserved. The findings below distinguish reproduced defects, code-traced limits, and missing validation; the September audit's historical defects are not being treated as still open without checking the current code.
 
+**Status of the findings**
+
+On branch `hardening-v0.7.0`:
+
+| Finding | Status |
+|---|---|
+| 1. Unreadable records | Fixed. One record limit for writers, readers and recovery; publishes check it before claiming an ID. |
+| 2. Producer-chosen terms | Fixed. A log stores its own term for every entry it appends for itself; followers store the leader's. |
+| 3. Append errors and dedup | Fixed. Appends report whether their events reached the log, and publishes hold those for the retry instead of releasing the ID. A failed write or fsync stops the log and the node; a failed rotation no longer fails the append. |
+| 4. Dead-letter copy not replicated | Open. |
+| 5. Whole-segment startup verification | Fixed. The second, whole-segment read was removed; opening a segment already checks every record one at a time. |
+| 6. Scheduler memory | Open. |
+| 7. Dedup recovery cutoff | Open. |
+| 8. Pinned log and disk admission | Partly fixed. Publishes are refused at `--max-disk-usage` (default 95%) with hysteresis. While refusing, a retry that would only finish an earlier, held publish is refused too. Metrics for what pins the log, retention policy, and refusing replicated appends on a full follower are open. |
+| 9. Sparse completion transfer | Open. |
+| 10. Client discovery of new nodes | Open. |
+| 11. Quota refusal strands an ID | Fixed for the stranded ID: a single publish refused for its quota gives back the ID it claimed. Returning reservations of publishes that fail later, and the batch path charging duplicates, are open. |
+| 12. Release evidence | Open. |
+
+The probes of findings 1, 2, 3 and 11 are now ordinary tests ([internal/api/publish_integrity_test.go](../internal/api/publish_integrity_test.go), [internal/storage/append_outcome_test.go](../internal/storage/append_outcome_test.go)). The probe of finding 3 changed with the fix: the publish that fills a segment now succeeds, and the test checks that its retry does not append the event again.
+
 **What was checked**
 
 - Followed the public publish handlers through dedup, WAL append, replication, scheduling, and retry; reviewed completion/DLQ transfer, recovery, retention, client discovery, and release workflows.

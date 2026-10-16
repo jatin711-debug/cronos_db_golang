@@ -78,6 +78,7 @@ Defaults from `internal/config/defaults.go` unless noted. Every flag has a `CRON
 | `--max-ready-queue` | `1000000` | Max ready-queue depth per partition |
 | `--max-timing-wheel-size` | `10000000` | Max active timers in the hot timing wheel |
 | `--max-in-flight` | `500000` | Max in-flight deliveries per partition |
+| `--max-disk-usage` | `0.95` | Refuse publishes once the filesystem holding `--data-dir` is this full (fraction, `0` = never); they are taken again two points below. Deliveries, replication and retention go on |
 | `--ack-timeout` | `30s` | Delivery ack deadline (**reload-only env**) |
 | `--max-retries` | `5` | Max delivery retries before DLQ (**reload-only env**) |
 | `--retry-backoff` | `1s` | Base retry backoff |

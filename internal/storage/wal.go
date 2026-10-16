@@ -59,6 +59,24 @@ var walFlushErrorsTotal = promauto.NewCounterVec(
 	[]string{"partition"},
 )
 
+// walFailed is 1 for a partition whose log failed and takes no more writes.
+var walFailed = promauto.NewGaugeVec(
+	prometheus.GaugeOpts{
+		Name: "cronos_wal_failed",
+		Help: "1 when a partition's WAL stopped taking writes after a write to disk failed",
+	},
+	[]string{"partition"},
+)
+
+// walRotationErrorsTotal counts failures to start a new segment.
+var walRotationErrorsTotal = promauto.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "cronos_wal_rotation_errors_total",
+		Help: "Total number of failures to start a new WAL segment; the full segment takes the next append, which tries again",
+	},
+	[]string{"partition"},
+)
+
 // WAL is a segmented write-ahead log for a single partition.
 // Offsets are reserved atomically, then written in strict order via an append
 // sequencer so concurrent producers never interleave records on disk.
@@ -97,6 +115,77 @@ type WAL struct {
 	// afterCheckpointCut, when set by a test, runs once Checkpoint has released
 	// the WAL lock and before it copies anything.
 	afterCheckpointCut func()
+
+	// failure holds the first write or sync of the log that failed. From then
+	// on the log takes no more appends (see fail).
+	failure atomic.Pointer[error]
+	// rotateErrorLogged is when a failure to start a new segment was last
+	// logged. Guarded by mu.
+	rotateErrorLogged time.Time
+}
+
+// ErrLogFailed is wrapped by the errors of a log that stopped taking appends
+// because a write or sync of it failed.
+//
+// After such a failure what the disk holds is not known: a failed fsync may
+// have dropped the pages it did not write, so a later fsync that succeeds says
+// nothing about them, and a failed write may have left part of a record. The
+// log therefore takes no more appends, and is not trusted again until it is
+// reopened, which reads what the disk holds. The server stops when a log fails
+// (see LogFailed), so that it is restarted and other replicas take over.
+var ErrLogFailed = errors.New("log stopped taking writes after a write to disk failed")
+
+// AppendedError is returned by an append whose events are in the log, at the
+// offsets the append gave them, although something after writing them failed.
+type AppendedError struct {
+	Err error
+}
+
+func (e *AppendedError) Error() string { return e.Err.Error() }
+func (e *AppendedError) Unwrap() error { return e.Err }
+
+// EventsAppended reports whether err, returned by an append, means that the
+// append's events are in the log. Any other append error means they are not,
+// or that the log failed and no longer takes appends, so that only reopening it
+// can say.
+func EventsAppended(err error) bool {
+	var appended *AppendedError
+	return errors.As(err, &appended)
+}
+
+var (
+	logFailedOnce sync.Once
+	logFailed     = make(chan struct{})
+)
+
+// LogFailed returns a channel that is closed once any log in the process has
+// failed and stopped taking appends.
+func LogFailed() <-chan struct{} { return logFailed }
+
+// fail records err as the failure of the log, unless it has one already, and
+// returns the error appends get from now on.
+func (w *WAL) fail(err error) error {
+	if w.failure.CompareAndSwap(nil, &err) {
+		walFailed.WithLabelValues(w.partitionLabel).Set(1)
+		log.Printf("[WAL-%d] ERROR: the log takes no more writes, because a write to disk failed: %v", w.partitionID, err)
+		logFailedOnce.Do(func() { close(logFailed) })
+	}
+	return w.Failure()
+}
+
+// Fail stops the log taking appends, as a failed write to disk does, and
+// returns the error appends get from then on. err says why.
+func (w *WAL) Fail(err error) error {
+	return w.fail(err)
+}
+
+// Failure returns an error wrapping ErrLogFailed once the log has failed, and
+// nil before.
+func (w *WAL) Failure() error {
+	if p := w.failure.Load(); p != nil {
+		return fmt.Errorf("partition %d: %w: %v", w.partitionID, ErrLogFailed, *p)
+	}
+	return nil
 }
 
 // groupSync is one flush+fsync shared by a group of writers. The writer that
@@ -225,24 +314,15 @@ func (w *WAL) loadSegments() error {
 	// Sort by offset
 	sort.Strings(segmentFiles)
 
-	// Load each segment with verification
+	// Opening a segment reads every record in it, one at a time, and checks
+	// its CRC (Segment.scan); where they stop reading is judged below. They
+	// used to be read once more here, the whole segment into memory at once,
+	// which took as much memory as the largest segment to start a node.
 	for _, filename := range segmentFiles {
 		segment, err := OpenSegment(w.dataDir, filename, w.cipher)
 		if err != nil {
 			return fmt.Errorf("open existing segment %s: %w", filename, err)
 		}
-
-		// Verify segment integrity by reading all events and checking CRCs
-		if err := w.verifySegment(segment); err != nil {
-			closeErr := segment.Close()
-			if closeErr != nil {
-				log.Printf("[WAL-%d] WARNING: Segment %s verification failed: %v; additionally failed to close: %v", w.partitionID, filename, err, closeErr)
-			} else {
-				log.Printf("[WAL-%d] WARNING: Segment %s verification failed: %v", w.partitionID, filename, err)
-			}
-			return fmt.Errorf("verify existing segment %s: %w", filename, err)
-		}
-
 		w.segments = append(w.segments, segment)
 	}
 	if err := w.judgeInvalidTails(); err != nil {
@@ -323,36 +403,6 @@ func (w *WAL) judgeInvalidTails() error {
 	return nil
 }
 
-// verifySegment reads all events from a segment to verify CRC integrity.
-// This is called on startup to detect data corruption.
-func (w *WAL) verifySegment(segment *Segment) error {
-	firstOffset := segment.GetFirstOffset()
-	lastOffset := segment.GetLastOffset()
-
-	if firstOffset > lastOffset {
-		return nil // Empty segment
-	}
-
-	events, err := segment.ReadEventsByOffsetRange(firstOffset, lastOffset)
-	if err != nil {
-		return fmt.Errorf("read events for verification: %w", err)
-	}
-
-	// Verify each event's CRC by re-parsing the raw record
-	for _, event := range events {
-		if event == nil {
-			return fmt.Errorf("nil event in segment")
-		}
-		// The event was successfully parsed, which means CRC passed
-		// Additional check: verify offset continuity
-		if event.Offset < firstOffset || event.Offset > lastOffset {
-			return fmt.Errorf("event offset %d out of segment range [%d, %d]", event.Offset, firstOffset, lastOffset)
-		}
-	}
-
-	return nil
-}
-
 // PreparedRecord holds a pre-encoded WAL record buffer for fast serialization.
 // Offset and CRC placeholders in Buf are filled after the offset is reserved.
 type PreparedRecord struct {
@@ -397,9 +447,55 @@ func releasePreparedSlice(prepared []*PreparedRecord) {
 	}
 }
 
+// MaxRecordLength is the largest value a record's length field may hold.
+// Readers and recovery take a larger one for damage, so no append may write it.
+const MaxRecordLength = 10 << 20
+
+// maxCipherOverhead is the most that encrypting a record adds to it: a version
+// byte, a nonce and an authentication tag, with room to spare.
+const maxCipherOverhead = 64
+
+// MaxEventRecordSize is the largest event, as a record before encryption, that
+// a log takes. It is the same with and without encryption, so every replica of
+// a partition takes the same events.
+const MaxEventRecordSize = MaxRecordLength - maxCipherOverhead
+
+// ErrRecordTooLarge is returned for an event whose record would be larger than
+// MaxEventRecordSize.
+var ErrRecordTooLarge = errors.New("event is too large for a log record")
+
+// EventRecordSize returns the size of event's record before encryption,
+// length field included.
+func EventRecordSize(event *types.Event) int {
+	size := 4 + 4 + 8 + 8 + 8 + 2 + len(event.GetMessageId()) + 2 + len(event.Topic) + 4 + len(event.Payload) + 4 + 2
+	for k, v := range event.Meta {
+		size += 2 + len(k) + 2 + len(v)
+	}
+	return size
+}
+
+// CheckEventSize returns an error wrapping ErrRecordTooLarge when event is too
+// large for a log record. A publish checks this before it claims anything, so
+// that what it accepts can always be read back.
+func CheckEventSize(event *types.Event) error {
+	return CheckRecordSize(EventRecordSize(event))
+}
+
+// CheckRecordSize returns an error wrapping ErrRecordTooLarge when a record of
+// size bytes, as EventRecordSize counts them, is too large for a log.
+func CheckRecordSize(size int) error {
+	if size > MaxEventRecordSize {
+		return fmt.Errorf("%w: %d bytes encoded, at most %d", ErrRecordTooLarge, size, MaxEventRecordSize)
+	}
+	return nil
+}
+
 // PrepareRecord serializes an event to a byte slice with placeholders for offset and CRC.
 // The record format v2 is: [crc32 4][term 8][offset 8][schedule_ts 8][msgID len 2][msgID]
 // [topic len 2][topic][payload len 4][payload][checksum 4][meta count 2][meta...].
+//
+// The record carries term, not the event's own Term: which term an entry has is
+// for the log to say (see WAL.AppendBatch and WAL.AppendReplicatedBatch).
 func PrepareRecord(event *types.Event, term int64) (*PreparedRecord, error) {
 	if event == nil {
 		return nil, fmt.Errorf("event is nil")
@@ -408,10 +504,7 @@ func PrepareRecord(event *types.Event, term int64) (*PreparedRecord, error) {
 	// Serialize local values instead of mutating the caller's event. Producers
 	// may reuse an event object across concurrent appenders; WAL preparation must
 	// not introduce a data race on Term or Checksum.
-	eventTerm := event.Term
-	if eventTerm == 0 {
-		eventTerm = term
-	}
+	eventTerm := term
 	eventChecksum := event.Checksum
 	if eventChecksum == 0 && len(event.Payload) > 0 {
 		eventChecksum = crc32.ChecksumIEEE(event.Payload)
@@ -431,17 +524,9 @@ func PrepareRecord(event *types.Event, term int64) (*PreparedRecord, error) {
 		}
 	}
 
-	// Calculate size
-	size := 4 + 4 + 8 + 8 + 8 + 2 + msgIDLen + 2 + topicLen + 4 + payloadLen + 4 + 2
-	for k, v := range event.Meta {
-		metaEntrySize := 2 + len(k) + 2 + len(v)
-		if size > (1<<63-1)-metaEntrySize {
-			return nil, fmt.Errorf("event record too large: overflow in size calculation")
-		}
-		size += metaEntrySize
-	}
-	if size > int(^uint32(0)) {
-		return nil, fmt.Errorf("event record exceeds uint32 length limit")
+	size := EventRecordSize(event)
+	if size > MaxEventRecordSize {
+		return nil, fmt.Errorf("%w: %d bytes encoded, at most %d", ErrRecordTooLarge, size, MaxEventRecordSize)
 	}
 
 	var buf []byte
@@ -517,9 +602,10 @@ func PrepareRecord(event *types.Event, term int64) (*PreparedRecord, error) {
 	}, nil
 }
 
-// termForEvent returns the term to use when writing an event. Replicated events
-// may already carry their term; locally produced events use the WAL's current term.
-func (w *WAL) termForEvent(event *types.Event) int64 {
+// replicatedTerm returns the term a follower stores for an entry it is sent:
+// the one the leader gave it. Entries a log appends for itself always take the
+// log's current term, whatever the event says (see AppendBatch).
+func (w *WAL) replicatedTerm(event *types.Event) int64 {
 	if event.Term != 0 {
 		return event.Term
 	}
@@ -547,23 +633,44 @@ func (w *WAL) advanceAppendTurn(endOffset int64) {
 
 // AppendBatch appends a batch of events to the WAL, assigning contiguous offsets
 // and applying the configured fsync mode. Empty batches are a no-op.
+//
+// Each event is stored under the log's current term, and gets its offset,
+// partition and term set. A term the event already carried is ignored: terms
+// say which leader wrote an entry, and elections and the matching of logs rely
+// on that, so they are not for a producer, another region or another
+// partition's log to choose.
+//
+// An error for which EventsAppended reports true means the events are in the
+// log at the offsets they were given; any other error means they are not. After
+// an error wrapping ErrLogFailed the log takes no more appends.
 func (w *WAL) AppendBatch(events []*types.Event) error {
 	if len(events) == 0 {
 		return nil
 	}
+	if err := w.Failure(); err != nil {
+		return err
+	}
 
 	start := time.Now()
 	defer func() {
-		metrics.ObserveWALAppend(strconv.FormatInt(int64(w.partitionID), 10), time.Since(start))
+		metrics.ObserveWALAppend(w.partitionLabel, time.Since(start))
 	}()
 
 	// 1. Prepare records OUTSIDE the lock; serialization is the most expensive
 	//    part of the write path and does not depend on the assigned offset.
-	prepared := acquirePreparedSlice(len(events))
-	defer releasePreparedSlice(prepared)
+	//    A single event, which is what AppendEvent appends, needs no pooled
+	//    slice: the pool round trip costs more than the rest of preparing it.
+	var single [1]*PreparedRecord
+	prepared := single[:]
+	if len(events) > 1 {
+		pooled := acquirePreparedSlice(len(events))
+		defer releasePreparedSlice(pooled)
+		prepared = pooled
+	}
 
+	term := w.GetCurrentTerm()
 	for i, event := range events {
-		prep, err := PrepareRecord(event, w.termForEvent(event))
+		prep, err := PrepareRecord(event, term)
 		if err != nil {
 			// If error, return already allocated buffers to pool
 			for j := 0; j < i; j++ {
@@ -575,6 +682,7 @@ func (w *WAL) AppendBatch(events []*types.Event) error {
 		}
 		prepared[i] = prep
 	}
+	defer returnBuffersToPool(prepared)
 
 	// 2. Reserve a contiguous offset range atomically. This is safe because the
 	//    actual segment append is serialized by the append sequencer below.
@@ -606,11 +714,20 @@ func (w *WAL) AppendBatch(events []*types.Event) error {
 
 	// 5. Append to active segment — caller holds w.mu, so use the lock-free variant.
 	w.mu.Lock()
-	if err := w.activeSegment.AppendPreparedBatchLocked(prepared, w.config.IndexInterval); err != nil {
+	// A writer before this one may have failed after reserving offsets it
+	// did not write. Appending behind it would leave a hole in the log.
+	if err := w.Failure(); err != nil {
 		w.mu.Unlock()
 		w.advanceAppendTurn(endOffset)
-		returnBuffersToPool(prepared)
-		return fmt.Errorf("append prepared batch to segment: %w", err)
+		return err
+	}
+	if err := w.activeSegment.AppendPreparedBatchLocked(prepared, w.config.IndexInterval); err != nil {
+		// Part of the batch may be in the segment, and the offsets are
+		// reserved: only reopening the log can say where it ends now.
+		err = w.fail(fmt.Errorf("append prepared batch to segment: %w", err))
+		w.mu.Unlock()
+		w.advanceAppendTurn(endOffset)
+		return err
 	}
 
 	if lastOffset := events[len(events)-1].Offset; lastOffset > w.highWatermark {
@@ -623,29 +740,15 @@ func (w *WAL) AppendBatch(events []*types.Event) error {
 	// while the disk works and then share one sync.
 	syncSegment := w.activeSegment
 	if w.fsyncMode == FsyncEveryEvent {
-		if err := syncSegment.FlushBuffer(); err != nil {
+		if err := syncSegment.Flush(); err != nil {
+			err = w.fail(fmt.Errorf("sync batch: %w", err))
 			w.mu.Unlock()
 			w.advanceAppendTurn(endOffset)
-			returnBuffersToPool(prepared)
-			return fmt.Errorf("flush batch: %w", err)
-		}
-		if err := syncSegment.Sync(); err != nil {
-			w.mu.Unlock()
-			w.advanceAppendTurn(endOffset)
-			returnBuffersToPool(prepared)
-			return fmt.Errorf("sync batch: %w", err)
+			return &AppendedError{Err: err}
 		}
 	}
 
-	// Rotate segment if full
-	if w.activeSegment.IsFull(w.config.SegmentSizeBytes) {
-		if err := w.rotateSegment(); err != nil {
-			w.mu.Unlock()
-			w.advanceAppendTurn(endOffset)
-			returnBuffersToPool(prepared)
-			return fmt.Errorf("rotate segment: %w", err)
-		}
-	}
+	w.rotateIfFullLocked()
 
 	// Advance the sequencer while still holding w.mu so the next writer cannot
 	// interleave appends, then release both locks.
@@ -656,14 +759,14 @@ func (w *WAL) AppendBatch(events []*types.Event) error {
 	// flush and fsync with every writer that appended in the meantime.
 	if w.fsyncMode == FsyncBatch {
 		if err := w.groupCommitSync(syncSegment); err != nil {
-			returnBuffersToPool(prepared)
-			return fmt.Errorf("sync batch: %w", err)
+			return &AppendedError{Err: w.fail(fmt.Errorf("sync batch: %w", err))}
 		}
 	}
-
-	// 4. Return buffers to pool
-	returnBuffersToPool(prepared)
-
+	// A sync of this append that succeeded after another one failed does not
+	// make it durable: the failed one may have dropped its pages.
+	if err := w.Failure(); err != nil {
+		return &AppendedError{Err: err}
+	}
 	return nil
 }
 
@@ -681,21 +784,26 @@ func returnBuffersToPool(prepared []*PreparedRecord) {
 // offsets. It verifies that the batch starts at the WAL's next expected offset and that
 // the offsets are contiguous, then writes the records without reassigning offsets.
 // This is the path used by followers during leader-follower replication.
+//
+// Errors mean what they mean for AppendBatch.
 func (w *WAL) AppendReplicatedBatch(events []*types.Event) error {
 	if len(events) == 0 {
 		return nil
 	}
+	if err := w.Failure(); err != nil {
+		return err
+	}
 
 	start := time.Now()
 	defer func() {
-		metrics.ObserveWALAppend(strconv.FormatInt(int64(w.partitionID), 10), time.Since(start))
+		metrics.ObserveWALAppend(w.partitionLabel, time.Since(start))
 	}()
 
 	prepared := acquirePreparedSlice(len(events))
 	defer releasePreparedSlice(prepared)
 
 	for i, event := range events {
-		prep, err := PrepareRecord(event, w.termForEvent(event))
+		prep, err := PrepareRecord(event, w.replicatedTerm(event))
 		if err != nil {
 			for j := 0; j < i; j++ {
 				if len(prepared[j].Buf) <= 4096 {
@@ -706,6 +814,7 @@ func (w *WAL) AppendReplicatedBatch(events []*types.Event) error {
 		}
 		prepared[i] = prep
 	}
+	defer returnBuffersToPool(prepared)
 
 	// Fill offsets, partition IDs, and CRCs outside the lock; offsets are already
 	// leader-assigned so the expensive CRC work can overlap with other replication.
@@ -717,26 +826,28 @@ func (w *WAL) AppendReplicatedBatch(events []*types.Event) error {
 	}
 
 	w.mu.Lock()
+	if err := w.Failure(); err != nil {
+		w.mu.Unlock()
+		return err
+	}
 
 	// Verify contiguity and starting offset against WAL's expected next offset.
 	nextOffset := w.nextOffset.Load()
 	if events[0].Offset != nextOffset {
 		w.mu.Unlock()
-		returnBuffersToPool(prepared)
 		return fmt.Errorf("replicated batch gap: expected start offset %d, got %d", nextOffset, events[0].Offset)
 	}
 	for i := 1; i < len(events); i++ {
 		if events[i].Offset != events[i-1].Offset+1 {
 			w.mu.Unlock()
-			returnBuffersToPool(prepared)
 			return fmt.Errorf("non-contiguous replicated offsets: %d followed by %d", events[i-1].Offset, events[i].Offset)
 		}
 	}
 
 	if err := w.activeSegment.AppendPreparedBatchLocked(prepared, w.config.IndexInterval); err != nil {
+		err = w.fail(fmt.Errorf("append replicated batch to segment: %w", err))
 		w.mu.Unlock()
-		returnBuffersToPool(prepared)
-		return fmt.Errorf("append replicated batch to segment: %w", err)
+		return err
 	}
 
 	endOffset := events[len(events)-1].Offset + 1
@@ -751,37 +862,24 @@ func (w *WAL) AppendReplicatedBatch(events []*types.Event) error {
 	// the lock is released (groupCommitSync).
 	syncSegment := w.activeSegment
 	if w.fsyncMode == FsyncEveryEvent {
-		if err := syncSegment.FlushBuffer(); err != nil {
+		if err := syncSegment.Flush(); err != nil {
+			err = w.fail(fmt.Errorf("sync replicated batch: %w", err))
 			w.mu.Unlock()
-			returnBuffersToPool(prepared)
-			return fmt.Errorf("flush replicated batch: %w", err)
-		}
-		if err := syncSegment.Sync(); err != nil {
-			w.mu.Unlock()
-			returnBuffersToPool(prepared)
-			return fmt.Errorf("sync replicated batch: %w", err)
+			return &AppendedError{Err: err}
 		}
 	}
 
-	if w.activeSegment.IsFull(w.config.SegmentSizeBytes) {
-		if err := w.rotateSegment(); err != nil {
-			w.mu.Unlock()
-			returnBuffersToPool(prepared)
-			return fmt.Errorf("rotate segment: %w", err)
-		}
-	}
-
+	w.rotateIfFullLocked()
 	w.mu.Unlock()
 
 	if w.fsyncMode == FsyncBatch {
 		if err := w.groupCommitSync(syncSegment); err != nil {
-			returnBuffersToPool(prepared)
-			return fmt.Errorf("sync replicated batch: %w", err)
+			return &AppendedError{Err: w.fail(fmt.Errorf("sync replicated batch: %w", err))}
 		}
 	}
-
-	returnBuffersToPool(prepared)
-
+	if err := w.Failure(); err != nil {
+		return &AppendedError{Err: err}
+	}
 	return nil
 }
 
@@ -805,101 +903,26 @@ func (w *WAL) openActiveSegment() error {
 	return nil
 }
 
-// AppendEvent appends a single event to the WAL, assigning the next offset and
-// applying the configured fsync mode.
+// AppendEvent appends a single event to the WAL, as AppendBatch does.
 func (w *WAL) AppendEvent(event *types.Event) error {
-	start := time.Now()
-	defer func() {
-		metrics.ObserveWALAppend(strconv.FormatInt(int64(w.partitionID), 10), time.Since(start))
-	}()
+	return w.AppendBatch([]*types.Event{event})
+}
 
-	// Prepare record outside the lock
-	prep, err := PrepareRecord(event, w.termForEvent(event))
-	if err != nil {
-		return err
+// rotateIfFullLocked starts a new segment once the active one is full. The
+// append that filled it is complete either way, so a failure to start one is
+// not that append's: the segment takes the next append, which tries again.
+// The caller must hold w.mu.
+func (w *WAL) rotateIfFullLocked() {
+	if !w.activeSegment.IsFull(w.config.SegmentSizeBytes) {
+		return
 	}
-
-	// Reserve a single offset atomically and fill it (plus CRC) outside the lock.
-	endOffset := w.nextOffset.Add(1)
-	offset := endOffset - 1
-	event.Offset = offset
-	event.Term = prep.Term
-	event.PartitionId = w.partitionID
-	binary.BigEndian.PutUint64(prep.Buf[16:24], uint64(offset))
-	crc := crc32.ChecksumIEEE(prep.Buf[8:])
-	binary.BigEndian.PutUint32(prep.Buf[4:8], crc)
-
-	// Wait for our turn so segment writes remain ordered.
-	w.waitAppendTurn(offset)
-
-	// Append to active segment — caller holds w.mu, so use the lock-free variant.
-	w.mu.Lock()
-	if err := w.activeSegment.AppendPreparedBatchLocked([]*PreparedRecord{prep}, w.config.IndexInterval); err != nil {
-		w.mu.Unlock()
-		w.advanceAppendTurn(endOffset)
-		if len(prep.Buf) <= 4096 {
-			recordBufPool.Put(prep.Buf)
-		}
-		return fmt.Errorf("append to segment: %w", err)
-	}
-
-	if event.Offset > w.highWatermark {
-		w.highWatermark = event.Offset
-	}
-	w.dirty.Store(true)
-
-	syncSegment := w.activeSegment
-	// For every_event, flush + sync inline under the lock. For batch, flush
-	// under the lock (so we don't race with concurrent appends) and sync after
-	// releasing the lock to keep the syscall out of the critical section.
-	if w.fsyncMode == FsyncEveryEvent {
-		if err := syncSegment.FlushBuffer(); err != nil {
-			w.mu.Unlock()
-			w.advanceAppendTurn(endOffset)
-			if len(prep.Buf) <= 4096 {
-				recordBufPool.Put(prep.Buf)
-			}
-			return fmt.Errorf("flush event: %w", err)
-		}
-		if err := syncSegment.Sync(); err != nil {
-			w.mu.Unlock()
-			w.advanceAppendTurn(endOffset)
-			if len(prep.Buf) <= 4096 {
-				recordBufPool.Put(prep.Buf)
-			}
-			return fmt.Errorf("sync event: %w", err)
+	if err := w.rotateSegment(); err != nil {
+		walRotationErrorsTotal.WithLabelValues(w.partitionLabel).Inc()
+		if now := time.Now(); now.Sub(w.rotateErrorLogged) >= 10*time.Second {
+			w.rotateErrorLogged = now
+			log.Printf("[WAL-%d] Starting a new segment failed; the active segment takes the next append, which tries again: %v", w.partitionID, err)
 		}
 	}
-
-	// Rotate segment if full
-	if w.activeSegment.IsFull(w.config.SegmentSizeBytes) {
-		if err := w.rotateSegment(); err != nil {
-			w.mu.Unlock()
-			w.advanceAppendTurn(endOffset)
-			if len(prep.Buf) <= 4096 {
-				recordBufPool.Put(prep.Buf)
-			}
-			return fmt.Errorf("rotate segment: %w", err)
-		}
-	}
-
-	w.advanceAppendTurn(endOffset)
-	w.mu.Unlock()
-
-	if w.fsyncMode == FsyncBatch {
-		if err := w.groupCommitSync(syncSegment); err != nil {
-			if len(prep.Buf) <= 4096 {
-				recordBufPool.Put(prep.Buf)
-			}
-			return fmt.Errorf("sync event: %w", err)
-		}
-	}
-
-	if len(prep.Buf) <= 4096 {
-		recordBufPool.Put(prep.Buf)
-	}
-
-	return nil
 }
 
 // rotateSegment creates a segment at the actual appended offset boundary.
@@ -931,8 +954,9 @@ func (w *WAL) rotateSegment() error {
 	// segment fail with os.ErrClosed. Retention/Delete closes it for good later.
 	if oldActive != nil {
 		if err := oldActive.Deactivate(); err != nil {
-			log.Printf("[WAL-%d] Failed to deactivate rotated segment %s: %v", w.partitionID, oldActive.GetFilename(), err)
-			// Don't fail the rotation because the new active segment is already open and active!
+			// The rotation stands: the new segment is active. But deactivating
+			// writes out and syncs what the old one holds, and that failed.
+			_ = w.fail(fmt.Errorf("deactivate rotated segment %s: %w", oldActive.GetFilename(), err))
 		}
 	}
 
@@ -1155,8 +1179,7 @@ func (w *WAL) periodicFlushLoop() {
 
 			if seg == nil || flushErr != nil {
 				if flushErr != nil {
-					w.recordFlushError()
-					log.Printf("[WAL-%d] background flush error: %v", w.partitionID, flushErr)
+					w.backgroundWriteFailed(fmt.Errorf("background flush: %w", flushErr))
 				}
 				continue
 			}
@@ -1165,8 +1188,7 @@ func (w *WAL) periodicFlushLoop() {
 			// Writers can continue appending to the bufio.Writer while we sync.
 			if w.fsyncMode == FsyncPeriodic || w.fsyncMode == FsyncBatch {
 				if err := seg.Sync(); err != nil {
-					w.recordFlushError()
-					log.Printf("[WAL-%d] background sync error: %v", w.partitionID, err)
+					w.backgroundWriteFailed(fmt.Errorf("background sync: %w", err))
 					continue
 				}
 			}
@@ -1193,6 +1215,14 @@ func (w *WAL) recordFlushError() {
 	walFlushErrorsTotal.WithLabelValues(w.partitionLabel).Inc()
 }
 
+// backgroundWriteFailed records that a background flush or sync of the active
+// segment failed. Appends that will be acknowledged after it were written to
+// the same pages, so the log fails: no later sync can be trusted for them.
+func (w *WAL) backgroundWriteFailed(err error) {
+	w.recordFlushError()
+	_ = w.fail(err)
+}
+
 // GetFlushErrors returns the number of background flush/sync errors observed.
 func (w *WAL) GetFlushErrors() int64 {
 	return w.flushErrors.Load()
@@ -1201,17 +1231,23 @@ func (w *WAL) GetFlushErrors() int64 {
 // Flush flushes all pending writes to disk.
 // This performs both buffer flush and fsync regardless of mode,
 // and is intended for explicit durability checkpoints (e.g. shutdown).
+//
+// It returns the log's failure once the log has failed, since no flush can
+// make its appends durable then.
 func (w *WAL) Flush() error {
+	if err := w.Failure(); err != nil {
+		return err
+	}
 	w.mu.RLock()
 	seg := w.activeSegment
 	w.mu.RUnlock()
 	if seg == nil {
 		return nil
 	}
-	if err := seg.FlushBuffer(); err != nil {
-		return err
+	if err := seg.Flush(); err != nil {
+		return w.fail(fmt.Errorf("flush: %w", err))
 	}
-	return seg.Sync()
+	return w.Failure()
 }
 
 // groupCommitSync makes a completed append durable in FsyncBatch mode, sharing
@@ -1406,7 +1442,8 @@ func (w *WAL) TruncateToOffset(offset int64) (int, error) {
 			// it was the active segment before truncation).
 			if segment == w.activeSegment {
 				if err := segment.Deactivate(); err != nil {
-					log.Printf("[WAL-%d] deactivate straddling segment failed: %v", w.partitionID, err)
+					// Deactivating writes out and syncs what the segment keeps.
+					_ = w.fail(fmt.Errorf("deactivate segment %s cut at offset %d: %w", segment.GetFilename(), offset, err))
 				}
 			}
 			kept = append(kept, segment)

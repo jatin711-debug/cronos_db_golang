@@ -100,6 +100,10 @@ const (
 	// DefaultHydratorMaxIntervalMs is the maximum cold-store hydrator scan interval.
 	DefaultHydratorMaxIntervalMs = 300000 // 5 minutes maximum
 
+	// DefaultMaxDiskUsage is the used fraction of the data filesystem at which
+	// publishes are refused.
+	DefaultMaxDiskUsage = 0.95
+
 	// DefaultMaxReadyQueueSize is max ready-queue depth per partition (0 = disabled).
 	DefaultMaxReadyQueueSize = 1_000_000
 	// DefaultMaxTimingWheelSize is max active timers in the hot timing wheel.

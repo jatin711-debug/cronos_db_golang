@@ -12,6 +12,9 @@ services:
       dockerfile: Dockerfile
     container_name: cronos-single
     image: cronos-db:latest
+    # A node stops with status 1 when a write to its disk fails, and recovers
+    # its logs when it starts again.
+    restart: on-failure
     command:
       - --dev
       - --data-dir=/data
@@ -56,6 +59,9 @@ services:
       dockerfile: Dockerfile
     container_name: cronos-node1
     image: cronos-db:latest
+    # A node stops with status 1 when a write to its disk fails, and recovers
+    # its logs when it starts again.
+    restart: on-failure
     command:
       - --dev
       - --data-dir=/data
@@ -114,6 +120,9 @@ services:
       dockerfile: Dockerfile
     container_name: cronos-node2
     image: cronos-db:latest
+    # A node stops with status 1 when a write to its disk fails, and recovers
+    # its logs when it starts again.
+    restart: on-failure
     command:
       - --dev
       - --data-dir=/data
@@ -171,6 +180,9 @@ services:
       dockerfile: Dockerfile
     container_name: cronos-node3
     image: cronos-db:latest
+    # A node stops with status 1 when a write to its disk fails, and recovers
+    # its logs when it starts again.
+    restart: on-failure
     command:
       - --dev
       - --data-dir=/data

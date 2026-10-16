@@ -38,6 +38,32 @@ spec:
           annotations:
             summary: "CronosDB WAL flush errors on {{`{{ $labels.instance }}`}}"
 
+        # A log that failed takes no more writes, and the node stops right
+        # after, so this is seen only if a scrape comes in between; the
+        # restart of the pod is the other sign.
+        - alert: CronosDBLogFailed
+          expr: max by (instance) (cronos_wal_failed{job=~".*cronos-db.*"}) > 0
+          labels:
+            severity: critical
+          annotations:
+            summary: "A write to disk failed on CronosDB node {{`{{ $labels.instance }}`}}; the node stops and must recover its logs"
+
+        - alert: CronosDBWALRotationErrors
+          expr: rate(cronos_wal_rotation_errors_total{job=~".*cronos-db.*"}[5m]) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "CronosDB node {{`{{ $labels.instance }}`}} cannot start new WAL segments; full segments keep growing"
+
+        - alert: CronosDBPublishesRefusedDiskFull
+          expr: max by (instance) (cronos_disk_publish_refused{job=~".*cronos-db.*"}) > 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "CronosDB node {{`{{ $labels.instance }}`}} refuses publishes: its data disk is nearly full"
+
         # Every partition is led by exactly one node, so the leader counts of
         # all nodes add up to the partition count when all is well. (Comparing
         # one node's count with the total, as this rule once did, fires on

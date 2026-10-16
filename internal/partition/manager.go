@@ -304,6 +304,9 @@ type PartitionManager struct {
 	// Both are guarded by mu.
 	pinned    map[int32]bool
 	releasing map[int32]bool
+	// diskGuard refuses publishes while the data disk is nearly full; nil
+	// when there is none.
+	diskGuard *DiskGuard
 }
 
 // tenantAccountant is the minimal interface needed for delivery callbacks.
@@ -693,6 +696,18 @@ func (pm *PartitionManager) GetPartitionForKey(key string) (*types.Partition, er
 		CreatedTS:     partition.CreatedTS.UnixMilli(),
 		UpdatedTS:     partition.UpdatedTS.UnixMilli(),
 	}, nil
+}
+
+// SetDiskGuard makes publishes depend on g (see DiskAdmission). Set it before
+// the node serves requests.
+func (pm *PartitionManager) SetDiskGuard(g *DiskGuard) {
+	pm.diskGuard = g
+}
+
+// DiskAdmission returns an error while the node refuses publishes because its
+// data disk is nearly full.
+func (pm *PartitionManager) DiskAdmission() error {
+	return pm.diskGuard.Check()
 }
 
 // CanAccept returns true if the partition can accept new publishes without exceeding capacity limits.
@@ -1198,6 +1213,19 @@ func (pm *PartitionManager) ListPartitions() []*Partition {
 	}
 
 	return partitions
+}
+
+// FailedLogs returns the IDs of the local partitions whose log failed and
+// takes no more writes (see storage.ErrLogFailed).
+func (pm *PartitionManager) FailedLogs() []int32 {
+	var failed []int32
+	for _, p := range pm.ListPartitions() {
+		if p.Wal != nil && p.Wal.Failure() != nil {
+			failed = append(failed, p.ID)
+		}
+	}
+	sort.Slice(failed, func(i, j int) bool { return failed[i] < failed[j] })
+	return failed
 }
 
 // StartPartition starts background workers (scheduler, delivery, compaction,

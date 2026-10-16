@@ -22,6 +22,7 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/internal/partition"
 	"github.com/jatin711-debug/cronos_db_golang/internal/replay"
 	"github.com/jatin711-debug/cronos_db_golang/internal/schema"
+	"github.com/jatin711-debug/cronos_db_golang/internal/storage"
 	"github.com/jatin711-debug/cronos_db_golang/internal/tenant"
 	"github.com/jatin711-debug/cronos_db_golang/internal/tracing"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
@@ -349,6 +350,10 @@ func classifyDuplicate(p *partition.Partition, messageID string) (duplicateKind,
 // as far as the last of them, which covers the others because followers hold a
 // prefix of it, and the partition then schedules and accepts them.
 func (h *EventServiceHandler) finishPriorPublishes(p *partition.Partition, logged []*types.Event, durable bool) error {
+	// A log that failed cannot say whether those events are durable.
+	if err := p.Wal.Failure(); err != nil {
+		return err
+	}
 	last := logged[0]
 	for _, event := range logged[1:] {
 		if event.Offset > last.Offset {
@@ -375,6 +380,30 @@ func (h *EventServiceHandler) finishPriorPublishes(p *partition.Partition, logge
 		}
 	}
 	return p.AcceptAppended(logged)
+}
+
+// publishTenant returns the tenant a publish is charged to: the subject of its
+// token, or "default" without one.
+func publishTenant(ctx context.Context) tenant.ID {
+	if claims, ok := auth.ClaimsFromContext(ctx); ok {
+		return tenant.ID(claims.Subject)
+	}
+	return tenant.ID("default")
+}
+
+// checkEventSize checks that event fits in a log record as it will be stored:
+// with tenant quotas configured, a publish tags its events with their tenant.
+func (h *EventServiceHandler) checkEventSize(ctx context.Context, event *types.Event) error {
+	size := storage.EventRecordSize(event)
+	if h.tenantAccountant != nil && h.tenantAccountant.HasConfiguredLimits() {
+		id := string(publishTenant(ctx))
+		if old, ok := event.Meta["tenant_id"]; ok {
+			size += len(id) - len(old)
+		} else {
+			size += 2 + len("tenant_id") + 2 + len(id)
+		}
+	}
+	return storage.CheckRecordSize(size)
 }
 
 // acceptEarlierPublishes is called by a publish that has just been replicated
@@ -438,6 +467,12 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 			Error:   "payload is required",
 		}, nil
 	}
+	if err := h.checkEventSize(ctx, event); err != nil {
+		return &types.PublishResponse{
+			Success: false,
+			Error:   err.Error(),
+		}, nil
+	}
 
 	// Topic-level authorization
 	if err := h.checkTopicAuth(ctx, event.Topic, "publish"); err != nil {
@@ -461,6 +496,11 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 	partitionID := h.partitionManager.GetPartitionIDForKey(partitionKey)
 	if err := h.ensureClusterPartitionWritable(partitionID); err != nil {
 		return nil, err
+	}
+
+	if err := h.partitionManager.DiskAdmission(); err != nil {
+		metrics.IncAdmissionRejected()
+		return nil, status.Error(codes.ResourceExhausted, err.Error())
 	}
 
 	// Admission control: reject if partition is overloaded
@@ -505,6 +545,9 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 	defer partitionInternal.EndPublish(partitionInternal.BeginPublish())
 	if err := h.ensurePublishAllowed(partitionID); err != nil {
 		return nil, err
+	}
+	if err := partitionInternal.Wal.Failure(); err != nil {
+		return nil, status.Error(codes.Unavailable, err.Error())
 	}
 
 	// Check if duplicate (unless explicitly allowed). dedupMgr is kept in scope so
@@ -562,13 +605,18 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 		}
 	}
 
-	// Tenant quota check
+	// Tenant quota check. It comes after the duplicate check, so that a retry
+	// of an accepted publish is not charged again, and a refusal gives back the
+	// message ID this publish claimed: nothing was appended.
 	if h.tenantAccountant != nil && h.tenantAccountant.HasConfiguredLimits() {
-		tenantID := tenant.ID("default")
-		if claims, ok := auth.ClaimsFromContext(ctx); ok {
-			tenantID = tenant.ID(claims.Subject)
-		}
+		tenantID := publishTenant(ctx)
 		if !h.tenantAccountant.ReservePublishBatch(tenantID, 1, int64(len(event.Payload))) {
+			if dedupMgr != nil {
+				if rbErr := dedupMgr.RollbackBatch([]string{event.GetMessageId()}); rbErr != nil {
+					slog.Warn("dedup rollback after quota refusal failed",
+						"messageId", event.GetMessageId(), "error", rbErr)
+				}
+			}
 			return nil, status.Errorf(codes.ResourceExhausted, "tenant quota exceeded")
 		}
 		if event.Meta == nil {
@@ -580,9 +628,10 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 	// Append to WAL (sync behavior depends on fsync mode; durable_ack forces an
 	// fsync). rollbackDedup undoes the dedup claim when the event never reached
 	// the log, so a client retry of this message ID is not dropped as a
-	// duplicate. A failure after the append leaves the event in the log; the
-	// partition then holds it unaccepted, and a retry finishes this publish
-	// instead of appending the event again.
+	// duplicate. A failure once the event is in the log, the append's own
+	// included (storage.EventsAppended), leaves the event there; the partition
+	// then holds it unaccepted, and a retry finishes this publish instead of
+	// appending the event again.
 	rollbackDedup := func() {
 		if dedupMgr == nil {
 			return
@@ -608,8 +657,12 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 			}, nil
 		}
 		if err := partitionInternal.Wal.AppendEvent(event); err != nil {
+			if storage.EventsAppended(err) {
+				partitionInternal.HoldUnaccepted([]*types.Event{event}, dedupMgr != nil)
+			} else {
+				rollbackDedup()
+			}
 			partitionInternal.ReplicateMu.Unlock()
-			rollbackDedup()
 			return &types.PublishResponse{
 				Success: false,
 				Error:   fmt.Sprintf("append to WAL: %v", err),
@@ -628,7 +681,11 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 			}, nil
 		}
 	} else if err := partitionInternal.Wal.AppendEvent(event); err != nil {
-		rollbackDedup()
+		if storage.EventsAppended(err) {
+			partitionInternal.HoldUnaccepted([]*types.Event{event}, dedupMgr != nil)
+		} else {
+			rollbackDedup()
+		}
 		return &types.PublishResponse{
 			Success: false,
 			Error:   fmt.Sprintf("append to WAL: %v", err),
@@ -713,6 +770,10 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 			Success: true,
 		}, nil
 	}
+	if err := h.partitionManager.DiskAdmission(); err != nil {
+		metrics.IncAdmissionRejected()
+		return nil, status.Error(codes.ResourceExhausted, err.Error())
+	}
 
 	var publishedCount, duplicateCount, errorCount int32
 	var firstOffset, lastOffset int64 = -1, -1
@@ -768,6 +829,10 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 			}
 			continue
 		}
+		if err := h.checkEventSize(ctx, event); err != nil {
+			setError(1, fmt.Sprintf("validation failed: msgId=%q: %v", event.GetMessageId(), err))
+			continue
+		}
 
 		// Topic-level authorization
 		authErr, checked := authResults[event.Topic]
@@ -811,6 +876,11 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 			delete(partitionEvents, pid)
 			continue
 		}
+		if err := partitionInternal.Wal.Failure(); err != nil {
+			setError(int32(len(events)), err.Error())
+			delete(partitionEvents, pid)
+			continue
+		}
 
 		validEvents := events[:0]
 		for _, event := range events {
@@ -840,10 +910,7 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 	// limits. In the common unrestricted case this removes a map lookup,
 	// atomic increment, and metadata allocation from every event.
 	if h.tenantAccountant != nil && h.tenantAccountant.HasConfiguredLimits() && len(partitionEvents) > 0 {
-		tenantID := tenant.ID("default")
-		if claims, ok := auth.ClaimsFromContext(ctx); ok {
-			tenantID = tenant.ID(claims.Subject)
-		}
+		tenantID := publishTenant(ctx)
 		var eventCount, payloadBytes int64
 		for _, events := range partitionEvents {
 			eventCount += int64(len(events))
@@ -972,8 +1039,9 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 			// rollbackDedup undoes the dedup claims for this batch when it never
 			// reached the log, so client retries are not dropped as spurious
 			// duplicates. Only meaningful when dedup actually claimed them
-			// (i.e. !req.AllowDuplicate). Once the batch is in the log a failure
-			// leaves it held by the partition instead, for a retry to finish.
+			// (i.e. !req.AllowDuplicate). Once the batch is in the log a failure,
+			// the append's own included (storage.EventsAppended), leaves it held
+			// by the partition instead, for a retry to finish.
 			rollbackDedup := func() {
 				if req.AllowDuplicate || partitionInternal.DedupStore == nil {
 					return
@@ -1012,8 +1080,12 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 					return
 				}
 				if err := partitionInternal.Wal.AppendBatch(evts); err != nil {
+					if storage.EventsAppended(err) {
+						partitionInternal.HoldUnaccepted(evts, !req.AllowDuplicate)
+					} else {
+						rollbackDedup()
+					}
 					partitionInternal.ReplicateMu.Unlock()
-					rollbackDedup()
 					setError(int32(len(evts)), fmt.Sprintf("WAL append for partition %d: %v", pid, err))
 					return
 				}
@@ -1030,7 +1102,11 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 					return
 				}
 			} else if err := partitionInternal.Wal.AppendBatch(evts); err != nil {
-				rollbackDedup()
+				if storage.EventsAppended(err) {
+					partitionInternal.HoldUnaccepted(evts, !req.AllowDuplicate)
+				} else {
+					rollbackDedup()
+				}
 				setError(int32(len(evts)), fmt.Sprintf("WAL append for partition %d: %v", pid, err))
 				return
 			}

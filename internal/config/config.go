@@ -97,6 +97,7 @@ func LoadConfig() (*types.Config, error) {
 
 	// Load shedding default (disabled)
 	config.LoadSheddingThreshold = 0.0
+	config.MaxDiskUsage = DefaultMaxDiskUsage
 
 	// Follower reads default
 	config.FollowerReadsEnabled = false
@@ -225,6 +226,7 @@ func LoadConfig() (*types.Config, error) {
 
 	// Load shedding
 	flag.Float64Var(&config.LoadSheddingThreshold, "load-shedding-threshold", 0.0, "Load shedding threshold (0.0-1.0, 0 = disabled)")
+	flag.Float64Var(&config.MaxDiskUsage, "max-disk-usage", DefaultMaxDiskUsage, "Refuse publishes once the filesystem holding data-dir is this full (0.0-1.0, 0 = never); they are taken again two points below")
 
 	// Follower reads
 	flag.BoolVar(&config.FollowerReadsEnabled, "follower-reads", false, "Allow follower nodes to serve replay reads")
@@ -353,6 +355,11 @@ func ValidateConfig(c *types.Config) error {
 	}
 	if c.MemoryLimitBytes < 0 || c.MaxMemoryUsagePercent < 0 || c.MaxMemoryUsagePercent > 100 {
 		return fmt.Errorf("memory-limit must be >= 0 and max-memory-percent between 0 and 100")
+	}
+	if c.MaxDiskUsage != 0 && (c.MaxDiskUsage < 0.05 || c.MaxDiskUsage > 1) {
+		// Publishes are taken again two points below the limit, so a limit
+		// that low would never let them through again.
+		return fmt.Errorf("max-disk-usage must be 0 (never refuse) or between 0.05 and 1.0")
 	}
 	if c.BackupInterval < 0 || c.BackupRetention < 0 {
 		return fmt.Errorf("backup-interval and backup-retention must be >= 0")

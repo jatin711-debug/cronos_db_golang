@@ -1,7 +1,7 @@
 package storage
 
 import (
-	"log"
+	"fmt"
 	"sync"
 	"time"
 )
@@ -108,8 +108,7 @@ func (c *FsyncCoalescer) sweep() {
 	var syncWg sync.WaitGroup
 	for i, r := range results {
 		if r.err != nil {
-			wals[i].recordFlushError()
-			log.Printf("[FsyncCoalescer] WAL-%d buffer flush error: %v", wals[i].partitionID, r.err)
+			wals[i].backgroundWriteFailed(fmt.Errorf("coalesced buffer flush: %w", r.err))
 			continue
 		}
 		if r.seg == nil || !r.needsSync {
@@ -119,8 +118,7 @@ func (c *FsyncCoalescer) sweep() {
 		go func(idx int, seg *Segment) {
 			defer syncWg.Done()
 			if err := seg.Sync(); err != nil {
-				wals[idx].recordFlushError()
-				log.Printf("[FsyncCoalescer] WAL-%d segment sync error: %v", wals[idx].partitionID, err)
+				wals[idx].backgroundWriteFailed(fmt.Errorf("coalesced segment sync: %w", err))
 			}
 		}(i, r.seg)
 	}

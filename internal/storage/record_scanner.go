@@ -62,7 +62,7 @@ func (r *recordScanner) record() (body []byte, bodyPos int64, ok bool, err error
 		return nil, 0, false, err
 	}
 	length := int64(binary.BigEndian.Uint32(r.buf[r.head:]))
-	if length <= 4 || length > 10*1024*1024 {
+	if length <= 4 || length > MaxRecordLength {
 		return nil, 0, false, nil
 	}
 	if have, err := r.fill(int(length)); err != nil || !have {

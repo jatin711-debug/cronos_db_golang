@@ -122,6 +122,16 @@ func (h *HealthChecker) handleReady(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// A failed log takes no more writes; the node stops soon after.
+	if h.PartitionMgr != nil {
+		if failed := h.PartitionMgr.FailedLogs(); len(failed) > 0 {
+			checks["wal_writable"] = HealthCheck{Status: "down", Detail: fmt.Sprintf("the logs of partitions %v failed after a write to disk failed", failed), Healthy: false}
+			healthy = false
+		} else {
+			checks["wal_writable"] = HealthCheck{Status: "up", Detail: "no log has failed", Healthy: true}
+		}
+	}
+
 	// Check cluster state if enabled
 	if h.Config.ClusterEnabled && h.ClusterMgr != nil {
 		clusterStats := h.ClusterMgr.GetStats()
