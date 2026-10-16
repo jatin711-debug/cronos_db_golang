@@ -27,6 +27,7 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/internal/auth"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/client"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 )
 
 type histogram struct{ buckets [60001]atomic.Uint64 }
@@ -80,27 +81,28 @@ func (l *ledger) delivery(e *types.Event) {
 }
 
 type result struct {
-	Name                string  `json:"name"`
-	Batch               int     `json:"batch"`
-	Publishers          int     `json:"publishers"`
-	Payload             int     `json:"payload_bytes"`
-	PublishSeconds      float64 `json:"publish_seconds"`
-	AccountedSeconds    float64 `json:"accounted_seconds"`
-	Accepted            int64   `json:"unique_accepted"`
-	Delivered           int64   `json:"accepted_delivered"`
-	Missing             int64   `json:"missing_accepted"`
-	DuplicateDeliveries int64   `json:"duplicate_deliveries"`
-	Errors              int64   `json:"errors"`
-	Ambiguous           int64   `json:"ambiguous_events"`
-	BacklogPauses       int64   `json:"backlog_pauses"`
-	AcceptedEPS         float64 `json:"accepted_events_per_second"`
-	AccountedEPS        float64 `json:"accounted_events_per_second"`
-	P50                 float64 `json:"publish_p50_ms"`
-	P95                 float64 `json:"publish_p95_ms"`
-	P99                 float64 `json:"publish_p99_ms"`
-	Lateness99          float64 `json:"delivery_lateness_p99_ms"`
-	Valid               bool    `json:"valid"`
-	Stopped             bool    `json:"stopped"`
+	Name                string   `json:"name"`
+	Batch               int      `json:"batch"`
+	Publishers          int      `json:"publishers"`
+	Payload             int      `json:"payload_bytes"`
+	PublishSeconds      float64  `json:"publish_seconds"`
+	AccountedSeconds    float64  `json:"accounted_seconds"`
+	Accepted            int64    `json:"unique_accepted"`
+	Delivered           int64    `json:"accepted_delivered"`
+	Missing             int64    `json:"missing_accepted"`
+	DuplicateDeliveries int64    `json:"duplicate_deliveries"`
+	Errors              int64    `json:"errors"`
+	Ambiguous           int64    `json:"ambiguous_events"`
+	BacklogPauses       int64    `json:"backlog_pauses"`
+	AcceptedEPS         float64  `json:"accepted_events_per_second"`
+	AccountedEPS        float64  `json:"accounted_events_per_second"`
+	P50                 float64  `json:"publish_p50_ms"`
+	P95                 float64  `json:"publish_p95_ms"`
+	P99                 float64  `json:"publish_p99_ms"`
+	Lateness99          float64  `json:"delivery_lateness_p99_ms"`
+	Valid               bool     `json:"valid"`
+	Stopped             bool     `json:"stopped"`
+	MissingSample       []string `json:"missing_sample,omitempty"`
 }
 
 var outputMu sync.Mutex
@@ -186,7 +188,7 @@ func initialize(dir string, names []string) error {
 		"master.key":  []byte(hex.EncodeToString(random)[:32]),
 		"server.env":  []byte("CRONOS_AUTH_JWT_SECRET=" + secret + "\nGOMEMLIMIT=230MiB\nGOMAXPROCS=2\n"),
 		"token":       []byte(token),
-		"policy.json": []byte(`{"peak":{"admin":true}}`),
+		"policy.json": []byte(`{"peak":{"admin":true,"topics":{"peak":{"publish":true,"subscribe":true}}}}`),
 	}
 	for name, data := range files {
 		if err = os.WriteFile(filepath.Join(dir, name), data, 0600); err != nil {
@@ -241,14 +243,30 @@ func run(dir, nodes, plan string, duration time.Duration, maxEvents int, maxBack
 	for _, p := range meta {
 		partitions = append(partitions, p.PartitionID)
 	}
+	// The server hashes partition_key itself. Keep the client's explicit route
+	// and that hash consistent instead of relying on the wire PartitionId.
+	partitionKeys := make(map[int32]string, len(partitions))
+	for _, partition := range partitions {
+		key, err := keyForPartition(partition, len(partitions))
+		if err != nil {
+			return err
+		}
+		partitionKeys[partition] = key
+	}
 	var current atomic.Pointer[ledger]
 	consumerCfg := client.DefaultConsumerConfig("peak", "peak-workers")
 	consumerCfg.StartOffset = 0
-	consumerCfg.MaxBufferSize = 512
-	consumerCfg.WorkerConcurrency = 4
+	consumerCfg.MaxBufferSize = 64
+	consumerCfg.WorkerConcurrency = 1
 	consumerCfg.AckBatchSize = 256
 	consumerCfg.AckFlushInterval = 10 * time.Millisecond
 	consumerCfg.AckQueueSize = 2048
+	consumerCfg.OnJoin = func(_ context.Context, a client.Assignment) {
+		emit(map[string]any{"type": "consumer_join", "partition": a.PartitionID, "address": a.NodeAddress})
+	}
+	consumerCfg.OnReconnect = func(_ context.Context, attempt int, err error) {
+		emit(map[string]any{"type": "consumer_reconnect", "attempt": attempt, "error": fmt.Sprint(err)})
+	}
 	consumerCtx, stopConsumer := context.WithCancel(ctx)
 	defer stopConsumer()
 	consumerDone := make(chan error, 1)
@@ -315,7 +333,7 @@ func run(dir, nodes, plan string, duration time.Duration, maxEvents int, maxBack
 					messages := make([]client.Message, n)
 					schedule := time.Now().UnixMilli()
 					for i := range messages {
-						messages[i] = client.Message{MessageID: l.prefix + strconv.Itoa(first+i), Topic: "peak", PartitionID: &partition, Payload: body, ScheduleTS: schedule}
+						messages[i] = client.Message{MessageID: l.prefix + strconv.Itoa(first+i), Topic: "peak", PartitionID: &partition, PartitionKey: partitionKeys[partition], Payload: body, ScheduleTS: schedule}
 					}
 					// Admission stops at the deadline, while admitted RPCs get their own
 					// bounded timeout so the end of a trial does not manufacture failures.
@@ -326,11 +344,16 @@ func run(dir, nodes, plan string, duration time.Duration, maxEvents int, maxBack
 					l.latency.add(time.Since(rpcStart))
 					if callErr != nil || resp == nil {
 						l.errors.Add(int64(n))
+						emit(map[string]any{"type": "publish_error", "trial": name, "partition": partition, "first": first, "count": n, "error": fmt.Sprint(callErr)})
+						stopPublish()
 						continue
 					}
 					if resp.PublishedCount != int32(n) || resp.ErrorCount != 0 || resp.DuplicateCount != 0 {
 						l.errors.Add(int64(resp.ErrorCount))
 						l.ambiguous.Add(int64(n))
+						emit(map[string]any{"type": "publish_error", "trial": name, "partition": partition, "first": first, "count": n,
+							"published": resp.PublishedCount, "duplicates": resp.DuplicateCount, "errors": resp.ErrorCount, "error": resp.Error})
+						stopPublish()
 						continue
 					}
 					for i := first; i < first+n; i++ {
@@ -355,6 +378,7 @@ func run(dir, nodes, plan string, duration time.Duration, maxEvents int, maxBack
 		}
 		end := time.Now()
 		var verified, missing int64
+		var missingSample []string
 		for i := range l.states {
 			state := l.states[i].Load()
 			if state&1 != 0 {
@@ -362,11 +386,15 @@ func run(dir, nodes, plan string, duration time.Duration, maxEvents int, maxBack
 					verified++
 				} else {
 					missing++
+					if len(missingSample) < 12 {
+						missingSample = append(missingSample, l.prefix+strconv.Itoa(i))
+					}
 				}
 			}
 		}
 		r := result{Name: name, Batch: batch, Publishers: workers, Payload: payloadBytes, PublishSeconds: publishEnd.Sub(start).Seconds(), AccountedSeconds: end.Sub(start).Seconds(), Accepted: l.accepted.Load(), Delivered: verified, Missing: missing, DuplicateDeliveries: l.duplicates.Load(), Errors: l.errors.Load(), Ambiguous: l.ambiguous.Load(), BacklogPauses: l.throttles.Load(), P50: l.latency.percentile(.5), P95: l.latency.percentile(.95), P99: l.latency.percentile(.99), Lateness99: l.lateness.percentile(.99), Stopped: stopped.Load()}
 		r.AcceptedEPS = float64(r.Accepted) / r.PublishSeconds
+		r.MissingSample = missingSample
 		r.AccountedEPS = float64(r.Delivered) / r.AccountedSeconds
 		r.Valid = r.Missing == 0 && r.Errors == 0 && r.Ambiguous == 0 && !r.Stopped && r.Accepted > 0
 		emit(map[string]any{"type": "result", "result": r})
@@ -428,4 +456,17 @@ func run(dir, nodes, plan string, duration time.Duration, maxEvents int, maxBack
 		return fmt.Errorf("no fully reconciled trial passed")
 	}
 	return nil
+}
+
+func keyForPartition(partition int32, count int) (string, error) {
+	if partition < 0 || int(partition) >= count {
+		return "", fmt.Errorf("benchmark requires fixed contiguous partition IDs")
+	}
+	for probe := 0; probe < 10000; probe++ {
+		key := fmt.Sprintf("peak-partition-%d-%d", partition, probe)
+		if utils.HashToPartitionID(key, count) == partition {
+			return key, nil
+		}
+	}
+	return "", fmt.Errorf("could not find partition key")
 }

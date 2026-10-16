@@ -28,11 +28,17 @@ These limits reduce risk; resource measurements are sampled and do not promise
 that the desktop can never stall. Other workloads can make the supervisor stop
 the test. Keep the guards enabled and close unused apps if preflight refuses.
 
+On a host with 16 or more logical processors and enough free RAM, use
+`-NodeCPUs 2 -NodeMemoryMiB 384` for a larger bounded budget. This raises the
+RAM preflight requirement to 2,944 MiB; the host abort reserves remain active.
+
 The ramp uses 256-byte payloads and batches of 1, 100 and 1,000, raising the
 publisher count gradually to at most 16. A trial normally offers load for 15
 seconds, or until its 500,000-event cap. Publishers pause when the undelivered
 backlog exceeds 20,000. One consumer group runs throughout; every accepted ID
 must have delivery evidence. The best reconciled rate is repeated twice.
+The consumer uses a 64-event buffer and one handler worker per partition,
+with asynchronous ACKs batched at 256 requests or 10 ms.
 
 Output lives under ignored `build/throughput/cronos-peak-*/`:
 

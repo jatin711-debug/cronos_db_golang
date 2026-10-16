@@ -5,6 +5,7 @@ param(
     [ValidateRange(128,4096)][int]$Payload = 256,
     [string]$Plan = '1:1,1:4,100:1,100:4,100:8,1000:1,1000:4,1000:8,1000:16',
     [ValidateRange(256,384)][int]$NodeMemoryMiB = 256,
+    [ValidateSet(1,2)][int]$NodeCPUs = 1,
     [ValidateRange(1536,16384)][int]$AbortFreeMiB = 1536
 )
 
@@ -104,7 +105,7 @@ if ($before.FreePhysicalMemory/1024 -lt $minimum) {
     [ordered]@{state='not_started';reason=$reason;host_free_mib=[int]($before.FreePhysicalMemory/1024);required_free_mib=$minimum;containers_started=0} | ConvertTo-Json | Set-Content (Join-Path $runDir 'safety.json')
     throw $reason
 }
-if ((Get-CimInstance Win32_Processor | Measure-Object NumberOfLogicalProcessors -Sum).Sum -lt 8) { throw 'Default CPU budget requires at least 8 logical processors' }
+if ((Get-CimInstance Win32_Processor | Measure-Object NumberOfLogicalProcessors -Sum).Sum -lt 8*$NodeCPUs) { throw 'CPU budget requires at least eight logical processors per assigned node CPU' }
 Guard
 $env:CGO_ENABLED='0'; $env:GOTOOLCHAIN='local'; $env:GOARCH='amd64'; $env:GOMAXPROCS='2'; $env:GOMEMLIMIT='192MiB'
 Push-Location $repo
@@ -116,8 +117,9 @@ if ($LASTEXITCODE -ne 0) { throw 'Credential setup failed' }
 
 try {
     $imageInfo = Docker @('image','inspect',$Image,'--format','{{.Id}}')
-    $hostInfo = [ordered]@{started=(Get-Date -Format o);image=$Image;image_id=$imageInfo;commit=(git -C $repo rev-parse HEAD);node_memory_mib=$NodeMemoryMiB;node_cpus=1;generator_gomaxprocs=2;abort_host_free_mib=$AbortFreeMiB;payload_bytes=$Payload;rf=3;min_isr=2;fsync='batch';dedup=$true;public_tls=$true;replication_mtls=$true;auth=$true;encryption=$true;partitions=3;plan=$Plan;seconds_per_trial=$Seconds;max_events_per_trial=$MaxEvents}
+    $hostInfo = [ordered]@{started=(Get-Date -Format o);image=$Image;image_id=$imageInfo;commit=(git -C $repo rev-parse HEAD);node_memory_mib=$NodeMemoryMiB;node_cpus=$NodeCPUs;generator_gomaxprocs=2;abort_host_free_mib=$AbortFreeMiB;payload_bytes=$Payload;rf=3;min_isr=2;fsync='batch';dedup=$true;public_tls=$true;replication_mtls=$true;auth=$true;encryption=$true;partitions=3;plan=$Plan;seconds_per_trial=$Seconds;max_events_per_trial=$MaxEvents}
     $hostInfo | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $runDir 'config.json')
+    [ordered]@{buffer_events=64;workers_per_partition=1;ack_batch=256;ack_flush_ms=10;backlog_pause_events=20000;server_go_memory_target_mib=150} | ConvertTo-Json | Set-Content (Join-Path $runDir 'consumer-config.json')
     Docker @('network','create',$runID) | Out-Null; $networkCreated=$true
     $ports = @()
     foreach ($i in 1..6) { $listener=[net.sockets.TcpListener]::new([net.ipaddress]::Loopback,0);$listener.Start();$ports+=$listener.LocalEndpoint.Port;$listener.Stop() }
@@ -128,7 +130,7 @@ try {
         $server=@("--node-id=node$($index+1)",'--cluster','--cluster-expected-nodes=3',"--cluster-seeds=$seeds",'--partition-count=3','--replication-factor=3','--min-insync-replicas=2','--fsync-mode=batch','--flush-interval=2','--segment-size=16777216','--bloom-capacity=1000000','--compaction-interval=2s','--backup-interval=0','--scheduler-memory=33554432','--max-memory-percent=65','--memory-check-interval=250','--max-ready-queue=30000','--max-in-flight=10000','--grpc-addr=0.0.0.0:9000','--http-addr=0.0.0.0:8080',"--cluster-gossip-addr=${name}:7946","--cluster-grpc-addr=${name}:7947","--cluster-raft-addr=${name}:7948",'--tls-enabled','--tls-ca-file=/config/ca.crt','--tls-cert-file=/config/tls.crt','--tls-key-file=/config/tls.key','--http-tls-enabled','--auth-enabled','--auth-policy-file=/config/policy.json','--replication-tls-enabled','--replication-tls-ca-file=/config/ca.crt','--replication-tls-cert-file=/config/tls.crt','--replication-tls-key-file=/config/tls.key','--encryption-enabled','--encryption-key-file=/tmp/master.key')
         if ($index -eq 0) { $server+='--cluster-bootstrap' }
         $entry='umask 077; cp /config/master.key /tmp/master.key; chmod 600 /tmp/master.key; exec /app/cronos-api "$@"'
-        $dockerArgs=@('run','-d','--name',$name,'--network',$runID,'--cpus=1',"--memory=$($NodeMemoryMiB)m","--memory-swap=$($NodeMemoryMiB)m",'--pids-limit=128','--log-opt=max-size=5m','--log-opt=max-file=2','--env-file',"$privateDir/server.env",'-e','GOMEMLIMIT=150MiB','--mount',"type=bind,source=$privateDir,target=/config,readonly",'-p',"127.0.0.1:$($ports[$index*2]):9000",'-p',"127.0.0.1:$($ports[$index*2+1]):8080",'--entrypoint','/bin/sh',$Image,'-ec',$entry,'peak')+$server
+        $dockerArgs=@('run','-d','--name',$name,'--network',$runID,"--cpus=$NodeCPUs","--memory=$($NodeMemoryMiB)m","--memory-swap=$($NodeMemoryMiB)m",'--pids-limit=128','--log-opt=max-size=5m','--log-opt=max-file=2','--env-file',"$privateDir/server.env",'-e','GOMEMLIMIT=150MiB','--mount',"type=bind,source=$privateDir,target=/config,readonly",'-p',"127.0.0.1:$($ports[$index*2]):9000",'-p',"127.0.0.1:$($ports[$index*2+1]):8080",'--entrypoint','/bin/sh',$Image,'-ec',$entry,'peak')+$server
         $containers += $name # Also clean a container whose creation only partly succeeds.
         Docker $dockerArgs | Out-Null
     }
@@ -160,6 +162,7 @@ catch {
 finally {
     if(Test-Path (Join-Path $privateDir 'results.json')){Copy-Item -LiteralPath (Join-Path $privateDir 'results.json') -Destination (Join-Path $runDir 'results.json')}
     foreach($name in $containers){
+        try{Docker @('exec',$name,'curl','-fsS','--cacert','/config/ca.crt','https://localhost:8080/metrics') | Set-Content (Join-Path $runDir "$name.metrics.txt")}catch{}
         try{Docker @('logs','--tail','200',$name) | Set-Content (Join-Path $runDir "$name.log")}catch{}
         try{Docker @('inspect',$name,'--format','{{json .State}}') | Set-Content (Join-Path $runDir "$name.state.json")}catch{}
         try{Docker @('exec',$name,'du','-sb','/data') | Set-Content (Join-Path $runDir "$name.data.txt")}catch{}
