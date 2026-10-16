@@ -737,15 +737,22 @@ func (c *Consumer) consumeFromNode(ctx context.Context, addr string) error {
 		defer infraWG.Done()
 		c.heartbeatLoop(subCtx, assignmentState)
 	})
+	// Deliveries that cannot be acknowledged are not worth receiving: the
+	// server keeps them in flight until they time out, and once they use up
+	// the subscription's credits it sends nothing more. So when the ack stream
+	// fails, the subscription ends with it, and the reconnect that follows
+	// opens both again.
 	infraWG.Add(1)
 	utils.GoSafe("consumer-ack-sender", func() {
 		defer infraWG.Done()
+		defer cancel()
 		c.ackSender(subCtx, addr, ackStream, ackQueue)
 	})
 	if c.cfg.CommitStrategy == CommitStrategyAsync {
 		infraWG.Add(1)
 		utils.GoSafe("consumer-ack-drain", func() {
 			defer infraWG.Done()
+			defer cancel()
 			c.drainAckResponses(subCtx, addr, ackStream)
 		})
 	}
@@ -867,11 +874,16 @@ func (c *Consumer) buildDefaultAck(delivery *types.Delivery, handlerErr error) a
 		return ackEnvelope{}
 	}
 
+	// The server takes an acknowledgement for the offset after the highest
+	// one delivered, and refuses any other. Servers up to v0.6.0 could send a
+	// batch out of offset order, so its last event is not taken for the
+	// highest.
 	nextOffset := int64(0)
-	if len(delivery.GetBatch()) > 0 {
-		nextOffset = delivery.GetBatch()[len(delivery.GetBatch())-1].GetOffset() + 1
-	} else if delivery.GetEvent() != nil {
-		nextOffset = delivery.GetEvent().GetOffset() + 1
+	for _, event := range delivery.GetBatch() {
+		nextOffset = max(nextOffset, event.GetOffset()+1)
+	}
+	if event := delivery.GetEvent(); event != nil {
+		nextOffset = max(nextOffset, event.GetOffset()+1)
 	}
 
 	partitionID, topic := deliveryPartitionTopic(delivery)
@@ -920,6 +932,7 @@ func (c *Consumer) ackSender(
 					return false
 				}
 				if resp != nil && !resp.GetSuccess() {
+					c.ackRefused(ack.req, resp)
 					continue
 				}
 				committed := ack.req.GetNextOffset()
@@ -986,12 +999,28 @@ func (c *Consumer) drainAckResponses(
 		}
 
 		start := time.Now()
-		_, err := stream.Recv()
+		resp, err := stream.Recv()
 		c.client.observeRequest("event.ack.recv", addr, start, err)
 		if err != nil {
 			return
 		}
+		if resp != nil && !resp.GetSuccess() {
+			c.ackRefused(nil, resp)
+		}
 	}
+}
+
+// ackRefused reports an acknowledgement the server did not take. The delivery
+// stays in flight on the server and is delivered again when it times out, so
+// nothing is lost, but a consumer whose acknowledgements are all refused stops
+// receiving once its credits are used up; this is how it can find out. req is
+// nil when the answer comes back without saying which request it was for.
+func (c *Consumer) ackRefused(req *types.AckRequest, resp *types.AckResponse) {
+	err := fmt.Errorf("acknowledgement refused: %s", resp.GetError())
+	if req != nil {
+		err = fmt.Errorf("acknowledgement of %s refused: %s", req.GetDeliveryId(), resp.GetError())
+	}
+	c.client.observeError("consumer.ack", ErrorKindValidation, err)
 }
 
 func (c *Consumer) wrapErr(op string, kind ErrorKind, err error) error {

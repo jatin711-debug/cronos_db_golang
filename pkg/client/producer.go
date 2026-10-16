@@ -75,6 +75,16 @@ type BatchSendResult struct {
 	DuplicateCount int32
 	// ErrorCount is how many events failed validation or write on the server.
 	ErrorCount int32
+	// Error is the first reason given for an event counted in ErrorCount,
+	// by the server or by the client; empty when ErrorCount is zero.
+	Error string
+}
+
+// noteError keeps the first reason an event of the batch failed.
+func (r *BatchSendResult) noteError(reason string) {
+	if r.Error == "" {
+		r.Error = reason
+	}
 }
 
 // DeliveryCallback is invoked for async sends after completion (success or error).
@@ -452,16 +462,22 @@ func (p *Producer) SendBatch(ctx context.Context, msgs []Message) (*BatchSendRes
 		msg, err := normalizeMessage(msg, p.cfg)
 		if err != nil {
 			result.ErrorCount++
+			result.noteError(err.Error())
 			continue
 		}
 		if err := validateMessage(msg); err != nil {
 			result.ErrorCount++
+			result.noteError(err.Error())
 			continue
 		}
 
 		partitionID, route, err := p.resolveRouteForMessage(msg)
 		if err != nil || len(route.CandidateAddresses) == 0 {
 			result.ErrorCount++
+			if err == nil {
+				err = fmt.Errorf("no node known for partition %d", partitionID)
+			}
+			result.noteError(err.Error())
 			continue
 		}
 
@@ -498,6 +514,7 @@ func (p *Producer) SendBatch(ctx context.Context, msgs []Message) (*BatchSendRes
 				sendRes, sendErr := p.Send(ctx, msg)
 				if sendErr != nil {
 					result.ErrorCount++
+					result.noteError(sendErr.Error())
 					continue
 				}
 				result.PublishedCount++
@@ -509,6 +526,9 @@ func (p *Producer) SendBatch(ctx context.Context, msgs []Message) (*BatchSendRes
 		result.PublishedCount += resp.GetPublishedCount()
 		result.DuplicateCount += resp.GetDuplicateCount()
 		result.ErrorCount += resp.GetErrorCount()
+		if resp.GetErrorCount() > 0 {
+			result.noteError(resp.GetError())
+		}
 
 		// Offsets are only reliably assigned per message when every message in
 		// the group was accepted (no duplicates or validation errors). In that
