@@ -66,8 +66,8 @@ func TestLeader_ProgressIsSentAgainToAFollowerThatHasCaughtUp(t *testing.T) {
 
 	l := NewLeader(0, 500, 20*time.Millisecond, wal, 2, "leader", nil)
 	// Offsets 0 to 5 are finished, and nothing changes after that.
-	l.SetProgressSource(func() (uint64, []*types.ConsumerGroupProgress) {
-		return 7, []*types.ConsumerGroupProgress{{GroupId: "g", Topic: "t", CommittedOffset: 6}}
+	l.SetProgressPageSource(func() uint64 { return 7 }, func(types.ProgressCursor) ([]*types.ConsumerGroupProgress, types.ProgressCursor, bool, error) {
+		return []*types.ConsumerGroupProgress{{GroupId: "g", Topic: "t", CommittedOffset: 6}}, types.ProgressCursor{}, true, nil
 	})
 	if err := l.AddFollower("f1", lis.Addr().String()); err != nil {
 		t.Fatal(err)

@@ -181,8 +181,38 @@ func (a *Accountant) AllowPublishBatch(tenant ID, eventCount, bytes int64) bool 
 // followed by RecordPublishBatch, two callers cannot both pass a MaxInFlight
 // or MaxStorageBytes check before recording their usage.
 func (a *Accountant) ReservePublishBatch(tenant ID, eventCount, bytes int64) bool {
+	_, ok := a.ReservePublishBatchWithReceipt(tenant, eventCount, bytes)
+	return ok
+}
+
+// PublishReservation remembers the exact counters and rate bucket charged by
+// admission, so a pre-append failure can refund even if limits change meanwhile.
+type PublishReservation struct {
+	mu            sync.Mutex
+	usage         *Usage
+	bucket        *tokenBucket
+	events, bytes int64
+}
+
+func (r *PublishReservation) Refund(events, bytes int64) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	events, bytes = min(max(events, 0), r.events), min(max(bytes, 0), r.bytes)
+	r.events -= events
+	r.bytes -= bytes
+	r.usage.InFlight.Add(-events)
+	r.usage.StorageBytes.Add(-bytes)
+	if r.bucket != nil {
+		r.bucket.refund(float64(events))
+	}
+}
+
+func (a *Accountant) ReservePublishBatchWithReceipt(tenant ID, eventCount, bytes int64) (*PublishReservation, bool) {
 	if eventCount <= 0 {
-		return true
+		return nil, true
 	}
 
 	a.mu.RLock()
@@ -192,7 +222,7 @@ func (a *Accountant) ReservePublishBatch(tenant ID, eventCount, bytes int64) boo
 	a.mu.RUnlock()
 
 	if !ok || !hasUsage {
-		return true
+		return nil, true
 	}
 
 	refund := func() {
@@ -201,7 +231,7 @@ func (a *Accountant) ReservePublishBatch(tenant ID, eventCount, bytes int64) boo
 		}
 	}
 	if hasBucket && !bucket.tryConsume(float64(eventCount)) {
-		return false
+		return nil, false
 	}
 
 	if limits.MaxInFlight > 0 {
@@ -209,7 +239,7 @@ func (a *Accountant) ReservePublishBatch(tenant ID, eventCount, bytes int64) boo
 			current := usage.InFlight.Load()
 			if current > limits.MaxInFlight || eventCount > limits.MaxInFlight-current {
 				refund()
-				return false
+				return nil, false
 			}
 			if usage.InFlight.CompareAndSwap(current, current+eventCount) {
 				break
@@ -225,7 +255,7 @@ func (a *Accountant) ReservePublishBatch(tenant ID, eventCount, bytes int64) boo
 			if current > limits.MaxStorageBytes || bytes > limits.MaxStorageBytes-current {
 				usage.InFlight.Add(-eventCount)
 				refund()
-				return false
+				return nil, false
 			}
 			if usage.StorageBytes.CompareAndSwap(current, current+bytes) {
 				break
@@ -235,7 +265,7 @@ func (a *Accountant) ReservePublishBatch(tenant ID, eventCount, bytes int64) boo
 		usage.StorageBytes.Add(bytes)
 	}
 
-	return true
+	return &PublishReservation{usage: usage, bucket: bucket, events: eventCount, bytes: bytes}, true
 }
 
 // RecordPublish records a publish attempt.

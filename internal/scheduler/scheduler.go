@@ -83,6 +83,7 @@ func acquireEventSlice() []*types.Event {
 
 func releaseEventSlice(s []*types.Event) {
 	if cap(s) <= 4096 {
+		clear(s[:cap(s)])
 		eventSlicePool.Put(s[:0])
 	}
 }
@@ -100,7 +101,14 @@ type EventReader interface {
 // hydrated back into the wheel. Concurrent Schedule/GetReadyEvents callers share
 // the ready queue under readyMu, while checkpoint and hydrator state use mu.
 type Scheduler struct {
-	mu sync.RWMutex
+	budget         *MemoryBudget
+	budgetMu       sync.Mutex
+	budgetShare    int64
+	retained       int64
+	reservations   map[int64]int64
+	retainedEvents map[int64]*types.Event
+	hydratorWake   chan struct{}
+	mu             sync.RWMutex
 	// readyMu guards readyQueue on its own dedicated mutex, decoupled from mu.
 	// The ready queue is touched on the hottest paths (ScheduleBatch appends
 	// expired events, GetReadyEvents drains, the tick drains expired timers), so
@@ -157,6 +165,7 @@ func NewScheduler(dataDir string, partitionID int32, tickMs int32, wheelSize int
 		timingWheel:         NewTimingWheel(tickMs, wheelSize, 10, 0, startTime),
 		readyQueue:          make([]*types.Event, 0),
 		readySignal:         make(chan struct{}, 1),
+		hydratorWake:        make(chan struct{}, 1),
 		partitionID:         partitionID,
 		dataDir:             dataDir,
 		active:              false,
@@ -200,7 +209,7 @@ func (s *Scheduler) ReadySignal() <-chan struct{} {
 // Already-due events go straight to the ready queue; far-future events are
 // stored in the cold store when configured; otherwise the event is placed on
 // the timing wheel.
-func (s *Scheduler) Schedule(event *types.Event) error {
+func (s *Scheduler) scheduleUnbudgeted(event *types.Event) error {
 	now := time.Now().UnixMilli()
 	// If event is already expired, add to ready queue
 	if event.GetScheduleTs() <= now {
@@ -212,7 +221,7 @@ func (s *Scheduler) Schedule(event *types.Event) error {
 	}
 
 	// Two-tier routing: far-future events go to cold store
-	if s.coldStore != nil && event.GetScheduleTs() > now+s.hotWindowMs {
+	if s.coldStore != nil && s.hotWindowMs > 0 && event.GetScheduleTs() > now+s.hotWindowMs {
 		return s.coldStore.Store(event.GetOffset(), event.GetScheduleTs())
 	}
 
@@ -227,7 +236,7 @@ func (s *Scheduler) Schedule(event *types.Event) error {
 
 // ScheduleBatch schedules multiple events efficiently with a single wheel
 // lock acquisition for hot timers and a single cold-store batch write.
-func (s *Scheduler) ScheduleBatch(events []*types.Event) error {
+func (s *Scheduler) scheduleBatchUnbudgeted(events []*types.Event) error {
 	if len(events) == 0 {
 		return nil
 	}
@@ -249,7 +258,7 @@ func (s *Scheduler) ScheduleBatch(events []*types.Event) error {
 		}
 
 		// Two-tier routing
-		if s.coldStore != nil && event.GetScheduleTs() > now+s.hotWindowMs {
+		if s.coldStore != nil && s.hotWindowMs > 0 && event.GetScheduleTs() > now+s.hotWindowMs {
 			coldEntries = append(coldEntries, struct {
 				Offset     int64
 				ScheduleTS int64
@@ -300,10 +309,18 @@ func (s *Scheduler) ScheduleBatch(events []*types.Event) error {
 func (s *Scheduler) Reset() error {
 	s.tickMu.Lock()
 	defer s.tickMu.Unlock()
+	s.budgetMu.Lock()
+	defer s.budgetMu.Unlock()
 	s.timingWheel.Clear()
 	s.readyMu.Lock()
 	s.readyQueue = nil
 	s.readyMu.Unlock()
+	if s.budget != nil {
+		s.budget.used.Add(-s.retained)
+		s.retained = 0
+		clear(s.reservations)
+		clear(s.retainedEvents)
+	}
 	if s.coldStore != nil {
 		return s.coldStore.Clear()
 	}
@@ -313,6 +330,8 @@ func (s *Scheduler) Reset() error {
 // GetReadyEvents drains and returns events ready for execution.
 // The caller owns the returned slice and its backing array.
 func (s *Scheduler) GetReadyEvents() []*types.Event {
+	s.budgetMu.Lock()
+	defer s.budgetMu.Unlock()
 	s.readyMu.Lock()
 	defer s.readyMu.Unlock()
 
@@ -323,6 +342,12 @@ func (s *Scheduler) GetReadyEvents() []*types.Event {
 
 	events := s.readyQueue
 	s.readyQueue = nil
+	if s.budget != nil {
+		for _, event := range events {
+			s.releaseEvent(event.Offset)
+		}
+		s.wakeHydrator()
+	}
 	return events
 }
 
@@ -520,6 +545,8 @@ func (s *Scheduler) hydratorLoop() {
 			schedulerHydratorInterval.WithLabelValues(partitionLabel).Set(float64(s.hydratorInterval.Milliseconds()))
 
 			timer.Reset(s.hydratorInterval)
+		case <-s.hydratorWake:
+			timer.Reset(0)
 		case <-s.workerDone:
 			return
 		}
@@ -580,6 +607,12 @@ func (s *Scheduler) adaptHydratorInterval(hydrated int, scanDuration time.Durati
 // hydrate scans cold store for events entering the hot window and loads them into the timing wheel.
 // It returns the number of events successfully hydrated.
 func (s *Scheduler) hydrate() int {
+	s.tickMu.Lock()
+	defer s.tickMu.Unlock()
+	if s.budget != nil {
+		s.budget.hydrateMu.Lock()
+		defer s.budget.hydrateMu.Unlock()
+	}
 	now := time.Now().UnixMilli()
 	startTS := int64(0) // Include overdue entries and entries missed during downtime.
 	// Adaptive lookahead: use the current hydrator interval as the lookahead window
@@ -592,7 +625,7 @@ func (s *Scheduler) hydrate() int {
 	s.mu.RUnlock()
 	endTS := now + s.hotWindowMs + lookaheadMs
 
-	offsets, err := s.coldStore.ScanRange(startTS, endTS)
+	offsets, err := s.coldStore.ScanRangeLimit(startTS, endTS, 1024)
 	if err != nil {
 		log.Printf("[SCHEDULER] Hydrator scan error (partition=%d): %v", s.partitionID, err)
 		return 0
@@ -617,6 +650,19 @@ func (s *Scheduler) hydrate() int {
 		if event == nil {
 			continue
 		}
+		if s.budget != nil {
+			s.budgetMu.Lock()
+			_, exists := s.reservations[event.Offset]
+			reserved := exists || s.reserveEarlier(event)
+			s.budgetMu.Unlock()
+			if !reserved {
+				break
+			} // earliest due first; leave it in the cold store
+			if exists {
+				toDelete = append(toDelete, struct{ Offset, ScheduleTS int64 }{offset, event.ScheduleTs})
+				continue
+			}
+		}
 
 		now := time.Now().UnixMilli()
 		if event.GetScheduleTs() <= now {
@@ -630,6 +676,11 @@ func (s *Scheduler) hydrate() int {
 			timer := s.timingWheel.GetTimerFast(event.GetOffset(), event, now)
 			if err := s.timingWheel.AddTimer(timer); err != nil {
 				s.timingWheel.PutTimer(timer)
+				if s.budget != nil {
+					s.budgetMu.Lock()
+					s.releaseEvent(event.Offset)
+					s.budgetMu.Unlock()
+				}
 				log.Printf("[SCHEDULER] Hydrator add timer error: %v", err)
 				continue
 			}
@@ -748,6 +799,14 @@ func (s *Scheduler) Stop() {
 	// Close cold store if present. This must happen even when the scheduler was
 	// never started; otherwise the underlying PebbleDB stays open and can block
 	// directory cleanup on Windows.
+	s.budgetMu.Lock()
+	if s.budget != nil {
+		s.budget.used.Add(-s.retained)
+		s.retained = 0
+		clear(s.reservations)
+		clear(s.retainedEvents)
+	}
+	s.budgetMu.Unlock()
 	if s.coldStore != nil {
 		if err := s.coldStore.Close(); err != nil {
 			log.Printf("[SCHEDULER] Cold store close error: %v", err)

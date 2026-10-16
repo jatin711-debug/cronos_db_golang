@@ -187,6 +187,26 @@ func (p *Pool) Addresses() []string {
 	return out
 }
 
+// RemoveNode retires a discovered endpoint. Existing streams are cancelled so
+// their normal reconnect path can follow the current metadata.
+func (p *Pool) RemoveNode(addr string) {
+	p.mu.Lock()
+	state := p.nodes[addr]
+	delete(p.nodes, addr)
+	for i, known := range p.order {
+		if known == addr {
+			p.order = append(p.order[:i], p.order[i+1:]...)
+			break
+		}
+	}
+	p.mu.Unlock()
+	if state != nil {
+		for _, conn := range state.conns {
+			_ = conn.Close()
+		}
+	}
+}
+
 func (p *Pool) getConn(addr string) (*grpc.ClientConn, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()

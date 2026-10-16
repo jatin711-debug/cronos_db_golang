@@ -164,6 +164,9 @@ func (h *ReplicationServiceHandler) Append(ctx context.Context, req *types.Repli
 		events = events[consumed:]
 	}
 	if len(events) > 0 {
+		if err := h.partitionManager.DiskAdmission(); err != nil {
+			return reject(err.Error())
+		}
 		if err := p.Wal.AppendReplicatedBatch(events); err != nil {
 			return reject(err.Error())
 		}
@@ -334,11 +337,19 @@ func (h *ReplicationServiceHandler) SyncConsumerProgress(ctx context.Context, re
 	if p.ConsumerGroup == nil {
 		return &types.ReplicationProgressResponse{Error: "consumer state not initialized"}, nil
 	}
+	if req.GetRequireDeadLetterAck() || len(req.GetDeadLetters()) > 0 {
+		if p.DLQ == nil {
+			return &types.ReplicationProgressResponse{Error: "dead-letter queue not initialized"}, nil
+		}
+		if err := p.DLQ.ApplyReplica(req.GetPartitionId(), req.GetDeadLetters()); err != nil {
+			return &types.ReplicationProgressResponse{Error: err.Error()}, nil
+		}
+	}
 	if err := p.ConsumerGroup.ApplyReplicatedProgress(req.GetPartitionId(), p.Wal.GetNextOffset(), req.GetGroups()); err != nil {
 		return &types.ReplicationProgressResponse{Error: err.Error()}, nil
 	}
 	p.NoteLeaderFeedPosition(req.GetChangeFeedOffset(), req.GetHasChangeFeedOffset())
-	return &types.ReplicationProgressResponse{Success: true}, nil
+	return &types.ReplicationProgressResponse{Success: true, DeadLettersDurable: req.GetRequireDeadLetterAck()}, nil
 }
 
 // Sync streams events from local WAL to followers for catch-up replication.
@@ -450,6 +461,28 @@ func (h *ReplicationServiceHandler) Snapshot(req *types.ReplicationSnapshotReque
 	checkpoint, lastOffset, err := p.Wal.Checkpoint(checkpointDir)
 	if err != nil {
 		return status.Errorf(codes.Internal, "checkpoint: %v", err)
+	}
+	// Capture the WAL first: every failed delivery already removed from
+	// that checkpoint's prefix must be durable in this journal. Apply the
+	// journal before installing the WAL, including for brand-new replicas.
+	if p.DLQ != nil && p.DLQ.Version() > 0 {
+		if !req.GetSupportsDeadLetters() {
+			return status.Error(codes.FailedPrecondition, "snapshot requires a follower with dead-letter replication support")
+		}
+		cursor := types.DeadLetterCursor{}
+		for {
+			records, next, done, err := p.DLQ.ExportPage(cursor)
+			if err != nil {
+				return status.Errorf(codes.Internal, "dead-letter checkpoint: %v", err)
+			}
+			if err := stream.Send(&types.ReplicationSnapshotChunk{Payload: &types.ReplicationSnapshotChunk_DeadLetters{DeadLetters: &types.ReplicationSnapshotDeadLetters{Records: records, Epoch: p.Epoch()}}}); err != nil {
+				return err
+			}
+			if done {
+				break
+			}
+			cursor = next
+		}
 	}
 	maxBytes := req.GetMaxBytes()
 	if maxBytes <= 0 {

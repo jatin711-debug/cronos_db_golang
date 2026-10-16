@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 )
 
 const (
@@ -93,6 +95,17 @@ func (sw *DLQSegmentWriter) openActiveSegment() error {
 
 	sw.activeFile = file
 	sw.size = info.Size()
+	if sw.size == 0 {
+		sw.size = dlqHeaderSize
+	}
+	if err := utils.SyncDirectory(sw.dataDir); err != nil {
+		file.Close()
+		return err
+	}
+	if err := utils.SyncDirectory(filepath.Dir(sw.dataDir)); err != nil {
+		file.Close()
+		return err
+	}
 	return nil
 }
 

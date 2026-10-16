@@ -249,3 +249,79 @@ func TestPublish_RefusedWhileDiskIsFull(t *testing.T) {
 		t.Fatal("a refused publish claimed its ID or reached the log")
 	}
 }
+
+func TestBatchQuotaChargesOnlyNewIDs(t *testing.T) {
+	pm := auditManager(t)
+	p, _ := pm.GetInternalPartition(0)
+	h := NewEventServiceHandler(pm, p.DedupStore, p.ConsumerGroup)
+	a := tenant.NewAccountant()
+	a.SetLimits("default", tenant.Limits{MaxInFlight: 1})
+	h.SetTenantAccountant(a)
+	first := orders("quota-first", 1)[0]
+	if ok, desc := publishOne(h, first, true); !ok {
+		t.Fatal(desc)
+	}
+	beforeCount, beforeBytes := a.GetUsage("default")
+	r, err := h.PublishBatch(context.Background(), &types.PublishBatchRequest{Events: []*types.Event{first}})
+	if err != nil || r.GetErrorCount() != 0 || r.GetDuplicateCount() != 1 {
+		t.Fatalf("duplicate-only retry charged quota: %v %v", r, err)
+	}
+	if n, b := a.GetUsage("default"); n != beforeCount || b != beforeBytes {
+		t.Fatalf("usage changed on retry: %d %d", n, b)
+	}
+	next := orders("quota-next", 1)[0]
+	r, err = h.PublishBatch(context.Background(), &types.PublishBatchRequest{Events: []*types.Event{first, next}})
+	if err != nil || r.GetErrorCount() != 1 || r.GetDuplicateCount() != 1 {
+		t.Fatalf("mixed batch: %v %v", r, err)
+	}
+	if !idIsFree(t, p, next.MessageId) {
+		t.Fatal("quota refusal stranded new ID")
+	}
+	a.SetLimits("default", tenant.Limits{MaxInFlight: 2})
+	if ok, desc := publishOne(h, next, true); !ok {
+		t.Fatal(desc)
+	}
+}
+
+func TestFullFollowerRefusesGrowthButAcknowledgesExistingEntries(t *testing.T) {
+	f := newReplicaLog(t, "disk-full")
+	batch := entries("leader", 1, 0, 1)
+	if r := f.send("node-a", 1, batch); !r.GetSuccess() {
+		t.Fatal(r)
+	}
+	guard := partition.NewDiskGuard(t.TempDir(), 0.0001)
+	guard.Start()
+	t.Cleanup(guard.Stop)
+	f.pm.SetDiskGuard(guard)
+	if r := f.send("node-a", 1, batch); !r.GetSuccess() {
+		t.Fatalf("existing durable prefix refused: %v", r)
+	}
+	if r := f.send("node-a", 1, entries("leader", 1, 2, 2)); r.GetSuccess() {
+		t.Fatal("full follower grew its log")
+	}
+	if f.p.Wal.GetNextOffset() != 2 {
+		t.Fatal("refused append changed log end")
+	}
+}
+
+func TestQuotaRefundedWhenNoReplicationLeaderCanAppend(t *testing.T) {
+	for _, batch := range []bool{false, true} {
+		t.Run(fmt.Sprint(batch), func(t *testing.T) {
+			f := newReplicaLog(t, "follower")
+			h := NewEventServiceHandler(f.pm, f.p.DedupStore, f.p.ConsumerGroup)
+			a := tenant.NewAccountant()
+			a.SetLimits("default", tenant.Limits{MaxInFlight: 1, MaxStorageBytes: 1000})
+			h.SetTenantAccountant(a)
+			event := orders("refund", 1)[0]
+			if ok, desc := publishOne(h, event, batch); ok {
+				t.Fatal(desc)
+			}
+			if n, b := a.GetUsage("default"); n != 0 || b != 0 {
+				t.Fatalf("pre-append failure charged %d events / %d bytes", n, b)
+			}
+			if !idIsFree(t, f.p, event.MessageId) {
+				t.Fatal("pre-append failure kept claim")
+			}
+		})
+	}
+}
