@@ -67,7 +67,7 @@ Defaults from `internal/config/defaults.go` unless noted. Every flag has a `CRON
 |------|---------|-------------|
 | `--tick-ms` | `10` | Timing wheel tick duration (ms) |
 | `--wheel-size` | `600` | Slots per timing wheel level |
-| `--hot-window-minutes` | `60` | Events beyond this window go to cold store (0 = disable) |
+| `--hot-window-minutes` | `60` | Events beyond this window go to cold store (0 disables time-based routing; memory overflow still spills) |
 | `--hydrator-min-interval` | `5000` | Minimum adaptive hydrator scan interval (ms) |
 | `--hydrator-max-interval` | `300000` | Maximum adaptive hydrator scan interval (ms) |
 
@@ -78,7 +78,7 @@ Defaults from `internal/config/defaults.go` unless noted. Every flag has a `CRON
 | `--max-ready-queue` | `1000000` | Max ready-queue depth per partition |
 | `--max-timing-wheel-size` | `10000000` | Max active timers in the hot timing wheel |
 | `--max-in-flight` | `500000` | Max in-flight deliveries per partition |
-| `--max-disk-usage` | `0.95` | Refuse publishes once the filesystem holding `--data-dir` is this full (fraction, `0` = never); they are taken again two points below. Deliveries, replication and retention go on |
+| `--max-disk-usage` | `0.95` | Refuse publishes once the filesystem holding `--data-dir` is this full (fraction, `0` = never); they are taken again two points below. Deliveries and retention continue; followers refuse log growth but may acknowledge entries already stored |
 | `--ack-timeout` | `30s` | Delivery ack deadline (**reload-only env**) |
 | `--max-retries` | `5` | Max delivery retries before DLQ (**reload-only env**) |
 | `--retry-backoff` | `1s` | Base retry backoff |
@@ -151,6 +151,7 @@ Defaults from `internal/config/defaults.go` unless noted. Every flag has a `CRON
 | `--topic-rate-limit` | `0.0` | Per-subject per-topic events/sec (0 = disabled) |
 | `--topic-rate-burst` | `0.0` | Topic rate limiter burst (0 = disabled) |
 | `--max-memory-percent` | `80` | Publishes are refused while the process holds this share of its memory limit or more (0 = never) |
+| `--scheduler-memory` | `67108864` | Node-wide scheduler payload budget in bytes; minimum 32 MiB. Excess events wait as WAL references. Excludes other process memory |
 | `--memory-limit` | `0` | Memory the process may use, in bytes. `0` = the container's (cgroup) limit, or the machine's memory when there is none |
 | `--memory-check-interval` | `1000` | How long a memory measurement is used (ms) |
 | `--max-ingest-rate` | `0` | Max events/sec per partition (0 = unlimited) |

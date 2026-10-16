@@ -24,8 +24,8 @@ Deduplication prevents duplicate message processing while keeping publish latenc
 
 - Two-tier design balances speed and correctness (bloom fast-path, Pebble source of truth).
 - The Rust bloom filter is used only in cgo builds. Any build without cgo, on any system, uses the pure-Go bloom filter (`rust_bloom_nocgo.go` returns nil and callers fall back to `GoBloomFilter`); the release binaries are built this way. The Docker image is built with cgo and ships `libcronos_dedup.so`, so it uses the Rust filter.
-- Publish path **claims** IDs before WAL append and **`RollbackBatch`** on write failure so retries are not spurious duplicates.
-- **Crash recovery:** on partition start, `recoverDedupFromWAL` re-seeds claims from the WAL tail, because the dedup Pebble store writes with `DisableWAL` + `NoSync` and can lose recent claims in a crash. The tail is bounded to the last 500,000 events (`maxDedupRecoveryEvents`) and skips events older than the dedup TTL.
+- Publish path **claims** IDs before WAL append and **`RollbackBatch`** on definite pre-append failure so retries are not spurious duplicates.
+- **Crash recovery:** on partition start, `recoverDedupFromWAL` re-seeds claims from the WAL tail, because the dedup Pebble store writes with `DisableWAL` + `NoSync` and can lose recent claims in a crash. Recovery walks the retained log in bounded byte pages from a validated `(offset, term, message ID)` checkpoint, skipping events older than the dedup TTL. The checkpoint is saved only after pending IDs and Pebble tables are flushed. Without a valid checkpoint every retained entry is examined; a recovery error blocks startup or promotion.
 - TTL pruning bounds store growth (default 7 days).
 
 ## Debug Pointers

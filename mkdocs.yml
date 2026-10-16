@@ -120,6 +120,8 @@ nav:
   - Home: index.md
   - Release:
       - Release Requirements: PRODUCTION_RELEASE.md
+      - v0.7.0 Hardening: HARDENING_V0.7.0.md
+      - October Production Audit: PRODUCTION_AUDIT_2026-10-16.md
       - Production Audit: PRODUCTION_AUDIT_2026-09-27.md
   - Architecture:
       - Overview: ARCHITECTURE.md

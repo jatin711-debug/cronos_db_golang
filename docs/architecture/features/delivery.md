@@ -27,6 +27,7 @@ The delivery module moves scheduled events to subscribers with backpressure, ret
 - Retry queue is non-blocking and deadline ordered (no inline sleep in timeout loop).
 - Dispatcher sharding reduces lock contention in high concurrency.
 - **DLQ is constructed per partition** at create time (`NewEncryptedDeadLetterQueue` + `NewDispatcherWithDLQ` in `partition.Manager`) so poison messages are not silently dropped.
+- **DLQ journal replication** copies failed payloads and removal tombstones in bounded pages. Followers sync before acknowledging; completion transfer and retention wait for the copies. A retry removes only its event when several entries share a batch delivery ID. See [upgrade behavior](../../HARDENING_V0.7.0.md#completion-and-dead-letter-replication).
 - **DLQ entries are encrypted** with the partition's key when encryption at rest is on: a dead-lettered event is stored whole, payload included. Entries written before encryption was switched on are still read. An encrypted entry that cannot be opened, because the key is wrong or missing, stops the partition from starting.
 - **A damaged DLQ file loses only the damaged records.** Records that fail their checksum are counted and logged with their file, and the counts are part of the queue's stats (`CorruptRecords`, `UnreadableBytes`). A file that cannot be read at all is an error.
 - **A subscription ends when its node stops leading the partition**, with an error that says so, and the consumer reconnects to the node that leads now. The dispatcher of a node that no longer leads delivers nothing.
