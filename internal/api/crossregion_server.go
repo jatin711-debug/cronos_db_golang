@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/jatin711-debug/cronos_db_golang/internal/lifecycle"
 	"github.com/jatin711-debug/cronos_db_golang/internal/partition"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 	"github.com/prometheus/client_golang/prometheus"
@@ -50,6 +51,11 @@ func (s *CrossRegionServer) ReplicateEvents(ctx context.Context, req *types.Regi
 	if len(req.Events) == 0 {
 		return &types.RegionReplicateResponse{Success: true}, nil
 	}
+	for _, event := range req.Events {
+		if lifecycle.HasReservedMeta(event) {
+			return nil, status.Error(codes.InvalidArgument, "cronos.internal.* metadata is reserved")
+		}
+	}
 
 	p, err := s.pm.GetOrCreateInternalPartition(req.PartitionId, req.RegionId)
 	if err != nil {
@@ -57,6 +63,9 @@ func (s *CrossRegionServer) ReplicateEvents(ctx context.Context, req *types.Regi
 	}
 	if p.Wal == nil {
 		return nil, status.Errorf(codes.Internal, "partition %d WAL not initialized", req.PartitionId)
+	}
+	if p.LifecycleEnabled() {
+		return nil, status.Error(codes.FailedPrecondition, "cross-region replication is not supported with event-lifecycle")
 	}
 
 	// Apply LWW conflict resolution and deduplication
@@ -184,6 +193,9 @@ func (s *CrossRegionServer) FetchEvents(req *types.RegionFetchRequest, stream ty
 	p, err := s.pm.GetInternalPartition(req.PartitionId)
 	if err != nil || p.Wal == nil {
 		return status.Errorf(codes.NotFound, "partition %d not found", req.PartitionId)
+	}
+	if p.LifecycleEnabled() {
+		return status.Error(codes.FailedPrecondition, "cross-region export is not supported with event-lifecycle")
 	}
 
 	// Stream events from WAL in chunks of at most fetchChunkBytes, so a

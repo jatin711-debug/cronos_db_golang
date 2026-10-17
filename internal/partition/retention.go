@@ -49,6 +49,15 @@ func (p *Partition) PruneWAL(ctx context.Context, opts storage.PruneOptions) (in
 	if p.ConsumerGroup == nil || p.Wal == nil {
 		return 0, nil
 	}
+	if p.lifecycleIndex != nil {
+		p.lifecycleMu.Lock()
+		defer p.lifecycleMu.Unlock()
+		if err := p.Wal.Failure(); err != nil {
+			return 0, err
+		}
+		opts.PrefixOnly = true
+		opts.Terminal = p.terminalEvent
+	}
 	if p.replicated {
 		if !p.IsLeader() {
 			return 0, fmt.Errorf("partition %d is led by another node, which decides what is removed from its log", p.ID)
@@ -79,15 +88,22 @@ func (p *Partition) PruneWAL(ctx context.Context, opts storage.PruneOptions) (in
 	}()
 
 	deleted, err := p.ConsumerGroup.WithRetentionCheck(func(eligible func(*types.Event) bool) (int, error) {
+		if err := p.evacuateFuture(ctx, opts, eligible); err != nil {
+			return 0, err
+		}
 		check := func(event *types.Event) bool {
 			reason := ""
 			switch {
+			case p.Wal.Failure() != nil:
+				reason = "log_failure"
 			case p.followed && !p.deadLettersSafeToPrune():
 				reason = "dead_letter_replication"
 			case p.replicated && event.Offset > accepted:
 				reason = "unaccepted"
 			case feeding && event.Offset > exported:
 				reason = "change_feed"
+			case p.terminalEvent(event):
+				// Canceled/superseded records have no consumer obligation.
 			case event.ScheduleTs > now:
 				reason = "future_schedule"
 			case !eligible(event):
@@ -116,10 +132,21 @@ func (p *Partition) PruneWAL(ctx context.Context, opts storage.PruneOptions) (in
 		})
 	})
 	if deleted > 0 {
+		if p.lifecycleIndex != nil {
+			if cleanupErr := p.lifecycleIndex.DropBefore(p.Wal.GetFirstOffset()); cleanupErr != nil {
+				p.Wal.Fail(cleanupErr)
+				if err == nil {
+					err = cleanupErr
+				}
+			}
+		}
 		metrics.AddSegmentsRemoved(p.ID, deleted)
 		if startErr := p.ConsumerGroup.SetLogStart(p.ID, p.Wal.GetFirstOffset()); startErr != nil && err == nil {
 			err = startErr
 		}
+	}
+	if err == nil {
+		err = p.Wal.Failure()
 	}
 	return deleted, err
 }

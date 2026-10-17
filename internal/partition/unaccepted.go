@@ -132,7 +132,13 @@ func (p *Partition) acceptRangeLocked(from, to int64, claimed bool) error {
 			return nil
 		}
 		from = events[len(events)-1].Offset + 1
-		if err := p.Scheduler.ScheduleBatch(events); err != nil {
+		active := make([]*types.Event, 0, len(events))
+		for _, event := range events {
+			if p.ActiveEvent(event) {
+				active = append(active, event)
+			}
+		}
+		if err := p.Scheduler.ScheduleBatch(active); err != nil {
 			return err
 		}
 		if claimed {

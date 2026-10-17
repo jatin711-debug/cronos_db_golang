@@ -57,6 +57,8 @@ type SendResult struct {
 	PartitionID int32
 	// Offset is the durable log offset assigned by the server.
 	Offset int64
+	// Term, with Offset, fences an event reference against log offset reuse.
+	Term int64
 	// ScheduleTS is the effective schedule timestamp (Unix ms) after server processing.
 	ScheduleTS int64
 	// NodeAddress is the gRPC address of the node that handled the publish.
@@ -293,6 +295,7 @@ func (p *Producer) Send(ctx context.Context, msg Message) (*SendResult, error) {
 						MessageID:   msg.MessageID,
 						PartitionID: hedgeRes.resp.GetPartitionId(),
 						Offset:      hedgeRes.resp.GetOffset(),
+						Term:        hedgeRes.resp.GetTerm(),
 						ScheduleTS:  hedgeRes.resp.GetScheduleTs(),
 						NodeAddress: hedgeRes.addr,
 						LeaderID:    route.LeaderID,
@@ -355,6 +358,7 @@ func (p *Producer) Send(ctx context.Context, msg Message) (*SendResult, error) {
 					MessageID:   msg.MessageID,
 					PartitionID: resp.GetPartitionId(),
 					Offset:      resp.GetOffset(),
+					Term:        resp.GetTerm(),
 					ScheduleTS:  resp.GetScheduleTs(),
 					NodeAddress: addr,
 					LeaderID:    route.LeaderID,

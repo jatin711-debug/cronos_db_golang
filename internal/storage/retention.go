@@ -24,6 +24,10 @@ type PruneOptions struct {
 	// offsets. A replicated log is pruned this way, because its replicas are
 	// kept in step by where the log starts and where it ends.
 	PrefixOnly bool
+	// Terminal identifies records durably canceled or superseded by a retained
+	// replacement. It only relaxes the schedule guard; eligible must still pass.
+	// Public retention requests never supply this predicate.
+	Terminal func(*types.Event) bool
 }
 
 // Prune deletes completed segments. Memory during verification is bounded by
@@ -67,7 +71,7 @@ func (w *WAL) Prune(ctx context.Context, opts PruneOptions, eligible func(*types
 				event.PartitionId = w.partitionID // partition identity is implicit in the WAL directory
 				// The caller is asked first, so that it learns which entry
 				// is in the way even when the log would keep it regardless.
-				return eligible(event) && event.ScheduleTs <= now && (opts.BeforeTimestamp <= 0 || event.ScheduleTs < opts.BeforeTimestamp)
+				return eligible(event) && ((opts.Terminal != nil && opts.Terminal(event)) || (event.ScheduleTs <= now && (opts.BeforeTimestamp <= 0 || event.ScheduleTs < opts.BeforeTimestamp)))
 			})
 			if err != nil {
 				return deleted, fmt.Errorf("verify retention of %s: %w", seg.filename, err)
