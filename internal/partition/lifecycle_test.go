@@ -350,3 +350,200 @@ func TestLifecycleDeliveryGateExcludesConcurrentCancellation(t *testing.T) {
 		t.Fatal("stale queued event was delivered")
 	}
 }
+
+// A durable local append can still have an unresolved acceptance outcome.
+// HoldUnaccepted supplies that boundary without enabling the cluster protocol.
+func TestLifecycleStagedMutationCannotReleasePrefixOrReportSuccess(t *testing.T) {
+	for _, kind := range []string{lifecycle.Cancel, lifecycle.Reschedule, lifecycle.Relocate} {
+		t.Run(kind, func(t *testing.T) {
+			pm, p := lifecyclePartition(t, lifecycleConfig(t))
+			defer pm.Close()
+			original := appendMaintenanceEvent(t, p, "pending", "a", time.Now().Add(time.Hour), 2048)
+			at := original.ScheduleTs
+			request := "staged"
+			if kind == lifecycle.Cancel {
+				at = 0
+			} else if kind == lifecycle.Relocate {
+				request = ""
+			}
+			next, err := lifecycle.Replacement(original, kind, request, at)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := p.Wal.AppendEvent(next); err != nil {
+				t.Fatal(err)
+			}
+			if err := p.Wal.Flush(); err != nil {
+				t.Fatal(err)
+			}
+			if err := p.lifecycleIndex.Apply(next); err != nil {
+				t.Fatal(err)
+			}
+			p.HoldUnaccepted([]*types.Event{next}, false)
+			appendMaintenanceEvent(t, p, "tail", "a", time.Now().Add(time.Hour), 2048)
+			if through := p.AcceptedThrough(); through >= next.Offset {
+				t.Fatalf("fixture accepted staged offset %d through %d", next.Offset, through)
+			}
+			if n, err := p.PruneWAL(context.Background(), storage.PruneOptions{AllCompleted: true}); err != nil || n != 0 || p.Wal.GetFirstOffset() != original.Offset {
+				t.Fatalf("unaccepted successor released original: removed=%d first=%d error=%v", n, p.Wal.GetFirstOffset(), err)
+			}
+			for _, e := range []*types.Event{original, next} {
+				if err := p.WithActiveEvent(e, func(*types.Event) error {
+					t.Error("replayed unresolved mutation or its frozen predecessor")
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if state, err := p.EventState(lifecycle.Reference(original)); status.Code(err) != codes.Unavailable || state != nil {
+				t.Fatalf("staged mutation reported as accepted state: %v %v", state, err)
+			}
+			if kind != lifecycle.Relocate {
+				if state, err := p.MutateEvent(context.Background(), mutation(original, request, at), kind); status.Code(err) != codes.Unavailable || state != nil {
+					t.Fatalf("retry reported success before acceptance: %v %v", state, err)
+				}
+			}
+			if err := p.AcceptThrough(next.Offset); err != nil {
+				t.Fatal(err)
+			}
+			if state, err := p.EventState(lifecycle.Reference(original)); err != nil || state.GetCurrentOffset() != next.Offset || state.GetCanceled() != (kind == lifecycle.Cancel) {
+				t.Fatalf("accepted state not visible: %v %v", state, err)
+			}
+			sends := 0
+			if err := p.WithActiveEvent(next, func(e *types.Event) error {
+				sends++
+				if lifecycle.HasReservedMeta(e) {
+					t.Error("internal envelope reached replay")
+				}
+				return nil
+			}); err != nil || (sends == 1) != (kind != lifecycle.Cancel) {
+				t.Fatalf("accepted replay: sends=%d error=%v", sends, err)
+			}
+			if n, err := p.PruneWAL(context.Background(), storage.PruneOptions{AllCompleted: true}); err != nil || n == 0 || p.Wal.GetFirstOffset() <= original.Offset {
+				t.Fatalf("accepted mutation still pins original: removed=%d first=%d error=%v", n, p.Wal.GetFirstOffset(), err)
+			}
+		})
+	}
+}
+
+func TestLifecycleCutLogRebuildsBeforeOffsetReuse(t *testing.T) {
+	pm, p := lifecyclePartition(t, lifecycleConfig(t))
+	defer pm.Close()
+	original := appendMaintenanceEvent(t, p, "pending", "a", time.Now().Add(time.Hour), 2048)
+	state, err := p.MutateEvent(context.Background(), mutation(original, "old-reschedule", original.ScheduleTs+1000), lifecycle.Reschedule)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, err := p.Wal.ReadEvent(state.CurrentOffset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.ReplicateMu.Lock()
+	removed, err := p.CutLog(old.Offset)
+	p.ReplicateMu.Unlock()
+	if err != nil || removed != 1 {
+		t.Fatalf("suffix cut: removed=%d error=%v", removed, err)
+	}
+	state, err = p.EventState(lifecycle.Reference(original))
+	if err != nil || state.GetCurrentOffset() != original.Offset || !p.ActiveEvent(original) {
+		t.Fatalf("cut left old mutation state: %v %v", state, err)
+	}
+	if p.ActiveEvent(old) || p.Wal.Failure() != nil {
+		t.Fatalf("discarded worker reference broke the recovered WAL: %v", p.Wal.Failure())
+	}
+	p.Wal.SetCurrentTerm(old.Term + 1)
+	state, err = p.MutateEvent(context.Background(), mutation(original, "new-reschedule", original.ScheduleTs+2000), lifecycle.Reschedule)
+	if err != nil || state.GetCurrentOffset() != old.Offset || state.GetRevisionTerm() <= old.Term {
+		t.Fatalf("replacement generation: %v %v", state, err)
+	}
+	if p.ActiveEvent(old) {
+		t.Fatal("cached old term became active at a reused mutation offset")
+	}
+}
+
+func TestLifecycleFollowLogStartDoesNotResurrectDiscardedReferences(t *testing.T) {
+	pm, p := lifecyclePartition(t, lifecycleConfig(t))
+	defer pm.Close()
+	if err := p.ConsumerGroup.CreateGroup("g", "a", []int32{p.ID}); err != nil {
+		t.Fatal(err)
+	}
+	original := appendMaintenanceEvent(t, p, "pending", "a", time.Now().Add(time.Hour), 2048)
+	state, err := p.MutateEvent(context.Background(), mutation(original, "reschedule", original.ScheduleTs+1000), lifecycle.Reschedule)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := p.Wal.ReadEvent(state.CurrentOffset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The accepted leader is ahead of this replica's whole retained log.
+	p.leader.Store(false)
+	start := p.Wal.GetNextOffset() + 10
+	p.ReplicateMu.Lock()
+	err = p.FollowLogStart(start)
+	p.ReplicateMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range []*types.Event{original, current} {
+		if p.ActiveEvent(e) {
+			t.Fatalf("discarded reference resurrected after reset: offset=%d", e.Offset)
+		}
+	}
+	if state, err := p.EventState(lifecycle.Reference(original)); status.Code(err) != codes.NotFound || state != nil {
+		t.Fatalf("discarded mutation remained resolvable: %v %v", state, err)
+	}
+	pending := appendMaintenanceEvent(t, p, "retained", "a", time.Now().Add(time.Hour), 32)
+	if pending.Offset != start || p.ConsumerGroup.IsCompleted("g", p.ID, pending.Offset) || !p.ActiveEvent(pending) {
+		t.Fatal("reset completed or suppressed new work at the retained start")
+	}
+}
+
+func TestLifecycleRetentionFailsClosedOnIncompleteIndex(t *testing.T) {
+	pm, p := lifecyclePartition(t, lifecycleConfig(t))
+	defer pm.Close()
+	if err := p.ConsumerGroup.CreateGroup("g", "a", []int32{p.ID}); err != nil {
+		t.Fatal(err)
+	}
+	done := appendMaintenanceEvent(t, p, "done", "a", time.Now().Add(-time.Hour), 2048)
+	appendMaintenanceEvent(t, p, "tail", "a", time.Now().Add(time.Hour), 32)
+	if err := p.ConsumerGroup.CommitDelivery("g", p.ID, []*types.Event{done}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := p.lifecycleIndex.Rebuild(ctx, p.Wal); err == nil {
+		t.Fatal("canceled rebuild succeeded")
+	}
+	n, err := p.PruneWAL(context.Background(), storage.PruneOptions{AllCompleted: true})
+	if err == nil || n != 0 || p.Wal.GetFirstOffset() != done.Offset || p.Wal.Failure() == nil {
+		t.Fatalf("retention used incomplete index: removed=%d first=%d error=%v failure=%v", n, p.Wal.GetFirstOffset(), err, p.Wal.Failure())
+	}
+}
+
+func TestLifecycleEvacuationWaitsForStagedMutationInOldestSegment(t *testing.T) {
+	cfg := lifecycleConfig(t)
+	cfg.SegmentSizeBytes, cfg.WALRelocationBytes = 6000, 4096
+	pm, p := lifecyclePartition(t, cfg)
+	defer pm.Close()
+	original := appendMaintenanceEvent(t, p, "pending", "a", time.Now().Add(time.Hour), 2048)
+	appendMaintenanceEvent(t, p, "other", "a", time.Now().Add(time.Hour), 2048)
+	next, err := lifecycle.Replacement(original, lifecycle.Reschedule, "staged", original.ScheduleTs+1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Wal.AppendEvent(next); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Wal.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.lifecycleIndex.Apply(next); err != nil {
+		t.Fatal(err)
+	}
+	p.HoldUnaccepted([]*types.Event{next}, false)
+	before := p.Wal.GetLastOffset()
+	if n, err := p.PruneWAL(context.Background(), storage.PruneOptions{AllCompleted: true}); err != nil || n != 0 || p.Wal.GetLastOffset() != before {
+		t.Fatalf("evacuated a segment still pinned by a staged mutation: removed=%d end=%d error=%v", n, p.Wal.GetLastOffset(), err)
+	}
+}

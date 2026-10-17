@@ -9,16 +9,16 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 )
 
-func (p *Partition) terminalEvent(e *types.Event) bool {
+func (p *Partition) terminalEvent(e *types.Event, accepted int64) bool {
 	if p.lifecycleIndex == nil {
 		return false
 	}
-	active, err := p.lifecycleIndex.Active(e)
+	terminal, err := p.lifecycleIndex.TerminalThrough(e, accepted)
 	if err != nil {
 		p.Wal.Fail(err)
 		return false
 	}
-	return !active
+	return terminal
 }
 
 // evacuateFuture moves only never-due work, keeping consumer completion tied
@@ -42,6 +42,7 @@ func (p *Partition) evacuateFuture(ctx context.Context, opts storage.PruneOption
 	}
 	end := first.GetLastOffset()
 	now := time.Now().UnixMilli()
+	accepted := p.AcceptedThrough()
 	walk := func(visit func(*types.Event) (bool, error)) error {
 		for from := first.GetFirstOffset(); from <= end; {
 			if err := ctx.Err(); err != nil {
@@ -67,14 +68,15 @@ func (p *Partition) evacuateFuture(ctx context.Context, opts storage.PruneOption
 		}
 		return nil
 	}
-	// Do not copy future work from a segment pinned by an unfinished due event.
+	// Do not copy future work from a segment pinned by an unresolved mutation,
+	// an unaccepted append, or an unfinished due event.
 	blocked := false
 	if err := walk(func(e *types.Event) (bool, error) {
 		active, err := p.lifecycleIndex.Active(e)
 		if err != nil {
 			return false, err
 		}
-		if active && e.ScheduleTs <= now && !eligible(e) {
+		if e.Offset > accepted || (!active && !p.terminalEvent(e, accepted)) || (active && e.ScheduleTs <= now && !eligible(e)) {
 			blocked = true
 			return false, nil
 		}

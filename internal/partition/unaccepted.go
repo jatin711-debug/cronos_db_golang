@@ -1,6 +1,7 @@
 package partition
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"sort"
@@ -248,6 +249,10 @@ func (p *Partition) forgetBeyondLog(offset int64, why string) error {
 // returns how many entries went. The caller holds ReplicateMu and has
 // accepted the sender as leader.
 func (p *Partition) CutLog(offset int64) (int, error) {
+	if p.lifecycleIndex != nil {
+		p.lifecycleMu.Lock()
+		defer p.lifecycleMu.Unlock()
+	}
 	if offset >= p.Wal.GetNextOffset() {
 		return 0, nil
 	}
@@ -255,7 +260,18 @@ func (p *Partition) CutLog(offset int64) (int, error) {
 	if err := p.forgetBeyondLog(offset, "the leader's log replaces what this replica held there"); err != nil {
 		return 0, err
 	}
-	return p.Wal.TruncateToOffset(offset)
+	removed, err := p.Wal.TruncateToOffset(offset)
+	if p.lifecycleIndex != nil {
+		// A suffix cut can reuse offsets for another term or identity. No
+		// lifecycle reader may observe heads from the previous WAL generation.
+		if err == nil {
+			err = p.lifecycleIndex.Rebuild(context.Background(), p.Wal)
+		}
+		if err != nil {
+			p.Wal.Fail(err)
+		}
+	}
+	return removed, err
 }
 
 // dropHeld forgets held publishes. It is called when the whole log is about to

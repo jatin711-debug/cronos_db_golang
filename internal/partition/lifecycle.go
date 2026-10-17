@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"time"
@@ -22,7 +23,11 @@ func (p *Partition) LifecycleEnabled() bool { return p.lifecycleIndex != nil }
 func (p *Partition) WithActiveEvent(e *types.Event, send func(*types.Event) error) error {
 	p.lifecycleMu.RLock()
 	defer p.lifecycleMu.RUnlock()
-	if p.ActiveEvent(e) {
+	through := int64(math.MaxInt64)
+	if p.lifecycleIndex != nil {
+		through = p.DeliverableThrough()
+	}
+	if p.activeEventThrough(e, through) {
 		return send(lifecycle.Public(e))
 	}
 	return p.Wal.Failure()
@@ -44,7 +49,16 @@ func (p *Partition) lifecycleError() error {
 // ActiveEvent is also used by replay and scheduler recovery. The delivery gate
 // holds lifecycleMu across this test and stream.Send, excluding durable changes.
 func (p *Partition) ActiveEvent(e *types.Event) bool {
+	// Timer reconstruction includes staged successors. Sending them also
+	// requires an accepted boundary, checked separately by delivery/replay.
+	return p.activeEventThrough(e, math.MaxInt64)
+}
+
+func (p *Partition) activeEventThrough(e *types.Event, through int64) bool {
 	if p.Wal.Failure() != nil {
+		return false
+	}
+	if e == nil || e.Offset > through {
 		return false
 	}
 	if p.lifecycleIndex == nil {
@@ -56,7 +70,7 @@ func (p *Partition) ActiveEvent(e *types.Event) bool {
 		}
 		return true
 	}
-	active, err := p.lifecycleIndex.Active(e)
+	active, err := p.lifecycleIndex.DeliverableThrough(e, through)
 	if err != nil {
 		p.Wal.Fail(fmt.Errorf("event lifecycle lookup: %w", err))
 		p.setReplayError(err)
@@ -77,12 +91,16 @@ func (p *Partition) lifecycleState(ref *types.EventReference) (*types.Event, *li
 	}
 	offset := ref.Offset
 	if head, found, err := p.lifecycleIndex.Latest(ref); err != nil {
+		p.Wal.Fail(err)
 		return nil, nil, status.Error(codes.Unavailable, err.Error())
 	} else if found {
 		offset = head
 	}
 	if offset < p.Wal.GetFirstOffset() || offset > p.Wal.GetLastOffset() {
 		return nil, nil, status.Error(codes.NotFound, "event state is no longer retained")
+	}
+	if offset > p.AcceptedThrough() {
+		return nil, nil, status.Error(codes.Unavailable, "event state has not been accepted; retry after its outcome is resolved")
 	}
 	e, err := p.Wal.ReadEvent(offset)
 	if err != nil {
