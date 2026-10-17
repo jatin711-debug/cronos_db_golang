@@ -1,6 +1,6 @@
 # v0.7.0 hardening
 
-These changes implement the remaining findings of the [October audit](PRODUCTION_AUDIT_2026-10-16.md). They are release preparation; the published version stays v0.6.0 until the release gates pass.
+These changes implement the remaining findings of the [October audit](PRODUCTION_AUDIT_2026-10-16.md). They were released as `v0.7.0` on 2026-10-17.
 
 ## Resource and recovery behavior
 
@@ -38,13 +38,15 @@ gh workflow run release.yml --ref v0.7.0 -f tag=v0.7.0
 
 The image job requires the tag's commit on `main` and the workflow's source commit to match it. It builds one linux/amd64 image, scans for fixable HIGH/CRITICAL vulnerabilities, and runs both container acceptance tests. It then pushes a run-specific candidate tag, records the registry digest, creates signed provenance with [GitHub's attestation action](https://github.com/actions/attest), and publishes the release tag from the same image. `IMAGE_DIGEST`, scan results and test logs preserve the evidence. It does not move `latest`.
 
+For `v0.7.0` the repository did not have the two secrets, so the image job could build, scan and test the image but not push it. The `v0.7.0` image was built from the tagged commit, scanned and started as three nodes by hand, and pushed by hand as `0.7.0` and `latest`, as for `v0.6.0`. It has no signed provenance.
+
 CI also audits the locked Rust dependencies. The publication job performs container acceptance and image scanning in Linux CI before registry publication and signing. Local workflow lint alone does not establish those results.
 
 ## Validation and release gates
 
 Local validation on 2026-10-16 includes all 33 Go test packages (Windows amd64, cgo disabled), focused race checks for the changed scheduler, completion, dedup, discovery, quota and dead-letter paths, workflow lint, strict documentation build, and chart assertions for persistent/ephemeral data with and without a separate backup PVC. The dead-letter regression covers loss of the original leader after WAL retention, replacement catch-up through a snapshot, failed journal writes and mixed-version acknowledgement.
 
-These local results come from separate runs. The branch still needs the required GitHub production checks before it can merge to `main`; local checks do not replace that gate.
+These local results come from separate runs. The required GitHub production checks passed on the pull request that took the release to `main`.
 
 The process acceptance runs passed node faults, certificate/CA rotation, overload refusal, lost-node removal, first-node replacement, backlog recovery and topology convergence after a node was killed and restarted. The overload run delivered all 6,315 acknowledged events. Process backlog recovery delivered all 11,365 acknowledged events with peak observed memory of 111 MiB against a 142 MiB configured limit.
 
@@ -56,6 +58,6 @@ The local Linux image also passed Trivy 0.75.0 with no fixable HIGH/CRITICAL fin
 
 The process overload test intentionally raises the scheduler budget so it reaches the process memory guard. With the default budget, this workload spills to disk and need not reject publishes merely because the accepted backlog exceeds RAM.
 
-The initial single-node Windows publish benchmark was slower after the change: three-sample medians were about 21.7k versus 40.8k events/s on the first-batch baseline. These short runs overlapped other validation, varied substantially, and accumulate a backlog without a consumer; the bounded scheduler starts spilling while the baseline keeps payloads in memory. This is a performance concern to investigate, not evidence that the audit's RF=3/minISR=2 durable-capacity comparison passed. Matched Linux load runs with production TLS/auth/encryption, sustainable throughput and p99 latency remain a release gate. Multi-host and real power-loss results are also not established here.
+The initial single-node Windows publish benchmark was slower after the change: three-sample medians were about 21.7k versus 40.8k events/s on the first-batch baseline. These short runs overlapped other validation, varied substantially, and accumulate a backlog without a consumer; the bounded scheduler starts spilling while the baseline keeps payloads in memory. This is a performance concern to investigate, not evidence that the audit's RF=3/minISR=2 durable-capacity comparison passed. Three-node runs with production TLS, authentication and encryption were later matched against `v0.6.0` on the same Windows host, with every accepted event checked as delivered: the rates were level, within the variance of that host ([record](CLUSTER_PERFORMANCE_VALIDATION_2026-10-16.md)). Matched Linux runs, multi-host runs and real power loss are not established; `v0.7.0` was released without them.
 
-GitHub repository secrets `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` were absent when checked. Configure them before running the image publication job. This branch does not change the published version or claim a signed v0.7.0 artifact exists.
+The GitHub repository secrets `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` were still absent at release. Configure them before relying on the image publication job; no signed `v0.7.0` image exists.

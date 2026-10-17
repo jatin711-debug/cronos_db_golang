@@ -1,7 +1,7 @@
 # Three-node throughput validation — 2026-10-16
 
 These measurements compare `v0.6.0` (`f8cc206`) with the `hardening-v0.7.0`
-branch at `e08c1bc`, whose server code is that of `d4702bf`. All runs use three
+branch at `e08c1bc`, whose server code is that of `d4702bf` and of `v0.7.0`. All runs use three
 server processes on one AMD Ryzen 7 6800H laptop (16 logical processors,
 15 GB of memory, one Micron 2450 NVMe SSD), Windows/amd64, Go 1.26.9 with cgo
 disabled (the Go bloom filter), and 256-byte payloads. The two server builds

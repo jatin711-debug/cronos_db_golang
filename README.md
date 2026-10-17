@@ -6,9 +6,9 @@
 [![Rust](https://img.shields.io/badge/Rust-FFI-dea584.svg)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/jatin711-debug/cronos_db_golang?include_prereleases)](https://github.com/jatin711-debug/cronos_db_golang/releases)
-[![Release](https://img.shields.io/badge/release-v0.6.0-blue.svg)](#status)
+[![Release](https://img.shields.io/badge/release-v0.7.0-blue.svg)](#status)
 
-> **Production Readiness:** The current release is [`v0.6.0`](https://github.com/jatin711-debug/cronos_db_golang/releases/tag/v0.6.0). What a release promises, the test behind each promise, and what has not been shown yet are in the [release requirements](docs/PRODUCTION_RELEASE.md); open findings are in the [audit](docs/PRODUCTION_AUDIT_2026-09-27.md). Transactions, online partition splitting and cross-region replication are disabled by default and require `--dev --experimental-features`; they are unsupported in production. End-to-end exactly-once delivery is not supported.
+> **Production Readiness:** The current release is [`v0.7.0`](https://github.com/jatin711-debug/cronos_db_golang/releases/tag/v0.7.0). What a release promises, the test behind each promise, and what has not been shown yet are in the [release requirements](docs/PRODUCTION_RELEASE.md); findings and their status are in the [September](docs/PRODUCTION_AUDIT_2026-09-27.md) and [October](docs/PRODUCTION_AUDIT_2026-10-16.md) audits. Transactions, online partition splitting and cross-region replication are disabled by default and require `--dev --experimental-features`; they are unsupported in production. End-to-end exactly-once delivery is not supported.
 
 CronosDB is a distributed database purpose-built for **timestamp-triggered event processing**. Publish events with a future timestamp — CronosDB stores them durably and delivers them precisely when the time arrives.
 
@@ -16,7 +16,7 @@ It combines the durability of a write-ahead log, the precision of a hierarchical
 
 ## Key Numbers
 
-Measured on 2026-10-16 on the `hardening-v0.7.0` branch with three server
+Measured on 2026-10-16 on the server code of `v0.7.0`, with three server
 processes on one AMD Ryzen 7 6800H laptop (16 threads, one NVMe SSD), 256-byte
 payloads and the Go bloom filter, alternating with `v0.6.0` under the same
 conditions. They show what the code does on one machine; they are not a
@@ -145,7 +145,7 @@ For the details see **[ARCHITECTURE.md](ARCHITECTURE.md)** and the per-feature d
 Each release has binaries of the server and of `cronos-admin` for Linux and macOS (amd64, arm64) and Windows (amd64), with `SHA256SUMS`, on the [releases page](https://github.com/jatin711-debug/cronos_db_golang/releases). They are built without cgo and use the bloom filter written in Go. The container image uses the one written in Rust:
 
 ```bash
-docker pull johnny711dock/cronos-db:0.6.0    # also :latest
+docker pull johnny711dock/cronos-db:0.7.0    # also :latest
 ```
 
 ### Prerequisites to build
@@ -499,9 +499,9 @@ Use `-addr` to target a different node. Run `make demo` if a node is already up.
 
 ### Benchmarks (3-Node Cluster on Single Machine)
 
-Measured on 2026-10-16 with three server processes on one host (AMD Ryzen 7 6800H, NVMe SSD) and 256-byte payloads, alternating the current branch with `v0.6.0` under the same conditions:
+Measured on 2026-10-16 with three server processes on one host (AMD Ryzen 7 6800H, NVMe SSD) and 256-byte payloads, alternating `v0.7.0` with `v0.6.0` under the same conditions:
 
-| Profile | Current branch | v0.6.0 | Settings |
+| Profile | v0.7.0 | v0.6.0 | Settings |
 |--------|------------|-------|-------|
 | Production settings, delivered | **18.6K / 17.5K events/sec** | 18.1K / 16.6K | RF=3, minISR=2, `batch` fsync, dedup, TLS, mTLS, auth, encryption at rest; 3 partitions, batch 1,000, one publisher, nodes capped at 2 CPUs and a 384 MiB budget; every accepted event checked as delivered |
 | RF=3, minISR=2 publish | **204K events/sec median** | 191K | `periodic` fsync, dedup enabled, 16 partitions, batch 4,000, 240K events, three runs |
@@ -759,7 +759,7 @@ See [proto/events.proto](proto/events.proto) for the complete specification.
 
 ## Status
 
-[`v0.6.0`](https://github.com/jatin711-debug/cronos_db_golang/releases/tag/v0.6.0) is the current release. Every pull request and every push to `main` runs the following, and `main` moves only to a commit on which all of it has passed:
+[`v0.7.0`](https://github.com/jatin711-debug/cronos_db_golang/releases/tag/v0.7.0) is the current release. Every pull request and every push to `main` runs the following, and `main` moves only to a commit on which all of it has passed:
 
 - build, vet, and the test suite under the race detector, and once without cgo, with the release archives built for five systems;
 - a fault campaign and other acceptance tests against three server processes, with a ledger of every acknowledged event;
@@ -767,7 +767,7 @@ See [proto/events.proto](proto/events.proto) for the complete specification.
 - the production Helm chart in a disposable Kubernetes cluster: TLS, JWT auth, encryption at rest, mutual TLS between nodes, a rolling restart;
 - `govulncheck` and the dashboard's tests.
 
-The acceptance tests also run three times over every night. What each promise rests on, the known limits, and what `v0.6.0` was released without are in the [release requirements](docs/PRODUCTION_RELEASE.md); open findings are in the [audit](docs/PRODUCTION_AUDIT_2026-09-27.md).
+The acceptance tests also run three times over every night. What each promise rests on, the known limits, and what `v0.7.0` was released without are in the [release requirements](docs/PRODUCTION_RELEASE.md); findings and their status are in the [September](docs/PRODUCTION_AUDIT_2026-09-27.md) and [October](docs/PRODUCTION_AUDIT_2026-10-16.md) audits.
 
 Experimental and refused in production: transactions, online partition splitting, cross-region replication, and exactly-once commits.
 
