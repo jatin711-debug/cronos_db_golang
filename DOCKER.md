@@ -9,7 +9,7 @@
 Each release is published on Docker Hub (linux/amd64):
 
 ```bash
-docker pull johnny711dock/cronos-db:0.6.0    # the current release; also :latest
+docker pull johnny711dock/cronos-db:0.7.0    # the current release; also :latest
 ```
 
 Or build it from a checkout:
@@ -18,7 +18,7 @@ Or build it from a checkout:
 docker build -t cronos-db:latest .
 ```
 
-The image holds the server at `/app/cronos-api`, built with cgo and the Rust bloom filter, and the administration tool at `/app/cronos-admin`. It runs as the non-root user `cronos`, and keeps its data in the volume `/data`. The examples below use the local tag `cronos-db:latest`; use `johnny711dock/cronos-db:0.6.0` for the published image.
+The image holds the server at `/app/cronos-api`, built with cgo and the Rust bloom filter, and the administration tool at `/app/cronos-admin`. It runs as the non-root user `cronos`, and keeps its data in the volume `/data`. The examples below use the local tag `cronos-db:latest`; use `johnny711dock/cronos-db:0.7.0` for the published image.
 
 ### Run single node
 
@@ -206,7 +206,7 @@ docker run -d \
   -v cronos-node1-data:/data \
   -v /etc/cronos/certs:/certs:ro \
   --env-file /etc/cronos/secrets.env \
-  johnny711dock/cronos-db:0.6.0 \
+  johnny711dock/cronos-db:0.7.0 \
   --node-id=node1 \
   --data-dir=/data \
   --cluster \

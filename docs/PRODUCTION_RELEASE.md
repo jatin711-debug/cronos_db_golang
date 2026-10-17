@@ -1,15 +1,23 @@
 # Production release requirements
 
-`v0.6.0` is the final release of 0.6.0. Hardening goes on: the
+`v0.7.0` is the current release. Hardening goes on: the
 [audit closure table](PRODUCTION_AUDIT_2026-09-27.md#finding-closure-review)
 tracks unresolved guarantees, and
-[what the release was cut without](#what-v060-was-released-without) is listed
+[what the release was cut without](#what-v070-was-released-without) is listed
 below. A green CI run is necessary but does not establish the complete release
 acceptance contract.
 
-## Preparing v0.7.0
+## What v0.7.0 adds
 
-The next release adds scheduler payload budgeting, durable dedup recovery checkpoints, paged completion and dead-letter replication, client discovery, and automated image evidence. See [hardening and upgrade behavior](HARDENING_V0.7.0.md), including the Docker Hub secret names and optional separate backup PVC.
+`v0.7.0` closes the findings of the [October audit](PRODUCTION_AUDIT_2026-10-16.md):
+records that could not be read back, terms chosen by producers, append and
+fsync errors that released message IDs, quota refusals that stranded them,
+scheduler memory, the dedup recovery cutoff, completion and dead-letter
+replication, disk admission on followers, client discovery of new nodes, and a
+release workflow that builds, scans, tests, pushes and attests one image. See
+[hardening and upgrade behavior](HARDENING_V0.7.0.md), including what a
+rolling upgrade from `v0.6.0` holds back, the Docker Hub secret names and the
+optional separate backup PVC.
 
 ## Supported scope under validation
 
@@ -125,7 +133,7 @@ is started again with its data joins as a member again. In
 `TestLostNodeIsRemoved` one of four nodes is lost and removed, and the
 cluster then loses a second node and carries on with two of three.
 
-In `v0.6.0`, a node cannot be added to a running cluster for applications that are
+In `v0.6.0` and before, a node cannot be added to a running cluster for applications that are
 already connected. Partition metadata names a leader by its node ID, and a
 client turns that into an address only for the nodes it was started with or
 was given in `NodeIDToAddress`. A node that joins later takes over leadership
@@ -134,7 +142,7 @@ to those. Replace a node under the name and address of the one it replaces,
 as a StatefulSet does, and restart or reconfigure clients before growing a
 cluster.
 
-The upcoming `v0.7.0` metadata response advertises public node endpoints, and
+Since `v0.7.0` the metadata response advertises public node endpoints, and
 updated clients refresh their address map when membership changes. Explicit
 `NodeIDToAddress` overrides still take precedence. Upgrade clients as well as
 servers to use discovery, and advertise addresses reachable from those clients.
@@ -313,17 +321,15 @@ second; the last column says what they do not show.
 No throughput, payload-size or latency figure is promised. None has been
 measured on production hardware.
 
-## What `v0.6.0` was released without
+## What `v0.7.0` was released without
 
 Releases are cut from the development branch when CI is green on the
-commit. `v0.6.0` is the final release of 0.6.0, after four release candidates;
-it is published as the latest release and as the `latest` image. Of what a
-final release was to have, one thing was done for it: the five CI jobs are
-required checks on `main` (see [Checks](#checks)).
+commit. `v0.7.0` is published as the latest release and as the `latest`
+image; the five CI jobs are required checks on `main` (see [Checks](#checks)).
 
-The rest was not done, and `v0.6.0` was released without it. These are
-limits of what has been shown, not defects that are known; a deployment
-that depends on one of them has to show it for itself first:
+`v0.7.0` was released without the following. These are limits of what has
+been shown, not defects that are known; a deployment that depends on one of
+them has to show it for itself first:
 
 - A run on more than one machine. Everything above was shown on one host,
   with processes or with containers; links were cut between containers.
@@ -331,17 +337,22 @@ that depends on one of them has to show it for itself first:
   size limit and resumes file by file, and has a ten minute deadline; it has
   only been run on megabytes.
 - Throughput and latency measured on the hardware a deployment will use, with
-  the memory that the backlog it allows needs.
-- A scan of the image that is published, as a step of the release. CI scans
-  the image it builds from the same Dockerfile, not the published one. The
-  images of `v0.6.0-rc.4` and `v0.6.0` were scanned by hand before they were
-  pushed, with the settings of CI (Trivy, HIGH and CRITICAL vulnerabilities
-  that have a fix); nothing does it for every release yet.
+  the memory that the backlog it allows needs. The
+  [measurements of 2026-10-16](CLUSTER_PERFORMANCE_VALIDATION_2026-10-16.md)
+  ran three processes on one Windows laptop; none was made on Linux.
+- A cut of power. Recovery is tested after processes are killed, not after
+  the machine loses power with writes in flight.
+- An image published by the release workflow. Its image job needs the
+  repository secrets `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`, which the
+  repository did not have. The image of `v0.7.0` was built from the tagged
+  commit, scanned with the settings of CI (Trivy, HIGH and CRITICAL
+  vulnerabilities that have a fix), started as three nodes and pushed, by
+  hand, as for `v0.6.0`. It has no signed provenance; its digest is in the
+  release notes.
 
 Known limits of what is released are in the
 [audit](PRODUCTION_AUDIT_2026-09-27.md): log entries are removed from the
 start of a log only, so one event that cannot go yet keeps every later
-segment; a node that joins a running cluster is not found by clients that are
-already connected; a consumer group's finished work in a partition shared by
+segment; a consumer group's finished work in a partition shared by
 several topics is carried over a failover only in part, and may be delivered
 again.

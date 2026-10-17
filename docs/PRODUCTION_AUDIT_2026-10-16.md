@@ -6,7 +6,7 @@ The next work should close correctness and bounded-resource gaps before adding f
 
 **Status of the findings**
 
-On branch `hardening-v0.7.0`:
+In `v0.7.0`:
 
 | Finding | Status |
 |---|---|
@@ -21,7 +21,7 @@ On branch `hardening-v0.7.0`:
 | 9. Sparse completion transfer | Implemented. Per-follower cursors send 4,096 completions per page, across all groups, with versioned retry rounds. |
 | 10. Client discovery of new nodes | Implemented. Metadata advertises public endpoints; clients refresh routing and preserve explicit overrides and mixed-version discoveries. |
 | 11. Quota refusal strands an ID | Implemented. Both publish paths release refused claims, charge after deduplication, and refund reservations on definite pre-append failure. |
-| 12. Release evidence | Workflow implemented. The release image is built once, scanned, tested, pushed and attested by digest. Publishing requires repository credentials and a successful CI run; no v0.7.0 artifact has been published by this change. |
+| 12. Release evidence | Workflow implemented. The release image is built once, scanned, tested, pushed and attested by digest. Publishing requires repository credentials and a successful CI run. The repository had no Docker Hub credentials at release, so the `v0.7.0` image was built, scanned and pushed by hand, without provenance. |
 
 The probes of findings 1, 2, 3 and 11 are now ordinary tests ([internal/api/publish_integrity_test.go](../internal/api/publish_integrity_test.go), [internal/storage/append_outcome_test.go](../internal/storage/append_outcome_test.go)). The probe of finding 3 changed with the fix: the publish that fills a segment now succeeds, and the test checks that its retry does not append the event again.
 
@@ -159,7 +159,7 @@ Fix: one reservation/claim lifecycle for both APIs; undo a claim on every pre-ap
 
 CI already includes meaningful fault and container tests; adding another generic unit-test target is not the missing work. Prior cluster throughput measurements use periodic fsync and are not a production durable-capacity baseline. Other archived end-to-end benchmark rows are explicitly marked invalid. The release workflow builds binaries, but states that the image is built and pushed manually; the CI image scan does not automatically establish the identity/security of the exact published digest. Backups default to the data volume and the chart provides no separate backup mount. Multi-host load/fault tests and large bootstrap validation remain unshown.
 
-Evidence: [release workflow](../.github/workflows/release.yml), [CI](../.github/workflows/ci.yml), [nightly coverage](../.github/workflows/nightly.yml), [performance qualifications](CLUSTER_PERFORMANCE_VALIDATION_2026-09-29.md), [invalid historical benchmark rows](PERFORMANCE.md#end-to-end-grpc-baseline-publishbatch-par1), [release limitations](PRODUCTION_RELEASE.md#what-v060-was-released-without).
+Evidence: [release workflow](../.github/workflows/release.yml), [CI](../.github/workflows/ci.yml), [nightly coverage](../.github/workflows/nightly.yml), [performance qualifications](CLUSTER_PERFORMANCE_VALIDATION_2026-09-29.md), [invalid historical benchmark rows](PERFORMANCE.md#end-to-end-grpc-baseline-publishbatch-par1), [release limitations](https://github.com/jatin711-debug/cronos_db_golang/blob/v0.6.0/docs/PRODUCTION_RELEASE.md#what-v060-was-released-without).
 
 Close this with a digest-bound release pipeline that builds, scans, tests, and publishes the same artifact, with provenance and checksums; add Rust dependency auditing. Add off-volume backup configuration and restore drills that destroy the original volumes. These have no serving-path throughput cost. No current dependency vulnerability count is asserted by this audit.
 
