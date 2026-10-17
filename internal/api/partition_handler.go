@@ -231,17 +231,29 @@ func (h *PartitionServiceHandler) ListPartitions(ctx context.Context, req *types
 		result = append(result, info)
 	}
 
-	addresses := make(map[string]string)
+	var addresses map[string]string
 	if h.clusterManager != nil && h.clusterManager.GetMembership() != nil {
-		for _, node := range h.clusterManager.GetMembership().GetAliveNodes() {
-			if node.ID != "" && node.Address != "" {
-				addresses[node.ID] = node.Address
-			}
-		}
+		addresses = clientAddresses(h.clusterManager.GetMembership().GetAliveNodes())
 	}
 	return &types.ListPartitionsResponse{
 		Partitions: result, NodeAddresses: addresses, DiscoveryVersion: 1,
 	}, nil
+}
+
+// clientAddresses maps each node that was given an address for clients
+// (--advertise-grpc-addr) to it. A node's cluster address is not one: it
+// serves replication and Raft, and a client sent there is told that the
+// event service does not exist. Nodes without a client address are left
+// out, and clients reach them as before discovery, through the addresses
+// they were configured with.
+func clientAddresses(nodes []*cluster.Node) map[string]string {
+	addresses := make(map[string]string)
+	for _, node := range nodes {
+		if node.ID != "" && node.ClientAddr != "" {
+			addresses[node.ID] = node.ClientAddr
+		}
+	}
+	return addresses
 }
 
 // GetWALStatus returns local WAL status for a partition.

@@ -252,6 +252,12 @@ func (c *cluster) args(n *node) []string {
 		"--replication-tls-cert-file=" + certFile,
 		"--replication-tls-key-file=" + keyFile,
 	}
+	if n.container == "" {
+		// Clients find the nodes they were not given through partition
+		// metadata, at this address. In containers the tests name each node's
+		// address to the client themselves.
+		args = append(args, "--advertise-grpc-addr="+n.grpcAddr)
+	}
 	seeds := make([]string, len(c.nodes))
 	for i, other := range c.nodes {
 		seeds[i] = other.gossipAddr

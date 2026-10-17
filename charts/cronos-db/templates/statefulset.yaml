@@ -91,6 +91,10 @@ spec:
               value: "$(POD_NAME).{{ include "cronos-db.headlessServiceName" . }}.$(POD_NAMESPACE).svc:{{ .Values.headlessService.clusterGRPCPort }}"
             - name: CRONOS_CLUSTER_RAFT_ADDR
               value: "$(POD_NAME).{{ include "cronos-db.headlessServiceName" . }}.$(POD_NAMESPACE).svc:{{ .Values.headlessService.raftPort }}"
+            {{- if .Values.service.advertisePodAddress }}
+            - name: CRONOS_ADVERTISE_GRPC_ADDR
+              value: "$(POD_NAME).{{ include "cronos-db.headlessServiceName" . }}.$(POD_NAMESPACE).svc:{{ .Values.service.grpcPort }}"
+            {{- end }}
             {{- if .Values.tls.enabled }}
             - name: CRONOS_TLS_ENABLED
               value: "true"

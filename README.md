@@ -608,6 +608,7 @@ set through an environment variable (see [Environment Variables](#environment-va
 | `-cluster` | `false` | Enable cluster mode |
 | `-cluster-gossip-addr` | `:7946` | Cluster membership (gossip) TCP address; other nodes reach this node by it |
 | `-cluster-grpc-addr` | `:7947` | Cluster internal gRPC listener (`InternalGRPCServer`, replication + Raft) |
+| `-advertise-grpc-addr` | *(empty)* | Address (`host:port`) clients reach this node's gRPC port at. Partition metadata gives it to clients, so they reach leaders they were not configured with, nodes added later included. Empty: not given |
 | `-cluster-raft-addr` | `:7948` | Cluster Raft listen address |
 | `-cluster-seeds` | *(empty)* | Comma-separated membership addresses of the cluster's nodes. Name every node, on every node |
 | `-cluster-bootstrap` | `false` | This node creates the cluster, if it has no state and no other node in `-cluster-seeds` belongs to one. Give it to exactly one node |

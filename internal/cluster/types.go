@@ -70,8 +70,12 @@ func (r NodeRole) String() string {
 type Node struct {
 	// ID is the unique node identifier within the cluster.
 	ID string `json:"id"`
-	// Address is the public gRPC address used for client and inter-node RPCs.
+	// Address is the cluster gRPC address, where other nodes reach this
+	// node's replication and Raft services. Clients cannot use it.
 	Address string `json:"address"`
+	// ClientAddr is the address clients reach this node's public gRPC port
+	// at, when the node was given one (--advertise-grpc-addr).
+	ClientAddr string `json:"client_addr,omitempty"`
 	// GossipAddr is the membership/gossip bind address used for heartbeats.
 	GossipAddr string `json:"gossip_addr"`
 	// HTTPAddr is the HTTP address used for health checks and admin endpoints.
@@ -200,8 +204,12 @@ type Config struct {
 	DataDir string
 	// GossipAddr is the bind address for membership/gossip traffic.
 	GossipAddr string
-	// GRPCAddr is the public gRPC listen address.
+	// GRPCAddr is the cluster gRPC address, where the replication and Raft
+	// services are served; not the port clients use.
 	GRPCAddr string
+	// ClientAddr is the address clients reach this node's public gRPC port
+	// at. Empty when the node was not given one.
+	ClientAddr string
 	// RaftAddr is the Raft transport listen address.
 	RaftAddr string
 	// RaftDir is the on-disk directory for Raft logs and snapshots.
@@ -264,8 +272,10 @@ type ClusterConfig struct {
 	BindAddr string `json:"bind_addr"`
 	// AdvertiseAddr is the address advertised to peers for membership.
 	AdvertiseAddr string `json:"advertise_addr"`
-	// GRPCAddr is the public gRPC address for this node.
+	// GRPCAddr is the cluster gRPC address for this node (replication, Raft).
 	GRPCAddr string `json:"grpc_addr"`
+	// ClientAddr is the address clients reach this node's public gRPC port at.
+	ClientAddr string `json:"client_addr"`
 	// HTTPAddr is the HTTP address for health and admin endpoints.
 	HTTPAddr string `json:"http_addr"`
 	// RaftAddr is the Raft transport address for this node.

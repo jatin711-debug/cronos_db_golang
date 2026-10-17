@@ -319,8 +319,10 @@ func run() int {
 			GossipAddr: cfg.ClusterGossipAddr,
 			// Advertise the dedicated cluster gRPC address. This is where the
 			// internal ReplicationService / RaftService are served, separate from
-			// the public client-facing gRPC port.
+			// the public client-facing gRPC port. Clients are given ClientAddr
+			// in partition metadata instead, when the node has one.
 			GRPCAddr:          cfg.ClusterGRPCAddr,
+			ClientAddr:        cfg.AdvertiseGRPCAddr,
 			RaftAddr:          cfg.ClusterRaftAddr,
 			RaftDir:           raftDir,
 			SeedNodes:         cfg.ClusterSeeds,

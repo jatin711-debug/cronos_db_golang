@@ -65,6 +65,11 @@ service:
   type: ClusterIP
   grpcPort: 9000
   httpPort: 8080
+  # Give clients each pod's address, <pod>.<headless-service>.<namespace>.svc
+  # on grpcPort, in partition metadata, so that clients inside the cluster
+  # reach the leaders they were not configured with, pods added later
+  # included. With TLS on, the certificate has to cover those names.
+  advertisePodAddress: false
 
 headlessService:
   gossipPort: 7946

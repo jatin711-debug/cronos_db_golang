@@ -173,6 +173,7 @@ func NewMembership(config *ClusterConfig) (*Membership, error) {
 	localNode := &Node{
 		ID:         config.NodeID,
 		Address:    config.GRPCAddr,
+		ClientAddr: config.ClientAddr,
 		GossipAddr: config.BindAddr, // Gossip address for heartbeats
 		HTTPAddr:   config.HTTPAddr,
 		RaftAddr:   config.RaftAddr,
@@ -371,8 +372,11 @@ type GossipMessage struct {
 	Type string `json:"type"`
 	// NodeID is the sender (or subject) node identifier.
 	NodeID string `json:"node_id"`
-	// Address is the node's public gRPC address.
+	// Address is the node's cluster gRPC address (replication, Raft).
 	Address string `json:"address"`
+	// ClientAddr is the address clients reach the node's public gRPC port
+	// at, if it has one. Nodes of v0.6.0 neither send nor read it.
+	ClientAddr string `json:"client_addr,omitempty"`
 	// GossipAddr is the node's gossip/membership address for heartbeats.
 	GossipAddr string `json:"gossip_addr"`
 	// RaftAddr is the node's Raft transport address.
@@ -392,6 +396,7 @@ func (m *Membership) handleJoinRequest(conn net.Conn, msg *GossipMessage) {
 	node := &Node{
 		ID:         msg.NodeID,
 		Address:    msg.Address,
+		ClientAddr: msg.ClientAddr,
 		GossipAddr: msg.GossipAddr,
 		RaftAddr:   msg.RaftAddr,
 		State:      NodeStateAlive,
@@ -445,6 +450,7 @@ func (m *Membership) handleHeartbeatMessage(msg *GossipMessage) {
 		// others may be reading the old one.
 		moved := *node
 		moved.Address, moved.GossipAddr, moved.RaftAddr = orElse(msg.Address, node.Address), orElse(msg.GossipAddr, node.GossipAddr), orElse(msg.RaftAddr, node.RaftAddr)
+		moved.ClientAddr = orElse(msg.ClientAddr, node.ClientAddr)
 		moved.State, moved.UpdatedAt = NodeStateAlive, time.Now()
 		m.nodes[msg.NodeID] = &moved
 		m.state.Nodes[msg.NodeID] = &moved
@@ -461,6 +467,7 @@ func (m *Membership) handleHeartbeatMessage(msg *GossipMessage) {
 		node = &Node{
 			ID:         msg.NodeID,
 			Address:    msg.Address,
+			ClientAddr: msg.ClientAddr,
 			GossipAddr: msg.GossipAddr,
 			RaftAddr:   msg.RaftAddr,
 			State:      NodeStateAlive,
@@ -491,9 +498,11 @@ func (m *Membership) handleHeartbeatMessage(msg *GossipMessage) {
 }
 
 // movedTo reports whether a heartbeat names another address for a node than
-// the one on record.
+// the one on record. An address the heartbeat leaves out, as a node of an
+// older version does with its client address, is not a change.
 func movedTo(node *Node, msg *GossipMessage) bool {
 	return (msg.Address != "" && msg.Address != node.Address) ||
+		(msg.ClientAddr != "" && msg.ClientAddr != node.ClientAddr) ||
 		(msg.GossipAddr != "" && msg.GossipAddr != node.GossipAddr) ||
 		(msg.RaftAddr != "" && msg.RaftAddr != node.RaftAddr)
 }
@@ -522,6 +531,7 @@ func (m *Membership) handleNodeJoinedBroadcast(msg *GossipMessage) {
 	node := &Node{
 		ID:         msg.NodeID,
 		Address:    msg.Address,
+		ClientAddr: msg.ClientAddr,
 		GossipAddr: msg.GossipAddr,
 		RaftAddr:   msg.RaftAddr,
 		State:      NodeStateAlive,
@@ -552,6 +562,7 @@ func (m *Membership) broadcastNodeJoined(newNode *Node) {
 		Type:       "node_joined",
 		NodeID:     newNode.ID,
 		Address:    newNode.Address,
+		ClientAddr: newNode.ClientAddr,
 		GossipAddr: newNode.GossipAddr,
 		RaftAddr:   newNode.RaftAddr,
 		Timestamp:  time.Now().UnixNano(),
@@ -848,6 +859,7 @@ func (m *Membership) sendHeartbeat(node *Node, heard bool) {
 		Type:       "heartbeat",
 		NodeID:     m.localNode.ID,
 		Address:    m.localNode.Address,
+		ClientAddr: m.localNode.ClientAddr,
 		GossipAddr: m.localNode.GossipAddr,
 		RaftAddr:   m.localNode.RaftAddr,
 		Timestamp:  time.Now().UnixMilli(),
@@ -1054,6 +1066,7 @@ func (m *Membership) joinViaNode(ctx context.Context, addr string) (int, error) 
 		Type:       "join",
 		NodeID:     m.localNode.ID,
 		Address:    m.localNode.Address,
+		ClientAddr: m.localNode.ClientAddr,
 		GossipAddr: m.localNode.GossipAddr,
 		RaftAddr:   m.localNode.RaftAddr,
 		Timestamp:  time.Now().UnixMilli(),
@@ -1088,6 +1101,7 @@ func (m *Membership) joinViaNode(ctx context.Context, addr string) (int, error) 
 					node := &Node{
 						ID:         nodeID,
 						Address:    getString(nodeMap, "address"),
+						ClientAddr: getString(nodeMap, "client_addr"),
 						GossipAddr: getString(nodeMap, "gossip_addr"),
 						HTTPAddr:   getString(nodeMap, "http_addr"),
 						RaftAddr:   getString(nodeMap, "raft_addr"),
