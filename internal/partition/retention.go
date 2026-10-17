@@ -56,7 +56,6 @@ func (p *Partition) PruneWAL(ctx context.Context, opts storage.PruneOptions) (in
 			return 0, err
 		}
 		opts.PrefixOnly = true
-		opts.Terminal = p.terminalEvent
 	}
 	if p.replicated {
 		if !p.IsLeader() {
@@ -72,6 +71,10 @@ func (p *Partition) PruneWAL(ctx context.Context, opts storage.PruneOptions) (in
 	// Nothing above the accepted watermark goes: a replicated entry is only
 	// known to be the partition's once it is on enough replicas.
 	accepted := p.AcceptedThrough()
+	terminal := func(event *types.Event) bool { return p.terminalEvent(event, accepted) }
+	if p.lifecycleIndex != nil {
+		opts.Terminal = terminal
+	}
 	var blocker *types.Event
 	var blockerReason string
 	now := time.Now().UnixMilli()
@@ -91,18 +94,26 @@ func (p *Partition) PruneWAL(ctx context.Context, opts storage.PruneOptions) (in
 		if err := p.evacuateFuture(ctx, opts, eligible); err != nil {
 			return 0, err
 		}
+		// A successful standalone evacuation fsynced its new copies. Capture
+		// their acceptance before proving that the original segment may go.
+		if p.lifecycleIndex != nil {
+			accepted = p.AcceptedThrough()
+		}
 		check := func(event *types.Event) bool {
+			// Index lookup can fail the WAL. Observe that failure in this
+			// very predicate, before an otherwise-completed segment is removed.
+			isTerminal := terminal(event)
 			reason := ""
 			switch {
 			case p.Wal.Failure() != nil:
 				reason = "log_failure"
 			case p.followed && !p.deadLettersSafeToPrune():
 				reason = "dead_letter_replication"
-			case p.replicated && event.Offset > accepted:
+			case (p.replicated || p.lifecycleIndex != nil) && event.Offset > accepted:
 				reason = "unaccepted"
 			case feeding && event.Offset > exported:
 				reason = "change_feed"
-			case p.terminalEvent(event):
+			case isTerminal:
 				// Canceled/superseded records have no consumer obligation.
 			case event.ScheduleTs > now:
 				reason = "future_schedule"
@@ -167,7 +178,16 @@ func (p *Partition) deadLettersSafeToPrune() bool {
 // cannot be had any more, and were finished before the leader removed them.
 // Either way they count as complete for every consumer group from here on,
 // which is what keeps this replica from looking for them if it leads next.
-func (p *Partition) FollowLogStart(start int64) error {
+func (p *Partition) FollowLogStart(start int64) (followErr error) {
+	if p.lifecycleIndex != nil {
+		p.lifecycleMu.Lock()
+		defer p.lifecycleMu.Unlock()
+		defer func() {
+			if followErr != nil {
+				p.Wal.Fail(followErr)
+			}
+		}()
+	}
 	if start <= 0 || start <= p.logStartSeen.Load() || p.Wal == nil {
 		return nil
 	}
@@ -185,6 +205,11 @@ func (p *Partition) FollowLogStart(start int64) error {
 	} else if dropped > 0 {
 		metrics.AddSegmentsRemoved(p.ID, dropped)
 		log.Printf("[Partition %d] Removed %d log segments below offset %d, which the leader has released", p.ID, dropped, start)
+	}
+	if p.lifecycleIndex != nil {
+		if err := p.lifecycleIndex.DropBefore(p.Wal.GetFirstOffset()); err != nil {
+			return err
+		}
 	}
 	if p.ConsumerGroup != nil {
 		if err := p.ConsumerGroup.SetLogStart(p.ID, start); err != nil {

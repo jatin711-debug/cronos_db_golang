@@ -1,7 +1,8 @@
 # WAL retention, cancellation, and rescheduling
 
-Status: first implementation on `retention-and-cancel`. The opt-in implementation
-is limited to standalone nodes. Cluster rollout is a separate, gated step.
+Status: standalone implementation and the accepted-state index prerequisite on
+`retention-and-cancel`. The opt-in implementation is limited to standalone nodes.
+Cluster rollout is a separate, gated step.
 
 ## Problem and invariants
 
@@ -60,11 +61,32 @@ Cancel records have no payload. Reschedule and relocation records contain the
 complete event. Internal envelopes are removed from public event responses.
 
 A small disk-backed index stores the latest physical offset for each mutated
-reference, plus offset-ordered cleanup keys. It contains no payloads. Opening an
-enabled partition rebuilds it in bounded chunks before timers or subscribers
-can run. Old physical copies and cancel records are never delivered or replayed.
-Index errors fail delivery closed. Prefix pruning also removes obsolete index
-keys. A reference expires once no retained WAL record represents its state.
+reference, the retained mutation offsets and terms for that reference, and
+offset-ordered cleanup keys. It contains no payloads. An accepted-state lookup
+seeks directly to the newest retained mutation at or below a supplied boundary;
+it does not scan payloads or earlier versions.
+
+The local head and the accepted head have different purposes. A staged successor
+freezes delivery of its predecessor while the outcome is unresolved. It cannot
+make that predecessor removable. Only an accepted successor proves that an old
+copy is terminal for retention; an accepted cancellation is itself terminal.
+An active reschedule or relocation keeps its consumer obligation. Replay checks
+the delivery boundary too, and state/mutation retries return `Unavailable` while
+the current physical head is unaccepted instead of reporting a successful change.
+
+Opening an enabled partition rebuilds the index before timers or subscribers can
+run. Recovery reads at most 1,024 offsets with a 4 MiB target per chunk; a read
+may exceed that byte target by one valid WAL record. Readers cannot see
+a partially rebuilt generation. A fresh open, failed/canceled rebuild, conflicting
+observation, or partial cleanup leaves the index unavailable until a complete
+rebuild. Index errors fail delivery and retention closed. A suffix cut rebuilds
+under the delivery gate before offsets can be reused; cached mutation records
+must also match the indexed term. The caller reconstructs timers before promotion.
+
+Prefix pruning removes obsolete index keys in batches of 128 records and advances
+a retained-offset floor. Old worker/replay references stay inactive after the last
+head is collected. Following a leader's log start cleans the derived history too.
+A reference expires once no retained WAL record represents its state.
 
 ## Bounded retention
 
@@ -103,9 +125,10 @@ and delayed acknowledgements all need fault tests before lifting this restrictio
 
 ## Replicated protocol to implement next
 
-The standalone index is deliberately a latest-head index. It must not be reused
-unchanged as proof that a replicated mutation is accepted. The cluster protocol
-needs the following additional state and transitions:
+The index now distinguishes the latest local head from history through an accepted
+boundary. Retention and replay use that distinction, with held-range tests modeling
+an unresolved mutation. This prerequisite does not enable replicated lifecycle
+records. The cluster protocol still needs the following state and transitions:
 
 1. **Persist the partition's format requirement in cluster metadata.** Every
    assigned replica must advertise support before enabling mutations, and
@@ -174,6 +197,13 @@ fsync, backup/restore, and unchanged default retention. Replicated configuration
 must reject enablement and ordinary replication must reject internal records.
 Run focused tests with low Go concurrency on the development laptop; do not run
 a throughput load as part of this change.
+
+Acceptance-boundary regression tests additionally cover staged cancel/reschedule/
+relocate records, later tentative heads hiding earlier accepted versions, reordered
+observations, reused offsets with different terms, partial or canceled recovery,
+partial index cleanup, concurrent rebuild readers, and follower prefix resets.
+They assert that an unresolved mutation cannot release a prefix, report success,
+reach replay, or cause redundant evacuation of a segment that must remain pinned.
 
 ## Using the standalone implementation
 
