@@ -353,6 +353,8 @@ them has to show it for itself first:
 Known limits of what is released are in the
 [audit](PRODUCTION_AUDIT_2026-09-27.md): log entries are removed from the
 start of a log only, so one event that cannot go yet keeps every later
-segment; a consumer group's finished work in a partition shared by
-several topics is carried over a failover only in part, and may be delivered
-again.
+segment; a partition shared by several topics keeps a completion record per
+finished event until the start of its log passes it. Up to `v0.6.0` a leader
+sent its followers at most 100,000 of those per group, so after a failover a
+group could be given events again that it had finished; since `v0.7.0` they
+go in pages, all of them.
