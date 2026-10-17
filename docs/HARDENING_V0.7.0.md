@@ -22,7 +22,9 @@ During a rolling upgrade, an older follower cannot provide the new durable ackno
 
 ## Discovery and disk operations
 
-Metadata includes advertised public node endpoints. Clients learn added nodes, retire obsolete discovered connections and retain explicit `NodeIDToAddress` overrides. Responses from older servers preserve endpoints already learned. Advertise addresses reachable from clients, or configure overrides when using proxies.
+A node started with `--advertise-grpc-addr` (`CRONOS_ADVERTISE_GRPC_ADDR`) gives clients that address in partition metadata; the Helm chart sets it to each pod's DNS name with `service.advertisePodAddress=true`. Clients learn added nodes, retire obsolete discovered connections and retain explicit `NodeIDToAddress` overrides. Responses from older servers preserve endpoints already learned. A node started without the flag advertises nothing, and clients reach it through the addresses they were configured with, as before. Advertise addresses reachable from clients, and covered by the client port's certificate when TLS is on, or configure overrides when using proxies.
+
+Before the release, metadata named each node's cluster gRPC address (`--cluster-grpc-addr`), where replication and Raft are served. A client sent there was refused with "unknown service cronos_db.EventService", or at the TLS handshake when the nodes use mutual TLS. The acceptance tests did not notice: in containers they configure `NodeIDToAddress`, and as processes a refused handshake made the client try another node. The image check of the release found it, and `TestClientsFindTheOtherNodesThroughPartitionMetadata` now publishes to every partition through a client given one node.
 
 Full followers reject new log growth while still handling retries of matching entries already on disk. `cronos_retention_blocking_offset` and `cronos_retention_blocking_age_seconds` expose the oldest observed retention blocker by partition and reason: `unaccepted`, `change_feed`, `future_schedule`, `consumer_completion`, or `dead_letter_replication`. An offset of -1 means no blocker was observed in the last pass.
 

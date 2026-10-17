@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -185,6 +186,7 @@ func LoadConfig() (*types.Config, error) {
 	flag.BoolVar(&config.ClusterEnabled, "cluster", DefaultClusterEnabled, "Enable cluster mode")
 	flag.StringVar(&config.ClusterGossipAddr, "cluster-gossip-addr", DefaultClusterGossipAddr, "Cluster membership (gossip) TCP address")
 	flag.StringVar(&config.ClusterGRPCAddr, "cluster-grpc-addr", DefaultClusterGRPCAddr, "Cluster gRPC address")
+	flag.StringVar(&config.AdvertiseGRPCAddr, "advertise-grpc-addr", "", "Address (host:port) clients reach this node's gRPC port at; partition metadata gives it to clients so they find this node (empty = not given)")
 	flag.StringVar(&config.ClusterRaftAddr, "cluster-raft-addr", DefaultClusterRaftAddr, "Cluster Raft address")
 	flag.IntVar(&config.VirtualNodes, "virtual-nodes", DefaultVirtualNodes, "Virtual nodes per physical node")
 	flag.DurationVar(&config.HeartbeatInterval, "heartbeat-interval", DefaultHeartbeatInterval, "Cluster heartbeat interval")
@@ -365,6 +367,11 @@ func ValidateConfig(c *types.Config) error {
 		// that low would never let them through again.
 		return fmt.Errorf("max-disk-usage must be 0 (never refuse) or between 0.05 and 1.0")
 	}
+	if c.AdvertiseGRPCAddr != "" && !reachableAddr(c.AdvertiseGRPCAddr) {
+		// Clients dial it as it is given; a wildcard host or a missing port
+		// sends them nowhere.
+		return fmt.Errorf("advertise-grpc-addr must be a host:port that clients can reach, such as node1.example.com:9000; got %q", c.AdvertiseGRPCAddr)
+	}
 	if c.BackupInterval < 0 || c.BackupRetention < 0 {
 		return fmt.Errorf("backup-interval and backup-retention must be >= 0")
 	}
@@ -456,4 +463,18 @@ func isLoopbackAddr(addr string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+// reachableAddr reports whether addr is a host:port another machine can
+// dial: a host that is not a wildcard, and a port from 1 to 65535.
+func reachableAddr(addr string) bool {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil || host == "" {
+		return false
+	}
+	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip == nil || !ip.IsUnspecified()
 }

@@ -124,6 +124,10 @@ type Config struct {
 	ClusterGossipAddr string
 	// ClusterGRPCAddr is the dedicated internal cluster gRPC address (replication/Raft).
 	ClusterGRPCAddr string
+	// AdvertiseGRPCAddr is the address (host:port) clients reach this node's
+	// public gRPC port at. Partition metadata gives it to clients so that they
+	// find this node; empty gives them none.
+	AdvertiseGRPCAddr string
 	// ClusterSeeds is the list of seed nodes used to join an existing cluster.
 	ClusterSeeds []string
 	// ClusterBootstrap names this node as the one that creates the cluster.

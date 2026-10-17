@@ -142,10 +142,14 @@ to those. Replace a node under the name and address of the one it replaces,
 as a StatefulSet does, and restart or reconfigure clients before growing a
 cluster.
 
-Since `v0.7.0` the metadata response advertises public node endpoints, and
-updated clients refresh their address map when membership changes. Explicit
-`NodeIDToAddress` overrides still take precedence. Upgrade clients as well as
-servers to use discovery, and advertise addresses reachable from those clients.
+Since `v0.7.0` a node started with `--advertise-grpc-addr` gives clients
+that address in partition metadata, and updated clients refresh their address
+map when membership changes; the Helm chart advertises each pod's DNS name
+with `service.advertisePodAddress=true`. Explicit `NodeIDToAddress` overrides
+still take precedence. Upgrade clients as well as servers to use discovery,
+and advertise addresses reachable from those clients, which the client port's
+certificate covers when TLS is on. A node started without the flag advertises
+nothing.
 
 The HTTP port (health, metrics, dashboard and the admin API) is served over
 TLS with `--http-tls-enabled`, with the certificate of the client port
@@ -310,7 +314,7 @@ second; the last column says what they do not show.
 | The replicas of a partition hold the same log | `TestFaultCampaign` compares them entry for entry | |
 | A partition takes publishes again within 90 seconds of its leader's death | The bound the campaign enforces | Typical times; behavior under load |
 | Any node, the first included, can be replaced with an empty one | `TestFaultCampaign`, `TestFirstNodeReplaced`, the kind job on the chart | Two at once |
-| A node that is lost for good is removed, and no longer counts towards a majority (since `v0.6.0-rc.4`) | `TestLostNodeIsRemoved`: one of four nodes lost and removed through `cronos-admin`, then a second node killed | Growing the cluster with connected clients is not covered by this test; `v0.7.0` adds endpoint discovery with separate client regression tests |
+| A node that is lost for good is removed, and no longer counts towards a majority (since `v0.6.0-rc.4`) | `TestLostNodeIsRemoved`: one of four nodes lost and removed through `cronos-admin`, then a second node killed | Growing the cluster with connected clients is not covered by this test; `TestClientsFindTheOtherNodesThroughPartitionMetadata` shows a client given one node publishing to the leaders of every partition through the addresses metadata gives it |
 | A cluster that is lost entirely comes back from its nodes' backups with everything acknowledged before the earliest of them | `TestClusterRestoredFromBackups` | Restore to a point between backups; getting backups off the node, which is the operator's to arrange |
 | Producers that outrun the cluster are refused, and no node dies of it | `TestOverloadIsRefusedAndSurvived` | Load at production sizes |
 | A node comes back with more waiting for consumers than it has memory, and delivers it (since `v0.6.0-rc.4`) | `TestRestartWithABacklogLargerThanMemory`; `TestRestartInContainersWithABacklogLargerThanTheirMemory`, with a limit of 384 MiB that the kernel enforces and a backlog of 1 GiB | Backlogs beyond a gigabyte; future events under production load. `v0.7.0` adds a separate scheduler payload budget for future events |

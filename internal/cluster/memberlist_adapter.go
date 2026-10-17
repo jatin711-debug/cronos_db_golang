@@ -34,6 +34,7 @@ func NewMemberlistMembership(config *ClusterConfig) (*MemberlistMembership, erro
 	localNode := &Node{
 		ID:         config.NodeID,
 		Address:    config.GRPCAddr,
+		ClientAddr: config.ClientAddr,
 		GossipAddr: config.BindAddr,
 		HTTPAddr:   config.HTTPAddr,
 		RaftAddr:   config.RaftAddr,
@@ -251,6 +252,7 @@ func (mm *MemberlistMembership) nodeFromMember(m *memberlist.Node) *Node {
 		var meta nodeMeta
 		if err := json.Unmarshal(m.Meta, &meta); err == nil {
 			node.Address = meta.GRPCAddr
+			node.ClientAddr = meta.ClientAddr
 			node.GossipAddr = meta.GossipAddr
 			node.HTTPAddr = meta.HTTPAddr
 			node.RaftAddr = meta.RaftAddr
@@ -263,6 +265,7 @@ func (mm *MemberlistMembership) metaBytes() []byte {
 	meta := nodeMeta{
 		NodeID:     mm.config.NodeID,
 		GRPCAddr:   mm.config.GRPCAddr,
+		ClientAddr: mm.config.ClientAddr,
 		GossipAddr: mm.config.BindAddr,
 		HTTPAddr:   mm.config.HTTPAddr,
 		RaftAddr:   mm.config.RaftAddr,
@@ -277,6 +280,8 @@ type nodeMeta struct {
 	NodeID string `json:"node_id"`
 	// GRPCAddr is the internal cluster gRPC advertise address.
 	GRPCAddr string `json:"grpc_addr"`
+	// ClientAddr is the address clients reach the public gRPC port at.
+	ClientAddr string `json:"client_addr,omitempty"`
 	// GossipAddr is the membership/gossip advertise address.
 	GossipAddr string `json:"gossip_addr"`
 	// HTTPAddr is the HTTP (health/UI) advertise address when known.

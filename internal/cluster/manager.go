@@ -61,6 +61,7 @@ func NewManager(cfg *Config) *Manager {
 		BindAddr:          cfg.GossipAddr,
 		AdvertiseAddr:     cfg.GossipAddr,
 		GRPCAddr:          cfg.GRPCAddr,
+		ClientAddr:        cfg.ClientAddr,
 		RaftAddr:          cfg.RaftAddr,
 		RaftDataDir:       cfg.RaftDir,
 		SeedNodes:         cfg.SeedNodes,
