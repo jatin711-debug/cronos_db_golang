@@ -1844,8 +1844,9 @@ flowchart LR
 - In a cluster, log entries are removed from the start of a log only. One
   event that cannot go yet, such as one scheduled far ahead, keeps every
   later segment.
-- A node that joins a running cluster is not found by clients that are
-  already connected.
+- Clients find a node that joins a running cluster since `v0.7.0`, through
+  the endpoints the partition metadata advertises; clients of `v0.6.0` and
+  before do not.
 - Transactions, online partition splitting and cross-region replication run
   only with `--dev --experimental-features` and are not verified.
 - The client unit test `TestSendAsyncContextCancellation` has failed
