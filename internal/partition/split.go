@@ -56,6 +56,9 @@ func (sm *SplitManager) SplitPartition(sourceID int32, newID int32, splitOffset 
 	if err != nil {
 		return fmt.Errorf("get source partition: %w", err)
 	}
+	if source.LifecycleEnabled() {
+		return fmt.Errorf("partition splitting is not supported with event-lifecycle")
+	}
 
 	// Capture original state for rollback
 	oldMinKey := source.MinKey

@@ -18,6 +18,7 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/internal/consumer"
 	"github.com/jatin711-debug/cronos_db_golang/internal/dedup"
 	"github.com/jatin711-debug/cronos_db_golang/internal/delivery"
+	"github.com/jatin711-debug/cronos_db_golang/internal/lifecycle"
 	"github.com/jatin711-debug/cronos_db_golang/internal/metrics"
 	"github.com/jatin711-debug/cronos_db_golang/internal/partition"
 	"github.com/jatin711-debug/cronos_db_golang/internal/replay"
@@ -429,7 +430,13 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 		defer span.End()
 	}
 
+	if req == nil || req.Event == nil {
+		return nil, status.Error(codes.InvalidArgument, "event is required")
+	}
 	event := req.Event
+	if lifecycle.HasReservedMeta(event) {
+		return nil, status.Error(codes.InvalidArgument, "cronos.internal.* metadata is reserved")
+	}
 
 	// Validate event
 	if event.GetMessageId() == "" {
@@ -602,6 +609,7 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 					Offset:      logged.Offset,
 					PartitionId: partitionInternal.ID,
 					ScheduleTs:  logged.GetScheduleTs(),
+					Term:        logged.Term,
 				}, nil
 			}
 			// duplicateReleased: this publish holds the ID and proceeds as new.
@@ -730,6 +738,7 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 		Offset:      event.Offset,
 		PartitionId: partitionInternal.ID,
 		ScheduleTs:  event.GetScheduleTs(),
+		Term:        event.Term,
 	}, nil
 }
 
@@ -784,6 +793,7 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 
 	var publishedCount, duplicateCount, errorCount int32
 	var firstOffset, lastOffset int64 = -1, -1
+	var references []*types.EventReference
 	var lastError string
 	var resultMu sync.Mutex
 
@@ -826,6 +836,10 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 		}
 
 		// Basic validation
+		if lifecycle.HasReservedMeta(event) {
+			setError(1, "cronos.internal.* metadata is reserved")
+			continue
+		}
 		if event == nil || event.GetMessageId() == "" || len(event.GetMessageId()) > 128 ||
 			event.GetScheduleTs() <= 0 || len(event.Payload) == 0 || len(event.Payload) > 4*1024*1024 || len(event.Topic) > 255 {
 			if event == nil {
@@ -1039,6 +1053,12 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 			}
 			if err != nil {
 				setError(int32(len(logged)), fmt.Sprintf("finishing earlier publish for partition %d: %v", pid, err))
+			} else if req.ReturnReferences {
+				resultMu.Lock()
+				for _, event := range logged {
+					references = append(references, lifecycle.Reference(event))
+				}
+				resultMu.Unlock()
 			}
 		}(partitionID, logged)
 	}
@@ -1177,6 +1197,9 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 
 			resultMu.Lock()
 			for _, event := range evts {
+				if req.ReturnReferences {
+					references = append(references, lifecycle.Reference(event))
+				}
 				if firstOffset == -1 || event.Offset < firstOffset {
 					firstOffset = event.Offset
 				}
@@ -1220,6 +1243,7 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 		ErrorCount:     finalErrorCount,
 		FirstOffset:    responseFirstOffset,
 		LastOffset:     responseLastOffset,
+		References:     references,
 	}, nil
 }
 
@@ -1710,7 +1734,7 @@ func (h *EventServiceHandler) Replay(req *types.ReplayRequest, stream types.Even
 			Event:        event.Event,
 			ReplayOffset: event.ReplayOffset,
 		}
-		if err := stream.Send(replayEvent); err != nil {
+		if err := partitionInternal.WithActiveEvent(replayEvent.Event, func(e *types.Event) error { replayEvent.Event = e; return stream.Send(replayEvent) }); err != nil {
 			return fmt.Errorf("send replay event: %w", err)
 		}
 	}

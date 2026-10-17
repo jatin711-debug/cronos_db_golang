@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/jatin711-debug/cronos_db_golang/internal/lifecycle"
 	"github.com/jatin711-debug/cronos_db_golang/internal/partition"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 
@@ -53,6 +54,11 @@ func NewReplicationServiceHandler(pm *partition.PartitionManager) *ReplicationSe
 // Append appends a leader-provided batch into the local follower WAL.
 func (h *ReplicationServiceHandler) Append(ctx context.Context, req *types.ReplicationAppendRequest) (*types.ReplicationAppendResponse, error) {
 	_ = ctx
+	for _, event := range req.GetEvents() {
+		if lifecycle.HasReservedMeta(event) {
+			return nil, status.Error(codes.FailedPrecondition, "lifecycle records require a versioned replication protocol")
+		}
+	}
 
 	if req == nil || req.GetPartitionId() < 0 {
 		return nil, status.Error(codes.InvalidArgument, "valid partition_id is required")
@@ -73,6 +79,9 @@ func (h *ReplicationServiceHandler) Append(ctx context.Context, req *types.Repli
 	}
 	if p.Wal == nil {
 		return nil, status.Errorf(codes.Internal, "partition %d WAL not initialized", req.GetPartitionId())
+	}
+	if p.LifecycleEnabled() {
+		return nil, status.Error(codes.FailedPrecondition, "standalone lifecycle partitions do not accept replication")
 	}
 
 	p.ReplicateMu.Lock()
@@ -275,6 +284,9 @@ func (h *ReplicationServiceHandler) Position(ctx context.Context, req *types.Rep
 		return nil, status.Error(codes.Unavailable, "partition manager not initialized")
 	}
 	position := h.partitionManager.LocalReplicaPosition(req.GetPartitionId())
+	if p, err := h.partitionManager.GetInternalPartition(req.GetPartitionId()); err == nil && p.LifecycleEnabled() {
+		return nil, status.Error(codes.FailedPrecondition, "standalone lifecycle partitions do not accept election fences")
+	}
 	if fence := req.GetFenceEpoch(); fence > 0 {
 		var err error
 		if position, err = h.partitionManager.FenceLocalReplica(req.GetPartitionId(), fence); err != nil {
@@ -328,6 +340,9 @@ func (h *ReplicationServiceHandler) SyncConsumerProgress(ctx context.Context, re
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "get partition %d: %v", req.GetPartitionId(), err)
 	}
+	if p.LifecycleEnabled() {
+		return nil, status.Error(codes.FailedPrecondition, "standalone lifecycle partitions do not accept replicated progress")
+	}
 
 	p.ReplicateMu.Lock()
 	defer p.ReplicateMu.Unlock()
@@ -365,6 +380,9 @@ func (h *ReplicationServiceHandler) Sync(req *types.ReplicationSyncRequest, stre
 	p, err := h.partitionManager.GetInternalPartition(req.GetPartitionId())
 	if err != nil || p.Wal == nil {
 		return status.Errorf(codes.NotFound, "partition %d not found", req.GetPartitionId())
+	}
+	if p.LifecycleEnabled() {
+		return status.Error(codes.FailedPrecondition, "lifecycle logs require a versioned replication protocol")
 	}
 
 	const batchSize int64 = 100
@@ -451,6 +469,9 @@ func (h *ReplicationServiceHandler) Snapshot(req *types.ReplicationSnapshotReque
 	p, err := h.partitionManager.GetInternalPartition(req.GetPartitionId())
 	if err != nil || p == nil || p.Wal == nil {
 		return status.Errorf(codes.NotFound, "partition %d not found", req.GetPartitionId())
+	}
+	if p.LifecycleEnabled() {
+		return status.Error(codes.FailedPrecondition, "lifecycle snapshots require a versioned replication protocol")
 	}
 
 	checkpointDir, err := os.MkdirTemp("", "cronos-snapshot-")

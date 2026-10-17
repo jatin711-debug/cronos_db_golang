@@ -572,6 +572,8 @@ set through an environment variable (see [Environment Variables](#environment-va
 | `-partition-count` | `1` | Number of partitions (use 8-16 for clusters) |
 | `-replication-factor` | `1` | Replication factor (production target ≥3) |
 | `-segment-size` | `512MB` | WAL segment size before rotation |
+| `-event-lifecycle` | `false` | Opt-in standalone RF=1 future-event cancellation and rescheduling; see [design and usage](docs/RETENTION_AND_EVENT_LIFECYCLE.md) |
+| `-wal-relocation-bytes` | `0` | Maximum encoded future-event bytes moved per compaction pass; requires `-event-lifecycle` (0 = disabled) |
 | `-index-interval` | `1000` | Sparse index interval (events per entry) |
 | `-fsync-mode` | `batch` | `every_event` \| `batch` \| `periodic` — `batch` is the durable default, `periodic` is the throughput ceiling |
 | `-flush-interval` | `1000` | Background flush interval (ms) |
@@ -733,7 +735,7 @@ cronos_db/
 
 | Service | Methods | Purpose |
 |---------|---------|---------|
-| **EventService** | `Publish`, `PublishBatch`, `Subscribe`, `Ack`, `Replay` | Core pub/sub |
+| **EventService** | `Publish`, `PublishBatch`, `Subscribe`, `Ack`, `Replay`, `GetEventState`, `CancelEvent`, `RescheduleEvent` | Pub/sub and opt-in standalone event mutations |
 | **PartitionService** | `GetPartition`, `ListPartitions`, `GetWALStatus`, `GetSchedulerStatus`, `Compact`, `RunRetention`, `SplitPartition` | Partition metadata and admin |
 | **ConsumerGroupService** | `CreateConsumerGroup`, `GetConsumerGroup`, `ListConsumerGroups`, `RebalanceConsumerGroup` | Group management |
 | **ReplicationService** | `Append`, `Sync`, `Snapshot`, `Position`, `LeaderReport`, `SyncConsumerProgress` | Internal: replication, elections, topology (intra-cluster, internal listener) |

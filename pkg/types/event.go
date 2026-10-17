@@ -25,6 +25,10 @@ type Config struct {
 	ReplicationFactor int
 	// SegmentSizeBytes is the target max size of a WAL segment file before rotation.
 	SegmentSizeBytes int64
+	// EventLifecycle enables standalone future-event mutations. Requires RF=1.
+	EventLifecycle bool
+	// WALRelocationBytes bounds future-event bytes copied per retention pass; 0 disables it.
+	WALRelocationBytes int64
 	// IndexInterval is how many events between sparse index entries in a segment.
 	IndexInterval int64
 	// FsyncMode controls WAL durability: "every_event", "batch", or "periodic".
