@@ -376,7 +376,7 @@ func TestLifecycleStagedMutationCannotReleasePrefixOrReportSuccess(t *testing.T)
 			if err := p.Wal.Flush(); err != nil {
 				t.Fatal(err)
 			}
-			if err := p.lifecycleIndex.Apply(next); err != nil {
+			if err := p.eventIndex().Apply(next); err != nil {
 				t.Fatal(err)
 			}
 			p.HoldUnaccepted([]*types.Event{next}, false)
@@ -512,7 +512,7 @@ func TestLifecycleRetentionFailsClosedOnIncompleteIndex(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := p.lifecycleIndex.Rebuild(ctx, p.Wal); err == nil {
+	if err := p.eventIndex().Rebuild(ctx, p.Wal); err == nil {
 		t.Fatal("canceled rebuild succeeded")
 	}
 	n, err := p.PruneWAL(context.Background(), storage.PruneOptions{AllCompleted: true})
@@ -538,7 +538,7 @@ func TestLifecycleEvacuationWaitsForStagedMutationInOldestSegment(t *testing.T) 
 	if err := p.Wal.Flush(); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.lifecycleIndex.Apply(next); err != nil {
+	if err := p.eventIndex().Apply(next); err != nil {
 		t.Fatal(err)
 	}
 	p.HoldUnaccepted([]*types.Event{next}, false)

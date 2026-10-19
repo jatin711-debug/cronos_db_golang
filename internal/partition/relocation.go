@@ -10,10 +10,10 @@ import (
 )
 
 func (p *Partition) terminalEvent(e *types.Event, accepted int64) bool {
-	if p.lifecycleIndex == nil {
+	if p.eventIndex() == nil {
 		return false
 	}
-	terminal, err := p.lifecycleIndex.TerminalThrough(e, accepted)
+	terminal, err := p.eventIndex().TerminalThrough(e, accepted)
 	if err != nil {
 		p.Wal.Fail(err)
 		return false
@@ -24,7 +24,7 @@ func (p *Partition) terminalEvent(e *types.Event, accepted int64) bool {
 // evacuateFuture moves only never-due work, keeping consumer completion tied
 // to its physical offsets. Called under pruneMu and lifecycleMu exclusively.
 func (p *Partition) evacuateFuture(ctx context.Context, opts storage.PruneOptions, eligible func(*types.Event) bool) error {
-	if p.lifecycleIndex == nil || p.relocationBytes <= 0 || opts.BeforeTimestamp > 0 {
+	if p.eventIndex() == nil || p.relocationBytes <= 0 || opts.BeforeTimestamp > 0 {
 		return nil
 	}
 	segments := p.Wal.GetSegments()
@@ -72,7 +72,7 @@ func (p *Partition) evacuateFuture(ctx context.Context, opts storage.PruneOption
 	// an unaccepted append, or an unfinished due event.
 	blocked := false
 	if err := walk(func(e *types.Event) (bool, error) {
-		active, err := p.lifecycleIndex.Active(e)
+		active, err := p.eventIndex().Active(e)
 		if err != nil {
 			return false, err
 		}
@@ -89,7 +89,7 @@ func (p *Partition) evacuateFuture(ctx context.Context, opts storage.PruneOption
 	}
 	remaining := p.relocationBytes
 	return walk(func(e *types.Event) (bool, error) {
-		active, err := p.lifecycleIndex.Active(e)
+		active, err := p.eventIndex().Active(e)
 		if err != nil {
 			return false, err
 		}

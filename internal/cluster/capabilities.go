@@ -161,6 +161,19 @@ func (m *Manager) requiredCapabilities() []string {
 	return normalizeCapabilities(all)
 }
 
+// PartitionRequiresLifecycle reports whether the committed assignment of a
+// partition, as this node has it, requires the lifecycle format.
+func (m *Manager) PartitionRequiresLifecycle(partitionID int32) bool {
+	m.mu.RLock()
+	store := m.assignments
+	m.mu.RUnlock()
+	if store == nil {
+		return false
+	}
+	info, ok := store.Partition(partitionID)
+	return ok && len(missingCapabilities(info.Requires, LifecycleRequirement)) == 0
+}
+
 // voterLister is implemented by an assignment store that can list the Raft
 // group's voters.
 type voterLister interface {

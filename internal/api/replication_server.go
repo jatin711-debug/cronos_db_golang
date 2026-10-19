@@ -28,6 +28,15 @@ import (
 type ReplicationServiceHandler struct {
 	types.UnimplementedReplicationServiceServer
 	partitionManager *partition.PartitionManager
+	// lifecycleRequired reports whether the cluster has committed that a
+	// partition requires the lifecycle format. nil outside a cluster.
+	lifecycleRequired func(partitionID int32) bool
+}
+
+// SetLifecycleRequirement gives the handler the cluster's record of which
+// partitions require the lifecycle format.
+func (h *ReplicationServiceHandler) SetLifecycleRequirement(required func(partitionID int32) bool) {
+	h.lifecycleRequired = required
 }
 
 // acceptLeader applies the fencing rules for a request from leaderID at term.
@@ -59,7 +68,45 @@ func (h *ReplicationServiceHandler) Append(ctx context.Context, req *types.Repli
 			return nil, status.Error(codes.FailedPrecondition, "lifecycle records require a versioned replication protocol")
 		}
 	}
+	return h.appendBatch(req, false)
+}
 
+// AppendLifecycle appends a batch of a partition that requires the lifecycle
+// format, whose records may include lifecycle records. Everything is checked
+// before anything is written: the format version, the cluster's record that
+// the partition requires the format, and every lifecycle record. The first
+// such request puts the partition into lifecycle mode.
+func (h *ReplicationServiceHandler) AppendLifecycle(ctx context.Context, lreq *types.ReplicationLifecycleAppendRequest) (*types.ReplicationAppendResponse, error) {
+	_ = ctx
+	if format := lreq.GetLifecycleFormat(); format != partition.LifecycleFormat {
+		return nil, status.Errorf(codes.FailedPrecondition, "lifecycle format %d is not supported; this build reads format %d", format, partition.LifecycleFormat)
+	}
+	req := lreq.GetAppend()
+	if req == nil || req.GetPartitionId() < 0 {
+		return nil, status.Error(codes.InvalidArgument, "an append with a valid partition_id is required")
+	}
+	if h.lifecycleRequired == nil || !h.lifecycleRequired(req.GetPartitionId()) {
+		return nil, status.Errorf(codes.FailedPrecondition, "partition %d does not require the lifecycle format on this node", req.GetPartitionId())
+	}
+	for _, event := range req.GetEvents() {
+		if event == nil || !lifecycle.HasReservedMeta(event) {
+			continue
+		}
+		if event.GetPartitionId() != req.GetPartitionId() {
+			return nil, status.Errorf(codes.InvalidArgument, "lifecycle record at offset %d belongs to partition %d", event.GetOffset(), event.GetPartitionId())
+		}
+		if _, err := lifecycle.Decode(event); err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "lifecycle record at offset %d: %v", event.GetOffset(), err)
+		}
+	}
+	return h.appendBatch(req, true)
+}
+
+// appendBatch is Append and AppendLifecycle, after the checks of their own.
+// A partition in lifecycle mode takes appends only through AppendLifecycle:
+// its leader sends everything that way, and the plain append is what a leader
+// of an older build would send.
+func (h *ReplicationServiceHandler) appendBatch(req *types.ReplicationAppendRequest, lifecycleAppend bool) (*types.ReplicationAppendResponse, error) {
 	if req == nil || req.GetPartitionId() < 0 {
 		return nil, status.Error(codes.InvalidArgument, "valid partition_id is required")
 	}
@@ -80,12 +127,17 @@ func (h *ReplicationServiceHandler) Append(ctx context.Context, req *types.Repli
 	if p.Wal == nil {
 		return nil, status.Errorf(codes.Internal, "partition %d WAL not initialized", req.GetPartitionId())
 	}
-	if p.LifecycleEnabled() {
-		return nil, status.Error(codes.FailedPrecondition, "standalone lifecycle partitions do not accept replication")
+	if p.LifecycleEnabled() && !lifecycleAppend {
+		return nil, status.Error(codes.FailedPrecondition, "a partition in lifecycle mode accepts appends only through AppendLifecycle")
 	}
 
 	p.ReplicateMu.Lock()
 	defer p.ReplicateMu.Unlock()
+	if lifecycleAppend {
+		if err := h.partitionManager.EnableReplicatedLifecycle(p); err != nil {
+			return nil, status.Errorf(codes.FailedPrecondition, "partition %d cannot switch to lifecycle mode: %v", p.ID, err)
+		}
+	}
 	reject := func(reason string) (*types.ReplicationAppendResponse, error) {
 		return &types.ReplicationAppendResponse{Success: false, Error: reason, LastOffset: p.Wal.GetLastOffset(), NextOffset: p.Wal.GetNextOffset(), Term: p.Epoch()}, nil
 	}
@@ -177,6 +229,9 @@ func (h *ReplicationServiceHandler) Append(ctx context.Context, req *types.Repli
 			return reject(err.Error())
 		}
 		if err := p.Wal.AppendReplicatedBatch(events); err != nil {
+			return reject(err.Error())
+		}
+		if err := p.IndexReplicatedLifecycle(events); err != nil {
 			return reject(err.Error())
 		}
 		for _, event := range events {

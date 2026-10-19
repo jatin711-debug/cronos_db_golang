@@ -20,6 +20,8 @@ type replicaLog struct {
 	pm *partition.PartitionManager
 	h  *ReplicationServiceHandler
 	p  *partition.Partition
+	// stop closes pm once; nil where the test's cleanup closes it.
+	stop func()
 }
 
 func newReplicaLog(t *testing.T, nodeID string) *replicaLog {

@@ -548,6 +548,11 @@ func run() int {
 
 	// Register internal replication and raft metadata services on the internal listener.
 	replicationServer := api.NewReplicationServiceHandler(pm)
+	if clusterMgr != nil {
+		// Lifecycle records are taken only for partitions the cluster has
+		// committed to require the format.
+		replicationServer.SetLifecycleRequirement(clusterMgr.PartitionRequiresLifecycle)
+	}
 	internalServer.RegisterReplicationServer(replicationServer)
 	if cfg.ExperimentalFeatures {
 		internalServer.RegisterCrossRegionServer(crossRegionServer)

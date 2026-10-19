@@ -1,8 +1,8 @@
 # WAL retention, cancellation, and rescheduling
 
-Status: standalone implementation, the accepted-state index prerequisite, and
-replica capability gating (step 1 of the replicated protocol) on
-`retention-and-cancel`. The opt-in implementation is limited to standalone nodes.
+Status: standalone implementation, the accepted-state index prerequisite,
+replica capability gating (step 1 of the replicated protocol) and the
+versioned append path (step 2, without snapshots) on `retention-and-cancel`. The opt-in implementation is limited to standalone nodes.
 Cluster rollout is a separate, gated step.
 
 ## Problem and invariants
@@ -138,7 +138,9 @@ records. The cluster protocol still needs the following state and transitions:
    just the currently connected quorum would leave an assigned older replica
    unable to catch up and potentially eligible for leadership. Enabling the
    format is a one-way operation for that partition, not a per-request hint.
-2. **Append through a dedicated versioned RPC.** Normal catch-up must select it
+2. **Append through a dedicated versioned RPC.** The append path is
+   implemented; see [Versioned append](#versioned-append). Snapshots are not
+   yet. Normal catch-up must select it
    whenever a batch contains lifecycle records. The receiver validates the
    version and envelope before changing the WAL. A legacy receiver returns
    `Unimplemented` without writing anything. Snapshot requests also carry a
@@ -223,6 +225,45 @@ voter that is downgraded after a requirement is committed: its older build
 ignores the requirement, and as Raft leader would place and elect without it.
 Downgrading a cluster whose partitions require capabilities is unsupported.
 
+### Versioned append
+
+Lifecycle records travel between replicas only in `AppendLifecycle`, whose
+request names the record format and wraps an ordinary append request. A build
+before it answers `Unimplemented`, and the plain `Append` refuses lifecycle
+records, as it did before.
+
+A leader whose partition is in lifecycle mode sends every request through
+`AppendLifecycle`: new entries, catch-up from the WAL, and the empty probes
+that carry the log start. A follower without it therefore receives nothing
+more of that log, not even the ordinary events between lifecycle records,
+holds no copy and counts towards no quorum; elections and placement already
+keep it out (step 1). A leader whose partition is not in lifecycle mode refuses
+to send a batch with a lifecycle record at all.
+
+The receiver checks everything before it writes anything: the format version,
+that the cluster has committed the partition's requirement as this node knows
+it, and every lifecycle record (`lifecycle.Decode`, and its partition). The
+first accepted request switches the partition to lifecycle mode
+(`PartitionManager.EnableReplicatedLifecycle`): the marker is written durably,
+then the index is built from the retained WAL and published. Nothing produces
+lifecycle records in a cluster before the switch, so that index is empty, but
+building it reads the retained log once, under the partition's replication
+lock. In lifecycle mode the plain `Append`, which only a leader of an older
+build sends, is refused. A replicated batch with lifecycle records is fsynced
+before it is acknowledged, whatever the fsync mode, and its records are added
+to the index as tentative ones. Which of them the leader accepted is settled
+when a replica is promoted (step 4).
+
+In a cluster, a partition with a lifecycle marker opens in lifecycle mode
+without `--event-lifecycle`, except with a change feed or experimental
+features, which it refuses. A standalone node still requires the flag. Because
+a partition of a cluster can switch while it runs, the dispatcher's lifecycle
+hooks are installed for every partition of a cluster; until the switch they
+pass every event through after one atomic load.
+
+The snapshot part of step 2 is not implemented: a partition in lifecycle mode
+still refuses to serve or install a snapshot.
+
 Before enabling this protocol, fault tests must cover leader death before and
 after quorum, lost success replies, an unaccepted replacement becoming due,
 replica reconnect to a legacy server, suffix replacement with offset reuse,
@@ -257,6 +298,16 @@ incapable replica holding the same log and waits while one holds a longer log,
 placement and handoffs that stay off incapable nodes, a handoff abandoned when
 its target is downgraded, voter admission, and capabilities carried and replaced
 through membership. Each fails with the corresponding check removed.
+
+Versioned append tests (`internal/api/replication_lifecycle_test.go`,
+`internal/replication/lifecycle_append_test.go`) cover refusals that write
+nothing (no requirement, unknown format, malformed record, record of another
+partition), the switch, storage and indexing of a cancellation, refusal of the
+plain append afterwards, reopening in lifecycle mode after a restart, refusal of
+lifecycle data by a standalone node without the flag, a leader that uses only
+`AppendLifecycle`, refuses lifecycle records without a format, and sends nothing
+to a follower that lacks the call. Eight negative controls, one per check, make
+them fail.
 
 ## Using the standalone implementation
 
