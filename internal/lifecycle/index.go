@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/jatin711-debug/cronos_db_golang/internal/logcontrol"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 )
 
@@ -253,6 +254,9 @@ func (i *Index) DeliverableThrough(e *types.Event, through int64) (bool, error) 
 	if e == nil || e.Offset < i.start || e.Offset > through {
 		return false, nil
 	}
+	if logcontrol.IsTermStart(e) {
+		return false, logcontrol.ValidateTermStart(e)
+	}
 	r, err := Decode(e)
 	if err != nil {
 		return false, err
@@ -290,6 +294,10 @@ func (i *Index) TerminalThrough(e *types.Event, through int64) (bool, error) {
 	}
 	if e == nil || e.Offset < i.start || e.Offset > through {
 		return false, nil
+	}
+	if logcontrol.IsTermStart(e) {
+		err := logcontrol.ValidateTermStart(e)
+		return err == nil, err
 	}
 	r, err := Decode(e)
 	if err != nil {

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jatin711-debug/cronos_db_golang/internal/lifecycle"
+	"github.com/jatin711-debug/cronos_db_golang/internal/logcontrol"
 	"github.com/jatin711-debug/cronos_db_golang/internal/partition"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 	"github.com/prometheus/client_golang/prometheus"
@@ -207,9 +208,16 @@ func (s *CrossRegionServer) FetchEvents(req *types.RegionFetchRequest, stream ty
 		maxBytes = 10 << 20 // 10MB default
 	}
 	var sentBytes int64
+	last := p.Wal.GetLastOffset()
+	if p.TermStartEnabled() {
+		last = min(last, p.DeliverableThrough())
+	}
 
 	for sentBytes < maxBytes {
-		events, err := p.Wal.ReadEventsWithin(offset, p.Wal.GetLastOffset(), fetchChunkBytes)
+		if offset > last {
+			break
+		}
+		events, err := p.Wal.ReadEventsWithin(offset, last, fetchChunkBytes)
 		if err != nil {
 			return status.Errorf(codes.Internal, "read events: %v", err)
 		}
@@ -217,8 +225,19 @@ func (s *CrossRegionServer) FetchEvents(req *types.RegionFetchRequest, stream ty
 			break
 		}
 
+		public, err := logcontrol.FilterTermStarts(events)
+		if err != nil {
+			p.Wal.Fail(err)
+			return status.Error(codes.Internal, err.Error())
+		}
+		for _, e := range public {
+			if lifecycle.HasReservedMeta(e) {
+				return status.Error(codes.FailedPrecondition, "cross-region lifecycle export is not supported")
+			}
+		}
 		resp := &types.RegionFetchResponse{
-			Events: events,
+			Events:     public,
+			NextOffset: events[len(events)-1].Offset + 1,
 		}
 		for _, ev := range events {
 			sentBytes += int64(len(ev.Payload))
@@ -227,7 +246,7 @@ func (s *CrossRegionServer) FetchEvents(req *types.RegionFetchRequest, stream ty
 			resp.HasMore = false
 		} else {
 			// The log goes on past the events just read if its last offset does.
-			resp.HasMore = events[len(events)-1].Offset < p.Wal.GetLastOffset()
+			resp.HasMore = events[len(events)-1].Offset < last
 		}
 
 		if err := stream.Send(resp); err != nil {

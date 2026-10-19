@@ -8,6 +8,7 @@ import (
 	"maps"
 	"strings"
 
+	"github.com/jatin711-debug/cronos_db_golang/internal/logcontrol"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 )
 
@@ -55,6 +56,9 @@ func SameReference(a, b *types.EventReference) bool {
 // Decode rejects unknown or malformed reserved metadata rather than silently
 // interpreting a future record version as an ordinary event.
 func Decode(e *types.Event) (*Record, error) {
+	if logcontrol.IsTermStart(e) {
+		return nil, logcontrol.ValidateTermStart(e)
+	}
 	if !HasReservedMeta(e) {
 		return nil, nil
 	}

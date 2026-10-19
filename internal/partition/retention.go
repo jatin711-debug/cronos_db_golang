@@ -72,7 +72,7 @@ func (p *Partition) PruneWAL(ctx context.Context, opts storage.PruneOptions) (in
 	// known to be the partition's once it is on enough replicas.
 	accepted := p.AcceptedThrough()
 	terminal := func(event *types.Event) bool { return p.terminalEvent(event, accepted) }
-	if p.eventIndex() != nil {
+	if p.eventIndex() != nil || p.TermStartEnabled() {
 		opts.Terminal = terminal
 	}
 	var blocker *types.Event

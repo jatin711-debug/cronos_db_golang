@@ -9,6 +9,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/jatin711-debug/cronos_db_golang/internal/logcontrol"
 	"github.com/jatin711-debug/cronos_db_golang/internal/storage"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 )
@@ -131,6 +132,12 @@ func (p *Partition) backupStores(dir string) (storage.BackupPartition, error) {
 		entry.Components = append(entry.Components, "epoch")
 	case !os.IsNotExist(err):
 		return entry, fmt.Errorf("epoch: %w", err)
+	}
+	switch err := copyIfPresent(filepath.Join(p.DataDir, logcontrol.TermStartMarker), filepath.Join(dir, logcontrol.TermStartMarker)); {
+	case err == nil:
+		entry.Components = append(entry.Components, "term_start")
+	case !os.IsNotExist(err):
+		return entry, fmt.Errorf("term-start format: %w", err)
 	}
 	return entry, nil
 }

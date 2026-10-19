@@ -552,6 +552,7 @@ func run() int {
 		// Lifecycle records, in appends and in snapshots, are taken only for
 		// partitions the cluster has committed to require the format.
 		pm.SetLifecycleRequirement(clusterMgr.PartitionRequiresLifecycle)
+		pm.SetTermStartRequirement(clusterMgr.PartitionRequiresTermStart)
 	}
 	internalServer.RegisterReplicationServer(replicationServer)
 	if cfg.ExperimentalFeatures {

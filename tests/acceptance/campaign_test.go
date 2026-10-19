@@ -3,12 +3,12 @@
 package acceptance
 
 import (
-	"bytes"
 	"fmt"
 	"testing"
 	"time"
 
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
+	"google.golang.org/protobuf/proto"
 )
 
 const (
@@ -246,7 +246,7 @@ func agreedLog(t *testing.T, c *cluster, partition int32, topic string) ([]*type
 		start, end = 0, -1
 		same := true
 		for i, n := range c.nodes {
-			log, err := c.readLog(n, partition, topic)
+			log, err := c.readLog(n, partition)
 			first, last := int64(0), int64(-1)
 			if err == nil {
 				first, last, err = c.logBounds(n, partition)
@@ -287,8 +287,7 @@ func agreedLog(t *testing.T, c *cluster, partition int32, topic string) ([]*type
 		}
 		for j := 0; j < min(len(log), len(reference)); j++ {
 			a, b := reference[j], log[j]
-			if a.GetOffset() != b.GetOffset() || a.GetTerm() != b.GetTerm() || a.GetMessageId() != b.GetMessageId() ||
-				a.GetScheduleTs() != b.GetScheduleTs() || !bytes.Equal(a.GetPayload(), b.GetPayload()) {
+			if !proto.Equal(a, b) {
 				t.Errorf("partition %d: the logs differ at entry %d:\n  %s: offset %d term %d id %s\n  %s: offset %d term %d id %s",
 					partition, j, c.nodes[0].id, a.GetOffset(), a.GetTerm(), a.GetMessageId(), other.id, b.GetOffset(), b.GetTerm(), b.GetMessageId())
 				break

@@ -330,6 +330,15 @@ message ReplicationLifecycleAppendRequest {
   ReplicationAppendRequest append = 2;
 }
 
+// A distinct RPC prevents a legacy receiver from ignoring a format flag and
+// storing internal term-start records as user events. Every append/probe of a
+// partition in this format uses it, including batches without a control record.
+message ReplicationTermAppendRequest {
+  uint32 term_start_format = 1;
+  uint32 lifecycle_format = 2;
+  ReplicationAppendRequest append = 3;
+}
+
 message ReplicationAppendResponse {
   bool success = 1;
   string error = 2;
@@ -503,6 +512,7 @@ message ReplicationSnapshotRequest {
   // A source whose partition is in lifecycle mode refuses a receiver that
   // cannot read its format.
   uint32 lifecycle_format = 6;
+  uint32 term_start_format = 7;
 }
 
 message ReplicationSnapshotHeader {
@@ -543,6 +553,7 @@ message ReplicationSnapshotTrailer {
   // not in lifecycle mode. The receiver switches to lifecycle mode before the
   // snapshot replaces its log.
   uint32 lifecycle_format = 5;
+  uint32 term_start_format = 6;
 }
 
 message ReplicationSnapshotDeadLetters {
@@ -817,6 +828,7 @@ service ReplicationService {
   // that predates it answers Unimplemented and writes nothing, and a receiver
   // that cannot read the format refuses the whole request.
   rpc AppendLifecycle(ReplicationLifecycleAppendRequest) returns (ReplicationAppendResponse);
+  rpc AppendTermStart(ReplicationTermAppendRequest) returns (ReplicationAppendResponse);
 
   // Internal: Sync from leader
   rpc Sync(ReplicationSyncRequest) returns (stream ReplicationSyncResponse);
@@ -883,6 +895,8 @@ message RegionFetchResponse {
   string error = 2;
   repeated Event events = 3;
   bool has_more = 4;
+  // Physical cursor after this page, including skipped internal records.
+  int64 next_offset = 5;
 }
 
 // TransactionService for distributed 2PC transactions.

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/jatin711-debug/cronos_db_golang/internal/lifecycle"
+	"github.com/jatin711-debug/cronos_db_golang/internal/logcontrol"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 )
@@ -123,6 +124,9 @@ func (pm *PartitionManager) EnableReplicatedLifecycle(p *Partition) error {
 func (p *Partition) IndexReplicatedLifecycle(events []*types.Event) error {
 	var records []*types.Event
 	for _, e := range events {
+		if logcontrol.IsTermStart(e) {
+			continue // fsynced by the term-start append protocol, not indexed
+		}
 		if lifecycle.HasReservedMeta(e) {
 			records = append(records, e)
 		}

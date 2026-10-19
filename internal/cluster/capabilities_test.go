@@ -14,6 +14,56 @@ import (
 
 const testCap = "test-format/1"
 
+func TestTermStartUpgradeWaitsForEveryAssignedReplicaAndVoter(t *testing.T) {
+	f := newLeadershipFixture(t, "a", "a", 3, 2, "a", "b", "c", "d")
+	info := f.committed(t)
+	info.Replicas, info.ISR = []string{"a", "b", "c"}, []string{"a", "b", "c"}
+	if err := f.store.ProposePartition(&info, false); err != nil {
+		t.Fatal(err)
+	}
+	f.store.voters = []string{"a", "b", "c", "d"}
+	f.advertise([]string{CapabilityTermStart}, "a", "b")
+	f.manager.enableTermStartRequirements()
+	if f.manager.PartitionRequiresTermStart(0) {
+		t.Fatal("upgraded with an incompatible assigned replica")
+	}
+	f.advertise([]string{CapabilityTermStart}, "c")
+	f.manager.enableTermStartRequirements()
+	if f.manager.PartitionRequiresTermStart(0) {
+		t.Fatal("upgraded with an incompatible voter")
+	}
+	f.advertise([]string{CapabilityTermStart}, "d")
+	f.manager.enableTermStartRequirements()
+	if !f.manager.PartitionRequiresTermStart(0) {
+		t.Fatal("compatible cluster did not commit the format")
+	}
+	count := f.store.proposals
+	f.manager.enableTermStartRequirements()
+	if f.store.proposals != count {
+		t.Fatal("idempotent requirement proposed repeatedly")
+	}
+	if f.manager.admitsVoter(&Node{ID: "legacy"}) {
+		t.Fatal("legacy replacement voter admitted after upgrade")
+	}
+	f.advertise(nil, "c")
+	if !f.manager.PartitionRequiresTermStart(0) {
+		t.Fatal("capability loss lifted a durable requirement")
+	}
+}
+
+func TestElectionPrefersReplicaWithCommittedTermStartOverConflictingOldEntry(t *testing.T) {
+	f := newLeadershipFixture(t, "b", "a", 3, 2, "a", "b", "c")
+	f.requireDirectly(t, CapabilityTermStart)
+	f.advertise([]string{CapabilityTermStart}, "a", "b", "c")
+	f.positions.set("b", ReplicaPosition{LastTerm: 3, LastOffset: 3, Epoch: 3})
+	f.positions.set("c", ReplicaPosition{LastTerm: 4, LastOffset: 4, Epoch: 4})
+	delete(f.membership.nodes, "a")
+	f.manager.checkPartitionHealth()
+	if got := f.committed(t); got.LeaderID != "c" {
+		t.Fatalf("elected stale conflicting replica %q instead of c", got.LeaderID)
+	}
+}
+
 // advertise sets what each named member of the fixture advertises.
 func (f *leadershipFixture) advertise(caps []string, ids ...string) {
 	for _, id := range ids {
