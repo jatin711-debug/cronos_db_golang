@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jatin711-debug/cronos_db_golang/internal/logcontrol"
 	"github.com/jatin711-debug/cronos_db_golang/internal/storage"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 )
@@ -202,6 +203,12 @@ func (c *replayCursor) Next(ctx context.Context) (*types.Event, error) {
 		if len(c.chunk) > 0 {
 			event := c.chunk[0]
 			c.chunk = c.chunk[1:]
+			if logcontrol.IsTermStart(event) {
+				if err := logcontrol.ValidateTermStart(event); err != nil {
+					return nil, err
+				}
+				continue
+			}
 			if c.keep == nil || c.keep(event) {
 				return event, nil
 			}

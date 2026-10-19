@@ -76,7 +76,7 @@ func ensureFirewallImage(t *testing.T) {
 
 // newContainerCluster prepares three nodes as containers without starting
 // them. They reach each other by name on a network of their own, and this
-// machine reaches each through two published ports. The containers and the
+// machine reaches each through three published ports. The containers and the
 // network are removed when the test ends, and the node logs are kept as for
 // a cluster of processes.
 func newContainerCluster(t *testing.T, extraArgs ...string) *cluster {
@@ -92,22 +92,23 @@ func newContainerCluster(t *testing.T, extraArgs ...string) *cluster {
 			t.Fatal(err)
 		}
 	}
-	ports := freePorts(t, 6)
+	ports := freePorts(t, 9)
 	names := make([]string, 0, 3)
 	for i := 0; i < 3; i++ {
 		id := fmt.Sprintf("node%d", i+1)
 		name := run + "-" + id
 		names = append(names, name)
 		c.nodes = append(c.nodes, &node{
-			index:       i,
-			id:          id,
-			container:   name,
-			logPath:     filepath.Join(c.dir, "logs", id+".log"),
-			grpcAddr:    fmt.Sprintf("127.0.0.1:%d", ports[i*2]),
-			httpAddr:    fmt.Sprintf("127.0.0.1:%d", ports[i*2+1]),
-			gossipAddr:  name + ":7946",
-			clusterAddr: name + ":7947",
-			raftAddr:    name + ":7948",
+			index:           i,
+			id:              id,
+			container:       name,
+			logPath:         filepath.Join(c.dir, "logs", id+".log"),
+			grpcAddr:        fmt.Sprintf("127.0.0.1:%d", ports[i*3]),
+			httpAddr:        fmt.Sprintf("127.0.0.1:%d", ports[i*3+1]),
+			clusterDialAddr: fmt.Sprintf("127.0.0.1:%d", ports[i*3+2]),
+			gossipAddr:      name + ":7946",
+			clusterAddr:     name + ":7947",
+			raftAddr:        name + ":7948",
 		})
 	}
 	// The image runs as a user of its own, which has to be able to read what
@@ -162,7 +163,7 @@ func (c *cluster) startContainer(n *node) {
 		// chosen. Nothing knows a node's ports before it has started.
 		for attempt := 1; ; attempt++ {
 			args := []string{"run", "-d", "--name", n.container, "--network", c.network,
-				"-p", n.grpcAddr + ":9000", "-p", n.httpAddr + ":8080",
+				"-p", n.grpcAddr + ":9000", "-p", n.httpAddr + ":8080", "-p", n.clusterDialAddr + ":7947",
 				"-v", c.certDir + ":/certs:ro"}
 			args = append(append(args, c.runOptions...), c.image)
 			out, err := docker(append(args, c.args(n)...)...)
@@ -175,8 +176,9 @@ func (c *cluster) startContainer(n *node) {
 			if !taken || attempt == 5 {
 				c.t.Fatalf("docker run %s: %v\n%s", n.container, err, out)
 			}
-			ports := freePorts(c.t, 2)
+			ports := freePorts(c.t, 3)
 			n.grpcAddr, n.httpAddr = fmt.Sprintf("127.0.0.1:%d", ports[0]), fmt.Sprintf("127.0.0.1:%d", ports[1])
+			n.clusterDialAddr = fmt.Sprintf("127.0.0.1:%d", ports[2])
 			c.note(n, "a port was taken; starting with others")
 		}
 		n.created = true

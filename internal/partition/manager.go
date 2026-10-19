@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -18,6 +19,9 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/internal/consumer"
 	"github.com/jatin711-debug/cronos_db_golang/internal/dedup"
 	"github.com/jatin711-debug/cronos_db_golang/internal/delivery"
+	"github.com/jatin711-debug/cronos_db_golang/internal/lifecycle"
+	"github.com/jatin711-debug/cronos_db_golang/internal/logcontrol"
+	"github.com/jatin711-debug/cronos_db_golang/internal/recoverystate"
 	"github.com/jatin711-debug/cronos_db_golang/internal/replication"
 	"github.com/jatin711-debug/cronos_db_golang/internal/scheduler"
 	"github.com/jatin711-debug/cronos_db_golang/internal/storage"
@@ -127,6 +131,16 @@ type Partition struct {
 	feed *changeFeed
 	// replQuorum is ReplLeader for readers that do not hold the manager lock.
 	replQuorum atomic.Pointer[replication.Leader]
+	// lifecycleMu gates eligibility through stream sends against durable mutations.
+	lifecycleMu sync.RWMutex
+	// lifecycleIdx is set once, when the partition opens in lifecycle mode or
+	// a follower switches to it (EnableReplicatedLifecycle), and never unset.
+	lifecycleIdx    atomic.Pointer[lifecycle.Index]
+	termStartMode   atomic.Bool
+	termStartEpoch  int64 // guarded by ReplicateMu; last local barrier appended
+	termStartOffset int64 // guarded by ReplicateMu
+	relocationBytes int64
+	diskAdmission   func() error
 }
 
 // leadershipRecord is the fencing state a replica keeps on disk: the highest
@@ -293,6 +307,10 @@ type PartitionManager struct {
 	splittingMu      sync.RWMutex         // protects splitting map
 	backpressureMgr  *BackpressureManager // memory + per-partition rate limits
 	fsyncCoalescer   *storage.FsyncCoalescer
+	// lifecycleRequired is the cluster's record of which partitions require
+	// the lifecycle format; nil outside a cluster. Guarded by mu.
+	lifecycleRequired func(partitionID int32) bool
+	termStartRequired func(partitionID int32) bool
 	// writable is the cluster's view of whether this node may accept publishes
 	// for a partition; nil means every led partition is writable.
 	writable func(partitionID int32) bool
@@ -389,7 +407,38 @@ func deliveryConfig(cfg *types.Config) *delivery.Config {
 }
 
 // createPartitionLocked creates a new partition (assumes lock is held)
-func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic string) error {
+func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic string) (createErr error) {
+	termMarker := filepath.Join(pm.config.DataDir, "partitions", fmt.Sprint(partitionID), logcontrol.TermStartMarker)
+	termMode := false
+	if data, err := os.ReadFile(termMarker); err == nil {
+		if string(data) != "1\n" {
+			return fmt.Errorf("partition %d has an unsupported term-start format", partitionID)
+		}
+		termMode = true
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if pm.config.EventLifecycle && ((!pm.config.ClusterEnabled && pm.config.ReplicationFactor != 1) || (pm.config.ClusterEnabled && pm.config.ReplicationFactor < 2) || pm.changeFeed != nil || pm.config.ExperimentalFeatures) {
+		return fmt.Errorf("event-lifecycle requires standalone RF=1 or a replicated cluster, without a change feed or experimental features")
+	}
+	marker := filepath.Join(pm.config.DataDir, "partitions", fmt.Sprint(partitionID), lifecycle.Marker)
+	lifecycleData := false
+	if format, err := os.ReadFile(marker); err == nil {
+		// In a cluster a partition is put into lifecycle mode when it comes to
+		// require the format (EnableReplicatedLifecycle), not by the flag.
+		if !pm.config.EventLifecycle && !pm.config.ClusterEnabled {
+			return fmt.Errorf("partition %d contains lifecycle data; --event-lifecycle is required", partitionID)
+		}
+		if string(format) != "1\n" {
+			return fmt.Errorf("partition %d has an unsupported lifecycle format", partitionID)
+		}
+		if err := pm.replicatedLifecycleAllowed(); pm.config.ClusterEnabled && err != nil {
+			return fmt.Errorf("partition %d contains lifecycle data: %w", partitionID, err)
+		}
+		lifecycleData = true
+	} else if !os.IsNotExist(err) {
+		return err
+	}
 	// Its previous instance still holds the files until it has finished closing.
 	if pm.releasing[partitionID] {
 		return fmt.Errorf("partition %d is being released; retry", partitionID)
@@ -432,9 +481,25 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 	if err != nil {
 		return fmt.Errorf("create WAL: %w", err)
 	}
+	var eventIndex *lifecycle.Index
+	if (pm.config.EventLifecycle && !pm.config.ClusterEnabled) || lifecycleData {
+		eventIndex, err = lifecycle.Open(dataDir, pm.pebbleCache)
+		if err != nil {
+			wal.Close()
+			return fmt.Errorf("open lifecycle index: %w", err)
+		}
+		if err = eventIndex.Rebuild(context.Background(), wal); err != nil {
+			eventIndex.Close()
+			wal.Close()
+			return fmt.Errorf("rebuild lifecycle index: %w", err)
+		}
+	}
 	// Clean up WAL on any subsequent failure
 	defer func() {
-		if err != nil {
+		if createErr != nil {
+			if eventIndex != nil {
+				eventIndex.Close()
+			}
 			wal.Close()
 		}
 	}()
@@ -445,8 +510,12 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 	if err != nil {
 		return fmt.Errorf("create scheduler: %w", err)
 	}
+	defer func() {
+		if createErr != nil {
+			sched.Stop()
+		}
+	}()
 	if err := sched.SetMemoryBudget(pm.schedulerBudget, pm.config.PartitionCount, pm.pebbleCache); err != nil {
-		sched.Stop()
 		return fmt.Errorf("configure scheduler budget: %w", err)
 	}
 	// Configure adaptive hydrator intervals if specified
@@ -462,6 +531,11 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 		return fmt.Errorf("create dedup store: %w", err)
 	}
 	dedupManager := dedup.NewManager(dedupStore)
+	defer func() {
+		if createErr != nil {
+			dedupManager.Close()
+		}
+	}()
 
 	// Create offset store for persistent consumer offsets
 	offsetStore, err := consumer.NewOffsetStore(dataDir, partitionID, pm.pebbleCache)
@@ -471,6 +545,11 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 
 	// Create consumer group manager with persistent offset store
 	consumerGroup := consumer.NewGroupManagerWithStore(offsetStore)
+	defer func() {
+		if createErr != nil {
+			consumerGroup.Close()
+		}
+	}()
 
 	// Create dispatcher with a durable dead-letter queue so poison messages
 	// (delivery failed after max retries) are captured on disk instead of being
@@ -488,6 +567,12 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 		return fmt.Errorf("create dead-letter queue: %w", err)
 	}
 	dispatcher := delivery.NewDispatcherWithDLQ(dispatcherConfig, dlq)
+	defer func() {
+		if createErr != nil {
+			dispatcher.Close()
+			dlq.Close()
+		}
+	}()
 	dispatcher.IsCompleted = func(group string, offset int64) bool { return consumerGroup.IsCompleted(group, partitionID, offset) }
 	// A dead-lettered event has reached its final disposition for the group;
 	// without a completion record the WAL redrive would deliver it again.
@@ -512,22 +597,24 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 
 	// Create partition
 	partition := &Partition{
-		replicated:    pm.config.ClusterEnabled || pm.config.ReplicationFactor > 1,
-		followed:      pm.config.ReplicationFactor > 1,
-		pruneWaitsAt:  -1,
-		ID:            partitionID,
-		Topic:         topic,
-		DataDir:       dataDir,
-		Wal:           wal,
-		Scheduler:     sched,
-		ConsumerGroup: consumerGroup,
-		DedupStore:    dedupManager,
-		Dispatcher:    dispatcher,
-		DLQ:           dlq,
-		Worker:        worker,
-		CreatedTS:     time.Now(),
-		UpdatedTS:     time.Now(),
-		deliveryQuit:  make(chan struct{}),
+		relocationBytes: pm.config.WALRelocationBytes,
+		diskAdmission:   pm.DiskAdmission,
+		replicated:      pm.config.ClusterEnabled || pm.config.ReplicationFactor > 1,
+		followed:        pm.config.ReplicationFactor > 1,
+		pruneWaitsAt:    -1,
+		ID:              partitionID,
+		Topic:           topic,
+		DataDir:         dataDir,
+		Wal:             wal,
+		Scheduler:       sched,
+		ConsumerGroup:   consumerGroup,
+		DedupStore:      dedupManager,
+		Dispatcher:      dispatcher,
+		DLQ:             dlq,
+		Worker:          worker,
+		CreatedTS:       time.Now(),
+		UpdatedTS:       time.Now(),
+		deliveryQuit:    make(chan struct{}),
 	}
 	// What lies below the start of the log was finished before it was removed.
 	if err = consumerGroup.SetLogStart(partitionID, wal.GetFirstOffset()); err != nil {
@@ -539,6 +626,35 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 		return err
 	}
 	dispatcher.DeliverableThrough = partition.DeliverableThrough
+	partition.termStartMode.Store(termMode)
+	partition.lifecycleIdx.Store(eventIndex)
+	if eventIndex != nil || pm.config.ClusterEnabled || pm.config.ReplicationFactor > 1 || termMode {
+		// A partition of a cluster can switch to lifecycle mode while it runs
+		// (EnableReplicatedLifecycle), so its hooks are installed from the
+		// start and pass every event through until it does.
+		dispatcher.LockEvents = func() func() {
+			if partition.eventIndex() == nil {
+				return func() {}
+			}
+			partition.lifecycleMu.RLock()
+			return partition.lifecycleMu.RUnlock
+		}
+		dispatcher.EventEligible = func(e *types.Event) bool {
+			if logcontrol.IsTermStart(e) {
+				return partition.ActiveEvent(e)
+			}
+			if partition.eventIndex() == nil {
+				return true
+			}
+			return e.ScheduleTs <= time.Now().UnixMilli() && partition.ActiveEvent(e)
+		}
+		dispatcher.PublicEvent = func(e *types.Event) *types.Event {
+			if partition.eventIndex() == nil {
+				return e
+			}
+			return lifecycle.Public(e)
+		}
+	}
 
 	if data, err := os.ReadFile(dataDir + "/epoch.json"); err == nil {
 		record, err := parseLeadershipRecord(data)
@@ -548,6 +664,28 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 		partition.restoreLeadership(record)
 	} else if !os.IsNotExist(err) {
 		return err
+	}
+	if err := partition.applyRecoverySnapshot(); err != nil {
+		return fmt.Errorf("recover snapshot state: %w", err)
+	}
+	if eventIndex != nil && !partition.replicated {
+		// A lost periodic-fsync tail can reuse offsets after restart. Persist
+		// a new term before assigning handles, even for the same message ID.
+		generation := partition.Epoch()
+		if last := wal.GetLastOffset(); last >= wal.GetFirstOffset() {
+			term, termErr := wal.GetTermForOffset(last)
+			if termErr != nil {
+				return termErr
+			}
+			generation = max(generation, term)
+		}
+		if generation == 1<<63-1 {
+			return fmt.Errorf("lifecycle generation exhausted")
+		}
+		if err = partition.AcceptLeadership(generation+1, pm.nodeID); err != nil {
+			return err
+		}
+		wal.SetCurrentTerm(generation + 1)
 	}
 	if pm.changeFeed != nil {
 		if err := partition.openChangeFeed(pm.changeFeed, pm.config.ClusterEnabled); err != nil {
@@ -993,6 +1131,28 @@ func (pm *PartitionManager) recoverDedupFromWAL(partition *Partition) (retErr er
 		}
 		from = events[len(events)-1].Offset + 1
 		for _, ev := range events {
+			if logcontrol.IsTermStart(ev) {
+				if err := logcontrol.ValidateTermStart(ev); err != nil {
+					return err
+				}
+				if err := partition.enableTermStart(); err != nil {
+					return err
+				}
+				continue
+			}
+			if lifecycle.HasReservedMeta(ev) {
+				if partition.eventIndex() == nil {
+					return fmt.Errorf("lifecycle WAL requires --event-lifecycle")
+				}
+				// A durable replacement proves the logical publish existed. Seed
+				// its ID as accepted if the original was pruned or this is a restore.
+				if minCreatedTS == 0 || ev.CreatedTs == 0 || ev.CreatedTs >= minCreatedTS {
+					if err := partition.DedupStore.Put(ev.MessageId, ev.Offset, ev.CreatedTs); err != nil {
+						return fmt.Errorf("recover lifecycle dedup: %w", err)
+					}
+				}
+				continue
+			}
 			mid := ev.GetMessageId()
 			if mid == "" {
 				continue
@@ -1090,6 +1250,9 @@ func (pm *PartitionManager) replayWALTimers(partition *Partition) {
 
 		for _, event := range events {
 			lastScheduled = event.Offset
+			if !partition.ActiveEvent(event) {
+				continue
+			}
 			if event.GetScheduleTs() <= now {
 				maturedCount++ // a subscription reads it from the log
 				continue
@@ -1141,6 +1304,9 @@ func (pm *PartitionManager) replayWALTimersFromOffset(partition *Partition, star
 
 		for _, event := range events {
 			// See replayWALTimers: schedule every event so matured-during-downtime
+			if !partition.ActiveEvent(event) {
+				continue
+			}
 			// timers are enqueued for immediate delivery rather than dropped.
 			if err := partition.Scheduler.Schedule(event); err != nil {
 				log2.Warn("WAL replay scheduler error", "partition", partition.ID, "offset", event.Offset, "error", err)
@@ -1316,6 +1482,11 @@ func stopPartition(partition *Partition) error {
 	}
 
 	// Flush and close WAL
+	if partition.eventIndex() != nil {
+		if err := partition.eventIndex().Close(); err != nil {
+			return fmt.Errorf("close lifecycle index: %w", err)
+		}
+	}
 	if partition.Wal != nil {
 		if err := partition.Wal.Close(); err != nil {
 			return fmt.Errorf("close WAL: %w", err)
@@ -1504,7 +1675,6 @@ func (pm *PartitionManager) SyncPartitionFromLeader(partitionID int32, leaderAdd
 	if !exists {
 		return fmt.Errorf("partition %d not found", partitionID)
 	}
-
 	// Get or create follower
 	pm.mu.Lock()
 	if partition.Follower == nil {
@@ -1512,6 +1682,26 @@ func (pm *PartitionManager) SyncPartitionFromLeader(partitionID int32, leaderAdd
 		partition.Follower.SetDeadLetterSink(func(records []*types.DeadLetterRecord) error {
 			return partition.DLQ.ApplyReplica(partitionID, records)
 		})
+		// A snapshot of a log in lifecycle mode is installed only where the
+		// cluster has committed that the partition requires the format. The
+		// partition switches before the snapshot replaces its log, and its
+		// index is rebuilt from the installed log; both run under ReplicateMu,
+		// which is held for the install below.
+		partition.Follower.SetLifecycleHooks(LifecycleFormat, func() error {
+			if !pm.LifecycleRequired(partitionID) {
+				return fmt.Errorf("partition %d does not require the lifecycle format on this node", partitionID)
+			}
+			return pm.EnableReplicatedLifecycle(partition)
+		}, partition.rebuildLifecycleIndex)
+		partition.Follower.SetTermStartHook(logcontrol.TermStartFormat, func() error {
+			if !pm.TermStartRequired(partitionID) {
+				return fmt.Errorf("partition %d does not require the term-start format", partitionID)
+			}
+			return partition.enableTermStart()
+		})
+	}
+	if partition.LifecycleEnabled() || (pm.lifecycleRequired != nil && pm.lifecycleRequired(partitionID)) {
+		partition.Follower.SetRecoveryHook(recoverystate.Format, partition.applyRecoverySnapshot)
 	}
 	pm.mu.Unlock()
 
@@ -1550,25 +1740,33 @@ func (pm *PartitionManager) SyncPartitionFromLeader(partitionID int32, leaderAdd
 
 // PromoteToLeader promotes a local partition to leader and starts replication.
 func (pm *PartitionManager) PromoteToLeader(partitionID int32, epoch int64) error {
+	// Match incoming appends: ReplicateMu precedes pm.mu. This also serializes
+	// term-start appends with ordinary publishes on an already-running leader.
+	p, err := pm.GetOrCreateInternalPartition(partitionID, fmt.Sprintf("partition-%d", partitionID))
+	if err != nil {
+		return err
+	}
+	p.ReplicateMu.Lock()
+	defer p.ReplicateMu.Unlock()
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
 	partition, exists := pm.partitions[partitionID]
-	if !exists {
-		// Partitions are lazily created in cluster mode; a node assigned as leader
-		// for a partition it has not written to yet must materialize and start it
-		// so it can serve reads/writes and replicate to followers.
-		if err := pm.createPartitionLocked(partitionID, fmt.Sprintf("partition-%d", partitionID)); err != nil {
-			return fmt.Errorf("create partition %d for promotion: %w", partitionID, err)
-		}
-		partition = pm.partitions[partitionID]
-		if err := pm.startPartitionInternal(partition); err != nil {
-			return fmt.Errorf("start partition %d on promotion: %w", partitionID, err)
-		}
+	if !exists || partition != p {
+		return fmt.Errorf("partition %d was released during promotion; retry", partitionID)
 	}
-
 	if epoch <= 0 {
 		return fmt.Errorf("leadership epoch must be positive")
+	}
+	if pm.termStartRequired != nil && pm.termStartRequired(partitionID) {
+		if err := partition.enableTermStart(); err != nil {
+			return err
+		}
+	}
+	if pm.lifecycleRequired != nil && pm.lifecycleRequired(partitionID) {
+		if err := pm.EnableReplicatedLifecycle(partition); err != nil {
+			return err
+		}
 	}
 	// Claim the epoch for this node. If another node already holds it here,
 	// this node may not lead until the cluster assigns a newer one.
@@ -1583,7 +1781,11 @@ func (pm *PartitionManager) PromoteToLeader(partitionID int32, epoch int64) erro
 		// both advertise term 1 and the follower's stale-term fence can't tell them
 		// apart — the split-brain guard is defeated.
 		partition.ReplLeader.SetEpoch(epoch)
-		return nil // Already leader, just update epoch
+		if err := partition.ensureTermStart(epoch); err != nil {
+			partition.leader.Store(false)
+			return err
+		}
+		return nil
 	}
 
 	// From here on this log is the partition's. What it does not hold was
@@ -1626,6 +1828,10 @@ func (pm *PartitionManager) PromoteToLeader(partitionID int32, epoch int64) erro
 	leader := replication.NewLeader(partitionID, int32(pm.config.ReplicationBatchSize), 0, partition.Wal, pm.config.MinInSyncReplicas, pm.nodeID, pm.replicationTLSConfig())
 	leader.SetReplicateTimeout(pm.config.ReplicationTimeout)
 	leader.SetEpoch(epoch) // advertise the real cluster epoch on the wire, not the default 1
+	if partition.eventIndex() != nil {
+		// Lifecycle records go to followers only through the versioned append.
+		leader.SetLifecycleFormat(LifecycleFormat)
+	}
 	// Followers receive this group progress so a failover does not redeliver
 	// what consumers already finished.
 	consumerGroup := partition.ConsumerGroup
@@ -1649,8 +1855,13 @@ func (pm *PartitionManager) PromoteToLeader(partitionID int32, epoch int64) erro
 	leader.SetSupersededObserver(func(term int64) {
 		go pm.stepDownFor(partitionID, leader, term)
 	})
-	leader.Start()
 	partition.ReplLeader = leader
+	if err := partition.ensureTermStart(epoch); err != nil {
+		partition.ReplLeader = nil
+		leader.Stop()
+		return err
+	}
+	leader.Start()
 	partition.replQuorum.Store(leader)
 	partition.leader.Store(true)
 	partition.wakeFeed()

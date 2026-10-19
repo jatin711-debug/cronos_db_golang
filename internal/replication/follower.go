@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jatin711-debug/cronos_db_golang/internal/recoverystate"
 	"github.com/jatin711-debug/cronos_db_golang/internal/storage"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 
@@ -38,6 +39,17 @@ type Follower struct {
 	nodeID           string
 	tlsConfig        *MTLSConfig // optional mTLS for replication connections
 	applyDeadLetters func([]*types.DeadLetterRecord) error
+	// lifecycleFormat is the lifecycle record format this replica reads,
+	// 0 when it cannot install a snapshot of a log in lifecycle mode;
+	// prepareLifecycle and rebuildLifecycle are its partition's hooks for one
+	// (SetLifecycleHooks).
+	lifecycleFormat  uint32
+	prepareLifecycle func() error
+	rebuildLifecycle func() error
+	termStartFormat  uint32
+	prepareTermStart func() error
+	recoveryFormat   uint32
+	applyRecovery    func() error
 }
 
 // NewFollower creates a new follower. tlsConfig may be nil for plaintext dev mode.
@@ -61,6 +73,29 @@ func (f *Follower) SetDeadLetterSink(apply func([]*types.DeadLetterRecord) error
 	f.applyDeadLetters = apply
 }
 
+// SetLifecycleHooks lets the follower install a snapshot of a log in
+// lifecycle mode of the given format. prepare puts the partition into
+// lifecycle mode, and is called before the snapshot replaces the log, so that
+// a crash in between leaves a partition that reopens in lifecycle mode;
+// rebuild rebuilds its lifecycle index from the installed log.
+func (f *Follower) SetLifecycleHooks(format uint32, prepare, rebuild func() error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lifecycleFormat, f.prepareLifecycle, f.rebuildLifecycle = format, prepare, rebuild
+}
+
+func (f *Follower) SetTermStartHook(format uint32, prepare func() error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.termStartFormat, f.prepareTermStart = format, prepare
+}
+
+func (f *Follower) SetRecoveryHook(format uint32, apply func() error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.recoveryFormat, f.applyRecovery = format, apply
+}
+
 // InstallSnapshot pulls a bulk segment snapshot from the leader over the
 // internal replication gRPC channel and installs it locally. It is used when a
 // follower is far behind or when a brand-new replica joins the partition.
@@ -79,6 +114,9 @@ func (f *Follower) InstallSnapshot(ctx context.Context, leaderAddr string, parti
 	walDataDir := f.wal.GetDataDir()
 	acceptedEpoch := f.epoch
 	applyDeadLetters := f.applyDeadLetters
+	lifecycleFormat, prepareLifecycle, rebuildLifecycle := f.lifecycleFormat, f.prepareLifecycle, f.rebuildLifecycle
+	termFormat, prepareTerm := f.termStartFormat, f.prepareTermStart
+	recoveryFormat, applyRecovery := f.recoveryFormat, f.applyRecovery
 	f.mu.Unlock()
 
 	defer func() {
@@ -137,6 +175,9 @@ func (f *Follower) InstallSnapshot(ctx context.Context, leaderAddr string, parti
 		MaxBytes:            1<<63 - 1,
 		Have:                have,
 		SupportsDeadLetters: applyDeadLetters != nil,
+		LifecycleFormat:     lifecycleFormat,
+		TermStartFormat:     termFormat,
+		RecoveryFormat:      recoveryFormat,
 	})
 	if err != nil {
 		return fmt.Errorf("snapshot RPC: %w", err)
@@ -278,6 +319,42 @@ func (f *Follower) InstallSnapshot(ctx context.Context, leaderAddr string, parti
 		_ = os.RemoveAll(stagingDir)
 		return fmt.Errorf("snapshot source %s is at epoch %d, behind epoch %d this replica has accepted", leaderAddr, trailer.GetEpoch(), acceptedEpoch)
 	}
+	if (recoveryFormat > 0 && trailer.GetRecoveryFormat() != recoveryFormat) || (trailer.GetLifecycleFormat() > 0 && trailer.GetRecoveryFormat() != recoverystate.Format) {
+		return fmt.Errorf("snapshot source did not provide the required recovery generation")
+	}
+	if format := trailer.GetRecoveryFormat(); format > 0 {
+		if format != recoveryFormat || applyRecovery == nil {
+			return fmt.Errorf("unsupported snapshot recovery format")
+		}
+		manifest, err := recoverystate.Read(filepath.Join(stagingSegments, recoverystate.Filename), f.wal.SnapshotCipher(), nil)
+		if err != nil {
+			return fmt.Errorf("validate recovery state: %w", err)
+		}
+		if manifest.Partition != partitionID || manifest.Epoch != trailer.GetEpoch() || manifest.Last != trailer.GetLastOffset() {
+			return fmt.Errorf("snapshot recovery generation mismatch")
+		}
+	} else if seen[stagedFileKey(recoverystate.Filename, false)] {
+		return fmt.Errorf("snapshot includes undeclared recovery state")
+	}
+	if format := trailer.GetTermStartFormat(); format > 0 {
+		if format != termFormat || prepareTerm == nil {
+			return fmt.Errorf("snapshot term-start format %d is not supported", format)
+		}
+		if err := prepareTerm(); err != nil {
+			return fmt.Errorf("enable term-start format before snapshot install: %w", err)
+		}
+	}
+	if format := trailer.GetLifecycleFormat(); format > 0 {
+		// The snapshot's log may hold lifecycle records. The partition goes
+		// into lifecycle mode first: installed without it, they would be read
+		// as ordinary events.
+		if format != lifecycleFormat || prepareLifecycle == nil {
+			return fmt.Errorf("snapshot from %s holds lifecycle records of format %d, which this replica does not read", leaderAddr, format)
+		}
+		if err := prepareLifecycle(); err != nil {
+			return fmt.Errorf("switch to lifecycle mode before installing the snapshot: %w", err)
+		}
+	}
 	f.mu.Lock()
 	if err := f.wal.InstallCheckpoint(stagingDir, trailer.LastOffset); err != nil {
 		f.mu.Unlock()
@@ -289,8 +366,20 @@ func (f *Follower) InstallSnapshot(ctx context.Context, leaderAddr string, parti
 		f.epoch = trailer.GetEpoch()
 	}
 	f.mu.Unlock()
+	if trailer.GetRecoveryFormat() > 0 {
+		if err := applyRecovery(); err != nil {
+			f.wal.Fail(err)
+			return fmt.Errorf("apply installed recovery generation: %w", err)
+		}
+	}
 	// InstallCheckpoint moved the staged directories into place.
 	_ = os.RemoveAll(stagingDir)
+	if rebuildLifecycle != nil {
+		// The index describes the log that was replaced.
+		if err := rebuildLifecycle(); err != nil {
+			return fmt.Errorf("rebuild the lifecycle index from the installed snapshot: %w", err)
+		}
+	}
 
 	log.Printf("[FOLLOWER] Snapshot installed for partition %d up to offset %d (epoch %d)", partitionID, trailer.GetLastOffset(), trailer.GetEpoch())
 	return nil

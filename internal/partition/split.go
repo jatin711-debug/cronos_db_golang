@@ -6,6 +6,7 @@ import (
 	"os"
 	"sync"
 
+	"github.com/jatin711-debug/cronos_db_golang/internal/logcontrol"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 )
 
@@ -55,6 +56,9 @@ func (sm *SplitManager) SplitPartition(sourceID int32, newID int32, splitOffset 
 	source, err := sm.pm.GetInternalPartition(sourceID)
 	if err != nil {
 		return fmt.Errorf("get source partition: %w", err)
+	}
+	if source.LifecycleEnabled() {
+		return fmt.Errorf("partition splitting is not supported with event-lifecycle")
 	}
 
 	// Capture original state for rollback
@@ -141,6 +145,12 @@ func (sm *SplitManager) SplitPartition(sourceID int32, newID int32, splitOffset 
 		// Filter events matching the new partition's range if splitKey is provided
 		var toMigrate []*types.Event
 		for _, ev := range events {
+			if logcontrol.IsTermStart(ev) {
+				if err := logcontrol.ValidateTermStart(ev); err != nil {
+					return err
+				}
+				continue // a leadership proof belongs only to its original log
+			}
 			partitionKey := ev.GetMessageId()
 			if pk, ok := ev.Meta["partition_key"]; ok && pk != "" {
 				partitionKey = pk

@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -134,6 +135,21 @@ func (cs *ColdStore) Delete(offset int64, scheduleTS int64) error {
 	}
 	cs.count.Add(-1)
 	return nil
+}
+
+// DeleteIfPresent is used under the scheduler's hydration gate; unlike Delete,
+// it does not decrement the approximate count for a reference that is absent.
+func (cs *ColdStore) DeleteIfPresent(offset, scheduleTS int64) error {
+	key := cs.buildKey(scheduleTS, offset)
+	_, closer, err := cs.db.Get(key)
+	if errors.Is(err, pebble.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	closer.Close()
+	return cs.Delete(offset, scheduleTS)
 }
 
 // DeleteBatch removes multiple offset references atomically in a single Pebble batch.

@@ -288,6 +288,9 @@ func (w *WAL) GetCurrentTerm() int64 {
 	return atomic.LoadInt64(&w.currentTerm)
 }
 
+// SnapshotCipher encrypts recovery pages alongside this WAL's checkpoint.
+func (w *WAL) SnapshotCipher() *SegmentCipher { return w.cipher }
+
 // loadSegments loads existing segments and verifies their integrity on startup.
 func (w *WAL) loadSegments() error {
 	segmentsDir := filepath.Join(w.dataDir, "segments")
