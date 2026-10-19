@@ -360,6 +360,7 @@ func (m *Manager) leaderTasks() {
 
 // performLeaderTasks performs leader-only tasks
 func (m *Manager) performLeaderTasks() {
+	m.enableTermStartRequirements()
 	// Elect a leader for partitions whose leader is dead
 	m.checkPartitionHealth()
 

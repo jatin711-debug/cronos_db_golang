@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jatin711-debug/cronos_db_golang/internal/lifecycle"
+	"github.com/jatin711-debug/cronos_db_golang/internal/logcontrol"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 	"google.golang.org/grpc/codes"
@@ -29,7 +30,7 @@ func (p *Partition) WithActiveEvent(e *types.Event, send func(*types.Event) erro
 	p.lifecycleMu.RLock()
 	defer p.lifecycleMu.RUnlock()
 	through := int64(math.MaxInt64)
-	if p.eventIndex() != nil {
+	if p.eventIndex() != nil || p.TermStartEnabled() {
 		through = p.DeliverableThrough()
 	}
 	if p.activeEventThrough(e, through) {
@@ -46,6 +47,9 @@ func (p *Partition) lifecycleError() error {
 		// Mutations of a replicated partition are made, and its state is
 		// read, on its leader, where they are replicated like publishes.
 		return status.Errorf(codes.Unavailable, "this node does not lead partition %d; retry against its leader", p.ID)
+	}
+	if (p.replicated || p.followed) && !p.TermStartEnabled() {
+		return status.Error(codes.FailedPrecondition, "replicated lifecycle operations require the term-start commit protocol")
 	}
 	if err := p.Wal.Failure(); err != nil {
 		return status.Error(codes.Unavailable, err.Error())
@@ -66,6 +70,13 @@ func (p *Partition) activeEventThrough(e *types.Event, through int64) bool {
 		return false
 	}
 	if e == nil || e.Offset > through {
+		return false
+	}
+	if logcontrol.IsTermStart(e) {
+		if err := logcontrol.ValidateTermStart(e); err != nil {
+			p.Wal.Fail(err)
+			p.setReplayError(err)
+		}
 		return false
 	}
 	if p.eventIndex() == nil {
@@ -112,6 +123,9 @@ func (p *Partition) lifecycleState(ref *types.EventReference) (*types.Event, *li
 	e, err := p.Wal.ReadEvent(offset)
 	if err != nil {
 		return nil, nil, status.Error(codes.Unavailable, err.Error())
+	}
+	if logcontrol.IsTermStart(e) {
+		return nil, nil, status.Error(codes.NotFound, "reference is not a user event")
 	}
 	root, err := lifecycle.Root(e)
 	if err != nil {

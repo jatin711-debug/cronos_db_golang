@@ -6,6 +6,11 @@ append and snapshot transport (step 2) and quorum-accepted mutations on a
 replicated leader (step 3) on `retention-and-cancel`. The opt-in implementation is limited to standalone nodes.
 Cluster rollout is a separate, gated step.
 
+The replication layer now also has a capability-gated
+[current-term commitment protocol](REPLICATION_TERM_START.md). It closes the
+old-term replica-counting hole found while testing step 4. Replicated lifecycle
+mutations require this protocol; full lifecycle rollout remains gated.
+
 ## Problem and invariants
 
 Replicated logs must retain a contiguous offset range. One event scheduled a
@@ -192,11 +197,15 @@ Each node advertises the capabilities of its build in every membership message
 it sends: join requests and replies, heartbeats, and the broadcast announcing a
 new node. A message without them means none, which is what builds of v0.7.0 and
 earlier send; unlike a missing address, a heartbeat without capabilities replaces
-what the sender advertised before. This build advertises `lifecycle-records/1`:
-it reads version 1 lifecycle records and refuses them on the legacy append path.
+what the sender advertised before. This build advertises `lifecycle-records/1`
+and `term-start/1`: it reads those version 1 records and refuses them on the
+legacy append path. Term-start requirements are enabled automatically once all
+assigned replicas and Raft voters support them.
 `lifecycle-replication/1` names the versioned append, catch-up and snapshot
 protocol of step 2. No build advertises it yet, so no replicated partition can
 require the lifecycle format (`cluster.LifecycleRequirement`).
+That requirement also includes `term-start/1`, so an acknowledged mutation cannot
+rely on the older replica-counting rule across a change of leader.
 
 A partition's requirement is `PartitionInfo.Requires` in the Raft state. A
 dedicated command adds to it and nothing removes it: an assignment update from a
@@ -231,13 +240,15 @@ Downgrading a cluster whose partitions require capabilities is unsupported.
 
 ### Versioned append
 
-Lifecycle records travel between replicas only in `AppendLifecycle`, whose
+The lifecycle-only transport is `AppendLifecycle`, whose
 request names the record format and wraps an ordinary append request. A build
 before it answers `Unimplemented`, and the plain `Append` refuses lifecycle
 records, as it did before.
 
-A leader whose partition is in lifecycle mode sends every request through
-`AppendLifecycle`: new entries, catch-up from the WAL, and the empty probes
+Replicated lifecycle operations additionally require the current-term protocol
+described in [REPLICATION_TERM_START.md](REPLICATION_TERM_START.md). Such a leader
+sends every request through `AppendTermStart`, naming both record formats:
+new entries, catch-up from the WAL, and the empty probes
 that carry the log start. A follower without it therefore receives nothing
 more of that log, not even the ordinary events between lifecycle records,
 holds no copy and counts towards no quorum; elections and placement already
@@ -270,8 +281,9 @@ pass every event through after one atomic load.
 `GetEventState`, `CancelEvent` and `RescheduleEvent` on a partition of a cluster
 are served by its leader; a follower answers `Unavailable` and writes nothing.
 The leader switches the partition to lifecycle mode on the first such call once
-the cluster has committed its requirement, and from then on replicates through
-`AppendLifecycle`; without the requirement the calls answer `FailedPrecondition`
+the cluster has committed its requirement, and replicates through
+`AppendTermStart` with both formats; without the requirement or an activated
+term-start protocol the calls answer `FailedPrecondition`
 as on a node without `--event-lifecycle`. A mutation announces itself like a
 publish (`BeginPublish`), so that a leadership handoff waits for it.
 

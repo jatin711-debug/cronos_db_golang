@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jatin711-debug/cronos_db_golang/internal/logcontrol"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 )
@@ -386,11 +387,18 @@ func (p *Partition) drainFeed() error {
 			}
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), feedDeliverLimit)
-		err = f.deliver(ctx, p.ID, events)
-		cancel()
+		public, err := logcontrol.FilterTermStarts(events)
 		if err != nil {
+			p.Wal.Fail(err)
 			return err
+		}
+		if len(public) > 0 {
+			ctx, cancel := context.WithTimeout(context.Background(), feedDeliverLimit)
+			err = f.deliver(ctx, p.ID, public)
+			cancel()
+			if err != nil {
+				return err
+			}
 		}
 		f.advance(events[len(events)-1].Offset)
 	}

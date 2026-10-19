@@ -20,6 +20,7 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/internal/dedup"
 	"github.com/jatin711-debug/cronos_db_golang/internal/delivery"
 	"github.com/jatin711-debug/cronos_db_golang/internal/lifecycle"
+	"github.com/jatin711-debug/cronos_db_golang/internal/logcontrol"
 	"github.com/jatin711-debug/cronos_db_golang/internal/replication"
 	"github.com/jatin711-debug/cronos_db_golang/internal/scheduler"
 	"github.com/jatin711-debug/cronos_db_golang/internal/storage"
@@ -134,6 +135,9 @@ type Partition struct {
 	// lifecycleIdx is set once, when the partition opens in lifecycle mode or
 	// a follower switches to it (EnableReplicatedLifecycle), and never unset.
 	lifecycleIdx    atomic.Pointer[lifecycle.Index]
+	termStartMode   atomic.Bool
+	termStartEpoch  int64 // guarded by ReplicateMu; last local barrier appended
+	termStartOffset int64 // guarded by ReplicateMu
 	relocationBytes int64
 	diskAdmission   func() error
 }
@@ -305,6 +309,7 @@ type PartitionManager struct {
 	// lifecycleRequired is the cluster's record of which partitions require
 	// the lifecycle format; nil outside a cluster. Guarded by mu.
 	lifecycleRequired func(partitionID int32) bool
+	termStartRequired func(partitionID int32) bool
 	// writable is the cluster's view of whether this node may accept publishes
 	// for a partition; nil means every led partition is writable.
 	writable func(partitionID int32) bool
@@ -402,6 +407,16 @@ func deliveryConfig(cfg *types.Config) *delivery.Config {
 
 // createPartitionLocked creates a new partition (assumes lock is held)
 func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic string) (createErr error) {
+	termMarker := filepath.Join(pm.config.DataDir, "partitions", fmt.Sprint(partitionID), logcontrol.TermStartMarker)
+	termMode := false
+	if data, err := os.ReadFile(termMarker); err == nil {
+		if string(data) != "1\n" {
+			return fmt.Errorf("partition %d has an unsupported term-start format", partitionID)
+		}
+		termMode = true
+	} else if !os.IsNotExist(err) {
+		return err
+	}
 	if pm.config.EventLifecycle && (pm.config.ClusterEnabled || pm.config.ReplicationFactor != 1 || pm.changeFeed != nil || pm.config.ExperimentalFeatures) {
 		return fmt.Errorf("event-lifecycle requires standalone RF=1 without a change feed or experimental features")
 	}
@@ -610,8 +625,9 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 		return err
 	}
 	dispatcher.DeliverableThrough = partition.DeliverableThrough
+	partition.termStartMode.Store(termMode)
 	partition.lifecycleIdx.Store(eventIndex)
-	if eventIndex != nil || pm.config.ClusterEnabled {
+	if eventIndex != nil || pm.config.ClusterEnabled || pm.config.ReplicationFactor > 1 || termMode {
 		// A partition of a cluster can switch to lifecycle mode while it runs
 		// (EnableReplicatedLifecycle), so its hooks are installed from the
 		// start and pass every event through until it does.
@@ -623,6 +639,9 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 			return partition.lifecycleMu.RUnlock
 		}
 		dispatcher.EventEligible = func(e *types.Event) bool {
+			if logcontrol.IsTermStart(e) {
+				return partition.ActiveEvent(e)
+			}
 			if partition.eventIndex() == nil {
 				return true
 			}
@@ -1108,6 +1127,15 @@ func (pm *PartitionManager) recoverDedupFromWAL(partition *Partition) (retErr er
 		}
 		from = events[len(events)-1].Offset + 1
 		for _, ev := range events {
+			if logcontrol.IsTermStart(ev) {
+				if err := logcontrol.ValidateTermStart(ev); err != nil {
+					return err
+				}
+				if err := partition.enableTermStart(); err != nil {
+					return err
+				}
+				continue
+			}
 			if lifecycle.HasReservedMeta(ev) {
 				if partition.eventIndex() == nil {
 					return fmt.Errorf("lifecycle WAL requires --event-lifecycle")
@@ -1661,6 +1689,12 @@ func (pm *PartitionManager) SyncPartitionFromLeader(partitionID int32, leaderAdd
 			}
 			return pm.EnableReplicatedLifecycle(partition)
 		}, partition.rebuildLifecycleIndex)
+		partition.Follower.SetTermStartHook(logcontrol.TermStartFormat, func() error {
+			if !pm.TermStartRequired(partitionID) {
+				return fmt.Errorf("partition %d does not require the term-start format", partitionID)
+			}
+			return partition.enableTermStart()
+		})
 	}
 	pm.mu.Unlock()
 
@@ -1699,25 +1733,28 @@ func (pm *PartitionManager) SyncPartitionFromLeader(partitionID int32, leaderAdd
 
 // PromoteToLeader promotes a local partition to leader and starts replication.
 func (pm *PartitionManager) PromoteToLeader(partitionID int32, epoch int64) error {
+	// Match incoming appends: ReplicateMu precedes pm.mu. This also serializes
+	// term-start appends with ordinary publishes on an already-running leader.
+	p, err := pm.GetOrCreateInternalPartition(partitionID, fmt.Sprintf("partition-%d", partitionID))
+	if err != nil {
+		return err
+	}
+	p.ReplicateMu.Lock()
+	defer p.ReplicateMu.Unlock()
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
 	partition, exists := pm.partitions[partitionID]
-	if !exists {
-		// Partitions are lazily created in cluster mode; a node assigned as leader
-		// for a partition it has not written to yet must materialize and start it
-		// so it can serve reads/writes and replicate to followers.
-		if err := pm.createPartitionLocked(partitionID, fmt.Sprintf("partition-%d", partitionID)); err != nil {
-			return fmt.Errorf("create partition %d for promotion: %w", partitionID, err)
-		}
-		partition = pm.partitions[partitionID]
-		if err := pm.startPartitionInternal(partition); err != nil {
-			return fmt.Errorf("start partition %d on promotion: %w", partitionID, err)
-		}
+	if !exists || partition != p {
+		return fmt.Errorf("partition %d was released during promotion; retry", partitionID)
 	}
-
 	if epoch <= 0 {
 		return fmt.Errorf("leadership epoch must be positive")
+	}
+	if pm.termStartRequired != nil && pm.termStartRequired(partitionID) {
+		if err := partition.enableTermStart(); err != nil {
+			return err
+		}
 	}
 	// Claim the epoch for this node. If another node already holds it here,
 	// this node may not lead until the cluster assigns a newer one.
@@ -1732,7 +1769,11 @@ func (pm *PartitionManager) PromoteToLeader(partitionID int32, epoch int64) erro
 		// both advertise term 1 and the follower's stale-term fence can't tell them
 		// apart — the split-brain guard is defeated.
 		partition.ReplLeader.SetEpoch(epoch)
-		return nil // Already leader, just update epoch
+		if err := partition.ensureTermStart(epoch); err != nil {
+			partition.leader.Store(false)
+			return err
+		}
+		return nil
 	}
 
 	// From here on this log is the partition's. What it does not hold was
@@ -1802,8 +1843,13 @@ func (pm *PartitionManager) PromoteToLeader(partitionID int32, epoch int64) erro
 	leader.SetSupersededObserver(func(term int64) {
 		go pm.stepDownFor(partitionID, leader, term)
 	})
-	leader.Start()
 	partition.ReplLeader = leader
+	if err := partition.ensureTermStart(epoch); err != nil {
+		partition.ReplLeader = nil
+		leader.Stop()
+		return err
+	}
+	leader.Start()
 	partition.replQuorum.Store(leader)
 	partition.leader.Store(true)
 	partition.wakeFeed()

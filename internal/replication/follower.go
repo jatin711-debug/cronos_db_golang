@@ -45,6 +45,8 @@ type Follower struct {
 	lifecycleFormat  uint32
 	prepareLifecycle func() error
 	rebuildLifecycle func() error
+	termStartFormat  uint32
+	prepareTermStart func() error
 }
 
 // NewFollower creates a new follower. tlsConfig may be nil for plaintext dev mode.
@@ -79,6 +81,12 @@ func (f *Follower) SetLifecycleHooks(format uint32, prepare, rebuild func() erro
 	f.lifecycleFormat, f.prepareLifecycle, f.rebuildLifecycle = format, prepare, rebuild
 }
 
+func (f *Follower) SetTermStartHook(format uint32, prepare func() error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.termStartFormat, f.prepareTermStart = format, prepare
+}
+
 // InstallSnapshot pulls a bulk segment snapshot from the leader over the
 // internal replication gRPC channel and installs it locally. It is used when a
 // follower is far behind or when a brand-new replica joins the partition.
@@ -98,6 +106,7 @@ func (f *Follower) InstallSnapshot(ctx context.Context, leaderAddr string, parti
 	acceptedEpoch := f.epoch
 	applyDeadLetters := f.applyDeadLetters
 	lifecycleFormat, prepareLifecycle, rebuildLifecycle := f.lifecycleFormat, f.prepareLifecycle, f.rebuildLifecycle
+	termFormat, prepareTerm := f.termStartFormat, f.prepareTermStart
 	f.mu.Unlock()
 
 	defer func() {
@@ -157,6 +166,7 @@ func (f *Follower) InstallSnapshot(ctx context.Context, leaderAddr string, parti
 		Have:                have,
 		SupportsDeadLetters: applyDeadLetters != nil,
 		LifecycleFormat:     lifecycleFormat,
+		TermStartFormat:     termFormat,
 	})
 	if err != nil {
 		return fmt.Errorf("snapshot RPC: %w", err)
@@ -297,6 +307,14 @@ func (f *Follower) InstallSnapshot(ctx context.Context, leaderAddr string, parti
 	if trailer.GetEpoch() < acceptedEpoch {
 		_ = os.RemoveAll(stagingDir)
 		return fmt.Errorf("snapshot source %s is at epoch %d, behind epoch %d this replica has accepted", leaderAddr, trailer.GetEpoch(), acceptedEpoch)
+	}
+	if format := trailer.GetTermStartFormat(); format > 0 {
+		if format != termFormat || prepareTerm == nil {
+			return fmt.Errorf("snapshot term-start format %d is not supported", format)
+		}
+		if err := prepareTerm(); err != nil {
+			return fmt.Errorf("enable term-start format before snapshot install: %w", err)
+		}
 	}
 	if format := trailer.GetLifecycleFormat(); format > 0 {
 		// The snapshot's log may hold lifecycle records. The partition goes

@@ -26,15 +26,48 @@ const (
 	// through the versioned append, catch-up and snapshot protocol. No build
 	// advertises it yet; until one does, no partition can require it.
 	CapabilityLifecycleReplication = "lifecycle-replication/1"
+	// The build reads term-start records and uses their versioned append and
+	// snapshot protocol, committing old entries only through its current term.
+	CapabilityTermStart = "term-start/1"
 )
 
 // LifecycleRequirement is what a replicated partition requires before
 // lifecycle records may be written to it.
-var LifecycleRequirement = []string{CapabilityLifecycleRecords, CapabilityLifecycleReplication}
+var LifecycleRequirement = []string{CapabilityLifecycleRecords, CapabilityLifecycleReplication, CapabilityTermStart}
 
 // LocalCapabilities returns the capabilities this build implements.
 func LocalCapabilities() []string {
-	return []string{CapabilityLifecycleRecords}
+	return []string{CapabilityLifecycleRecords, CapabilityTermStart}
+}
+
+func (m *Manager) PartitionRequiresTermStart(partitionID int32) bool {
+	m.mu.RLock()
+	store := m.assignments
+	m.mu.RUnlock()
+	if store == nil {
+		return false
+	}
+	info, ok := store.Partition(partitionID)
+	return ok && slices.Contains(info.Requires, CapabilityTermStart)
+}
+
+// Upgrade only after every assigned node and voter supports the format. A
+// durable requirement also protects replacement placement and later elections.
+func (m *Manager) enableTermStartRequirements() {
+	m.mu.RLock()
+	store := m.assignments
+	replicated := m.config.ReplicationFactor > 1
+	m.mu.RUnlock()
+	if !replicated || store == nil || !store.IsLeader() {
+		return
+	}
+	for id, info := range store.Partitions() {
+		if !slices.Contains(info.Requires, CapabilityTermStart) {
+			// A mixed or temporarily unavailable cluster retains its legacy
+			// format. No new control record is sent to an unsupported replica.
+			_ = m.RequirePartitionCapabilities(id, []string{CapabilityTermStart})
+		}
+	}
 }
 
 // normalizeCapabilities returns the distinct, non-empty names in caps, sorted.

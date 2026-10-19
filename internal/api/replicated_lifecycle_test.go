@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jatin711-debug/cronos_db_golang/internal/logcontrol"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -13,6 +14,25 @@ import (
 // lifecycleGate is gatedReplication for a follower that also takes the
 // versioned append.
 type lifecycleGate struct{ gatedReplication }
+
+func (g *lifecycleGate) AppendTermStart(ctx context.Context, req *types.ReplicationTermAppendRequest) (*types.ReplicationAppendResponse, error) {
+	if g.refusing.Load() {
+		return nil, status.Error(codes.Unavailable, "follower unreachable")
+	}
+	return g.ReplicationServiceServer.AppendTermStart(ctx, req)
+}
+
+// These assertions count logical records; term-start records only prove the
+// leader's term and never stand for a publish or a lifecycle operation.
+func (c *replicatedLifecycle) records(r *replicaLog) []*types.Event {
+	var records []*types.Event
+	for _, e := range r.log() {
+		if !logcontrol.IsTermStart(e) {
+			records = append(records, e)
+		}
+	}
+	return records
+}
 
 func (g *lifecycleGate) AppendLifecycle(ctx context.Context, req *types.ReplicationLifecycleAppendRequest) (*types.ReplicationAppendResponse, error) {
 	if g.refusing.Load() {
@@ -37,6 +57,7 @@ func newReplicatedLifecycle(t *testing.T, required bool) *replicatedLifecycle {
 	leader, follower := newClusterReplica(t, t.TempDir()), newClusterReplica(t, t.TempDir())
 	for _, r := range []*replicaLog{leader, follower} {
 		r.pm.SetLifecycleRequirement(func(int32) bool { return required })
+		r.pm.SetTermStartRequirement(func(int32) bool { return required })
 	}
 	if err := leader.pm.PromoteToLeader(0, 1); err != nil {
 		t.Fatal(err)
@@ -100,7 +121,7 @@ func TestReplicatedCancel_AcceptedAtQuorum(t *testing.T) {
 	if err != nil || !got.GetCanceled() {
 		t.Fatalf("cancel: resp=%v err=%v", got, err)
 	}
-	if events := c.follower.log(); len(events) != 2 || !c.follower.p.LifecycleEnabled() || c.follower.p.ActiveEvent(events[0]) {
+	if events := c.records(c.follower); len(events) != 2 || !c.follower.p.LifecycleEnabled() || c.follower.p.ActiveEvent(events[0]) {
 		t.Fatalf("follower: %d entries, lifecycle mode=%v; want the event and its cancellation, and the event canceled", len(events), c.follower.p.LifecycleEnabled())
 	}
 	if c.delivered(ref.Offset) {
@@ -127,7 +148,7 @@ func TestReplicatedCancel_UnknownOutcomeUntilAQuorumHoldsIt(t *testing.T) {
 	c.gate.refuse(true)
 	_, err = c.cancel(ref, "cancel-1", rev)
 	wantCode(t, err, codes.Unavailable, "cancel while the follower refuses appends")
-	if n := len(c.leader.log()); n != 2 {
+	if n := len(c.records(c.leader)); n != 2 {
 		t.Fatalf("leader log has %d entries, want the event and the staged cancellation", n)
 	}
 	if c.delivered(ref.Offset) {
@@ -137,7 +158,7 @@ func TestReplicatedCancel_UnknownOutcomeUntilAQuorumHoldsIt(t *testing.T) {
 	wantCode(t, err, codes.Unavailable, "state while the cancellation is unresolved")
 	_, err = c.cancel(ref, "cancel-2", rev)
 	wantCode(t, err, codes.Unavailable, "another change while the cancellation is unresolved")
-	if n := len(c.leader.log()); n != 2 {
+	if n := len(c.records(c.leader)); n != 2 {
 		t.Fatalf("leader log has %d entries after a second request, want 2", n)
 	}
 
@@ -156,10 +177,10 @@ func TestReplicatedCancel_UnknownOutcomeUntilAQuorumHoldsIt(t *testing.T) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	if n := len(c.leader.log()); n != 2 {
+	if n := len(c.records(c.leader)); n != 2 {
 		t.Fatalf("leader log has %d entries after the retry: the cancellation was appended again", n)
 	}
-	if events := c.follower.log(); len(events) != 2 || c.follower.p.ActiveEvent(events[0]) {
+	if events := c.records(c.follower); len(events) != 2 || c.follower.p.ActiveEvent(events[0]) {
 		t.Fatalf("follower holds %d entries, want the event and its cancellation", len(events))
 	}
 	if c.leader.p.HasUnaccepted() {
@@ -189,7 +210,7 @@ func TestReplicatedReschedule_ReplacesTheEvent(t *testing.T) {
 	if err != nil || !c.leader.p.ActiveEvent(replacement) {
 		t.Fatalf("the replacement is not the active copy (%v)", err)
 	}
-	if events := c.follower.log(); len(events) != 2 || events[1].GetScheduleTs() != at {
+	if events := c.records(c.follower); len(events) != 2 || events[1].GetScheduleTs() != at {
 		t.Fatalf("follower holds %d entries, want the event and its replacement due at %d", len(events), at)
 	}
 }
@@ -207,7 +228,7 @@ func TestReplicatedMutation_RefusedOnAFollower(t *testing.T) {
 	_, err = onFollower.CancelEvent(context.Background(), &types.EventMutationRequest{Reference: ref, RequestId: "cancel-1",
 		ExpectedRevisionOffset: rev.GetRevisionOffset(), ExpectedRevisionTerm: rev.GetRevisionTerm()})
 	wantCode(t, err, codes.Unavailable, "cancel on a follower")
-	if n := len(c.follower.log()); n != 1 {
+	if n := len(c.records(c.follower)); n != 1 {
 		t.Fatalf("follower log has %d entries, want only the event", n)
 	}
 }

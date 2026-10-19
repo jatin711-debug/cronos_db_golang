@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/jatin711-debug/cronos_db_golang/internal/lifecycle"
+	"github.com/jatin711-debug/cronos_db_golang/internal/logcontrol"
 	"github.com/jatin711-debug/cronos_db_golang/internal/partition"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 
@@ -59,7 +60,7 @@ func (h *ReplicationServiceHandler) Append(ctx context.Context, req *types.Repli
 			return nil, status.Error(codes.FailedPrecondition, "lifecycle records require a versioned replication protocol")
 		}
 	}
-	return h.appendBatch(req, false)
+	return h.appendBatch(req, false, false)
 }
 
 // AppendLifecycle appends a batch of a partition that requires the lifecycle
@@ -80,6 +81,9 @@ func (h *ReplicationServiceHandler) AppendLifecycle(ctx context.Context, lreq *t
 		return nil, status.Errorf(codes.FailedPrecondition, "partition %d does not require the lifecycle format on this node", req.GetPartitionId())
 	}
 	for _, event := range req.GetEvents() {
+		if logcontrol.IsTermStart(event) {
+			return nil, status.Error(codes.FailedPrecondition, "term-start records require AppendTermStart")
+		}
 		if event == nil || !lifecycle.HasReservedMeta(event) {
 			continue
 		}
@@ -90,14 +94,48 @@ func (h *ReplicationServiceHandler) AppendLifecycle(ctx context.Context, lreq *t
 			return nil, status.Errorf(codes.InvalidArgument, "lifecycle record at offset %d: %v", event.GetOffset(), err)
 		}
 	}
-	return h.appendBatch(req, true)
+	return h.appendBatch(req, true, false)
 }
 
-// appendBatch is Append and AppendLifecycle, after the checks of their own.
-// A partition in lifecycle mode takes appends only through AppendLifecycle:
-// its leader sends everything that way, and the plain append is what a leader
-// of an older build would send.
-func (h *ReplicationServiceHandler) appendBatch(req *types.ReplicationAppendRequest, lifecycleAppend bool) (*types.ReplicationAppendResponse, error) {
+func (h *ReplicationServiceHandler) AppendTermStart(ctx context.Context, treq *types.ReplicationTermAppendRequest) (*types.ReplicationAppendResponse, error) {
+	if treq.GetTermStartFormat() != logcontrol.TermStartFormat {
+		return nil, status.Error(codes.FailedPrecondition, "unsupported term-start format")
+	}
+	req := treq.GetAppend()
+	if req == nil || req.GetPartitionId() < 0 {
+		return nil, status.Error(codes.InvalidArgument, "an append with a valid partition_id is required")
+	}
+	if h.partitionManager == nil || !h.partitionManager.TermStartRequired(req.PartitionId) {
+		return nil, status.Error(codes.FailedPrecondition, "partition does not require the term-start format on this node")
+	}
+	life := treq.GetLifecycleFormat()
+	if life != 0 && (life != partition.LifecycleFormat || !h.partitionManager.LifecycleRequired(req.PartitionId)) {
+		return nil, status.Error(codes.FailedPrecondition, "lifecycle format is unsupported or not required on this node")
+	}
+	for _, e := range req.GetEvents() {
+		if e == nil || !lifecycle.HasReservedMeta(e) {
+			continue
+		}
+		if e.PartitionId != req.PartitionId {
+			return nil, status.Error(codes.InvalidArgument, "internal record belongs to another partition")
+		}
+		if logcontrol.IsTermStart(e) {
+			if err := logcontrol.ValidateTermStart(e); err != nil {
+				return nil, status.Error(codes.InvalidArgument, err.Error())
+			}
+		} else if life == 0 {
+			return nil, status.Error(codes.FailedPrecondition, "lifecycle records require a lifecycle format")
+		} else if _, err := lifecycle.Decode(e); err != nil {
+			return nil, status.Error(codes.InvalidArgument, err.Error())
+		}
+	}
+	return h.appendBatch(req, life != 0, true)
+}
+
+// appendBatch applies a request after its RPC's format and envelope checks.
+// Once a format is required, every request must use its versioned protocol,
+// including batches of ordinary events and empty probes.
+func (h *ReplicationServiceHandler) appendBatch(req *types.ReplicationAppendRequest, lifecycleAppend, termAppend bool) (*types.ReplicationAppendResponse, error) {
 	if req == nil || req.GetPartitionId() < 0 {
 		return nil, status.Error(codes.InvalidArgument, "valid partition_id is required")
 	}
@@ -118,12 +156,26 @@ func (h *ReplicationServiceHandler) appendBatch(req *types.ReplicationAppendRequ
 	if p.Wal == nil {
 		return nil, status.Errorf(codes.Internal, "partition %d WAL not initialized", req.GetPartitionId())
 	}
+	if !termAppend && h.partitionManager.TermStartRequired(req.GetPartitionId()) {
+		return nil, status.Error(codes.FailedPrecondition, "the committed partition format requires AppendTermStart")
+	}
 	if p.LifecycleEnabled() && !lifecycleAppend {
 		return nil, status.Error(codes.FailedPrecondition, "a partition in lifecycle mode accepts appends only through AppendLifecycle")
 	}
 
 	p.ReplicateMu.Lock()
 	defer p.ReplicateMu.Unlock()
+	if p.TermStartEnabled() && !termAppend {
+		return nil, status.Error(codes.FailedPrecondition, "this partition requires AppendTermStart, including probes")
+	}
+	if p.LifecycleEnabled() && !lifecycleAppend {
+		return nil, status.Error(codes.FailedPrecondition, "this partition requires a lifecycle append format")
+	}
+	if termAppend {
+		if err := p.EnableReplicatedTermStart(); err != nil {
+			return nil, status.Error(codes.Unavailable, err.Error())
+		}
+	}
 	if lifecycleAppend {
 		if err := h.partitionManager.EnableReplicatedLifecycle(p); err != nil {
 			return nil, status.Errorf(codes.FailedPrecondition, "partition %d cannot switch to lifecycle mode: %v", p.ID, err)
@@ -145,7 +197,7 @@ func (h *ReplicationServiceHandler) appendBatch(req *types.ReplicationAppendRequ
 		h := crc32.NewIEEE()
 		var buf [20]byte
 		for i, e := range events {
-			if e == nil || e.Offset < 0 || (i > 0 && e.Offset != events[i-1].Offset+1) {
+			if e == nil || e.Offset < 0 || e.Term < 0 || e.Term > req.GetTerm() || (i > 0 && e.Offset != events[i-1].Offset+1) {
 				return reject("batch offsets must be nonnegative and contiguous")
 			}
 			checksum := crc32.ChecksumIEEE(e.Payload)
@@ -226,7 +278,7 @@ func (h *ReplicationServiceHandler) appendBatch(req *types.ReplicationAppendRequ
 			return reject(err.Error())
 		}
 		for _, event := range events {
-			if durableAckEnabled(event) {
+			if durableAckEnabled(event) || logcontrol.IsTermStart(event) {
 				if err := p.Wal.Flush(); err != nil {
 					return reject(err.Error())
 				}
@@ -427,8 +479,8 @@ func (h *ReplicationServiceHandler) Sync(req *types.ReplicationSyncRequest, stre
 	if err != nil || p.Wal == nil {
 		return status.Errorf(codes.NotFound, "partition %d not found", req.GetPartitionId())
 	}
-	if p.LifecycleEnabled() {
-		return status.Error(codes.FailedPrecondition, "lifecycle logs require a versioned replication protocol")
+	if p.LifecycleEnabled() || p.TermStartEnabled() {
+		return status.Error(codes.FailedPrecondition, "internal log records require a versioned replication protocol")
 	}
 
 	const batchSize int64 = 100
@@ -451,6 +503,11 @@ func (h *ReplicationServiceHandler) Sync(req *types.ReplicationSyncRequest, stre
 		sendEvents := make([]*types.Event, 0, len(events))
 		for _, event := range events {
 			eventSize := int64(len(event.GetPayload()))
+			// A format switch can race this legacy stream after its entry
+			// check. No later chunk may carry a newly appended control.
+			if lifecycle.HasReservedMeta(event) {
+				return status.Error(codes.FailedPrecondition, "internal records require versioned replication")
+			}
 			if len(sendEvents) > 0 && sentBytes+eventSize > maxBytes {
 				break
 			}
@@ -516,6 +573,22 @@ func (h *ReplicationServiceHandler) Snapshot(req *types.ReplicationSnapshotReque
 	if err != nil || p == nil || p.Wal == nil {
 		return status.Errorf(codes.NotFound, "partition %d not found", req.GetPartitionId())
 	}
+	// A format switch and its first append cannot race the snapshot cut and
+	// leave a control record in files advertised as a legacy snapshot.
+	p.ReplicateMu.Lock()
+	cutLocked := true
+	defer func() {
+		if cutLocked {
+			p.ReplicateMu.Unlock()
+		}
+	}()
+	termFormat := uint32(0)
+	if p.TermStartEnabled() {
+		termFormat = logcontrol.TermStartFormat
+		if req.GetTermStartFormat() != termFormat {
+			return status.Error(codes.FailedPrecondition, "snapshot receiver does not support the term-start format")
+		}
+	}
 	format := uint32(0)
 	if p.LifecycleEnabled() {
 		// The snapshot may hold lifecycle records; a receiver that cannot
@@ -532,6 +605,8 @@ func (h *ReplicationServiceHandler) Snapshot(req *types.ReplicationSnapshotReque
 	}
 	defer os.RemoveAll(checkpointDir)
 	checkpoint, lastOffset, err := p.Wal.Checkpoint(checkpointDir)
+	p.ReplicateMu.Unlock()
+	cutLocked = false
 	if err != nil {
 		return status.Errorf(codes.Internal, "checkpoint: %v", err)
 	}
@@ -665,6 +740,7 @@ func (h *ReplicationServiceHandler) Snapshot(req *types.ReplicationSnapshotReque
 				LastOffset:      lastOffset,
 				Epoch:           p.Epoch(),
 				LifecycleFormat: format,
+				TermStartFormat: termFormat,
 			},
 		},
 	})

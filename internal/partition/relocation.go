@@ -5,11 +5,19 @@ import (
 	"time"
 
 	"github.com/jatin711-debug/cronos_db_golang/internal/lifecycle"
+	"github.com/jatin711-debug/cronos_db_golang/internal/logcontrol"
 	"github.com/jatin711-debug/cronos_db_golang/internal/storage"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 )
 
 func (p *Partition) terminalEvent(e *types.Event, accepted int64) bool {
+	if logcontrol.IsTermStart(e) {
+		if err := logcontrol.ValidateTermStart(e); err != nil {
+			p.Wal.Fail(err)
+			return false
+		}
+		return e.Offset <= accepted
+	}
 	if p.eventIndex() == nil {
 		return false
 	}

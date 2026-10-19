@@ -17,6 +17,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jatin711-debug/cronos_db_golang/internal/replication"
+	"github.com/jatin711-debug/cronos_db_golang/internal/storage"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/client"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 	"google.golang.org/grpc"
@@ -107,7 +109,10 @@ type node struct {
 	httpAddr    string
 	gossipAddr  string
 	clusterAddr string
-	raftAddr    string
+	// clusterDialAddr reaches a container's internal replication listener
+	// from the test host; clusterAddr remains its advertised peer address.
+	clusterDialAddr string
+	raftAddr        string
 
 	mu     sync.Mutex
 	cmd    *exec.Cmd
@@ -508,46 +513,41 @@ func (c *cluster) leaderOf(observer *client.Client, partitionID int32) *node {
 	}
 }
 
-// readLog returns the node's whole log of a partition, read from that node
-// whether or not it leads the partition.
-func (c *cluster) readLog(n *node, partitionID int32, topic string) ([]*types.Event, error) {
-	conn, err := grpc.NewClient(n.grpcAddr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(64<<20)))
+// readLog inspects a consistent physical snapshot, including internal records,
+// on leaders and followers. Public replay intentionally omits internal records
+// and cannot prove that every physical offset agrees between replicas.
+func (c *cluster) readLog(n *node, partitionID int32) ([]*types.Event, error) {
+	wal, err := storage.NewWAL(c.t.TempDir(), partitionID, &storage.WALConfig{
+		SegmentSizeBytes: 1 << 20, IndexInterval: 100, FsyncMode: "every_event",
+	}, nil)
 	if err != nil {
 		return nil, err
 	}
-	defer conn.Close()
-	events := types.NewEventServiceClient(conn)
-
-	var log []*types.Event
-	next := int64(0)
-	for {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		stream, err := events.Replay(ctx, &types.ReplayRequest{Topic: topic, PartitionId: partitionID, StartOffset: next, Count: 1000})
-		if err != nil {
-			cancel()
-			return nil, err
-		}
-		read := 0
-		for {
-			item, err := stream.Recv()
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				cancel()
-				return nil, err
-			}
-			log = append(log, item.GetEvent())
-			read++
-		}
-		cancel()
-		if read == 0 {
-			return log, nil
-		}
-		next = log[len(log)-1].GetOffset() + 1
+	defer wal.Close()
+	serverName, _, err := net.SplitHostPort(n.clusterAddr)
+	if err != nil {
+		return nil, err
 	}
+	f := replication.NewFollower(partitionID, wal, "acceptance-inspection", &replication.MTLSConfig{
+		Enabled: true, CAFile: c.caFile, CertFile: c.certFile, KeyFile: c.keyFile, ServerName: serverName,
+	})
+	// This copy only inspects WAL entries; it never serves or recovers work.
+	f.SetTermStartHook(1, func() error { return nil })
+	f.SetLifecycleHooks(1, func() error { return nil }, func() error { return nil })
+	f.SetDeadLetterSink(func([]*types.DeadLetterRecord) error { return nil })
+	addr := n.clusterAddr
+	if n.clusterDialAddr != "" {
+		addr = n.clusterDialAddr
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := f.InstallSnapshot(ctx, addr, partitionID, 0); err != nil {
+		return nil, err
+	}
+	if wal.GetLastOffset() < wal.GetFirstOffset() {
+		return nil, nil
+	}
+	return wal.ReadEvents(wal.GetFirstOffset(), wal.GetLastOffset())
 }
 
 // logged returns how many times text appears in what the node has written
