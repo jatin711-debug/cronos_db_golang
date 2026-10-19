@@ -27,6 +27,9 @@ func (h *EventServiceHandler) lifecyclePartition(ctx context.Context, ref *types
 	if err != nil {
 		return nil, status.Error(codes.NotFound, "partition not found")
 	}
+	if err := h.partitionManager.EnsureReplicatedLifecycle(p); err != nil {
+		return nil, status.Errorf(codes.Unavailable, "partition %d cannot switch to lifecycle mode: %v", p.ID, err)
+	}
 	return p, nil
 }
 
@@ -51,6 +54,9 @@ func (h *EventServiceHandler) mutateEvent(ctx context.Context, req *types.EventM
 	if err != nil {
 		return nil, err
 	}
+	// A mutation appends like a publish: a leadership handoff waits for it,
+	// and the writable check below comes after it is announced.
+	defer p.EndPublish(p.BeginPublish())
 	if err = h.partitionManager.DiskAdmission(); err != nil {
 		return nil, status.Error(codes.ResourceExhausted, err.Error())
 	}

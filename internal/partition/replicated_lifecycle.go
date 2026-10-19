@@ -32,6 +32,19 @@ func (pm *PartitionManager) LifecycleRequired(partitionID int32) bool {
 	return required != nil && required(partitionID)
 }
 
+// EnsureReplicatedLifecycle switches a partition of a cluster to lifecycle
+// mode once the cluster has committed that it requires the format, for the
+// event state and mutation calls on its leader. A partition that is already in
+// lifecycle mode, or not required to be, is left as it is.
+func (pm *PartitionManager) EnsureReplicatedLifecycle(p *Partition) error {
+	if p.eventIndex() != nil || !pm.config.ClusterEnabled || !pm.LifecycleRequired(p.ID) {
+		return nil
+	}
+	p.ReplicateMu.Lock()
+	defer p.ReplicateMu.Unlock()
+	return pm.EnableReplicatedLifecycle(p)
+}
+
 // rebuildLifecycleIndex rebuilds a partition's lifecycle index from its WAL,
 // after a snapshot has replaced the WAL. Nothing to do for a partition not in
 // lifecycle mode. The caller holds p.ReplicateMu.

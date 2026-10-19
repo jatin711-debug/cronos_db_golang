@@ -1,8 +1,9 @@
 # WAL retention, cancellation, and rescheduling
 
 Status: standalone implementation, the accepted-state index prerequisite,
-replica capability gating (step 1 of the replicated protocol) and the
-versioned append and snapshot transport (step 2) on `retention-and-cancel`. The opt-in implementation is limited to standalone nodes.
+replica capability gating (step 1 of the replicated protocol), the versioned
+append and snapshot transport (step 2) and quorum-accepted mutations on a
+replicated leader (step 3) on `retention-and-cancel`. The opt-in implementation is limited to standalone nodes.
 Cluster rollout is a separate, gated step.
 
 ## Problem and invariants
@@ -148,7 +149,9 @@ records. The cluster protocol still needs the following state and transitions:
    capability; a source refuses a receiver that cannot read its retained format.
    Empty probes, reconnects, replacement replicas, and bulk catch-up must obey
    the persisted requirement too.
-3. **Separate staged state from accepted state.** Serialize changes with the
+3. **Separate staged state from accepted state.** Implemented for mutations on
+   a replicated leader; see [Mutations on a replicated leader](#mutations-on-a-replicated-leader).
+   Serialize changes with the
    partition's append/replicate lock, fsync locally, and replicate in WAL order.
    A staged successor freezes delivery of its predecessor while its outcome is
    unresolved; it is not permission to prune the predecessor. The replacement
@@ -262,6 +265,38 @@ a partition of a cluster can switch while it runs, the dispatcher's lifecycle
 hooks are installed for every partition of a cluster; until the switch they
 pass every event through after one atomic load.
 
+### Mutations on a replicated leader
+
+`GetEventState`, `CancelEvent` and `RescheduleEvent` on a partition of a cluster
+are served by its leader; a follower answers `Unavailable` and writes nothing.
+The leader switches the partition to lifecycle mode on the first such call once
+the cluster has committed its requirement, and from then on replicates through
+`AppendLifecycle`; without the requirement the calls answer `FailedPrecondition`
+as on a node without `--event-lifecycle`. A mutation announces itself like a
+publish (`BeginPublish`), so that a leadership handoff waits for it.
+
+Under the partition's replication lock and then the delivery gate, the leader
+checks the request, appends the successor, fsyncs it and adds it to the index,
+which freezes the event it replaces. It releases the delivery gate, since the
+staged successor already keeps the predecessor from being delivered, and
+replicates the successor like a publish. Success is reported once the replicas
+the partition requires hold it, each of which fsyncs it before acknowledging.
+Otherwise the successor stays in the leader's log, held as unaccepted, and the
+call answers `Unavailable` with an unknown outcome. While it is unresolved the
+event is delivered in neither version, its state reads `Unavailable`, and
+another change is refused the same way. Catch-up that brings the successor to a
+quorum accepts it, and the unchanged retry then reports success without
+appending again; a new leader whose log lacks it removes it, and the retry
+appends it anew there.
+
+A cancellation releases the tenant's delivery credit when its call succeeds. A
+cancellation accepted later through catch-up does not, because the retry that
+reports it cannot tell whether the credit was released.
+
+How a newly promoted leader settles the tentative records it holds is step 4;
+until then, this is reachable only in tests: no build advertises
+`lifecycle-replication/1`, so no replicated partition can require the format.
+
 ### Snapshots of a log in lifecycle mode
 
 A snapshot request says which lifecycle record format the receiver reads. A
@@ -327,6 +362,14 @@ receiver which does not read the format and names it in the trailer, and a
 receiver that refuses without the requirement, switches before the install,
 and keeps the cancellation after it and after a restart. Thirteen negative
 controls, one per check, make them fail.
+
+Replicated mutation tests (`internal/api/replicated_lifecycle_test.go`) cover a
+cancellation accepted at quorum and held by both replicas, one whose outcome is
+unknown while the follower refuses appends (the event frozen, its state and
+further changes refused, no second append on the retry that succeeds after
+catch-up), a reschedule whose replacement is the active copy on both replicas,
+a follower that refuses changes, and a leader without the requirement. Five
+negative controls make them fail.
 
 ## Using the standalone implementation
 
