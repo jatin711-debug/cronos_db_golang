@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"os"
 	"path/filepath"
@@ -41,8 +42,10 @@ func (p *Partition) lifecycleError() error {
 	if !p.LifecycleEnabled() {
 		return status.Error(codes.FailedPrecondition, "event-lifecycle is disabled")
 	}
-	if p.replicated || p.followed {
-		return status.Error(codes.FailedPrecondition, "event-lifecycle requires a standalone partition")
+	if (p.replicated || p.followed) && (!p.IsLeader() || p.replQuorum.Load() == nil) {
+		// Mutations of a replicated partition are made, and its state is
+		// read, on its leader, where they are replicated like publishes.
+		return status.Errorf(codes.Unavailable, "this node does not lead partition %d; retry against its leader", p.ID)
 	}
 	if err := p.Wal.Failure(); err != nil {
 		return status.Error(codes.Unavailable, err.Error())
@@ -154,8 +157,22 @@ func (p *Partition) MutateEvent(ctx context.Context, req *types.EventMutationReq
 	if kind == lifecycle.Cancel && req.ScheduleTs != 0 {
 		return nil, status.Error(codes.InvalidArgument, "cancel schedule_ts must be zero")
 	}
+	replicated := p.replicated || p.followed
+	if replicated {
+		// A replicated leader appends and replicates in offset order under
+		// ReplicateMu, which is taken before lifecycleMu, as on followers.
+		p.ReplicateMu.Lock()
+		defer p.ReplicateMu.Unlock()
+	}
 	p.lifecycleMu.Lock()
-	defer p.lifecycleMu.Unlock()
+	gateHeld := true
+	releaseGate := func() {
+		if gateHeld {
+			gateHeld = false
+			p.lifecycleMu.Unlock()
+		}
+	}
+	defer releaseGate()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -194,6 +211,31 @@ func (p *Partition) MutateEvent(ctx context.Context, req *types.EventMutationReq
 	}
 	if err = p.appendLifecycle(replacement, e); err != nil {
 		return nil, status.Error(codes.Unavailable, err.Error())
+	}
+	if replicated {
+		// The successor is staged: it freezes the event it replaces, which is
+		// therefore no longer delivered, and is itself delivered only once a
+		// quorum holds it. Deliveries of other events may go on meanwhile.
+		releaseGate()
+		leader := p.replQuorum.Load()
+		if leader == nil {
+			p.HoldUnaccepted([]*types.Event{replacement}, false)
+			return nil, status.Errorf(codes.Unavailable, "partition %d lost its replication leader; the outcome of request %s is unknown, retry it unchanged", p.ID, req.RequestId)
+		}
+		if err := leader.Replicate([]*types.Event{replacement}); err != nil {
+			// In this leader's log but not on the replicas it needs. It is
+			// held there, and accepted if catch-up brings it to a quorum, or
+			// removed if another leader's log replaces this one.
+			p.HoldUnaccepted([]*types.Event{replacement}, false)
+			return nil, status.Errorf(codes.Unavailable, "request %s is in the leader's log but not yet on the replicas it needs (%v); its outcome is unknown, retry it unchanged", req.RequestId, err)
+		}
+		// Replication is in offset order: entries held after earlier failures
+		// are on the replicas now too.
+		if p.HasUnaccepted() {
+			if err := p.AcceptThrough(replacement.Offset - 1); err != nil {
+				slog.Warn("accepting entries before a replicated lifecycle record failed", "partition", p.ID, "through", replacement.Offset-1, "error", err)
+			}
+		}
 	}
 	if kind == lifecycle.Cancel && p.Dispatcher != nil && p.Dispatcher.OnDeliveryComplete != nil && e.Meta["tenant_id"] != "" {
 		// Cancellation is a final disposition, once per new durable command.
