@@ -8,6 +8,7 @@ name: release-binaries
 # It builds the source of the tag, with the script of the tag, so it works for
 # releases from the first one that has scripts/build-release-binaries.sh.
 # The image job tests and scans the exact local image it then publishes.
+# A manual run stages an image archive unless publish_image is explicitly set.
 on:
   release:
     types: [published]
@@ -17,6 +18,11 @@ on:
         description: Tag of the release to attach binaries to
         required: true
         type: string
+      publish_image:
+        description: Publish the tested image to Docker Hub instead of staging an archive
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -32,6 +38,14 @@ jobs:
     env:
       TAG: ${{ github.event.release.tag_name || inputs.tag }}
     steps:
+      - name: Require a draft release for preparation
+        if: github.event_name == 'workflow_dispatch' && !inputs.publish_image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" = true
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.release.tag_name || inputs.tag }}
@@ -128,11 +142,29 @@ jobs:
           output: release-image-scan.json
       - name: Test network faults and memory-limited restart on this image
         run: go test -tags acceptance -count=1 -timeout 40m -v -run 'TestNetworkPartitions|TestRestartInContainersWithABacklogLargerThanTheirMemory' ./tests/acceptance/
+      - name: Stage the tested image on the draft release
+        if: github.event_name == 'workflow_dispatch' && !inputs.publish_image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Preparation must not add assets to a published release.
+          test "$(gh release view "$TAG" --json isDraft --jq .isDraft)" = true
+          image="$IMAGE:${TAG#v}"
+          archive="cronos-db_${TAG}_linux_amd64_image.tar.gz"
+          docker tag "$CRONOS_IMAGE" "$image"
+          docker image inspect "$image" --format '{{.Id}}' > IMAGE_ID
+          docker save "$image" | gzip > "$archive"
+          sha256sum "$archive" > IMAGE_ARCHIVE_SHA256
+          gh release upload "$TAG" "$archive" IMAGE_ID IMAGE_ARCHIVE_SHA256 release-image-scan.json --clobber
       - uses: docker/login-action@v3
+        if: github.event_name == 'release' || inputs.publish_image
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Push the tested image and capture its registry digest
+        if: github.event_name == 'release' || inputs.publish_image
         id: pushed
         shell: bash
         run: |
@@ -146,18 +178,21 @@ jobs:
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
           printf '%s@%s\n' "$IMAGE" "$digest" > IMAGE_DIGEST
       - name: Sign provenance for the exact published digest
+        if: github.event_name == 'release' || inputs.publish_image
         uses: actions/attest@v4
         with:
           subject-name: docker.io/johnny711dock/cronos-db
           subject-digest: ${{ steps.pushed.outputs.digest }}
           push-to-registry: true
       - name: Give the attested image its release tag
+        if: github.event_name == 'release' || inputs.publish_image
         shell: bash
         run: |
           set -euo pipefail
           docker tag "$CRONOS_IMAGE" "$IMAGE:${TAG#v}"
           docker push "$IMAGE:${TAG#v}"
       - name: Attach image evidence to the release
+        if: github.event_name == 'release' || inputs.publish_image
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "$TAG" IMAGE_DIGEST release-image-scan.json --clobber
@@ -169,5 +204,7 @@ jobs:
           path: |
             release-image-scan.json
             IMAGE_DIGEST
+            IMAGE_ID
+            IMAGE_ARCHIVE_SHA256
             build/release-image-logs
           if-no-files-found: ignore

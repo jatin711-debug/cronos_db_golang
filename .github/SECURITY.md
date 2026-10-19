@@ -7,7 +7,7 @@ latest release is supported; there are no fixes for older ones.
 
 | Version | Supported          |
 | ------- | ------------------ |
-| Latest release (currently `v0.7.0`) and `main` | :white_check_mark: |
+| Latest published release and `main` | :white_check_mark: |
 | Older releases | :x: |
 
 ## Reporting a Vulnerability
