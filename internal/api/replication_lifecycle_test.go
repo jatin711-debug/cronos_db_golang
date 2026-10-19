@@ -85,7 +85,7 @@ func TestAppendLifecycle_RefusalsWriteNothing(t *testing.T) {
 	r.untouched("without a requirement source")
 
 	required := false
-	r.h.SetLifecycleRequirement(func(int32) bool { return required })
+	r.pm.SetLifecycleRequirement(func(int32) bool { return required })
 	_, err = r.sendLifecycle(partition.LifecycleFormat, 1, cancelBatch(t, 1))
 	wantCode(t, err, codes.FailedPrecondition, "while the partition does not require the format")
 	r.untouched("while the partition does not require the format")
@@ -116,7 +116,7 @@ func TestAppendLifecycle_RefusalsWriteNothing(t *testing.T) {
 func TestAppendLifecycle_SwitchesStoresAndIndexes(t *testing.T) {
 	dir := t.TempDir()
 	r := newClusterReplica(t, dir)
-	r.h.SetLifecycleRequirement(func(int32) bool { return true })
+	r.pm.SetLifecycleRequirement(func(int32) bool { return true })
 	resp, err := r.sendLifecycle(partition.LifecycleFormat, 1, cancelBatch(t, 1))
 	if err != nil || !resp.GetSuccess() {
 		t.Fatalf("lifecycle append: resp=%v err=%v", resp, err)
@@ -153,7 +153,7 @@ func TestAppendLifecycle_SwitchesStoresAndIndexes(t *testing.T) {
 func TestLifecycleDataNeedsTheFlagOutsideACluster(t *testing.T) {
 	dir := t.TempDir()
 	r := newClusterReplica(t, dir)
-	r.h.SetLifecycleRequirement(func(int32) bool { return true })
+	r.pm.SetLifecycleRequirement(func(int32) bool { return true })
 	if _, err := r.sendLifecycle(partition.LifecycleFormat, 1, cancelBatch(t, 1)); err != nil {
 		t.Fatal(err)
 	}
@@ -164,5 +164,71 @@ func TestLifecycleDataNeedsTheFlagOutsideACluster(t *testing.T) {
 	defer pm.Close()
 	if err := pm.CreatePartition(0, "orders"); err == nil || !strings.Contains(err.Error(), "--event-lifecycle") {
 		t.Fatalf("opening lifecycle data standalone without the flag: err = %v", err)
+	}
+}
+
+// lifecycleSource is a replica in lifecycle mode holding an event and its
+// cancellation, serving snapshots.
+func lifecycleSource(t *testing.T) (*replicaLog, string) {
+	t.Helper()
+	source := newClusterReplica(t, t.TempDir())
+	source.pm.SetLifecycleRequirement(func(int32) bool { return true })
+	if _, err := source.sendLifecycle(partition.LifecycleFormat, 1, cancelBatch(t, 1)); err != nil {
+		t.Fatal(err)
+	}
+	return source, serveReplicationService(t, source.h)
+}
+
+// A snapshot of a log in lifecycle mode goes only to a receiver that says it
+// reads the format, and says the format in its trailer.
+func TestSnapshot_LifecycleLogOnlyToAReceiverThatReadsIt(t *testing.T) {
+	source, _ := lifecycleSource(t)
+	stream := &mockReplicationSnapshotStream{ctx: context.Background()}
+	err := source.h.Snapshot(&types.ReplicationSnapshotRequest{PartitionId: 0, SupportsDeadLetters: true}, stream)
+	wantCode(t, err, codes.FailedPrecondition, "snapshot for a receiver that does not read lifecycle records")
+	if len(stream.chunks) != 0 {
+		t.Fatalf("%d chunks were sent before the refusal", len(stream.chunks))
+	}
+
+	stream = &mockReplicationSnapshotStream{ctx: context.Background()}
+	if err := source.h.Snapshot(&types.ReplicationSnapshotRequest{PartitionId: 0, SupportsDeadLetters: true, LifecycleFormat: partition.LifecycleFormat}, stream); err != nil {
+		t.Fatal(err)
+	}
+	last := stream.chunks[len(stream.chunks)-1].GetTrailer()
+	if last == nil || last.GetLifecycleFormat() != partition.LifecycleFormat {
+		t.Fatalf("trailer = %v, want one naming lifecycle format %d", last, partition.LifecycleFormat)
+	}
+}
+
+// A replica installs a snapshot of a log in lifecycle mode only where the
+// cluster has committed the partition's requirement. It switches to
+// lifecycle mode before the log is replaced and rebuilds its index from the
+// installed log, so the canceled event stays canceled, after a restart too.
+func TestSnapshot_LifecycleInstallSwitchesFirst(t *testing.T) {
+	_, addr := lifecycleSource(t)
+
+	refused := newClusterReplica(t, t.TempDir())
+	if err := refused.pm.SyncPartitionFromLeader(0, addr); err == nil {
+		t.Fatal("a lifecycle snapshot was installed without the partition's requirement")
+	}
+	refused.untouched("lifecycle snapshot without the requirement")
+
+	dir := t.TempDir()
+	r := newClusterReplica(t, dir)
+	r.pm.SetLifecycleRequirement(func(int32) bool { return true })
+	if err := r.pm.SyncPartitionFromLeader(0, addr); err != nil {
+		t.Fatal(err)
+	}
+	if !r.p.LifecycleEnabled() {
+		t.Fatal("the replica did not switch to lifecycle mode")
+	}
+	events := r.log()
+	if len(events) != 2 || r.p.ActiveEvent(events[0]) {
+		t.Fatalf("after the install: %d entries, original active=%v; want 2 and the original canceled", len(events), len(events) > 0 && r.p.ActiveEvent(events[0]))
+	}
+	r.stop()
+	again := newClusterReplica(t, dir)
+	if events := again.log(); !again.p.LifecycleEnabled() || len(events) != 2 || again.p.ActiveEvent(events[0]) {
+		t.Fatalf("after a restart: lifecycle mode=%v, %d entries; want lifecycle mode and the original canceled", again.p.LifecycleEnabled(), len(events))
 	}
 }
