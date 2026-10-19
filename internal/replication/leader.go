@@ -6,6 +6,7 @@ package replication
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"log"
@@ -14,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jatin711-debug/cronos_db_golang/internal/lifecycle"
 	"github.com/jatin711-debug/cronos_db_golang/internal/storage"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
@@ -71,6 +73,9 @@ type Leader struct {
 	// newerTerm is the term of a newer leader that a follower has named, 0
 	// while none has. See noteNewerTerm.
 	newerTerm atomic.Int64
+	// lifecycleFormat is the lifecycle record format of the partition's log,
+	// 0 while it holds none. Set, every request goes through AppendLifecycle.
+	lifecycleFormat atomic.Uint32
 	// replicatedNext is one past the highest offset QuorumOffset has
 	// returned, 0 while it has returned none. See ReplicatedThrough.
 	replicatedNext atomic.Int64
@@ -604,10 +609,14 @@ func (l *Leader) appendToFollower(f *FollowerInfo, events []*types.Event, checks
 
 	ctx, cancel := context.WithTimeout(context.Background(), l.getReplicateTimeout())
 	defer cancel()
-	resp, err := client.Append(ctx, req)
+	resp, err := l.sendAppend(ctx, client, req)
 	if err != nil {
 		f.mu.Lock()
-		f.Connected = false
+		// A follower that does not implement AppendLifecycle answered, and its
+		// connection is fine; it cannot hold this log. Nothing was sent at all
+		// when a lifecycle record had no versioned append to go in.
+		refused := status.Code(err) == codes.Unimplemented || errors.Is(err, errLifecycleWithoutFormat)
+		f.Connected = refused && f.Connected
 		f.InSync = false
 		f.LastError = err
 		// A call that got no answer may have gone into a connection that
@@ -698,6 +707,33 @@ func (l *Leader) appendToFollower(f *FollowerInfo, events []*types.Event, checks
 		replicationLag.WithLabelValues(f.ID, fmt.Sprintf("%d", l.partitionID)).Set(float64(lag))
 	}
 	return nil
+}
+
+// SetLifecycleFormat marks the partition's log as one that may hold lifecycle
+// records of the given format. From then on every append, catch-up and probe
+// goes through AppendLifecycle, which a follower of an older build does not
+// have: it answers Unimplemented and receives nothing more of this log, not
+// even the ordinary events between the lifecycle records.
+func (l *Leader) SetLifecycleFormat(format uint32) {
+	l.lifecycleFormat.Store(format)
+}
+
+// errLifecycleWithoutFormat is the refusal to send a lifecycle record through
+// the plain append: a follower of an older build would store it as an event.
+var errLifecycleWithoutFormat = errors.New("lifecycle records in a log without a lifecycle format; refusing to send them through the plain append")
+
+// sendAppend sends one append request to a follower, through AppendLifecycle
+// when the partition's log has a lifecycle format.
+func (l *Leader) sendAppend(ctx context.Context, client types.ReplicationServiceClient, req *types.ReplicationAppendRequest) (*types.ReplicationAppendResponse, error) {
+	if format := l.lifecycleFormat.Load(); format > 0 {
+		return client.AppendLifecycle(ctx, &types.ReplicationLifecycleAppendRequest{LifecycleFormat: format, Append: req})
+	}
+	for _, e := range req.GetEvents() {
+		if lifecycle.HasReservedMeta(e) {
+			return nil, errLifecycleWithoutFormat
+		}
+	}
+	return client.Append(ctx, req)
 }
 
 // getPrevLogTerm returns the term of the log entry at the given offset, or 0

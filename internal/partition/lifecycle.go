@@ -16,7 +16,11 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-func (p *Partition) LifecycleEnabled() bool { return p.lifecycleIndex != nil }
+func (p *Partition) LifecycleEnabled() bool { return p.eventIndex() != nil }
+
+// eventIndex is the partition's lifecycle index, nil while the partition is
+// not in lifecycle mode.
+func (p *Partition) eventIndex() *lifecycle.Index { return p.lifecycleIdx.Load() }
 
 // WithActiveEvent checks and sends a replay record under the same gate as live
 // delivery. An event canceled between the cursor read and send is suppressed.
@@ -24,7 +28,7 @@ func (p *Partition) WithActiveEvent(e *types.Event, send func(*types.Event) erro
 	p.lifecycleMu.RLock()
 	defer p.lifecycleMu.RUnlock()
 	through := int64(math.MaxInt64)
-	if p.lifecycleIndex != nil {
+	if p.eventIndex() != nil {
 		through = p.DeliverableThrough()
 	}
 	if p.activeEventThrough(e, through) {
@@ -61,7 +65,7 @@ func (p *Partition) activeEventThrough(e *types.Event, through int64) bool {
 	if e == nil || e.Offset > through {
 		return false
 	}
-	if p.lifecycleIndex == nil {
+	if p.eventIndex() == nil {
 		if lifecycle.HasReservedMeta(e) {
 			err := fmt.Errorf("lifecycle WAL requires --event-lifecycle")
 			p.Wal.Fail(err)
@@ -70,7 +74,7 @@ func (p *Partition) activeEventThrough(e *types.Event, through int64) bool {
 		}
 		return true
 	}
-	active, err := p.lifecycleIndex.DeliverableThrough(e, through)
+	active, err := p.eventIndex().DeliverableThrough(e, through)
 	if err != nil {
 		p.Wal.Fail(fmt.Errorf("event lifecycle lookup: %w", err))
 		p.setReplayError(err)
@@ -90,7 +94,7 @@ func (p *Partition) lifecycleState(ref *types.EventReference) (*types.Event, *li
 		return nil, nil, status.Error(codes.Unavailable, err.Error())
 	}
 	offset := ref.Offset
-	if head, found, err := p.lifecycleIndex.Latest(ref); err != nil {
+	if head, found, err := p.eventIndex().Latest(ref); err != nil {
 		p.Wal.Fail(err)
 		return nil, nil, status.Error(codes.Unavailable, err.Error())
 	} else if found {
@@ -221,7 +225,7 @@ func (p *Partition) appendLifecycle(next, previous *types.Event) error {
 		p.Wal.Fail(err)
 		return err
 	}
-	if err := p.lifecycleIndex.Apply(next); err != nil {
+	if err := p.eventIndex().Apply(next); err != nil {
 		p.Wal.Fail(err)
 		return err
 	}

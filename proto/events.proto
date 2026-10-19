@@ -318,6 +318,18 @@ message ReplicationAppendRequest {
   int64 leader_log_end = 11;
 }
 
+// ReplicationLifecycleAppendRequest is an append for a partition that
+// requires the lifecycle format. Its records may include lifecycle records
+// (cancel, reschedule, relocate), which never travel in a plain
+// ReplicationAppendRequest: a receiver that predates them would store one as
+// an ordinary event, to be delivered.
+message ReplicationLifecycleAppendRequest {
+  // Version of the lifecycle record format of the batch. A receiver refuses a
+  // version it cannot read, before it changes anything.
+  uint32 lifecycle_format = 1;
+  ReplicationAppendRequest append = 2;
+}
+
 message ReplicationAppendResponse {
   bool success = 1;
   string error = 2;
@@ -789,6 +801,12 @@ service ConsumerGroupService {
 service ReplicationService {
   // Internal: Append batch from leader
   rpc Append(ReplicationAppendRequest) returns (ReplicationAppendResponse);
+
+  // Internal: Append batch from leader, for a partition that requires the
+  // lifecycle format. Lifecycle records travel only in this call. A build
+  // that predates it answers Unimplemented and writes nothing, and a receiver
+  // that cannot read the format refuses the whole request.
+  rpc AppendLifecycle(ReplicationLifecycleAppendRequest) returns (ReplicationAppendResponse);
 
   // Internal: Sync from leader
   rpc Sync(ReplicationSyncRequest) returns (stream ReplicationSyncResponse);

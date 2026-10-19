@@ -249,7 +249,7 @@ func (p *Partition) forgetBeyondLog(offset int64, why string) error {
 // returns how many entries went. The caller holds ReplicateMu and has
 // accepted the sender as leader.
 func (p *Partition) CutLog(offset int64) (int, error) {
-	if p.lifecycleIndex != nil {
+	if p.eventIndex() != nil {
 		p.lifecycleMu.Lock()
 		defer p.lifecycleMu.Unlock()
 	}
@@ -261,11 +261,11 @@ func (p *Partition) CutLog(offset int64) (int, error) {
 		return 0, err
 	}
 	removed, err := p.Wal.TruncateToOffset(offset)
-	if p.lifecycleIndex != nil {
+	if p.eventIndex() != nil {
 		// A suffix cut can reuse offsets for another term or identity. No
 		// lifecycle reader may observe heads from the previous WAL generation.
 		if err == nil {
-			err = p.lifecycleIndex.Rebuild(context.Background(), p.Wal)
+			err = p.eventIndex().Rebuild(context.Background(), p.Wal)
 		}
 		if err != nil {
 			p.Wal.Fail(err)

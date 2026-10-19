@@ -958,6 +958,7 @@ var ConsumerGroupService_ServiceDesc = grpc.ServiceDesc{
 
 const (
 	ReplicationService_Append_FullMethodName               = "/cronos_db.ReplicationService/Append"
+	ReplicationService_AppendLifecycle_FullMethodName      = "/cronos_db.ReplicationService/AppendLifecycle"
 	ReplicationService_Sync_FullMethodName                 = "/cronos_db.ReplicationService/Sync"
 	ReplicationService_Snapshot_FullMethodName             = "/cronos_db.ReplicationService/Snapshot"
 	ReplicationService_Position_FullMethodName             = "/cronos_db.ReplicationService/Position"
@@ -971,6 +972,11 @@ const (
 type ReplicationServiceClient interface {
 	// Internal: Append batch from leader
 	Append(ctx context.Context, in *ReplicationAppendRequest, opts ...grpc.CallOption) (*ReplicationAppendResponse, error)
+	// Internal: Append batch from leader, for a partition that requires the
+	// lifecycle format. Lifecycle records travel only in this call. A build
+	// that predates it answers Unimplemented and writes nothing, and a receiver
+	// that cannot read the format refuses the whole request.
+	AppendLifecycle(ctx context.Context, in *ReplicationLifecycleAppendRequest, opts ...grpc.CallOption) (*ReplicationAppendResponse, error)
 	// Internal: Sync from leader
 	Sync(ctx context.Context, in *ReplicationSyncRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ReplicationSyncResponse], error)
 	// Internal: Bulk snapshot install from leader
@@ -995,6 +1001,16 @@ func (c *replicationServiceClient) Append(ctx context.Context, in *ReplicationAp
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ReplicationAppendResponse)
 	err := c.cc.Invoke(ctx, ReplicationService_Append_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *replicationServiceClient) AppendLifecycle(ctx context.Context, in *ReplicationLifecycleAppendRequest, opts ...grpc.CallOption) (*ReplicationAppendResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReplicationAppendResponse)
+	err := c.cc.Invoke(ctx, ReplicationService_AppendLifecycle_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1075,6 +1091,11 @@ func (c *replicationServiceClient) SyncConsumerProgress(ctx context.Context, in 
 type ReplicationServiceServer interface {
 	// Internal: Append batch from leader
 	Append(context.Context, *ReplicationAppendRequest) (*ReplicationAppendResponse, error)
+	// Internal: Append batch from leader, for a partition that requires the
+	// lifecycle format. Lifecycle records travel only in this call. A build
+	// that predates it answers Unimplemented and writes nothing, and a receiver
+	// that cannot read the format refuses the whole request.
+	AppendLifecycle(context.Context, *ReplicationLifecycleAppendRequest) (*ReplicationAppendResponse, error)
 	// Internal: Sync from leader
 	Sync(*ReplicationSyncRequest, grpc.ServerStreamingServer[ReplicationSyncResponse]) error
 	// Internal: Bulk snapshot install from leader
@@ -1097,6 +1118,9 @@ type UnimplementedReplicationServiceServer struct{}
 
 func (UnimplementedReplicationServiceServer) Append(context.Context, *ReplicationAppendRequest) (*ReplicationAppendResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Append not implemented")
+}
+func (UnimplementedReplicationServiceServer) AppendLifecycle(context.Context, *ReplicationLifecycleAppendRequest) (*ReplicationAppendResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method AppendLifecycle not implemented")
 }
 func (UnimplementedReplicationServiceServer) Sync(*ReplicationSyncRequest, grpc.ServerStreamingServer[ReplicationSyncResponse]) error {
 	return status.Errorf(codes.Unimplemented, "method Sync not implemented")
@@ -1148,6 +1172,24 @@ func _ReplicationService_Append_Handler(srv interface{}, ctx context.Context, de
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ReplicationServiceServer).Append(ctx, req.(*ReplicationAppendRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ReplicationService_AppendLifecycle_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReplicationLifecycleAppendRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ReplicationServiceServer).AppendLifecycle(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ReplicationService_AppendLifecycle_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ReplicationServiceServer).AppendLifecycle(ctx, req.(*ReplicationLifecycleAppendRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1238,6 +1280,10 @@ var ReplicationService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Append",
 			Handler:    _ReplicationService_Append_Handler,
+		},
+		{
+			MethodName: "AppendLifecycle",
+			Handler:    _ReplicationService_AppendLifecycle_Handler,
 		},
 		{
 			MethodName: "Position",

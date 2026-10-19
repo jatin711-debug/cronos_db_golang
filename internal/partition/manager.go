@@ -130,8 +130,10 @@ type Partition struct {
 	// replQuorum is ReplLeader for readers that do not hold the manager lock.
 	replQuorum atomic.Pointer[replication.Leader]
 	// lifecycleMu gates eligibility through stream sends against durable mutations.
-	lifecycleMu     sync.RWMutex
-	lifecycleIndex  *lifecycle.Index
+	lifecycleMu sync.RWMutex
+	// lifecycleIdx is set once, when the partition opens in lifecycle mode or
+	// a follower switches to it (EnableReplicatedLifecycle), and never unset.
+	lifecycleIdx    atomic.Pointer[lifecycle.Index]
 	relocationBytes int64
 	diskAdmission   func() error
 }
@@ -401,13 +403,20 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 		return fmt.Errorf("event-lifecycle requires standalone RF=1 without a change feed or experimental features")
 	}
 	marker := filepath.Join(pm.config.DataDir, "partitions", fmt.Sprint(partitionID), lifecycle.Marker)
+	lifecycleData := false
 	if format, err := os.ReadFile(marker); err == nil {
-		if !pm.config.EventLifecycle {
+		// In a cluster a partition is put into lifecycle mode when it comes to
+		// require the format (EnableReplicatedLifecycle), not by the flag.
+		if !pm.config.EventLifecycle && !pm.config.ClusterEnabled {
 			return fmt.Errorf("partition %d contains lifecycle data; --event-lifecycle is required", partitionID)
 		}
 		if string(format) != "1\n" {
 			return fmt.Errorf("partition %d has an unsupported lifecycle format", partitionID)
 		}
+		if err := pm.replicatedLifecycleAllowed(); pm.config.ClusterEnabled && err != nil {
+			return fmt.Errorf("partition %d contains lifecycle data: %w", partitionID, err)
+		}
+		lifecycleData = true
 	} else if !os.IsNotExist(err) {
 		return err
 	}
@@ -454,7 +463,7 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 		return fmt.Errorf("create WAL: %w", err)
 	}
 	var eventIndex *lifecycle.Index
-	if pm.config.EventLifecycle {
+	if pm.config.EventLifecycle || lifecycleData {
 		eventIndex, err = lifecycle.Open(dataDir, pm.pebbleCache)
 		if err != nil {
 			wal.Close()
@@ -569,7 +578,6 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 
 	// Create partition
 	partition := &Partition{
-		lifecycleIndex:  eventIndex,
 		relocationBytes: pm.config.WALRelocationBytes,
 		diskAdmission:   pm.DiskAdmission,
 		replicated:      pm.config.ClusterEnabled || pm.config.ReplicationFactor > 1,
@@ -599,10 +607,30 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 		return err
 	}
 	dispatcher.DeliverableThrough = partition.DeliverableThrough
-	if eventIndex != nil {
-		dispatcher.LockEvents = func() func() { partition.lifecycleMu.RLock(); return partition.lifecycleMu.RUnlock }
-		dispatcher.EventEligible = func(e *types.Event) bool { return e.ScheduleTs <= time.Now().UnixMilli() && partition.ActiveEvent(e) }
-		dispatcher.PublicEvent = lifecycle.Public
+	partition.lifecycleIdx.Store(eventIndex)
+	if eventIndex != nil || pm.config.ClusterEnabled {
+		// A partition of a cluster can switch to lifecycle mode while it runs
+		// (EnableReplicatedLifecycle), so its hooks are installed from the
+		// start and pass every event through until it does.
+		dispatcher.LockEvents = func() func() {
+			if partition.eventIndex() == nil {
+				return func() {}
+			}
+			partition.lifecycleMu.RLock()
+			return partition.lifecycleMu.RUnlock
+		}
+		dispatcher.EventEligible = func(e *types.Event) bool {
+			if partition.eventIndex() == nil {
+				return true
+			}
+			return e.ScheduleTs <= time.Now().UnixMilli() && partition.ActiveEvent(e)
+		}
+		dispatcher.PublicEvent = func(e *types.Event) *types.Event {
+			if partition.eventIndex() == nil {
+				return e
+			}
+			return lifecycle.Public(e)
+		}
 	}
 
 	if data, err := os.ReadFile(dataDir + "/epoch.json"); err == nil {
@@ -1078,7 +1106,7 @@ func (pm *PartitionManager) recoverDedupFromWAL(partition *Partition) (retErr er
 		from = events[len(events)-1].Offset + 1
 		for _, ev := range events {
 			if lifecycle.HasReservedMeta(ev) {
-				if partition.lifecycleIndex == nil {
+				if partition.eventIndex() == nil {
 					return fmt.Errorf("lifecycle WAL requires --event-lifecycle")
 				}
 				// A durable replacement proves the logical publish existed. Seed
@@ -1419,8 +1447,8 @@ func stopPartition(partition *Partition) error {
 	}
 
 	// Flush and close WAL
-	if partition.lifecycleIndex != nil {
-		if err := partition.lifecycleIndex.Close(); err != nil {
+	if partition.eventIndex() != nil {
+		if err := partition.eventIndex().Close(); err != nil {
 			return fmt.Errorf("close lifecycle index: %w", err)
 		}
 	}
@@ -1737,6 +1765,10 @@ func (pm *PartitionManager) PromoteToLeader(partitionID int32, epoch int64) erro
 	leader := replication.NewLeader(partitionID, int32(pm.config.ReplicationBatchSize), 0, partition.Wal, pm.config.MinInSyncReplicas, pm.nodeID, pm.replicationTLSConfig())
 	leader.SetReplicateTimeout(pm.config.ReplicationTimeout)
 	leader.SetEpoch(epoch) // advertise the real cluster epoch on the wire, not the default 1
+	if partition.eventIndex() != nil {
+		// Lifecycle records go to followers only through the versioned append.
+		leader.SetLifecycleFormat(LifecycleFormat)
+	}
 	// Followers receive this group progress so a failover does not redeliver
 	// what consumers already finished.
 	consumerGroup := partition.ConsumerGroup
