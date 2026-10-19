@@ -21,6 +21,7 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/internal/delivery"
 	"github.com/jatin711-debug/cronos_db_golang/internal/lifecycle"
 	"github.com/jatin711-debug/cronos_db_golang/internal/logcontrol"
+	"github.com/jatin711-debug/cronos_db_golang/internal/recoverystate"
 	"github.com/jatin711-debug/cronos_db_golang/internal/replication"
 	"github.com/jatin711-debug/cronos_db_golang/internal/scheduler"
 	"github.com/jatin711-debug/cronos_db_golang/internal/storage"
@@ -417,8 +418,8 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 	} else if !os.IsNotExist(err) {
 		return err
 	}
-	if pm.config.EventLifecycle && (pm.config.ClusterEnabled || pm.config.ReplicationFactor != 1 || pm.changeFeed != nil || pm.config.ExperimentalFeatures) {
-		return fmt.Errorf("event-lifecycle requires standalone RF=1 without a change feed or experimental features")
+	if pm.config.EventLifecycle && ((!pm.config.ClusterEnabled && pm.config.ReplicationFactor != 1) || (pm.config.ClusterEnabled && pm.config.ReplicationFactor < 2) || pm.changeFeed != nil || pm.config.ExperimentalFeatures) {
+		return fmt.Errorf("event-lifecycle requires standalone RF=1 or a replicated cluster, without a change feed or experimental features")
 	}
 	marker := filepath.Join(pm.config.DataDir, "partitions", fmt.Sprint(partitionID), lifecycle.Marker)
 	lifecycleData := false
@@ -481,7 +482,7 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 		return fmt.Errorf("create WAL: %w", err)
 	}
 	var eventIndex *lifecycle.Index
-	if pm.config.EventLifecycle || lifecycleData {
+	if (pm.config.EventLifecycle && !pm.config.ClusterEnabled) || lifecycleData {
 		eventIndex, err = lifecycle.Open(dataDir, pm.pebbleCache)
 		if err != nil {
 			wal.Close()
@@ -664,7 +665,10 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 	} else if !os.IsNotExist(err) {
 		return err
 	}
-	if eventIndex != nil {
+	if err := partition.applyRecoverySnapshot(); err != nil {
+		return fmt.Errorf("recover snapshot state: %w", err)
+	}
+	if eventIndex != nil && !partition.replicated {
 		// A lost periodic-fsync tail can reuse offsets after restart. Persist
 		// a new term before assigning handles, even for the same message ID.
 		generation := partition.Epoch()
@@ -1696,6 +1700,9 @@ func (pm *PartitionManager) SyncPartitionFromLeader(partitionID int32, leaderAdd
 			return partition.enableTermStart()
 		})
 	}
+	if partition.LifecycleEnabled() || (pm.lifecycleRequired != nil && pm.lifecycleRequired(partitionID)) {
+		partition.Follower.SetRecoveryHook(recoverystate.Format, partition.applyRecoverySnapshot)
+	}
 	pm.mu.Unlock()
 
 	// Perform bulk snapshot install.
@@ -1753,6 +1760,11 @@ func (pm *PartitionManager) PromoteToLeader(partitionID int32, epoch int64) erro
 	}
 	if pm.termStartRequired != nil && pm.termStartRequired(partitionID) {
 		if err := partition.enableTermStart(); err != nil {
+			return err
+		}
+	}
+	if pm.lifecycleRequired != nil && pm.lifecycleRequired(partitionID) {
+		if err := pm.EnableReplicatedLifecycle(partition); err != nil {
 			return err
 		}
 	}

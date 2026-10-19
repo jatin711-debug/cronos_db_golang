@@ -187,6 +187,16 @@ func TestLifecycleRestartAndBackupRebuild(t *testing.T) {
 			if _, err = p.MutateEvent(context.Background(), cancelReq, lifecycle.Cancel); err != nil {
 				t.Fatal(err)
 			}
+			done := appendMaintenanceEvent(t, p, "finished", "a", time.Now().Add(-time.Hour), 32)
+			if err := p.ConsumerGroup.CreateGroup("workers", "a", []int32{0}); err != nil {
+				t.Fatal(err)
+			}
+			if err := p.DLQ.Add(done, "failed-delivery", 3, "handler failed", "workers"); err != nil {
+				t.Fatal(err)
+			}
+			if err := p.ConsumerGroup.CommitDelivery("workers", 0, []*types.Event{done}); err != nil {
+				t.Fatal(err)
+			}
 			backup := t.TempDir()
 			if err = pm.Backup(backup); err != nil {
 				t.Fatal(err)
@@ -222,8 +232,7 @@ func TestLifecycleRestartAndBackupRebuild(t *testing.T) {
 			blocked.Close()
 			cfg.EventLifecycle = true
 			cfg.DataDir = t.TempDir()
-			restore := filepath.Join(cfg.DataDir, "partitions", "0")
-			if err = storage.RestoreWAL(filepath.Join(backup, "partitions", "0"), restore); err != nil {
+			if _, err = storage.RestoreBackup(backup, cfg.DataDir, storage.RestoreOptions{EncryptionKeyFile: cfg.EncryptionKeyFile}); err != nil {
 				t.Fatal(err)
 			}
 			pm, p = lifecyclePartition(t, cfg)
@@ -233,6 +242,12 @@ func TestLifecycleRestartAndBackupRebuild(t *testing.T) {
 			}
 			if canceledState, err := p.EventState(cancelReq.Reference); err != nil || !canceledState.GetCanceled() || p.ActiveEvent(canceled) {
 				t.Fatalf("cancellation did not survive backup: %v %v", canceledState, err)
+			}
+			if !p.ConsumerGroup.IsCompleted("workers", 0, done.Offset) || p.ConsumerGroup.IsCompleted("workers", 0, state.CurrentOffset) {
+				t.Fatal("backup recovery lost consumer progress or completed pending work")
+			}
+			if entries := p.DLQ.GetByPartition(0); len(entries) != 1 || entries[0].Event.MessageId != done.MessageId {
+				t.Fatal("backup recovery lost the dead letter behind a completion")
 			}
 		})
 	}

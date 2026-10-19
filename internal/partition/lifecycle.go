@@ -20,6 +20,10 @@ import (
 
 func (p *Partition) LifecycleEnabled() bool { return p.eventIndex() != nil }
 
+// Replicated distinguishes cluster lifecycle partitions from standalone ones,
+// which must never accept replication traffic or election fences.
+func (p *Partition) Replicated() bool { return p.replicated || p.followed }
+
 // eventIndex is the partition's lifecycle index, nil while the partition is
 // not in lifecycle mode.
 func (p *Partition) eventIndex() *lifecycle.Index { return p.lifecycleIdx.Load() }

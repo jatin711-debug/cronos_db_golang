@@ -53,8 +53,13 @@ type replicatedLifecycle struct {
 }
 
 func newReplicatedLifecycle(t *testing.T, required bool) *replicatedLifecycle {
+	return newReplicatedLifecycleConfig(t, required, nil)
+}
+
+func newReplicatedLifecycleConfig(t *testing.T, required bool, configure func(*types.Config)) *replicatedLifecycle {
 	t.Helper()
-	leader, follower := newClusterReplica(t, t.TempDir()), newClusterReplica(t, t.TempDir())
+	leader := newConfiguredClusterReplica(t, t.TempDir(), "leader", configure)
+	follower := newConfiguredClusterReplica(t, t.TempDir(), "follower", configure)
 	for _, r := range []*replicaLog{leader, follower} {
 		r.pm.SetLifecycleRequirement(func(int32) bool { return required })
 		r.pm.SetTermStartRequirement(func(int32) bool { return required })

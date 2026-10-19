@@ -9,7 +9,9 @@ import (
 	"sort"
 	"time"
 
+	"github.com/jatin711-debug/cronos_db_golang/internal/lifecycle"
 	"github.com/jatin711-debug/cronos_db_golang/internal/logcontrol"
+	"github.com/jatin711-debug/cronos_db_golang/internal/recoverystate"
 	"github.com/jatin711-debug/cronos_db_golang/internal/storage"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 )
@@ -52,6 +54,28 @@ func (pm *PartitionManager) Backup(dest string) error {
 	if len(partitions) == 0 {
 		return fmt.Errorf("no loaded partitions to back up")
 	}
+	// Format switches and replicated lifecycle changes use the same locks.
+	// Their markers, state pages and WAL cut must describe one generation.
+	for _, p := range partitions {
+		p.ReplicateMu.Lock()
+		if !p.Replicated() {
+			p.lifecycleMu.Lock()
+		}
+	}
+	locked := true
+	unlock := func() {
+		for i := len(partitions) - 1; i >= 0; i-- {
+			if !partitions[i].Replicated() {
+				partitions[i].lifecycleMu.Unlock()
+			}
+			partitions[i].ReplicateMu.Unlock()
+		}
+	}
+	defer func() {
+		if locked {
+			unlock()
+		}
+	}()
 
 	manifest := storage.BackupManifest{Version: storage.BackupVersionPartition, Scope: "partition", Created: time.Now().UTC(), NodeID: pm.nodeID}
 	if pm.config.EncryptionEnabled && pm.config.EncryptionKeyFile != "" {
@@ -79,6 +103,24 @@ func (pm *PartitionManager) Backup(dest string) error {
 		return fmt.Errorf("cut partition logs: %w", err)
 	}
 	manifest.CutAt = time.Now().UTC()
+	for i, p := range partitions {
+		if p.LifecycleEnabled() {
+			if err := os.MkdirAll(filepath.Join(dirs[i], "segments"), 0700); err != nil {
+				for _, cut := range cuts {
+					cut.Release()
+				}
+				return err
+			}
+			if err := p.WriteRecoverySnapshot(filepath.Join(dirs[i], "segments", recoverystate.Filename), cuts[i].LastOffset()); err != nil {
+				for _, cut := range cuts {
+					cut.Release()
+				}
+				return err
+			}
+		}
+	}
+	unlock()
+	locked = false
 	for i, cut := range cuts {
 		entry := &manifest.Partitions[i]
 		if _, entry.LastOffset, err = cut.CopyTo(dirs[i]); err == nil {
@@ -138,6 +180,12 @@ func (p *Partition) backupStores(dir string) (storage.BackupPartition, error) {
 		entry.Components = append(entry.Components, "term_start")
 	case !os.IsNotExist(err):
 		return entry, fmt.Errorf("term-start format: %w", err)
+	}
+	switch err := copyIfPresent(filepath.Join(p.DataDir, lifecycle.Marker), filepath.Join(dir, lifecycle.Marker)); {
+	case err == nil:
+		entry.Components = append(entry.Components, "lifecycle")
+	case !os.IsNotExist(err):
+		return entry, fmt.Errorf("lifecycle format: %w", err)
 	}
 	return entry, nil
 }

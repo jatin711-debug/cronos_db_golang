@@ -200,6 +200,30 @@ func (g *GroupManager) CheckpointOffsetStore(destDir string) error {
 	return store.Checkpoint(destDir)
 }
 
+// SyncProgress makes imported recovery progress durable before its generation
+// marker is removed. Normal replication may still use asynchronous writes.
+func (g *GroupManager) SyncProgress() error {
+	g.mu.RLock()
+	store := g.offsetStore
+	g.mu.RUnlock()
+	if store == nil {
+		return nil
+	}
+	return store.syncProgress()
+}
+
+// ResetSnapshotProgress discards the previous generation's completion floor.
+// The partition must be quiescent until its new snapshot progress is imported.
+func (g *GroupManager) ResetSnapshotProgress(partitionID int32) error {
+	if _, err := g.ForgetCompletionsFrom(partitionID, 0); err != nil {
+		return err
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	delete(g.logStart, partitionID)
+	return nil
+}
+
 // JoinGroup adds or re-joins a consumer member to a group and rebalances assignments.
 // The group is auto-created when it does not yet exist.
 func (g *GroupManager) JoinGroup(groupID, memberID, address, topic string, partitionID int32) error {

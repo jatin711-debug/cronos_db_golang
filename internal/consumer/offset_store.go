@@ -117,6 +117,7 @@ func (s *OffsetStore) GetGroup(groupID string) (*types.ConsumerGroup, bool) {
 // metadata in Pebble with batched flushes for durability.
 type OffsetStore struct {
 	db          *pebble.DB
+	flushMu     sync.Mutex // serializes periodic flushes, checkpoints and recovery sync
 	dataDir     string
 	partitionID int32
 	dirty       atomic.Bool // Set on write, skip flush when clean
@@ -215,7 +216,9 @@ func (s *OffsetStore) startFlushLoop() {
 			case <-ticker.C:
 				// Only flush if something was written since last flush
 				if s.dirty.CompareAndSwap(true, false) {
-					s.flushPending()
+					if err := s.flushPending(); err != nil {
+						fmt.Printf("[OFFSET_STORE] Pending state flush failed: %v\n", err)
+					}
 				}
 			case <-s.quit:
 				return
@@ -308,7 +311,13 @@ func (s *OffsetStore) loadPersistedGroups() error {
 	return nil
 }
 
-func (s *OffsetStore) flushPending() {
+func (s *OffsetStore) flushPending() error {
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
+	return s.flushPendingLocked()
+}
+
+func (s *OffsetStore) flushPendingLocked() error {
 	s.pendingMu.Lock()
 	toFlush := s.pending
 	s.pending = make(map[offsetKey]int64)
@@ -329,7 +338,7 @@ func (s *OffsetStore) flushPending() {
 	s.groupMu.Unlock()
 
 	if len(toFlush) == 0 && len(toCommitIDs) == 0 && len(toCommitDels) == 0 && len(toGroups) == 0 && len(toGroupDels) == 0 {
-		return
+		return nil
 	}
 
 	batch := s.db.NewBatch()
@@ -359,12 +368,23 @@ func (s *OffsetStore) flushPending() {
 	}
 
 	if err := batch.Commit(pebble.NoSync); err != nil {
-		fmt.Printf("[OFFSET_STORE] Failed to commit batch: %v\n", err)
+		return fmt.Errorf("commit pending offset state: %w", err)
 	}
 
 	// Explicit flush moves data from Pebble's memtable/WAL to L0 and fsyncs.
 	// The 200ms flush loop above is the durability boundary, not each commit.
-	_ = s.db.Flush()
+	return s.db.Flush()
+}
+
+func (s *OffsetStore) syncProgress() error {
+	return s.withDB(func(db *pebble.DB) error {
+		s.flushMu.Lock()
+		defer s.flushMu.Unlock()
+		if err := s.flushPendingLocked(); err != nil {
+			return err
+		}
+		return db.LogData(nil, pebble.Sync)
+	})
 }
 
 // CommitOffset commits an offset for a consumer group.
@@ -545,7 +565,9 @@ func (s *OffsetStore) withDB(fn func(db *pebble.DB) error) error {
 // Pending in-memory commits are flushed before the checkpoint so it is
 // consistent with the latest committed offsets.
 func (s *OffsetStore) Checkpoint(destDir string) error {
-	s.flushPending()
+	if err := s.flushPending(); err != nil {
+		return err
+	}
 	if err := s.db.Checkpoint(destDir); err != nil {
 		return fmt.Errorf("offset checkpoint: %w", err)
 	}

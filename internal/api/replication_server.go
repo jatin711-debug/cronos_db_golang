@@ -18,6 +18,8 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/internal/lifecycle"
 	"github.com/jatin711-debug/cronos_db_golang/internal/logcontrol"
 	"github.com/jatin711-debug/cronos_db_golang/internal/partition"
+	"github.com/jatin711-debug/cronos_db_golang/internal/recoverystate"
+	"github.com/jatin711-debug/cronos_db_golang/internal/storage"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 
 	"google.golang.org/grpc"
@@ -382,7 +384,7 @@ func (h *ReplicationServiceHandler) Position(ctx context.Context, req *types.Rep
 		return nil, status.Error(codes.Unavailable, "partition manager not initialized")
 	}
 	position := h.partitionManager.LocalReplicaPosition(req.GetPartitionId())
-	if p, err := h.partitionManager.GetInternalPartition(req.GetPartitionId()); err == nil && p.LifecycleEnabled() {
+	if p, err := h.partitionManager.GetInternalPartition(req.GetPartitionId()); err == nil && p.LifecycleEnabled() && !p.Replicated() {
 		return nil, status.Error(codes.FailedPrecondition, "standalone lifecycle partitions do not accept election fences")
 	}
 	if fence := req.GetFenceEpoch(); fence > 0 {
@@ -438,7 +440,7 @@ func (h *ReplicationServiceHandler) SyncConsumerProgress(ctx context.Context, re
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "get partition %d: %v", req.GetPartitionId(), err)
 	}
-	if p.LifecycleEnabled() {
+	if p.LifecycleEnabled() && !p.Replicated() {
 		return nil, status.Error(codes.FailedPrecondition, "standalone lifecycle partitions do not accept replicated progress")
 	}
 
@@ -593,11 +595,22 @@ func (h *ReplicationServiceHandler) Snapshot(req *types.ReplicationSnapshotReque
 	if p.LifecycleEnabled() {
 		// The snapshot may hold lifecycle records; a receiver that cannot
 		// read them would install them as ordinary events.
+		if !p.Replicated() {
+			return status.Error(codes.FailedPrecondition, "standalone lifecycle partitions do not serve replica snapshots")
+		}
 		format = partition.LifecycleFormat
 		if req.GetLifecycleFormat() != format {
 			return status.Errorf(codes.FailedPrecondition, "the snapshot holds lifecycle records of format %d, which the receiver does not read (it reads %d)", format, req.GetLifecycleFormat())
 		}
+		if req.GetRecoveryFormat() != recoverystate.Format {
+			return status.Error(codes.FailedPrecondition, "lifecycle snapshots require a consistent recovery manifest")
+		}
 	}
+	recoveryFormat := req.GetRecoveryFormat()
+	if recoveryFormat != 0 && recoveryFormat != recoverystate.Format {
+		return status.Error(codes.FailedPrecondition, "unsupported recovery format")
+	}
+	cutEpoch := p.Epoch()
 
 	checkpointDir, err := os.MkdirTemp("", "cronos-snapshot-")
 	if err != nil {
@@ -605,6 +618,15 @@ func (h *ReplicationServiceHandler) Snapshot(req *types.ReplicationSnapshotReque
 	}
 	defer os.RemoveAll(checkpointDir)
 	checkpoint, lastOffset, err := p.Wal.Checkpoint(checkpointDir)
+	if err == nil && recoveryFormat > 0 {
+		path := filepath.Join(checkpointDir, "segments", recoverystate.Filename)
+		if err = p.WriteRecoverySnapshot(path, lastOffset); err == nil {
+			var info os.FileInfo
+			if info, err = os.Stat(path); err == nil {
+				checkpoint = append(checkpoint, storage.CheckpointFile{Path: path, Filename: recoverystate.Filename, Size: info.Size()})
+			}
+		}
+	}
 	p.ReplicateMu.Unlock()
 	cutLocked = false
 	if err != nil {
@@ -613,7 +635,7 @@ func (h *ReplicationServiceHandler) Snapshot(req *types.ReplicationSnapshotReque
 	// Capture the WAL first: every failed delivery already removed from
 	// that checkpoint's prefix must be durable in this journal. Apply the
 	// journal before installing the WAL, including for brand-new replicas.
-	if p.DLQ != nil && p.DLQ.Version() > 0 {
+	if recoveryFormat == 0 && p.DLQ != nil && p.DLQ.Version() > 0 {
 		if !req.GetSupportsDeadLetters() {
 			return status.Error(codes.FailedPrecondition, "snapshot requires a follower with dead-letter replication support")
 		}
@@ -738,9 +760,10 @@ func (h *ReplicationServiceHandler) Snapshot(req *types.ReplicationSnapshotReque
 			Trailer: &types.ReplicationSnapshotTrailer{
 				Success:         true,
 				LastOffset:      lastOffset,
-				Epoch:           p.Epoch(),
+				Epoch:           cutEpoch,
 				LifecycleFormat: format,
 				TermStartFormat: termFormat,
+				RecoveryFormat:  recoveryFormat,
 			},
 		},
 	})
