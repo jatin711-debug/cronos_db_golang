@@ -302,6 +302,9 @@ type PartitionManager struct {
 	splittingMu      sync.RWMutex         // protects splitting map
 	backpressureMgr  *BackpressureManager // memory + per-partition rate limits
 	fsyncCoalescer   *storage.FsyncCoalescer
+	// lifecycleRequired is the cluster's record of which partitions require
+	// the lifecycle format; nil outside a cluster. Guarded by mu.
+	lifecycleRequired func(partitionID int32) bool
 	// writable is the cluster's view of whether this node may accept publishes
 	// for a partition; nil means every led partition is writable.
 	writable func(partitionID int32) bool
@@ -1640,10 +1643,6 @@ func (pm *PartitionManager) SyncPartitionFromLeader(partitionID int32, leaderAdd
 	if !exists {
 		return fmt.Errorf("partition %d not found", partitionID)
 	}
-	if partition.LifecycleEnabled() {
-		return fmt.Errorf("lifecycle partitions cannot install replicated snapshots yet")
-	}
-
 	// Get or create follower
 	pm.mu.Lock()
 	if partition.Follower == nil {
@@ -1651,6 +1650,17 @@ func (pm *PartitionManager) SyncPartitionFromLeader(partitionID int32, leaderAdd
 		partition.Follower.SetDeadLetterSink(func(records []*types.DeadLetterRecord) error {
 			return partition.DLQ.ApplyReplica(partitionID, records)
 		})
+		// A snapshot of a log in lifecycle mode is installed only where the
+		// cluster has committed that the partition requires the format. The
+		// partition switches before the snapshot replaces its log, and its
+		// index is rebuilt from the installed log; both run under ReplicateMu,
+		// which is held for the install below.
+		partition.Follower.SetLifecycleHooks(LifecycleFormat, func() error {
+			if !pm.LifecycleRequired(partitionID) {
+				return fmt.Errorf("partition %d does not require the lifecycle format on this node", partitionID)
+			}
+			return pm.EnableReplicatedLifecycle(partition)
+		}, partition.rebuildLifecycleIndex)
 	}
 	pm.mu.Unlock()
 

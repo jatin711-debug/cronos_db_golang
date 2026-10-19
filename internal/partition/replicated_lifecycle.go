@@ -14,6 +14,37 @@ import (
 // writes and reads, and puts in the lifecycle marker of a partition.
 const LifecycleFormat = 1
 
+// SetLifecycleRequirement gives the manager the cluster's record of which
+// partitions require the lifecycle format.
+func (pm *PartitionManager) SetLifecycleRequirement(required func(partitionID int32) bool) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	pm.lifecycleRequired = required
+}
+
+// LifecycleRequired reports whether the cluster has committed, as this node
+// knows it, that a partition requires the lifecycle format. Lifecycle records
+// are taken from replication, in appends and in snapshots, only then.
+func (pm *PartitionManager) LifecycleRequired(partitionID int32) bool {
+	pm.mu.RLock()
+	required := pm.lifecycleRequired
+	pm.mu.RUnlock()
+	return required != nil && required(partitionID)
+}
+
+// rebuildLifecycleIndex rebuilds a partition's lifecycle index from its WAL,
+// after a snapshot has replaced the WAL. Nothing to do for a partition not in
+// lifecycle mode. The caller holds p.ReplicateMu.
+func (p *Partition) rebuildLifecycleIndex() error {
+	index := p.eventIndex()
+	if index == nil {
+		return nil
+	}
+	p.lifecycleMu.Lock()
+	defer p.lifecycleMu.Unlock()
+	return index.Rebuild(context.Background(), p.Wal)
+}
+
 // replicatedLifecycleAllowed reports why a partition of this node may not be
 // in lifecycle mode in a cluster, or nil. Change feeds and experimental
 // features have no contract for lifecycle records yet.

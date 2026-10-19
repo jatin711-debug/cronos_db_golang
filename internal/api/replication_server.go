@@ -28,15 +28,6 @@ import (
 type ReplicationServiceHandler struct {
 	types.UnimplementedReplicationServiceServer
 	partitionManager *partition.PartitionManager
-	// lifecycleRequired reports whether the cluster has committed that a
-	// partition requires the lifecycle format. nil outside a cluster.
-	lifecycleRequired func(partitionID int32) bool
-}
-
-// SetLifecycleRequirement gives the handler the cluster's record of which
-// partitions require the lifecycle format.
-func (h *ReplicationServiceHandler) SetLifecycleRequirement(required func(partitionID int32) bool) {
-	h.lifecycleRequired = required
 }
 
 // acceptLeader applies the fencing rules for a request from leaderID at term.
@@ -85,7 +76,7 @@ func (h *ReplicationServiceHandler) AppendLifecycle(ctx context.Context, lreq *t
 	if req == nil || req.GetPartitionId() < 0 {
 		return nil, status.Error(codes.InvalidArgument, "an append with a valid partition_id is required")
 	}
-	if h.lifecycleRequired == nil || !h.lifecycleRequired(req.GetPartitionId()) {
+	if h.partitionManager == nil || !h.partitionManager.LifecycleRequired(req.GetPartitionId()) {
 		return nil, status.Errorf(codes.FailedPrecondition, "partition %d does not require the lifecycle format on this node", req.GetPartitionId())
 	}
 	for _, event := range req.GetEvents() {
@@ -525,8 +516,14 @@ func (h *ReplicationServiceHandler) Snapshot(req *types.ReplicationSnapshotReque
 	if err != nil || p == nil || p.Wal == nil {
 		return status.Errorf(codes.NotFound, "partition %d not found", req.GetPartitionId())
 	}
+	format := uint32(0)
 	if p.LifecycleEnabled() {
-		return status.Error(codes.FailedPrecondition, "lifecycle snapshots require a versioned replication protocol")
+		// The snapshot may hold lifecycle records; a receiver that cannot
+		// read them would install them as ordinary events.
+		format = partition.LifecycleFormat
+		if req.GetLifecycleFormat() != format {
+			return status.Errorf(codes.FailedPrecondition, "the snapshot holds lifecycle records of format %d, which the receiver does not read (it reads %d)", format, req.GetLifecycleFormat())
+		}
 	}
 
 	checkpointDir, err := os.MkdirTemp("", "cronos-snapshot-")
@@ -664,9 +661,10 @@ func (h *ReplicationServiceHandler) Snapshot(req *types.ReplicationSnapshotReque
 	return stream.Send(&types.ReplicationSnapshotChunk{
 		Payload: &types.ReplicationSnapshotChunk_Trailer{
 			Trailer: &types.ReplicationSnapshotTrailer{
-				Success:    true,
-				LastOffset: lastOffset,
-				Epoch:      p.Epoch(),
+				Success:         true,
+				LastOffset:      lastOffset,
+				Epoch:           p.Epoch(),
+				LifecycleFormat: format,
 			},
 		},
 	})

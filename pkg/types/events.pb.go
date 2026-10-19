@@ -2762,8 +2762,12 @@ type ReplicationSnapshotRequest struct {
 	Have []*ReplicationSnapshotHeader `protobuf:"bytes,4,rep,name=have,proto3" json:"have,omitempty"`
 	// Receiver can durably apply dead-letter journal pages before the WAL.
 	SupportsDeadLetters bool `protobuf:"varint,5,opt,name=supports_dead_letters,json=supportsDeadLetters,proto3" json:"supports_dead_letters,omitempty"`
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
+	// Lifecycle record format the receiver reads and can install; 0 for none.
+	// A source whose partition is in lifecycle mode refuses a receiver that
+	// cannot read its format.
+	LifecycleFormat uint32 `protobuf:"varint,6,opt,name=lifecycle_format,json=lifecycleFormat,proto3" json:"lifecycle_format,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *ReplicationSnapshotRequest) Reset() {
@@ -2829,6 +2833,13 @@ func (x *ReplicationSnapshotRequest) GetSupportsDeadLetters() bool {
 		return x.SupportsDeadLetters
 	}
 	return false
+}
+
+func (x *ReplicationSnapshotRequest) GetLifecycleFormat() uint32 {
+	if x != nil {
+		return x.LifecycleFormat
+	}
+	return 0
 }
 
 type ReplicationSnapshotHeader struct {
@@ -2938,9 +2949,13 @@ type ReplicationSnapshotTrailer struct {
 	// Last replicated offset after the snapshot.
 	LastOffset int64 `protobuf:"varint,3,opt,name=last_offset,json=lastOffset,proto3" json:"last_offset,omitempty"`
 	// Leader epoch at snapshot time.
-	Epoch         int64 `protobuf:"varint,4,opt,name=epoch,proto3" json:"epoch,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Epoch int64 `protobuf:"varint,4,opt,name=epoch,proto3" json:"epoch,omitempty"`
+	// Lifecycle record format of the snapshot's log; 0 when its partition is
+	// not in lifecycle mode. The receiver switches to lifecycle mode before the
+	// snapshot replaces its log.
+	LifecycleFormat uint32 `protobuf:"varint,5,opt,name=lifecycle_format,json=lifecycleFormat,proto3" json:"lifecycle_format,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *ReplicationSnapshotTrailer) Reset() {
@@ -2997,6 +3012,13 @@ func (x *ReplicationSnapshotTrailer) GetLastOffset() int64 {
 func (x *ReplicationSnapshotTrailer) GetEpoch() int64 {
 	if x != nil {
 		return x.Epoch
+	}
+	return 0
+}
+
+func (x *ReplicationSnapshotTrailer) GetLifecycleFormat() uint32 {
+	if x != nil {
+		return x.LifecycleFormat
 	}
 	return 0
 }
@@ -5373,13 +5395,14 @@ const file_proto_events_proto_rawDesc = "" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x14\n" +
 	"\x05error\x18\x02 \x01(\tR\x05error\x12(\n" +
 	"\x06events\x18\x03 \x03(\v2\x10.cronos_db.EventR\x06events\x12\x19\n" +
-	"\bhas_more\x18\x04 \x01(\bR\ahasMore\"\xed\x01\n" +
+	"\bhas_more\x18\x04 \x01(\bR\ahasMore\"\x98\x02\n" +
 	"\x1aReplicationSnapshotRequest\x12!\n" +
 	"\fpartition_id\x18\x01 \x01(\x05R\vpartitionId\x12!\n" +
 	"\fstart_offset\x18\x02 \x01(\x03R\vstartOffset\x12\x1b\n" +
 	"\tmax_bytes\x18\x03 \x01(\x03R\bmaxBytes\x128\n" +
 	"\x04have\x18\x04 \x03(\v2$.cronos_db.ReplicationSnapshotHeaderR\x04have\x122\n" +
-	"\x15supports_dead_letters\x18\x05 \x01(\bR\x13supportsDeadLetters\"\xdf\x01\n" +
+	"\x15supports_dead_letters\x18\x05 \x01(\bR\x13supportsDeadLetters\x12)\n" +
+	"\x10lifecycle_format\x18\x06 \x01(\rR\x0flifecycleFormat\"\xdf\x01\n" +
 	"\x19ReplicationSnapshotHeader\x12\x1a\n" +
 	"\bfilename\x18\x01 \x01(\tR\bfilename\x12!\n" +
 	"\ffirst_offset\x18\x02 \x01(\x03R\vfirstOffset\x12\x1f\n" +
@@ -5388,13 +5411,14 @@ const file_proto_events_proto_rawDesc = "" +
 	"\tfile_size\x18\x04 \x01(\x03R\bfileSize\x12\x14\n" +
 	"\x05crc32\x18\x05 \x01(\rR\x05crc32\x12\x19\n" +
 	"\bis_index\x18\x06 \x01(\bR\aisIndex\x12\x14\n" +
-	"\x05reuse\x18\a \x01(\bR\x05reuse\"\x83\x01\n" +
+	"\x05reuse\x18\a \x01(\bR\x05reuse\"\xae\x01\n" +
 	"\x1aReplicationSnapshotTrailer\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x14\n" +
 	"\x05error\x18\x02 \x01(\tR\x05error\x12\x1f\n" +
 	"\vlast_offset\x18\x03 \x01(\x03R\n" +
 	"lastOffset\x12\x14\n" +
-	"\x05epoch\x18\x04 \x01(\x03R\x05epoch\"m\n" +
+	"\x05epoch\x18\x04 \x01(\x03R\x05epoch\x12)\n" +
+	"\x10lifecycle_format\x18\x05 \x01(\rR\x0flifecycleFormat\"m\n" +
 	"\x1eReplicationSnapshotDeadLetters\x125\n" +
 	"\arecords\x18\x01 \x03(\v2\x1b.cronos_db.DeadLetterRecordR\arecords\x12\x14\n" +
 	"\x05epoch\x18\x02 \x01(\x03R\x05epoch\"\x8e\x02\n" +

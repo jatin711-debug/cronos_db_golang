@@ -2,7 +2,7 @@
 
 Status: standalone implementation, the accepted-state index prerequisite,
 replica capability gating (step 1 of the replicated protocol) and the
-versioned append path (step 2, without snapshots) on `retention-and-cancel`. The opt-in implementation is limited to standalone nodes.
+versioned append and snapshot transport (step 2) on `retention-and-cancel`. The opt-in implementation is limited to standalone nodes.
 Cluster rollout is a separate, gated step.
 
 ## Problem and invariants
@@ -138,9 +138,10 @@ records. The cluster protocol still needs the following state and transitions:
    just the currently connected quorum would leave an assigned older replica
    unable to catch up and potentially eligible for leadership. Enabling the
    format is a one-way operation for that partition, not a per-request hint.
-2. **Append through a dedicated versioned RPC.** The append path is
-   implemented; see [Versioned append](#versioned-append). Snapshots are not
-   yet. Normal catch-up must select it
+2. **Append through a dedicated versioned RPC.** Implemented, with the
+   snapshot capability; see [Versioned append](#versioned-append) and
+   [Snapshots of a log in lifecycle mode](#snapshots-of-a-log-in-lifecycle-mode).
+   Normal catch-up must select it
    whenever a batch contains lifecycle records. The receiver validates the
    version and envelope before changing the WAL. A legacy receiver returns
    `Unimplemented` without writing anything. Snapshot requests also carry a
@@ -261,8 +262,23 @@ a partition of a cluster can switch while it runs, the dispatcher's lifecycle
 hooks are installed for every partition of a cluster; until the switch they
 pass every event through after one atomic load.
 
-The snapshot part of step 2 is not implemented: a partition in lifecycle mode
-still refuses to serve or install a snapshot.
+### Snapshots of a log in lifecycle mode
+
+A snapshot request says which lifecycle record format the receiver reads. A
+source whose partition is in lifecycle mode refuses a receiver that does not
+read its format, before it sends anything, and names the format in the
+snapshot's trailer. The receiver installs such a snapshot only when the cluster
+has committed the partition's requirement as it knows it. It switches the
+partition to lifecycle mode, marker first, before the snapshot replaces its log,
+and rebuilds the index from the installed log afterwards. A crash between the
+two leaves a partition that reopens in lifecycle mode and rebuilds its index
+from whichever log generation is complete. A receiver already in lifecycle mode
+rebuilds its index after any snapshot, since the index described the log that
+was replaced.
+
+This is the transport only. Which tentative records a snapshot's source had
+accepted, and a manifest that names that boundary together with consumer
+progress and dead letters, are step 7.
 
 Before enabling this protocol, fault tests must cover leader death before and
 after quorum, lost success replies, an unaccepted replacement becoming due,
@@ -306,8 +322,11 @@ partition), the switch, storage and indexing of a cancellation, refusal of the
 plain append afterwards, reopening in lifecycle mode after a restart, refusal of
 lifecycle data by a standalone node without the flag, a leader that uses only
 `AppendLifecycle`, refuses lifecycle records without a format, and sends nothing
-to a follower that lacks the call. Eight negative controls, one per check, make
-them fail.
+to a follower that lacks the call. Snapshot tests cover a source that refuses a
+receiver which does not read the format and names it in the trailer, and a
+receiver that refuses without the requirement, switches before the install,
+and keeps the cancellation after it and after a restart. Thirteen negative
+controls, one per check, make them fail.
 
 ## Using the standalone implementation
 
