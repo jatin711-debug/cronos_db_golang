@@ -66,6 +66,8 @@ func (pm *PartitionManager) replicatedLifecycleAllowed() error {
 	switch {
 	case !pm.config.ClusterEnabled:
 		return fmt.Errorf("replicated lifecycle mode needs cluster mode")
+	case pm.config.ReplicationFactor < 2 || pm.config.MinInSyncReplicas < pm.config.ReplicationFactor/2+1:
+		return fmt.Errorf("replicated lifecycle mode requires majority acknowledgements")
 	case pm.changeFeed != nil:
 		return fmt.Errorf("lifecycle records are not supported with a change feed")
 	case pm.config.ExperimentalFeatures:

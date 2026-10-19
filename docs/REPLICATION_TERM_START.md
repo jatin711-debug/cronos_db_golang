@@ -47,9 +47,9 @@ including its old-term limitation. Mixed clusters do not receive new records.
 After agreement, reconciliation switches the leader and persists
 `term-start.version` before its first control append. Downgrading a required
 partition or a voter to a build that ignores requirements is unsupported.
-Replicated lifecycle mutations additionally require this commit protocol;
-the lifecycle replication capability remains unadvertised until its remaining
-recovery and rollout work is complete.
+Replicated lifecycle mutations additionally require this commit protocol.
+Lifecycle activation is opt-in, and also waits for every assigned replica and
+Raft voter to advertise the lifecycle append and recovery snapshot protocol.
 
 Every append, catch-up request and empty probe of a term-start log uses the
 dedicated `AppendTermStart` RPC. It names the term-start format and, independently,

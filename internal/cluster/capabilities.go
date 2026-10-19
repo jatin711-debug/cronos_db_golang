@@ -23,8 +23,7 @@ const (
 	// deliver them as ordinary events.
 	CapabilityLifecycleRecords = "lifecycle-records/1"
 	// CapabilityLifecycleReplication: the build replicates lifecycle records
-	// through the versioned append, catch-up and snapshot protocol. No build
-	// advertises it yet; until one does, no partition can require it.
+	// through the versioned append, catch-up and consistent recovery snapshot.
 	CapabilityLifecycleReplication = "lifecycle-replication/1"
 	// The build reads term-start records and uses their versioned append and
 	// snapshot protocol, committing old entries only through its current term.
@@ -37,7 +36,24 @@ var LifecycleRequirement = []string{CapabilityLifecycleRecords, CapabilityLifecy
 
 // LocalCapabilities returns the capabilities this build implements.
 func LocalCapabilities() []string {
-	return []string{CapabilityLifecycleRecords, CapabilityTermStart}
+	return []string{CapabilityLifecycleRecords, CapabilityTermStart, CapabilityLifecycleReplication}
+}
+
+func (m *Manager) enableLifecycleRequirements() {
+	if !m.lifecycleRequested {
+		return
+	}
+	m.mu.RLock()
+	store := m.assignments
+	m.mu.RUnlock()
+	if store == nil || !store.IsLeader() {
+		return
+	}
+	for id, info := range store.Partitions() {
+		if len(missingCapabilities(info.Requires, LifecycleRequirement)) > 0 {
+			_ = m.RequirePartitionCapabilities(id, LifecycleRequirement)
+		}
+	}
 }
 
 func (m *Manager) PartitionRequiresTermStart(partitionID int32) bool {

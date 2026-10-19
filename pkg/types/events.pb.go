@@ -2830,6 +2830,7 @@ type ReplicationSnapshotRequest struct {
 	// cannot read its format.
 	LifecycleFormat uint32 `protobuf:"varint,6,opt,name=lifecycle_format,json=lifecycleFormat,proto3" json:"lifecycle_format,omitempty"`
 	TermStartFormat uint32 `protobuf:"varint,7,opt,name=term_start_format,json=termStartFormat,proto3" json:"term_start_format,omitempty"`
+	RecoveryFormat  uint32 `protobuf:"varint,8,opt,name=recovery_format,json=recoveryFormat,proto3" json:"recovery_format,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -2909,6 +2910,13 @@ func (x *ReplicationSnapshotRequest) GetLifecycleFormat() uint32 {
 func (x *ReplicationSnapshotRequest) GetTermStartFormat() uint32 {
 	if x != nil {
 		return x.TermStartFormat
+	}
+	return 0
+}
+
+func (x *ReplicationSnapshotRequest) GetRecoveryFormat() uint32 {
+	if x != nil {
+		return x.RecoveryFormat
 	}
 	return 0
 }
@@ -3026,6 +3034,7 @@ type ReplicationSnapshotTrailer struct {
 	// snapshot replaces its log.
 	LifecycleFormat uint32 `protobuf:"varint,5,opt,name=lifecycle_format,json=lifecycleFormat,proto3" json:"lifecycle_format,omitempty"`
 	TermStartFormat uint32 `protobuf:"varint,6,opt,name=term_start_format,json=termStartFormat,proto3" json:"term_start_format,omitempty"`
+	RecoveryFormat  uint32 `protobuf:"varint,7,opt,name=recovery_format,json=recoveryFormat,proto3" json:"recovery_format,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -3098,6 +3107,13 @@ func (x *ReplicationSnapshotTrailer) GetLifecycleFormat() uint32 {
 func (x *ReplicationSnapshotTrailer) GetTermStartFormat() uint32 {
 	if x != nil {
 		return x.TermStartFormat
+	}
+	return 0
+}
+
+func (x *ReplicationSnapshotTrailer) GetRecoveryFormat() uint32 {
+	if x != nil {
+		return x.RecoveryFormat
 	}
 	return 0
 }
@@ -5487,7 +5503,7 @@ const file_proto_events_proto_rawDesc = "" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x14\n" +
 	"\x05error\x18\x02 \x01(\tR\x05error\x12(\n" +
 	"\x06events\x18\x03 \x03(\v2\x10.cronos_db.EventR\x06events\x12\x19\n" +
-	"\bhas_more\x18\x04 \x01(\bR\ahasMore\"\xc4\x02\n" +
+	"\bhas_more\x18\x04 \x01(\bR\ahasMore\"\xed\x02\n" +
 	"\x1aReplicationSnapshotRequest\x12!\n" +
 	"\fpartition_id\x18\x01 \x01(\x05R\vpartitionId\x12!\n" +
 	"\fstart_offset\x18\x02 \x01(\x03R\vstartOffset\x12\x1b\n" +
@@ -5495,7 +5511,8 @@ const file_proto_events_proto_rawDesc = "" +
 	"\x04have\x18\x04 \x03(\v2$.cronos_db.ReplicationSnapshotHeaderR\x04have\x122\n" +
 	"\x15supports_dead_letters\x18\x05 \x01(\bR\x13supportsDeadLetters\x12)\n" +
 	"\x10lifecycle_format\x18\x06 \x01(\rR\x0flifecycleFormat\x12*\n" +
-	"\x11term_start_format\x18\a \x01(\rR\x0ftermStartFormat\"\xdf\x01\n" +
+	"\x11term_start_format\x18\a \x01(\rR\x0ftermStartFormat\x12'\n" +
+	"\x0frecovery_format\x18\b \x01(\rR\x0erecoveryFormat\"\xdf\x01\n" +
 	"\x19ReplicationSnapshotHeader\x12\x1a\n" +
 	"\bfilename\x18\x01 \x01(\tR\bfilename\x12!\n" +
 	"\ffirst_offset\x18\x02 \x01(\x03R\vfirstOffset\x12\x1f\n" +
@@ -5504,7 +5521,7 @@ const file_proto_events_proto_rawDesc = "" +
 	"\tfile_size\x18\x04 \x01(\x03R\bfileSize\x12\x14\n" +
 	"\x05crc32\x18\x05 \x01(\rR\x05crc32\x12\x19\n" +
 	"\bis_index\x18\x06 \x01(\bR\aisIndex\x12\x14\n" +
-	"\x05reuse\x18\a \x01(\bR\x05reuse\"\xda\x01\n" +
+	"\x05reuse\x18\a \x01(\bR\x05reuse\"\x83\x02\n" +
 	"\x1aReplicationSnapshotTrailer\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x14\n" +
 	"\x05error\x18\x02 \x01(\tR\x05error\x12\x1f\n" +
@@ -5512,7 +5529,8 @@ const file_proto_events_proto_rawDesc = "" +
 	"lastOffset\x12\x14\n" +
 	"\x05epoch\x18\x04 \x01(\x03R\x05epoch\x12)\n" +
 	"\x10lifecycle_format\x18\x05 \x01(\rR\x0flifecycleFormat\x12*\n" +
-	"\x11term_start_format\x18\x06 \x01(\rR\x0ftermStartFormat\"m\n" +
+	"\x11term_start_format\x18\x06 \x01(\rR\x0ftermStartFormat\x12'\n" +
+	"\x0frecovery_format\x18\a \x01(\rR\x0erecoveryFormat\"m\n" +
 	"\x1eReplicationSnapshotDeadLetters\x125\n" +
 	"\arecords\x18\x01 \x03(\v2\x1b.cronos_db.DeadLetterRecordR\arecords\x12\x14\n" +
 	"\x05epoch\x18\x02 \x01(\x03R\x05epoch\"\x8e\x02\n" +

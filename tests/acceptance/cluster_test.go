@@ -542,6 +542,7 @@ func (c *cluster) readLog(n *node, partitionID int32) ([]*types.Event, error) {
 	// This copy only inspects WAL entries; it never serves or recovers work.
 	f.SetTermStartHook(1, func() error { return nil })
 	f.SetLifecycleHooks(1, func() error { return nil }, func() error { return nil })
+	f.SetRecoveryHook(1, func() error { return nil })
 	f.SetDeadLetterSink(func([]*types.DeadLetterRecord) error { return nil })
 	addr := n.clusterAddr
 	if n.clusterDialAddr != "" {

@@ -2,6 +2,7 @@ package partition
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/jatin711-debug/cronos_db_golang/internal/lifecycle"
@@ -120,6 +121,17 @@ func (p *Partition) evacuateFuture(ctx context.Context, opts storage.PruneOption
 		}
 		if err = p.appendLifecycle(next, e); err != nil {
 			return false, err
+		}
+		if p.Replicated() {
+			leader := p.replQuorum.Load()
+			if leader == nil {
+				p.HoldUnaccepted([]*types.Event{next}, false)
+				return false, fmt.Errorf("partition %d lost leadership while relocating offset %d", p.ID, e.Offset)
+			}
+			if err := leader.Replicate([]*types.Event{next}); err != nil {
+				p.HoldUnaccepted([]*types.Event{next}, false)
+				return false, fmt.Errorf("relocation of offset %d has an unknown outcome: %w", e.Offset, err)
+			}
 		}
 		remaining -= cost
 		return remaining > 0, nil

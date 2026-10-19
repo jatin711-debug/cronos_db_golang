@@ -513,6 +513,7 @@ message ReplicationSnapshotRequest {
   // cannot read its format.
   uint32 lifecycle_format = 6;
   uint32 term_start_format = 7;
+  uint32 recovery_format = 8;
 }
 
 message ReplicationSnapshotHeader {
@@ -554,6 +555,7 @@ message ReplicationSnapshotTrailer {
   // snapshot replaces its log.
   uint32 lifecycle_format = 5;
   uint32 term_start_format = 6;
+  uint32 recovery_format = 7;
 }
 
 message ReplicationSnapshotDeadLetters {

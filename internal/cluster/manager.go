@@ -23,8 +23,9 @@ type Manager struct {
 	partitionAccessor PartitionAccessor
 	// assignments is the committed partition metadata (Raft); positions reads
 	// replica log positions. Either may be nil.
-	assignments assignmentStore
-	positions   ReplicaPositioner
+	assignments        assignmentStore
+	positions          ReplicaPositioner
+	lifecycleRequested bool
 	// reconcileCh wakes the background loop when an assignment is committed.
 	reconcileCh chan struct{}
 	// leadershipMu serializes the Raft leader's decisions about assignments.
@@ -118,11 +119,12 @@ func NewManager(cfg *Config) *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &Manager{
-		config:      config,
-		stopCh:      make(chan struct{}),
-		reconcileCh: make(chan struct{}, 1),
-		ctx:         ctx,
-		cancel:      cancel,
+		lifecycleRequested: cfg.EventLifecycle,
+		config:             config,
+		stopCh:             make(chan struct{}),
+		reconcileCh:        make(chan struct{}, 1),
+		ctx:                ctx,
+		cancel:             cancel,
 	}
 }
 
@@ -361,6 +363,7 @@ func (m *Manager) leaderTasks() {
 // performLeaderTasks performs leader-only tasks
 func (m *Manager) performLeaderTasks() {
 	m.enableTermStartRequirements()
+	m.enableLifecycleRequirements()
 	// Elect a leader for partitions whose leader is dead
 	m.checkPartitionHealth()
 

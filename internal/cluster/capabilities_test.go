@@ -14,6 +14,26 @@ import (
 
 const testCap = "test-format/1"
 
+func TestLifecycleActivationIsOptInAndWaitsForEveryAssignedNode(t *testing.T) {
+	f := newLeadershipFixture(t, "a", "a", 3, 2, "a", "b", "c")
+	f.advertise(LocalCapabilities(), "a", "b", "c")
+	f.manager.enableLifecycleRequirements()
+	if f.manager.PartitionRequiresLifecycle(0) {
+		t.Fatal("lifecycle activated without opt-in")
+	}
+	f.manager.lifecycleRequested = true
+	f.advertise([]string{CapabilityLifecycleRecords, CapabilityTermStart}, "c")
+	f.manager.enableLifecycleRequirements()
+	if f.manager.PartitionRequiresLifecycle(0) {
+		t.Fatal("lifecycle activated while a replica cannot recover the format")
+	}
+	f.advertise(LocalCapabilities(), "c")
+	f.manager.enableLifecycleRequirements()
+	if !f.manager.PartitionRequiresLifecycle(0) {
+		t.Fatal("compatible opt-in cluster did not activate")
+	}
+}
+
 func TestTermStartUpgradeWaitsForEveryAssignedReplicaAndVoter(t *testing.T) {
 	f := newLeadershipFixture(t, "a", "a", 3, 2, "a", "b", "c", "d")
 	info := f.committed(t)

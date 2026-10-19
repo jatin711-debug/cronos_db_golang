@@ -19,9 +19,20 @@ import (
 // newClusterReplica is a follower of a cluster: partitions can switch to
 // lifecycle mode only there.
 func newClusterReplica(t *testing.T, dataDir string) *replicaLog {
+	return newNamedClusterReplica(t, dataDir, "follower")
+}
+
+func newNamedClusterReplica(t *testing.T, dataDir, nodeID string) *replicaLog {
+	return newConfiguredClusterReplica(t, dataDir, nodeID, nil)
+}
+
+func newConfiguredClusterReplica(t *testing.T, dataDir, nodeID string, configure func(*types.Config)) *replicaLog {
 	t.Helper()
 	cfg := &types.Config{DataDir: dataDir, ClusterEnabled: true, PartitionCount: 1, ReplicationFactor: 3, MinInSyncReplicas: 2, TickMS: 10, WheelSize: 100, SegmentSizeBytes: 1 << 20, IndexInterval: 1, FsyncMode: "periodic", FlushIntervalMS: 50, DedupTTLHours: 24, BloomCapacity: 1000}
-	pm := partition.NewPartitionManager("follower", cfg)
+	if configure != nil {
+		configure(cfg)
+	}
+	pm := partition.NewPartitionManager(nodeID, cfg)
 	stop := sync.OnceFunc(func() { pm.Close() })
 	t.Cleanup(stop)
 	if err := pm.CreatePartition(0, "orders"); err != nil {
@@ -191,7 +202,7 @@ func TestSnapshot_LifecycleLogOnlyToAReceiverThatReadsIt(t *testing.T) {
 	}
 
 	stream = &mockReplicationSnapshotStream{ctx: context.Background()}
-	if err := source.h.Snapshot(&types.ReplicationSnapshotRequest{PartitionId: 0, SupportsDeadLetters: true, LifecycleFormat: partition.LifecycleFormat}, stream); err != nil {
+	if err := source.h.Snapshot(&types.ReplicationSnapshotRequest{PartitionId: 0, SupportsDeadLetters: true, LifecycleFormat: partition.LifecycleFormat, RecoveryFormat: 1}, stream); err != nil {
 		t.Fatal(err)
 	}
 	last := stream.chunks[len(stream.chunks)-1].GetTrailer()

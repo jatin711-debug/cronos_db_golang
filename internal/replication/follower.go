@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jatin711-debug/cronos_db_golang/internal/recoverystate"
 	"github.com/jatin711-debug/cronos_db_golang/internal/storage"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 
@@ -47,6 +48,8 @@ type Follower struct {
 	rebuildLifecycle func() error
 	termStartFormat  uint32
 	prepareTermStart func() error
+	recoveryFormat   uint32
+	applyRecovery    func() error
 }
 
 // NewFollower creates a new follower. tlsConfig may be nil for plaintext dev mode.
@@ -87,6 +90,12 @@ func (f *Follower) SetTermStartHook(format uint32, prepare func() error) {
 	f.termStartFormat, f.prepareTermStart = format, prepare
 }
 
+func (f *Follower) SetRecoveryHook(format uint32, apply func() error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.recoveryFormat, f.applyRecovery = format, apply
+}
+
 // InstallSnapshot pulls a bulk segment snapshot from the leader over the
 // internal replication gRPC channel and installs it locally. It is used when a
 // follower is far behind or when a brand-new replica joins the partition.
@@ -107,6 +116,7 @@ func (f *Follower) InstallSnapshot(ctx context.Context, leaderAddr string, parti
 	applyDeadLetters := f.applyDeadLetters
 	lifecycleFormat, prepareLifecycle, rebuildLifecycle := f.lifecycleFormat, f.prepareLifecycle, f.rebuildLifecycle
 	termFormat, prepareTerm := f.termStartFormat, f.prepareTermStart
+	recoveryFormat, applyRecovery := f.recoveryFormat, f.applyRecovery
 	f.mu.Unlock()
 
 	defer func() {
@@ -167,6 +177,7 @@ func (f *Follower) InstallSnapshot(ctx context.Context, leaderAddr string, parti
 		SupportsDeadLetters: applyDeadLetters != nil,
 		LifecycleFormat:     lifecycleFormat,
 		TermStartFormat:     termFormat,
+		RecoveryFormat:      recoveryFormat,
 	})
 	if err != nil {
 		return fmt.Errorf("snapshot RPC: %w", err)
@@ -308,6 +319,23 @@ func (f *Follower) InstallSnapshot(ctx context.Context, leaderAddr string, parti
 		_ = os.RemoveAll(stagingDir)
 		return fmt.Errorf("snapshot source %s is at epoch %d, behind epoch %d this replica has accepted", leaderAddr, trailer.GetEpoch(), acceptedEpoch)
 	}
+	if (recoveryFormat > 0 && trailer.GetRecoveryFormat() != recoveryFormat) || (trailer.GetLifecycleFormat() > 0 && trailer.GetRecoveryFormat() != recoverystate.Format) {
+		return fmt.Errorf("snapshot source did not provide the required recovery generation")
+	}
+	if format := trailer.GetRecoveryFormat(); format > 0 {
+		if format != recoveryFormat || applyRecovery == nil {
+			return fmt.Errorf("unsupported snapshot recovery format")
+		}
+		manifest, err := recoverystate.Read(filepath.Join(stagingSegments, recoverystate.Filename), f.wal.SnapshotCipher(), nil)
+		if err != nil {
+			return fmt.Errorf("validate recovery state: %w", err)
+		}
+		if manifest.Partition != partitionID || manifest.Epoch != trailer.GetEpoch() || manifest.Last != trailer.GetLastOffset() {
+			return fmt.Errorf("snapshot recovery generation mismatch")
+		}
+	} else if seen[stagedFileKey(recoverystate.Filename, false)] {
+		return fmt.Errorf("snapshot includes undeclared recovery state")
+	}
 	if format := trailer.GetTermStartFormat(); format > 0 {
 		if format != termFormat || prepareTerm == nil {
 			return fmt.Errorf("snapshot term-start format %d is not supported", format)
@@ -338,6 +366,12 @@ func (f *Follower) InstallSnapshot(ctx context.Context, leaderAddr string, parti
 		f.epoch = trailer.GetEpoch()
 	}
 	f.mu.Unlock()
+	if trailer.GetRecoveryFormat() > 0 {
+		if err := applyRecovery(); err != nil {
+			f.wal.Fail(err)
+			return fmt.Errorf("apply installed recovery generation: %w", err)
+		}
+	}
 	// InstallCheckpoint moved the staged directories into place.
 	_ = os.RemoveAll(stagingDir)
 	if rebuildLifecycle != nil {

@@ -42,8 +42,12 @@ import (
 // PruneWAL is the common safety boundary for background and operator pruning.
 // It returns how many segments were removed.
 func (p *Partition) PruneWAL(ctx context.Context, opts storage.PruneOptions) (int, error) {
-	// Not ReplicateMu: publishes replicate under it, and a pass reads whole
-	// segments.
+	// A replicated evacuation appends in the same order as publishes and
+	// mutations. Take the append lock before the retention and delivery gates.
+	if p.Replicated() {
+		p.ReplicateMu.Lock()
+		defer p.ReplicateMu.Unlock()
+	}
 	p.pruneMu.Lock()
 	defer p.pruneMu.Unlock()
 	if p.ConsumerGroup == nil || p.Wal == nil {

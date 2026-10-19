@@ -220,6 +220,9 @@ type Config struct {
 	// Capabilities overrides what this node advertises; nil advertises
 	// LocalCapabilities(). For tests.
 	Capabilities []string
+	// EventLifecycle requests one-way lifecycle activation once every assigned
+	// replica and Raft voter supports the protocol.
+	EventLifecycle bool
 	// RaftAddr is the Raft transport listen address.
 	RaftAddr string
 	// RaftDir is the on-disk directory for Raft logs and snapshots.
