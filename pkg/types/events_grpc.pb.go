@@ -19,17 +19,23 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	EventService_Publish_FullMethodName      = "/cronos_db.EventService/Publish"
-	EventService_PublishBatch_FullMethodName = "/cronos_db.EventService/PublishBatch"
-	EventService_Subscribe_FullMethodName    = "/cronos_db.EventService/Subscribe"
-	EventService_Ack_FullMethodName          = "/cronos_db.EventService/Ack"
-	EventService_Replay_FullMethodName       = "/cronos_db.EventService/Replay"
+	EventService_GetEventState_FullMethodName   = "/cronos_db.EventService/GetEventState"
+	EventService_CancelEvent_FullMethodName     = "/cronos_db.EventService/CancelEvent"
+	EventService_RescheduleEvent_FullMethodName = "/cronos_db.EventService/RescheduleEvent"
+	EventService_Publish_FullMethodName         = "/cronos_db.EventService/Publish"
+	EventService_PublishBatch_FullMethodName    = "/cronos_db.EventService/PublishBatch"
+	EventService_Subscribe_FullMethodName       = "/cronos_db.EventService/Subscribe"
+	EventService_Ack_FullMethodName             = "/cronos_db.EventService/Ack"
+	EventService_Replay_FullMethodName          = "/cronos_db.EventService/Replay"
 )
 
 // EventServiceClient is the client API for EventService service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type EventServiceClient interface {
+	GetEventState(ctx context.Context, in *EventStateRequest, opts ...grpc.CallOption) (*EventStateResponse, error)
+	CancelEvent(ctx context.Context, in *EventMutationRequest, opts ...grpc.CallOption) (*EventStateResponse, error)
+	RescheduleEvent(ctx context.Context, in *EventMutationRequest, opts ...grpc.CallOption) (*EventStateResponse, error)
 	// Publish an event
 	Publish(ctx context.Context, in *PublishRequest, opts ...grpc.CallOption) (*PublishResponse, error)
 	// Publish a batch of events (high-throughput)
@@ -48,6 +54,36 @@ type eventServiceClient struct {
 
 func NewEventServiceClient(cc grpc.ClientConnInterface) EventServiceClient {
 	return &eventServiceClient{cc}
+}
+
+func (c *eventServiceClient) GetEventState(ctx context.Context, in *EventStateRequest, opts ...grpc.CallOption) (*EventStateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(EventStateResponse)
+	err := c.cc.Invoke(ctx, EventService_GetEventState_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *eventServiceClient) CancelEvent(ctx context.Context, in *EventMutationRequest, opts ...grpc.CallOption) (*EventStateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(EventStateResponse)
+	err := c.cc.Invoke(ctx, EventService_CancelEvent_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *eventServiceClient) RescheduleEvent(ctx context.Context, in *EventMutationRequest, opts ...grpc.CallOption) (*EventStateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(EventStateResponse)
+	err := c.cc.Invoke(ctx, EventService_RescheduleEvent_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (c *eventServiceClient) Publish(ctx context.Context, in *PublishRequest, opts ...grpc.CallOption) (*PublishResponse, error) {
@@ -119,6 +155,9 @@ type EventService_ReplayClient = grpc.ServerStreamingClient[ReplayEvent]
 // All implementations must embed UnimplementedEventServiceServer
 // for forward compatibility.
 type EventServiceServer interface {
+	GetEventState(context.Context, *EventStateRequest) (*EventStateResponse, error)
+	CancelEvent(context.Context, *EventMutationRequest) (*EventStateResponse, error)
+	RescheduleEvent(context.Context, *EventMutationRequest) (*EventStateResponse, error)
 	// Publish an event
 	Publish(context.Context, *PublishRequest) (*PublishResponse, error)
 	// Publish a batch of events (high-throughput)
@@ -139,6 +178,15 @@ type EventServiceServer interface {
 // pointer dereference when methods are called.
 type UnimplementedEventServiceServer struct{}
 
+func (UnimplementedEventServiceServer) GetEventState(context.Context, *EventStateRequest) (*EventStateResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetEventState not implemented")
+}
+func (UnimplementedEventServiceServer) CancelEvent(context.Context, *EventMutationRequest) (*EventStateResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CancelEvent not implemented")
+}
+func (UnimplementedEventServiceServer) RescheduleEvent(context.Context, *EventMutationRequest) (*EventStateResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RescheduleEvent not implemented")
+}
 func (UnimplementedEventServiceServer) Publish(context.Context, *PublishRequest) (*PublishResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Publish not implemented")
 }
@@ -173,6 +221,60 @@ func RegisterEventServiceServer(s grpc.ServiceRegistrar, srv EventServiceServer)
 		t.testEmbeddedByValue()
 	}
 	s.RegisterService(&EventService_ServiceDesc, srv)
+}
+
+func _EventService_GetEventState_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(EventStateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(EventServiceServer).GetEventState(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: EventService_GetEventState_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(EventServiceServer).GetEventState(ctx, req.(*EventStateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _EventService_CancelEvent_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(EventMutationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(EventServiceServer).CancelEvent(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: EventService_CancelEvent_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(EventServiceServer).CancelEvent(ctx, req.(*EventMutationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _EventService_RescheduleEvent_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(EventMutationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(EventServiceServer).RescheduleEvent(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: EventService_RescheduleEvent_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(EventServiceServer).RescheduleEvent(ctx, req.(*EventMutationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
 func _EventService_Publish_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
@@ -243,6 +345,18 @@ var EventService_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "cronos_db.EventService",
 	HandlerType: (*EventServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "GetEventState",
+			Handler:    _EventService_GetEventState_Handler,
+		},
+		{
+			MethodName: "CancelEvent",
+			Handler:    _EventService_CancelEvent_Handler,
+		},
+		{
+			MethodName: "RescheduleEvent",
+			Handler:    _EventService_RescheduleEvent_Handler,
+		},
 		{
 			MethodName: "Publish",
 			Handler:    _EventService_Publish_Handler,
@@ -844,6 +958,8 @@ var ConsumerGroupService_ServiceDesc = grpc.ServiceDesc{
 
 const (
 	ReplicationService_Append_FullMethodName               = "/cronos_db.ReplicationService/Append"
+	ReplicationService_AppendLifecycle_FullMethodName      = "/cronos_db.ReplicationService/AppendLifecycle"
+	ReplicationService_AppendTermStart_FullMethodName      = "/cronos_db.ReplicationService/AppendTermStart"
 	ReplicationService_Sync_FullMethodName                 = "/cronos_db.ReplicationService/Sync"
 	ReplicationService_Snapshot_FullMethodName             = "/cronos_db.ReplicationService/Snapshot"
 	ReplicationService_Position_FullMethodName             = "/cronos_db.ReplicationService/Position"
@@ -857,6 +973,12 @@ const (
 type ReplicationServiceClient interface {
 	// Internal: Append batch from leader
 	Append(ctx context.Context, in *ReplicationAppendRequest, opts ...grpc.CallOption) (*ReplicationAppendResponse, error)
+	// Internal: Append batch from leader, for a partition that requires the
+	// lifecycle format. Lifecycle records travel only in this call. A build
+	// that predates it answers Unimplemented and writes nothing, and a receiver
+	// that cannot read the format refuses the whole request.
+	AppendLifecycle(ctx context.Context, in *ReplicationLifecycleAppendRequest, opts ...grpc.CallOption) (*ReplicationAppendResponse, error)
+	AppendTermStart(ctx context.Context, in *ReplicationTermAppendRequest, opts ...grpc.CallOption) (*ReplicationAppendResponse, error)
 	// Internal: Sync from leader
 	Sync(ctx context.Context, in *ReplicationSyncRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ReplicationSyncResponse], error)
 	// Internal: Bulk snapshot install from leader
@@ -881,6 +1003,26 @@ func (c *replicationServiceClient) Append(ctx context.Context, in *ReplicationAp
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ReplicationAppendResponse)
 	err := c.cc.Invoke(ctx, ReplicationService_Append_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *replicationServiceClient) AppendLifecycle(ctx context.Context, in *ReplicationLifecycleAppendRequest, opts ...grpc.CallOption) (*ReplicationAppendResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReplicationAppendResponse)
+	err := c.cc.Invoke(ctx, ReplicationService_AppendLifecycle_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *replicationServiceClient) AppendTermStart(ctx context.Context, in *ReplicationTermAppendRequest, opts ...grpc.CallOption) (*ReplicationAppendResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReplicationAppendResponse)
+	err := c.cc.Invoke(ctx, ReplicationService_AppendTermStart_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -961,6 +1103,12 @@ func (c *replicationServiceClient) SyncConsumerProgress(ctx context.Context, in 
 type ReplicationServiceServer interface {
 	// Internal: Append batch from leader
 	Append(context.Context, *ReplicationAppendRequest) (*ReplicationAppendResponse, error)
+	// Internal: Append batch from leader, for a partition that requires the
+	// lifecycle format. Lifecycle records travel only in this call. A build
+	// that predates it answers Unimplemented and writes nothing, and a receiver
+	// that cannot read the format refuses the whole request.
+	AppendLifecycle(context.Context, *ReplicationLifecycleAppendRequest) (*ReplicationAppendResponse, error)
+	AppendTermStart(context.Context, *ReplicationTermAppendRequest) (*ReplicationAppendResponse, error)
 	// Internal: Sync from leader
 	Sync(*ReplicationSyncRequest, grpc.ServerStreamingServer[ReplicationSyncResponse]) error
 	// Internal: Bulk snapshot install from leader
@@ -983,6 +1131,12 @@ type UnimplementedReplicationServiceServer struct{}
 
 func (UnimplementedReplicationServiceServer) Append(context.Context, *ReplicationAppendRequest) (*ReplicationAppendResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Append not implemented")
+}
+func (UnimplementedReplicationServiceServer) AppendLifecycle(context.Context, *ReplicationLifecycleAppendRequest) (*ReplicationAppendResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method AppendLifecycle not implemented")
+}
+func (UnimplementedReplicationServiceServer) AppendTermStart(context.Context, *ReplicationTermAppendRequest) (*ReplicationAppendResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method AppendTermStart not implemented")
 }
 func (UnimplementedReplicationServiceServer) Sync(*ReplicationSyncRequest, grpc.ServerStreamingServer[ReplicationSyncResponse]) error {
 	return status.Errorf(codes.Unimplemented, "method Sync not implemented")
@@ -1034,6 +1188,42 @@ func _ReplicationService_Append_Handler(srv interface{}, ctx context.Context, de
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ReplicationServiceServer).Append(ctx, req.(*ReplicationAppendRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ReplicationService_AppendLifecycle_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReplicationLifecycleAppendRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ReplicationServiceServer).AppendLifecycle(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ReplicationService_AppendLifecycle_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ReplicationServiceServer).AppendLifecycle(ctx, req.(*ReplicationLifecycleAppendRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ReplicationService_AppendTermStart_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReplicationTermAppendRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ReplicationServiceServer).AppendTermStart(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ReplicationService_AppendTermStart_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ReplicationServiceServer).AppendTermStart(ctx, req.(*ReplicationTermAppendRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1124,6 +1314,14 @@ var ReplicationService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Append",
 			Handler:    _ReplicationService_Append_Handler,
+		},
+		{
+			MethodName: "AppendLifecycle",
+			Handler:    _ReplicationService_AppendLifecycle_Handler,
+		},
+		{
+			MethodName: "AppendTermStart",
+			Handler:    _ReplicationService_AppendTermStart_Handler,
 		},
 		{
 			MethodName: "Position",

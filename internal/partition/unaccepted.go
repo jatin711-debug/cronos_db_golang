@@ -1,6 +1,7 @@
 package partition
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"sort"
@@ -132,7 +133,13 @@ func (p *Partition) acceptRangeLocked(from, to int64, claimed bool) error {
 			return nil
 		}
 		from = events[len(events)-1].Offset + 1
-		if err := p.Scheduler.ScheduleBatch(events); err != nil {
+		active := make([]*types.Event, 0, len(events))
+		for _, event := range events {
+			if p.ActiveEvent(event) {
+				active = append(active, event)
+			}
+		}
+		if err := p.Scheduler.ScheduleBatch(active); err != nil {
 			return err
 		}
 		if claimed {
@@ -242,6 +249,10 @@ func (p *Partition) forgetBeyondLog(offset int64, why string) error {
 // returns how many entries went. The caller holds ReplicateMu and has
 // accepted the sender as leader.
 func (p *Partition) CutLog(offset int64) (int, error) {
+	if p.eventIndex() != nil {
+		p.lifecycleMu.Lock()
+		defer p.lifecycleMu.Unlock()
+	}
 	if offset >= p.Wal.GetNextOffset() {
 		return 0, nil
 	}
@@ -249,7 +260,18 @@ func (p *Partition) CutLog(offset int64) (int, error) {
 	if err := p.forgetBeyondLog(offset, "the leader's log replaces what this replica held there"); err != nil {
 		return 0, err
 	}
-	return p.Wal.TruncateToOffset(offset)
+	removed, err := p.Wal.TruncateToOffset(offset)
+	if p.eventIndex() != nil {
+		// A suffix cut can reuse offsets for another term or identity. No
+		// lifecycle reader may observe heads from the previous WAL generation.
+		if err == nil {
+			err = p.eventIndex().Rebuild(context.Background(), p.Wal)
+		}
+		if err != nil {
+			p.Wal.Fail(err)
+		}
+	}
+	return removed, err
 }
 
 // dropHeld forgets held publishes. It is called when the whole log is about to

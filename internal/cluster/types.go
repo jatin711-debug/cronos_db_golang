@@ -76,6 +76,9 @@ type Node struct {
 	// ClientAddr is the address clients reach this node's public gRPC port
 	// at, when the node was given one (--advertise-grpc-addr).
 	ClientAddr string `json:"client_addr,omitempty"`
+	// Capabilities are what the node's build advertises (capabilities.go);
+	// none for a build that predates them.
+	Capabilities []string `json:"capabilities,omitempty"`
 	// GossipAddr is the membership/gossip bind address used for heartbeats.
 	GossipAddr string `json:"gossip_addr"`
 	// HTTPAddr is the HTTP address used for health checks and admin endpoints.
@@ -155,12 +158,16 @@ type PartitionInfo struct {
 	TransferTo string `json:"transfer_to,omitempty"`
 	// TransferStartedMs is when the handoff began (Unix ms), for timing it out.
 	TransferStartedMs int64 `json:"transfer_started_ms,omitempty"`
+	// Requires names the capabilities every node that holds, leads or takes
+	// over the partition must advertise (see capabilities.go). It only grows.
+	Requires []string `json:"requires,omitempty"`
 }
 
 // clone returns a copy that shares no slices or maps with the receiver.
 func (p PartitionInfo) clone() PartitionInfo {
 	p.Replicas = append([]string(nil), p.Replicas...)
 	p.ISR = append([]string(nil), p.ISR...)
+	p.Requires = append([]string(nil), p.Requires...)
 	if p.ReplicaOffsets != nil {
 		offsets := make(map[string]int64, len(p.ReplicaOffsets))
 		for id, offset := range p.ReplicaOffsets {
@@ -210,6 +217,12 @@ type Config struct {
 	// ClientAddr is the address clients reach this node's public gRPC port
 	// at. Empty when the node was not given one.
 	ClientAddr string
+	// Capabilities overrides what this node advertises; nil advertises
+	// LocalCapabilities(). For tests.
+	Capabilities []string
+	// EventLifecycle requests one-way lifecycle activation once every assigned
+	// replica and Raft voter supports the protocol.
+	EventLifecycle bool
 	// RaftAddr is the Raft transport listen address.
 	RaftAddr string
 	// RaftDir is the on-disk directory for Raft logs and snapshots.
@@ -276,6 +289,8 @@ type ClusterConfig struct {
 	GRPCAddr string `json:"grpc_addr"`
 	// ClientAddr is the address clients reach this node's public gRPC port at.
 	ClientAddr string `json:"client_addr"`
+	// Capabilities are what this node advertises to the others.
+	Capabilities []string `json:"capabilities"`
 	// HTTPAddr is the HTTP address for health and admin endpoints.
 	HTTPAddr string `json:"http_addr"`
 	// RaftAddr is the Raft transport address for this node.

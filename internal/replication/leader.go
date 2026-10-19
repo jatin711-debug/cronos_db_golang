@@ -6,6 +6,7 @@ package replication
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"log"
@@ -14,6 +15,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jatin711-debug/cronos_db_golang/internal/lifecycle"
+	"github.com/jatin711-debug/cronos_db_golang/internal/logcontrol"
 	"github.com/jatin711-debug/cronos_db_golang/internal/storage"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
@@ -71,11 +74,27 @@ type Leader struct {
 	// newerTerm is the term of a newer leader that a follower has named, 0
 	// while none has. See noteNewerTerm.
 	newerTerm atomic.Int64
+	// lifecycleFormat is the lifecycle record format of the partition's log,
+	// 0 while it holds none. Versioned appends carry it with every request.
+	lifecycleFormat atomic.Uint32
+	termStartFormat atomic.Uint32
+	termCommit      atomic.Pointer[termCommitState]
 	// replicatedNext is one past the highest offset QuorumOffset has
 	// returned, 0 while it has returned none. See ReplicatedThrough.
 	replicatedNext atomic.Int64
 	// supersededObserver is told once when newerTerm is first set.
 	supersededObserver func(term int64)
+}
+
+// A separate generation prevents an old quorum calculation finishing after an
+// epoch change from publishing its result as a commitment in the new term.
+type termCommitState struct {
+	epoch int64
+	next  atomic.Int64
+	// One past the fsynced local term-start offset, 0 before it is installed.
+	// Every append after this point belongs to this leader's term, so quorum
+	// checks need no disk read or flush on the publish/delivery paths.
+	firstNext atomic.Int64
 }
 
 // FollowerInfo tracks a follower replica and its gRPC replication client state.
@@ -604,10 +623,14 @@ func (l *Leader) appendToFollower(f *FollowerInfo, events []*types.Event, checks
 
 	ctx, cancel := context.WithTimeout(context.Background(), l.getReplicateTimeout())
 	defer cancel()
-	resp, err := client.Append(ctx, req)
+	resp, err := l.sendAppend(ctx, client, req)
 	if err != nil {
 		f.mu.Lock()
-		f.Connected = false
+		// A follower that does not implement AppendLifecycle answered, and its
+		// connection is fine; it cannot hold this log. Nothing was sent at all
+		// when a lifecycle record had no versioned append to go in.
+		refused := status.Code(err) == codes.Unimplemented || errors.Is(err, errLifecycleWithoutFormat)
+		f.Connected = refused && f.Connected
 		f.InSync = false
 		f.LastError = err
 		// A call that got no answer may have gone into a connection that
@@ -700,6 +723,53 @@ func (l *Leader) appendToFollower(f *FollowerInfo, events []*types.Event, checks
 	return nil
 }
 
+// SetLifecycleFormat marks the partition's log as one that may hold lifecycle
+// records of the given format. Every append, catch-up and probe uses a versioned
+// RPC: AppendLifecycle, or AppendTermStart carrying both formats. A follower of
+// an older build answers Unimplemented and receives nothing more of this log.
+func (l *Leader) SetLifecycleFormat(format uint32) {
+	l.lifecycleFormat.Store(format)
+}
+
+func (l *Leader) SetTermStartFormat(format uint32) {
+	if format > 0 && l.termCommit.Load() == nil {
+		l.termCommit.CompareAndSwap(nil, &termCommitState{epoch: l.GetEpoch()})
+	}
+	l.termStartFormat.Store(format)
+}
+
+func (l *Leader) SetTermStartOffset(offset, epoch int64) {
+	if state := l.termCommit.Load(); state != nil && state.epoch == epoch && l.GetEpoch() == epoch && offset >= 0 {
+		state.firstNext.CompareAndSwap(0, offset+1)
+	}
+}
+
+// errLifecycleWithoutFormat is the refusal to send a lifecycle record through
+// the plain append: a follower of an older build would store it as an event.
+var errLifecycleWithoutFormat = errors.New("lifecycle records in a log without a lifecycle format; refusing to send them through the plain append")
+
+// sendAppend uses the versioned protocol required by this partition's log,
+// including for empty probes. It never falls back to a legacy append.
+func (l *Leader) sendAppend(ctx context.Context, client types.ReplicationServiceClient, req *types.ReplicationAppendRequest) (*types.ReplicationAppendResponse, error) {
+	if format := l.termStartFormat.Load(); format > 0 {
+		return client.AppendTermStart(ctx, &types.ReplicationTermAppendRequest{TermStartFormat: format, LifecycleFormat: l.lifecycleFormat.Load(), Append: req})
+	}
+	for _, e := range req.GetEvents() {
+		if logcontrol.IsTermStart(e) {
+			return nil, errLifecycleWithoutFormat
+		}
+	}
+	if format := l.lifecycleFormat.Load(); format > 0 {
+		return client.AppendLifecycle(ctx, &types.ReplicationLifecycleAppendRequest{LifecycleFormat: format, Append: req})
+	}
+	for _, e := range req.GetEvents() {
+		if lifecycle.HasReservedMeta(e) {
+			return nil, errLifecycleWithoutFormat
+		}
+	}
+	return client.Append(ctx, req)
+}
+
 // getPrevLogTerm returns the term of the log entry at the given offset, or 0
 // when it cannot be read, which tells the follower not to compare.
 func (l *Leader) getPrevLogTerm(offset int64) int64 {
@@ -758,10 +828,34 @@ func (l *Leader) getHighWatermarkLocked() int64 {
 	return minWatermark
 }
 
-// QuorumOffset returns the highest log offset known to be held by
-// min-insync-replicas replicas, counting the leader, or -1 when no offset is.
-// A follower holds everything up to the last offset it acknowledged.
+// QuorumOffset returns the committed offset, or -1 before any commitment is
+// proved. Term-start mode requires current-term replication and preserves the
+// proof after quorum loss. Legacy mode returns the current replica-count bound.
 func (l *Leader) QuorumOffset() int64 {
+	state := l.termCommit.Load()
+	if state == nil {
+		return l.replicaCountOffset()
+	}
+	if state.epoch != l.GetEpoch() || l.newerTerm.Load() > 0 {
+		return -1
+	}
+	candidate := l.replicaCountOffset()
+	if first := state.firstNext.Load(); first > 0 && candidate+1 >= first {
+		for known := state.next.Load(); candidate+1 > known; known = state.next.Load() {
+			if state.next.CompareAndSwap(known, candidate+1) {
+				break
+			}
+		}
+	}
+	if l.termCommit.Load() != state || state.epoch != l.GetEpoch() || l.newerTerm.Load() > 0 {
+		return -1
+	}
+	return state.next.Load() - 1
+}
+
+// replicaCountOffset is replication evidence, not by itself a commit proof for
+// an older-term entry. Legacy partitions retain it during rolling upgrades.
+func (l *Leader) replicaCountOffset() int64 {
 	if l.newerTerm.Load() > 0 {
 		return -1 // what the followers hold now is another leader's log
 	}
@@ -791,16 +885,13 @@ func (l *Leader) QuorumOffset() int64 {
 	return min(acked[need-1], last)
 }
 
-// ReplicatedThrough returns the highest offset this leader has found, at any
-// time since it began to lead, on min-insync-replicas replicas, or -1.
-//
-// QuorumOffset says what the followers it knows of hold now, and goes back
-// when one of them is removed or has to be asked again. What the required
-// replicas held once does not stop being part of the partition's log for
-// that: whichever replica leads next has it. So this is what decides whether
-// an entry may be delivered, and a leader that loses its followers goes on
-// delivering what was replicated before it lost them.
+// ReplicatedThrough is the boundary used for delivery. In term-start mode it
+// is the current term's latched commit proof. Legacy partitions retain their
+// former behavior: remember the highest replica-count bound this leader saw.
 func (l *Leader) ReplicatedThrough() int64 {
+	if l.termCommit.Load() != nil {
+		return l.QuorumOffset()
+	}
 	if l.newerTerm.Load() > 0 {
 		return -1
 	}
@@ -928,6 +1019,9 @@ func (l *Leader) GetEpoch() int64 {
 // atomic reads in appendToFollower/GetTerm (mixing a mutex write with atomic
 // reads is a data race).
 func (l *Leader) SetEpoch(epoch int64) {
+	if l.GetEpoch() != epoch && l.termCommit.Load() != nil {
+		l.termCommit.Store(&termCommitState{epoch: epoch})
+	}
 	atomic.StoreInt64(&l.epoch, epoch)
 	if l.wal != nil {
 		l.wal.SetCurrentTerm(epoch)

@@ -224,6 +224,10 @@ func run() int {
 	}
 	crossRegion := remoteRegions != ""
 	if cdcManager.HasSinks() || crossRegion {
+		if cfg.EventLifecycle {
+			slog.Error("event-lifecycle version 1 cannot be combined with CDC or cross-region change feeds")
+			return 1
+		}
 		pm.SetChangeFeed(func(ctx context.Context, partitionID int32, events []*types.Event) error {
 			if err := cdcManager.Deliver(ctx, partitionID, events); err != nil {
 				return err
@@ -314,9 +318,10 @@ func run() int {
 		}
 
 		clusterConfig := &cluster.Config{
-			NodeID:     cfg.NodeID,
-			DataDir:    cfg.DataDir,
-			GossipAddr: cfg.ClusterGossipAddr,
+			EventLifecycle: cfg.EventLifecycle,
+			NodeID:         cfg.NodeID,
+			DataDir:        cfg.DataDir,
+			GossipAddr:     cfg.ClusterGossipAddr,
 			// Advertise the dedicated cluster gRPC address. This is where the
 			// internal ReplicationService / RaftService are served, separate from
 			// the public client-facing gRPC port. Clients are given ClientAddr
@@ -339,6 +344,11 @@ func run() int {
 			Rack:              cfg.NodeRack,
 			Zone:              cfg.NodeZone,
 			Region:            cfg.NodeRegion,
+		}
+		if cdcManager.HasSinks() || cfg.ExperimentalFeatures || cfg.ReplicationFactor < 2 || cfg.MinInSyncReplicas < cfg.ReplicationFactor/2+1 {
+			// These nodes cannot host version 1 lifecycle data. Placement and
+			// activation must see that restriction through membership too.
+			clusterConfig.Capabilities = []string{cluster.CapabilityLifecycleRecords, cluster.CapabilityTermStart}
 		}
 
 		if cfg.ReplicationTLSEnabled {
@@ -548,6 +558,12 @@ func run() int {
 
 	// Register internal replication and raft metadata services on the internal listener.
 	replicationServer := api.NewReplicationServiceHandler(pm)
+	if clusterMgr != nil {
+		// Lifecycle records, in appends and in snapshots, are taken only for
+		// partitions the cluster has committed to require the format.
+		pm.SetLifecycleRequirement(clusterMgr.PartitionRequiresLifecycle)
+		pm.SetTermStartRequirement(clusterMgr.PartitionRequiresTermStart)
+	}
 	internalServer.RegisterReplicationServer(replicationServer)
 	if cfg.ExperimentalFeatures {
 		internalServer.RegisterCrossRegionServer(crossRegionServer)

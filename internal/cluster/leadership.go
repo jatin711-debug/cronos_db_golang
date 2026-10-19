@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -59,6 +60,8 @@ type assignmentStore interface {
 	Partition(id int32) (PartitionInfo, bool)
 	Partitions() map[int32]PartitionInfo
 	ProposePartition(info *PartitionInfo, assign bool) error
+	// RequirePartition commits capabilities a partition requires.
+	RequirePartition(partitionID int32, caps []string) error
 }
 
 const (
@@ -355,6 +358,35 @@ func mostCompleteReplica(positions map[string]ReplicaPosition) string {
 	return best
 }
 
+// mostCompleteCapableReplica is mostCompleteReplica among the replicas that
+// advertise what the partition requires. It elects nobody when a replica
+// that does not advertise them holds more of the log than every one that
+// does: the entries only it has may have been acknowledged, and the node
+// cannot be made leader, since it may not be able to read the partition.
+func (m *Manager) mostCompleteCapableReplica(partitionID int32, positions map[string]ReplicaPosition, requires []string) string {
+	best := mostCompleteReplica(positions)
+	if len(requires) == 0 || best == "" {
+		return best
+	}
+	capable := make(map[string]ReplicaPosition, len(positions))
+	for id, position := range positions {
+		if m.supports(id, requires) {
+			capable[id] = position
+		}
+	}
+	candidate := mostCompleteReplica(capable)
+	switch {
+	case candidate == "":
+		log.Printf("[CLUSTER] Partition %d: not electing a leader, no replica that answered advertises %v", partitionID, requires)
+		return ""
+	case moreComplete(positions[best], capable[candidate]):
+		log.Printf("[CLUSTER] Partition %d: not electing a leader, %s holds more of the log than any replica advertising %v",
+			partitionID, best, requires)
+		return ""
+	}
+	return candidate
+}
+
 // moreComplete reports whether log a ends after log b: in a later term, or in
 // the same term at a higher offset.
 func moreComplete(a, b ReplicaPosition) bool {
@@ -481,11 +513,13 @@ func (m *Manager) electNewLeader(partitionID int32, info *PartitionInfo) {
 				partitionID, len(positions), need)
 			return
 		}
-		newLeader = mostCompleteReplica(positions)
+		newLeader = m.mostCompleteCapableReplica(partitionID, positions, info.Requires)
 	} else {
 		aliveIDs := make(map[string]bool, len(alive))
 		for id := range alive {
-			aliveIDs[id] = true
+			if m.supports(id, info.Requires) {
+				aliveIDs[id] = true
+			}
 		}
 		newLeader, _ = ChooseFailoverLeader(info, aliveIDs)
 	}
@@ -761,9 +795,22 @@ func (m *Manager) syncClusterState() {
 		// until a handoff has moved leadership away from it. The in-sync set
 		// is carried along but is not a reason to commit: every commit raises
 		// the epoch, and followers drop in and out of sync under load.
-		replicas := withNode(ring.Replicas, existing.LeaderID)
+		replicas, isr := withNode(ring.Replicas, existing.LeaderID), withNode(ring.ISR, existing.LeaderID)
+		ringLeader := ring.LeaderID
+		if len(existing.Requires) > 0 {
+			// A partition that requires capabilities stays where it is rather
+			// than go to a node that does not advertise them.
+			refused := m.unsupportedNodes(replicas, existing.Requires)
+			m.noteRefusedPlacement(partitionID, refused, existing.Requires)
+			if len(refused) > 0 {
+				replicas, isr = existing.Replicas, existing.ISR
+			}
+			if !slices.Contains(replicas, ringLeader) || !m.supports(ringLeader, existing.Requires) {
+				ringLeader = existing.LeaderID
+			}
+		}
 		updated := existing.clone()
-		updated.Replicas, updated.ISR = replicas, withNode(ring.ISR, existing.LeaderID)
+		updated.Replicas, updated.ISR = replicas, isr
 		if updated.Topic == "" {
 			updated.Topic = ring.Topic
 		}
@@ -771,18 +818,18 @@ func (m *Manager) syncClusterState() {
 		placementChanged := !stringSliceSetEqual(existing.Replicas, replicas) ||
 			existing.State != PartitionStateOnline || existing.Epoch <= 0
 
-		if ring.LeaderID != existing.LeaderID {
+		if ringLeader != existing.LeaderID {
 			if !hasPositions {
 				// No way to compare logs: move leadership as older builds did.
-				updated.LeaderID = ring.LeaderID
+				updated.LeaderID = ringLeader
 				updated.Replicas, updated.ISR = ring.Replicas, ring.ISR
 				placementChanged = true
-			} else if m.handoffMayStart(partitionID, existing.LeaderID, ring.LeaderID, alive) {
+			} else if m.handoffMayStart(partitionID, existing.LeaderID, ringLeader, alive) {
 				updated.State = PartitionStateRebalancing
-				updated.TransferTo = ring.LeaderID
+				updated.TransferTo = ringLeader
 				updated.TransferStartedMs = time.Now().UnixMilli()
 				placementChanged = true
-				log.Printf("[CLUSTER] Partition %d: starting leadership handoff %s -> %s", partitionID, existing.LeaderID, ring.LeaderID)
+				log.Printf("[CLUSTER] Partition %d: starting leadership handoff %s -> %s", partitionID, existing.LeaderID, ringLeader)
 			}
 		}
 		if !placementChanged {
@@ -853,7 +900,10 @@ func (m *Manager) advanceTransfers() {
 		}
 		_, targetAlive := alive[target]
 		expired := time.Since(time.UnixMilli(info.TransferStartedMs)) > limit
-		if !targetAlive || ring[partitionID].LeaderID != target || expired {
+		// A target that stopped advertising what the partition requires
+		// (it was restarted on another build) cannot take it over.
+		capable := m.supports(target, info.Requires)
+		if !targetAlive || !capable || ring[partitionID].LeaderID != target || expired {
 			aborted := info.clone()
 			aborted.State, aborted.TransferTo, aborted.TransferStartedMs = PartitionStateOnline, "", 0
 			if err := store.ProposePartition(&aborted, false); err != nil {
@@ -866,7 +916,7 @@ func (m *Manager) advanceTransfers() {
 			}
 			m.transferRetryAt[partitionID] = time.Now().Add(transferRetryDelay)
 			m.mu.Unlock()
-			log.Printf("[CLUSTER] Partition %d: abandoned handoff %s -> %s (target alive=%v, expired=%v)", partitionID, leader, target, targetAlive, expired)
+			log.Printf("[CLUSTER] Partition %d: abandoned handoff %s -> %s (target alive=%v, capable=%v, expired=%v)", partitionID, leader, target, targetAlive, capable, expired)
 			continue
 		}
 
@@ -884,6 +934,9 @@ func (m *Manager) advanceTransfers() {
 		done.Epoch = epochAbove(positions, info.Epoch+1)
 		done.LeaderID = target
 		done.Replicas, done.ISR = ring[partitionID].Replicas, ring[partitionID].ISR
+		if len(m.unsupportedNodes(done.Replicas, info.Requires)) > 0 {
+			done.Replicas, done.ISR = withNode(info.Replicas, target), withNode(info.ISR, target)
+		}
 		done.State, done.TransferTo, done.TransferStartedMs = PartitionStateOnline, "", 0
 		if err := store.ProposePartition(&done, false); err != nil {
 			log.Printf("[CLUSTER] Partition %d: failed to complete handoff to %s: %v", partitionID, target, err)

@@ -132,6 +132,8 @@ func LoadConfig() (*types.Config, error) {
 
 	// WAL configuration
 	flag.Int64Var(&config.SegmentSizeBytes, "segment-size", DefaultSegmentSizeBytes, "Segment size in bytes (512MB)")
+	flag.BoolVar(&config.EventLifecycle, "event-lifecycle", false, "Enable future-event cancellation and rescheduling (cluster activation waits for replica capabilities)")
+	flag.Int64Var(&config.WALRelocationBytes, "wal-relocation-bytes", 0, "Maximum future-event bytes copied per retention pass (requires event-lifecycle; 0 disables)")
 	flag.Int64Var(&config.IndexInterval, "index-interval", DefaultIndexInterval, "Index interval (events)")
 	flag.StringVar(&config.FsyncMode, "fsync-mode", DefaultFsyncMode, "fsync mode: every_event, batch, periodic")
 	var flushInterval int
@@ -320,6 +322,18 @@ func LoadConfig() (*types.Config, error) {
 // hardening rules hold when DevMode is false (replication factor, min ISR,
 // TLS, auth policy, encryption at rest, and replication mTLS).
 func ValidateConfig(c *types.Config) error {
+	if c.EventLifecycle && ((!c.ClusterEnabled && c.ReplicationFactor != 1) || (c.ClusterEnabled && c.ReplicationFactor < 2)) {
+		return fmt.Errorf("event-lifecycle requires standalone RF=1 or a replicated cluster")
+	}
+	if c.EventLifecycle && c.ClusterEnabled && c.MinInSyncReplicas < c.ReplicationFactor/2+1 {
+		return fmt.Errorf("replicated event-lifecycle requires min-insync-replicas to include a majority")
+	}
+	if c.EventLifecycle && c.ExperimentalFeatures {
+		return fmt.Errorf("event-lifecycle cannot be combined with experimental transactions or cross-region replication")
+	}
+	if c.WALRelocationBytes < 0 || (c.WALRelocationBytes > 0 && !c.EventLifecycle) {
+		return fmt.Errorf("wal-relocation-bytes must be nonnegative and requires event-lifecycle")
+	}
 	if c.NodeID == "" {
 		return fmt.Errorf("node-id is required")
 	}

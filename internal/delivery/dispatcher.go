@@ -9,6 +9,7 @@ package delivery
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -130,6 +131,10 @@ type Dispatcher struct {
 	// the replicas the partition requires, so they can still be removed from
 	// the log; they are held back until it has moved past them.
 	DeliverableThrough func() int64
+	// Optional lifecycle gate. LockEvents covers filtering through stream.Send.
+	LockEvents    func() func()
+	EventEligible func(*types.Event) bool
+	PublicEvent   func(*types.Event) *types.Event
 	// OnDeadLettered is called once a delivery's events are safely in the DLQ so
 	// their final disposition can be recorded; they are then not re-driven.
 	OnDeadLettered func(group string, events []*types.Event)
@@ -566,6 +571,16 @@ func (d *Dispatcher) Dispatch(event *types.Event) error {
 // dispatchToSub handles the fast path for a single subscriber.
 // No map allocation, no round-robin selection needed.
 func (d *Dispatcher) dispatchToSub(sub *Subscription, event *types.Event) error {
+	if d.LockEvents != nil {
+		unlock := d.LockEvents()
+		defer unlock()
+	}
+	if d.EventEligible != nil && !d.EventEligible(event) {
+		return nil
+	}
+	if d.PublicEvent != nil {
+		event = d.PublicEvent(event)
+	}
 	// Circuit breaker check: skip open circuits without consuming credits
 	if sub.circuitBreaker != nil && !sub.circuitBreaker.CanTry() {
 		return nil
@@ -683,6 +698,10 @@ func (d *Dispatcher) DispatchGroup(group string, events []*types.Event) error {
 // empty) held-back events are queued for redrive; a redrive caller keeps its
 // own position and retries instead.
 func (d *Dispatcher) dispatchGroupBatch(partitionID int32, events []*types.Event, onlyGroup string) (dispatched int, blocked bool, err error) {
+	if d.LockEvents != nil {
+		unlock := d.LockEvents()
+		defer unlock()
+	}
 	d.dispatchMu.Lock()
 	defer d.dispatchMu.Unlock()
 	start := time.Now()
@@ -751,6 +770,12 @@ func (d *Dispatcher) dispatchGroupBatch(partitionID int32, events []*types.Event
 	notReplicated := 0
 
 	for _, event := range events {
+		if d.EventEligible != nil && !d.EventEligible(event) {
+			continue
+		}
+		if d.PublicEvent != nil {
+			event = d.PublicEvent(event)
+		}
 		if event.Offset > deliverable {
 			// Not on the required replicas, so not certain to stay in the log.
 			notReplicated++
@@ -1123,12 +1148,12 @@ func (d *Dispatcher) processRetries(now time.Time) {
 			continue
 		}
 
-		if err := active.Subscription.Stream.Send(retryDelivery); err != nil {
+		if err := d.sendRetry(active.Subscription, retryDelivery); err != nil {
 			if err := d.decInFlight(1); err != nil {
 				log.Printf("[DISPATCHER] in-flight underflow: %v", err)
 			}
 			deliveryMessagePool.Put(retryDelivery)
-			if active.Subscription.circuitBreaker != nil {
+			if active.Subscription.circuitBreaker != nil && !errors.Is(err, errEventIneligible) {
 				active.Subscription.circuitBreaker.RecordFailure(
 					d.config.CircuitBreakerFailureThreshold,
 					d.config.CircuitBreakerMinAttempts,
@@ -1367,7 +1392,7 @@ func (d *Dispatcher) retryDelivery(active *ActiveDelivery) error {
 		}
 	}
 
-	if err := active.Subscription.Stream.Send(retryDelivery); err != nil {
+	if err := d.sendRetry(active.Subscription, retryDelivery); err != nil {
 		if err := d.decInFlight(1); err != nil {
 			log.Printf("[DISPATCHER] in-flight underflow: %v", err)
 		}
@@ -1378,6 +1403,23 @@ func (d *Dispatcher) retryDelivery(active *ActiveDelivery) error {
 	countDelivered(retryDelivery, true)
 	d.trackDelivery(retryDelivery, active.Subscription)
 	return nil
+}
+
+var errEventIneligible = errors.New("event is no longer eligible for delivery")
+
+func (d *Dispatcher) sendRetry(sub *Subscription, message *DeliveryMessage) error {
+	if d.LockEvents != nil {
+		unlock := d.LockEvents()
+		defer unlock()
+	}
+	if d.EventEligible != nil {
+		for _, event := range deliveryEvents(message) {
+			if !d.EventEligible(event) {
+				return errEventIneligible
+			}
+		}
+	}
+	return sub.Stream.Send(message)
 }
 
 // GetStats returns dispatcher statistics.

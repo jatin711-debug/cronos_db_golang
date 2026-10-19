@@ -62,6 +62,39 @@ message PublishResponse {
 
   // Actual schedule timestamp (may be adjusted by server)
   int64 schedule_ts = 5;
+  // Together with offset, identifies this publish even after offset reuse.
+  int64 term = 6;
+}
+
+// Stable logical identity, preserved across rescheduling and WAL relocation.
+message EventReference {
+  int32 partition_id = 1;
+  int64 offset = 2;
+  int64 term = 3;
+  string message_id = 4;
+  string topic = 5;
+}
+
+message EventStateRequest { EventReference reference = 1; }
+
+message EventStateResponse {
+  EventReference reference = 1;
+  int64 current_offset = 2;
+  int64 revision_offset = 3;
+  int64 revision_term = 4;
+  int64 schedule_ts = 5;
+  bool canceled = 6;
+}
+
+// expected_revision_* comes from GetEventState (or offset/term of Publish).
+// The same latest request_id and arguments can be retried without another write.
+message EventMutationRequest {
+  EventReference reference = 1;
+  string request_id = 2;
+  int64 expected_revision_offset = 3;
+  int64 expected_revision_term = 4;
+  // Required for RescheduleEvent; must be zero for CancelEvent.
+  int64 schedule_ts = 5;
 }
 
 // Batch publish request for high-throughput ingestion
@@ -69,6 +102,8 @@ message PublishBatchRequest {
   repeated Event events = 1;
   // If true, allow duplicate message_ids (for testing)
   bool allow_duplicate = 2;
+  // Return handles for events accepted by this request. Off by default.
+  bool return_references = 3;
 }
 
 // Batch publish response
@@ -82,6 +117,9 @@ message PublishBatchResponse {
   int64 first_offset = 6;
   // Last offset in the batch  
   int64 last_offset = 7;
+  // Unordered, matched by message_id (and partition_id for cross-partition batches).
+  // Already-accepted duplicates do not get a new receipt.
+  repeated EventReference references = 8;
 }
 
 message SubscribeRequest {
@@ -280,6 +318,27 @@ message ReplicationAppendRequest {
   int64 leader_log_end = 11;
 }
 
+// ReplicationLifecycleAppendRequest is an append for a partition that
+// requires the lifecycle format. Its records may include lifecycle records
+// (cancel, reschedule, relocate), which never travel in a plain
+// ReplicationAppendRequest: a receiver that predates them would store one as
+// an ordinary event, to be delivered.
+message ReplicationLifecycleAppendRequest {
+  // Version of the lifecycle record format of the batch. A receiver refuses a
+  // version it cannot read, before it changes anything.
+  uint32 lifecycle_format = 1;
+  ReplicationAppendRequest append = 2;
+}
+
+// A distinct RPC prevents a legacy receiver from ignoring a format flag and
+// storing internal term-start records as user events. Every append/probe of a
+// partition in this format uses it, including batches without a control record.
+message ReplicationTermAppendRequest {
+  uint32 term_start_format = 1;
+  uint32 lifecycle_format = 2;
+  ReplicationAppendRequest append = 3;
+}
+
 message ReplicationAppendResponse {
   bool success = 1;
   string error = 2;
@@ -448,6 +507,13 @@ message ReplicationSnapshotRequest {
 
   // Receiver can durably apply dead-letter journal pages before the WAL.
   bool supports_dead_letters = 5;
+
+  // Lifecycle record format the receiver reads and can install; 0 for none.
+  // A source whose partition is in lifecycle mode refuses a receiver that
+  // cannot read its format.
+  uint32 lifecycle_format = 6;
+  uint32 term_start_format = 7;
+  uint32 recovery_format = 8;
 }
 
 message ReplicationSnapshotHeader {
@@ -483,6 +549,13 @@ message ReplicationSnapshotTrailer {
 
   // Leader epoch at snapshot time.
   int64 epoch = 4;
+
+  // Lifecycle record format of the snapshot's log; 0 when its partition is
+  // not in lifecycle mode. The receiver switches to lifecycle mode before the
+  // snapshot replaces its log.
+  uint32 lifecycle_format = 5;
+  uint32 term_start_format = 6;
+  uint32 recovery_format = 7;
 }
 
 message ReplicationSnapshotDeadLetters {
@@ -692,6 +765,9 @@ message RaftStatusResponse {
 // ============================================================================
 
 service EventService {
+  rpc GetEventState(EventStateRequest) returns (EventStateResponse);
+  rpc CancelEvent(EventMutationRequest) returns (EventStateResponse);
+  rpc RescheduleEvent(EventMutationRequest) returns (EventStateResponse);
   // Publish an event
   rpc Publish(PublishRequest) returns (PublishResponse);
 
@@ -748,6 +824,13 @@ service ConsumerGroupService {
 service ReplicationService {
   // Internal: Append batch from leader
   rpc Append(ReplicationAppendRequest) returns (ReplicationAppendResponse);
+
+  // Internal: Append batch from leader, for a partition that requires the
+  // lifecycle format. Lifecycle records travel only in this call. A build
+  // that predates it answers Unimplemented and writes nothing, and a receiver
+  // that cannot read the format refuses the whole request.
+  rpc AppendLifecycle(ReplicationLifecycleAppendRequest) returns (ReplicationAppendResponse);
+  rpc AppendTermStart(ReplicationTermAppendRequest) returns (ReplicationAppendResponse);
 
   // Internal: Sync from leader
   rpc Sync(ReplicationSyncRequest) returns (stream ReplicationSyncResponse);
@@ -814,6 +897,8 @@ message RegionFetchResponse {
   string error = 2;
   repeated Event events = 3;
   bool has_more = 4;
+  // Physical cursor after this page, including skipped internal records.
+  int64 next_offset = 5;
 }
 
 // TransactionService for distributed 2PC transactions.
