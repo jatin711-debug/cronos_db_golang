@@ -6,9 +6,8 @@
 [![Rust](https://img.shields.io/badge/Rust-FFI-dea584.svg)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/jatin711-debug/cronos_db_golang?include_prereleases)](https://github.com/jatin711-debug/cronos_db_golang/releases)
-[![Release](https://img.shields.io/badge/release-v0.7.0-blue.svg)](#status)
 
-> **Production Readiness:** The current release is [`v0.7.0`](https://github.com/jatin711-debug/cronos_db_golang/releases/tag/v0.7.0). What a release promises, the test behind each promise, and what has not been shown yet are in the [release requirements](docs/PRODUCTION_RELEASE.md); findings and their status are in the [September](docs/PRODUCTION_AUDIT_2026-09-27.md) and [October](docs/PRODUCTION_AUDIT_2026-10-16.md) audits. Transactions, online partition splitting and cross-region replication are disabled by default and require `--dev --experimental-features`; they are unsupported in production. End-to-end exactly-once delivery is not supported.
+> **Production Readiness:** See the [latest published release](https://github.com/jatin711-debug/cronos_db_golang/releases/latest) for available artifacts and the [v0.8.0 release notes](docs/RELEASE_V0.8.0.md) for the new lifecycle and replication protocols. What a release promises, the test behind each promise, and what has not been shown yet are in the [release requirements](docs/PRODUCTION_RELEASE.md); findings and their status are in the [September](docs/PRODUCTION_AUDIT_2026-09-27.md) and [October](docs/PRODUCTION_AUDIT_2026-10-16.md) audits. Transactions, online partition splitting and cross-region replication are disabled by default and require `--dev --experimental-features`; they are unsupported in production. End-to-end exactly-once delivery is not supported.
 
 CronosDB is a distributed database purpose-built for **timestamp-triggered event processing**. Publish events with a future timestamp — CronosDB stores them durably and delivers them precisely when the time arrives.
 
@@ -145,7 +144,7 @@ For the details see **[ARCHITECTURE.md](ARCHITECTURE.md)** and the per-feature d
 Each release has binaries of the server and of `cronos-admin` for Linux and macOS (amd64, arm64) and Windows (amd64), with `SHA256SUMS`, on the [releases page](https://github.com/jatin711-debug/cronos_db_golang/releases). They are built without cgo and use the bloom filter written in Go. The container image uses the one written in Rust:
 
 ```bash
-docker pull johnny711dock/cronos-db:0.7.0    # also :latest
+docker pull johnny711dock/cronos-db:latest  # pin the release digest for deployments
 ```
 
 ### Prerequisites to build
@@ -762,7 +761,7 @@ See [proto/events.proto](proto/events.proto) for the complete specification.
 
 ## Status
 
-[`v0.7.0`](https://github.com/jatin711-debug/cronos_db_golang/releases/tag/v0.7.0) is the current release. Every pull request and every push to `main` runs the following, and `main` moves only to a commit on which all of it has passed:
+Published artifacts are listed on the [releases page](https://github.com/jatin711-debug/cronos_db_golang/releases). The [v0.8.0 notes](docs/RELEASE_V0.8.0.md) describe opt-in event cancellation, rescheduling and relocation, current-term commitment, and the upgrade constraints. Every pull request and every push to `main` runs the following, and `main` moves only to a commit on which all of it has passed:
 
 - build, vet, and the test suite under the race detector, and once without cgo, with the release archives built for five systems;
 - a fault campaign and other acceptance tests against three server processes, with a ledger of every acknowledged event;

@@ -1,6 +1,9 @@
 # Production release requirements
 
-`v0.7.0` is the current release. Hardening goes on: the
+The `v0.8.0` source line adds the lifecycle and replication changes described
+in the [release notes](RELEASE_V0.8.0.md). Available artifacts and publication
+status are on the [releases page](https://github.com/jatin711-debug/cronos_db_golang/releases).
+Hardening goes on: the
 [audit closure table](PRODUCTION_AUDIT_2026-09-27.md#finding-closure-review)
 tracks unresolved guarantees, and
 [what the release was cut without](#what-v070-was-released-without) is listed
@@ -328,7 +331,7 @@ measured on production hardware.
 ## What `v0.7.0` was released without
 
 Releases are cut from the development branch when CI is green on the
-commit. `v0.7.0` is published as the latest release and as the `latest`
+commit. `v0.7.0` was published as the latest release and as the `latest`
 image; the five CI jobs are required checks on `main` (see [Checks](#checks)).
 
 `v0.7.0` was released without the following. These are limits of what has
