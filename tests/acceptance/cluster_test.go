@@ -303,6 +303,14 @@ func (c *cluster) start(n *node) {
 		c.t.Fatal(err)
 	}
 	cmd := exec.Command(c.binary, c.args(n)...)
+	// The test runner may need a Go heap limit of its own. Nodes exercise
+	// their configured/container memory policy and must pace their own heaps.
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		if !strings.EqualFold(key, "GOMEMLIMIT") {
+			cmd.Env = append(cmd.Env, entry)
+		}
+	}
 	cmd.Dir = c.dir
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
