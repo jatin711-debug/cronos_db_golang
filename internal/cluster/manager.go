@@ -37,7 +37,12 @@ type Manager struct {
 	// transferRetryAt delays restarting an abandoned handoff; pulling marks
 	// partitions this node is copying for a handoff. Both are guarded by mu.
 	transferRetryAt map[int32]time.Time
-	pulling         map[int32]bool
+	// refusedPlacement is, per partition, the nodes the ring last wanted to
+	// place it on that do not advertise what it requires, so that the
+	// refusal is logged when it changes and not every round. Guarded by
+	// leadershipMu.
+	refusedPlacement map[int32]string
+	pulling          map[int32]bool
 	// inSyncSeen is how many replicas were last seen in sync for each
 	// partition this node leads. Only updateReplicaOffsets uses it.
 	inSyncSeen map[int32]int
@@ -62,6 +67,7 @@ func NewManager(cfg *Config) *Manager {
 		AdvertiseAddr:     cfg.GossipAddr,
 		GRPCAddr:          cfg.GRPCAddr,
 		ClientAddr:        cfg.ClientAddr,
+		Capabilities:      normalizeCapabilities(cfg.Capabilities),
 		RaftAddr:          cfg.RaftAddr,
 		RaftDataDir:       cfg.RaftDir,
 		SeedNodes:         cfg.SeedNodes,
@@ -84,6 +90,9 @@ func NewManager(cfg *Config) *Manager {
 		Region:            cfg.Region,
 	}
 
+	if config.Capabilities == nil {
+		config.Capabilities = LocalCapabilities()
+	}
 	if config.HeartbeatInterval == 0 {
 		config.HeartbeatInterval = 1 * time.Second
 	}
@@ -204,7 +213,7 @@ func (m *Manager) Start() error {
 	m.membership.OnJoin(func(node *Node) {
 		m.noteMembershipChange()
 		// When a new node joins via gossip, add it to Raft if we're the leader
-		if m.raft != nil && m.raft.IsLeader() && node.RaftAddr != "" {
+		if m.raft != nil && m.raft.IsLeader() && node.RaftAddr != "" && m.admitsVoter(node) {
 			log.Printf("[CLUSTER] Adding node %s to Raft cluster at %s", node.ID, node.RaftAddr)
 			// Retry with exponential backoff — the target node may still be booting
 			var lastErr error
@@ -586,6 +595,9 @@ func (m *Manager) AddNode(node *Node) error {
 
 	// If Raft enabled and we're leader, add to Raft cluster
 	if m.raft != nil && m.raft.IsLeader() {
+		if !m.admitsVoter(node) {
+			return fmt.Errorf("node %s does not advertise the capabilities this cluster's partitions require", node.ID)
+		}
 		// Add node to Raft
 		if err := m.raft.Join(node.ID, node.RaftAddr); err != nil {
 			return fmt.Errorf("add to raft: %w", err)

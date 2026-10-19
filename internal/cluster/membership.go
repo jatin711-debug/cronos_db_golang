@@ -171,20 +171,21 @@ func (e EventType) String() string {
 // NewMembership creates a new membership manager
 func NewMembership(config *ClusterConfig) (*Membership, error) {
 	localNode := &Node{
-		ID:         config.NodeID,
-		Address:    config.GRPCAddr,
-		ClientAddr: config.ClientAddr,
-		GossipAddr: config.BindAddr, // Gossip address for heartbeats
-		HTTPAddr:   config.HTTPAddr,
-		RaftAddr:   config.RaftAddr,
-		State:      NodeStateAlive,
-		Role:       NodeRoleFollower,
-		Meta:       make(map[string]string),
-		JoinedAt:   time.Now(),
-		UpdatedAt:  time.Now(),
-		Rack:       config.Rack,
-		Zone:       config.Zone,
-		Region:     config.Region,
+		ID:           config.NodeID,
+		Address:      config.GRPCAddr,
+		ClientAddr:   config.ClientAddr,
+		Capabilities: normalizeCapabilities(config.Capabilities),
+		GossipAddr:   config.BindAddr, // Gossip address for heartbeats
+		HTTPAddr:     config.HTTPAddr,
+		RaftAddr:     config.RaftAddr,
+		State:        NodeStateAlive,
+		Role:         NodeRoleFollower,
+		Meta:         make(map[string]string),
+		JoinedAt:     time.Now(),
+		UpdatedAt:    time.Now(),
+		Rack:         config.Rack,
+		Zone:         config.Zone,
+		Region:       config.Region,
 	}
 
 	m := &Membership{
@@ -377,6 +378,9 @@ type GossipMessage struct {
 	// ClientAddr is the address clients reach the node's public gRPC port
 	// at, if it has one. Nodes of v0.6.0 neither send nor read it.
 	ClientAddr string `json:"client_addr,omitempty"`
+	// Capabilities are what the node's build advertises. A message without
+	// them, which is what nodes of v0.7.0 and before send, means none.
+	Capabilities []string `json:"capabilities,omitempty"`
 	// GossipAddr is the node's gossip/membership address for heartbeats.
 	GossipAddr string `json:"gossip_addr"`
 	// RaftAddr is the node's Raft transport address.
@@ -394,15 +398,16 @@ func (m *Membership) handleJoinRequest(conn net.Conn, msg *GossipMessage) {
 		return
 	}
 	node := &Node{
-		ID:         msg.NodeID,
-		Address:    msg.Address,
-		ClientAddr: msg.ClientAddr,
-		GossipAddr: msg.GossipAddr,
-		RaftAddr:   msg.RaftAddr,
-		State:      NodeStateAlive,
-		Role:       NodeRoleFollower,
-		JoinedAt:   time.Now(),
-		UpdatedAt:  time.Now(),
+		ID:           msg.NodeID,
+		Address:      msg.Address,
+		ClientAddr:   msg.ClientAddr,
+		Capabilities: normalizeCapabilities(msg.Capabilities),
+		GossipAddr:   msg.GossipAddr,
+		RaftAddr:     msg.RaftAddr,
+		State:        NodeStateAlive,
+		Role:         NodeRoleFollower,
+		JoinedAt:     time.Now(),
+		UpdatedAt:    time.Now(),
 	}
 
 	if err := m.Join(node); err != nil {
@@ -451,11 +456,27 @@ func (m *Membership) handleHeartbeatMessage(msg *GossipMessage) {
 		moved := *node
 		moved.Address, moved.GossipAddr, moved.RaftAddr = orElse(msg.Address, node.Address), orElse(msg.GossipAddr, node.GossipAddr), orElse(msg.RaftAddr, node.RaftAddr)
 		moved.ClientAddr = orElse(msg.ClientAddr, node.ClientAddr)
+		moved.Capabilities = normalizeCapabilities(msg.Capabilities)
 		moved.State, moved.UpdatedAt = NodeStateAlive, time.Now()
 		m.nodes[msg.NodeID] = &moved
 		m.state.Nodes[msg.NodeID] = &moved
 		log.Printf("[MEMBERSHIP] Node %s is now at gossip=%s", msg.NodeID, moved.GossipAddr)
 		m.emitEvent(EventTypeJoin, &moved)
+	case exists && !sameCapabilities(node.Capabilities, msg.Capabilities):
+		// It runs another build than before. What it advertises now replaces
+		// what it did, unlike its addresses: a heartbeat without capabilities
+		// comes from a build that has none.
+		changed := *node
+		changed.Capabilities = normalizeCapabilities(msg.Capabilities)
+		changed.State, changed.UpdatedAt = NodeStateAlive, time.Now()
+		m.nodes[msg.NodeID] = &changed
+		m.state.Nodes[msg.NodeID] = &changed
+		log.Printf("[MEMBERSHIP] Node %s now advertises capabilities %v", msg.NodeID, changed.Capabilities)
+		if node.State != NodeStateAlive {
+			m.emitEvent(EventTypeJoin, &changed)
+		} else {
+			m.emitEvent(EventTypeUpdate, &changed)
+		}
 	case exists:
 		node.UpdatedAt = time.Now()
 		if node.State != NodeStateAlive {
@@ -465,15 +486,16 @@ func (m *Membership) handleHeartbeatMessage(msg *GossipMessage) {
 		}
 	case msg.GossipAddr != "":
 		node = &Node{
-			ID:         msg.NodeID,
-			Address:    msg.Address,
-			ClientAddr: msg.ClientAddr,
-			GossipAddr: msg.GossipAddr,
-			RaftAddr:   msg.RaftAddr,
-			State:      NodeStateAlive,
-			Role:       NodeRoleFollower,
-			JoinedAt:   time.Now(),
-			UpdatedAt:  time.Now(),
+			ID:           msg.NodeID,
+			Address:      msg.Address,
+			ClientAddr:   msg.ClientAddr,
+			Capabilities: normalizeCapabilities(msg.Capabilities),
+			GossipAddr:   msg.GossipAddr,
+			RaftAddr:     msg.RaftAddr,
+			State:        NodeStateAlive,
+			Role:         NodeRoleFollower,
+			JoinedAt:     time.Now(),
+			UpdatedAt:    time.Now(),
 		}
 		m.nodes[node.ID] = node
 		m.state.Nodes[node.ID] = node
@@ -529,15 +551,16 @@ func (m *Membership) handleNodeJoinedBroadcast(msg *GossipMessage) {
 	}
 
 	node := &Node{
-		ID:         msg.NodeID,
-		Address:    msg.Address,
-		ClientAddr: msg.ClientAddr,
-		GossipAddr: msg.GossipAddr,
-		RaftAddr:   msg.RaftAddr,
-		State:      NodeStateAlive,
-		Role:       NodeRoleFollower,
-		JoinedAt:   time.Now(),
-		UpdatedAt:  time.Now(),
+		ID:           msg.NodeID,
+		Address:      msg.Address,
+		ClientAddr:   msg.ClientAddr,
+		Capabilities: normalizeCapabilities(msg.Capabilities),
+		GossipAddr:   msg.GossipAddr,
+		RaftAddr:     msg.RaftAddr,
+		State:        NodeStateAlive,
+		Role:         NodeRoleFollower,
+		JoinedAt:     time.Now(),
+		UpdatedAt:    time.Now(),
 	}
 
 	if err := m.Join(node); err != nil {
@@ -559,13 +582,14 @@ func (m *Membership) broadcastNodeJoined(newNode *Node) {
 	m.mu.RUnlock()
 
 	msg := GossipMessage{
-		Type:       "node_joined",
-		NodeID:     newNode.ID,
-		Address:    newNode.Address,
-		ClientAddr: newNode.ClientAddr,
-		GossipAddr: newNode.GossipAddr,
-		RaftAddr:   newNode.RaftAddr,
-		Timestamp:  time.Now().UnixNano(),
+		Type:         "node_joined",
+		NodeID:       newNode.ID,
+		Address:      newNode.Address,
+		ClientAddr:   newNode.ClientAddr,
+		Capabilities: newNode.Capabilities,
+		GossipAddr:   newNode.GossipAddr,
+		RaftAddr:     newNode.RaftAddr,
+		Timestamp:    time.Now().UnixNano(),
 	}
 
 	for _, node := range nodes {
@@ -856,13 +880,14 @@ func (m *Membership) sendHeartbeats() {
 func (m *Membership) sendHeartbeat(node *Node, heard bool) {
 	// Create heartbeat message
 	hb := &GossipMessage{
-		Type:       "heartbeat",
-		NodeID:     m.localNode.ID,
-		Address:    m.localNode.Address,
-		ClientAddr: m.localNode.ClientAddr,
-		GossipAddr: m.localNode.GossipAddr,
-		RaftAddr:   m.localNode.RaftAddr,
-		Timestamp:  time.Now().UnixMilli(),
+		Type:         "heartbeat",
+		NodeID:       m.localNode.ID,
+		Address:      m.localNode.Address,
+		ClientAddr:   m.localNode.ClientAddr,
+		Capabilities: m.localNode.Capabilities,
+		GossipAddr:   m.localNode.GossipAddr,
+		RaftAddr:     m.localNode.RaftAddr,
+		Timestamp:    time.Now().UnixMilli(),
 	}
 
 	// Use gossip address if available, otherwise fall back to gRPC address
@@ -1063,13 +1088,14 @@ func (m *Membership) joinViaNode(ctx context.Context, addr string) (int, error) 
 
 	// Send join request using GossipMessage format
 	joinMsg := &GossipMessage{
-		Type:       "join",
-		NodeID:     m.localNode.ID,
-		Address:    m.localNode.Address,
-		ClientAddr: m.localNode.ClientAddr,
-		GossipAddr: m.localNode.GossipAddr,
-		RaftAddr:   m.localNode.RaftAddr,
-		Timestamp:  time.Now().UnixMilli(),
+		Type:         "join",
+		NodeID:       m.localNode.ID,
+		Address:      m.localNode.Address,
+		ClientAddr:   m.localNode.ClientAddr,
+		Capabilities: m.localNode.Capabilities,
+		GossipAddr:   m.localNode.GossipAddr,
+		RaftAddr:     m.localNode.RaftAddr,
+		Timestamp:    time.Now().UnixMilli(),
 	}
 	if err := json.NewEncoder(conn).Encode(joinMsg); err != nil {
 		return 0, fmt.Errorf("send join request: %w", err)
@@ -1099,15 +1125,16 @@ func (m *Membership) joinViaNode(ctx context.Context, addr string) (int, error) 
 				if nodeID != "" && nodeID != m.localNode.ID {
 					others++
 					node := &Node{
-						ID:         nodeID,
-						Address:    getString(nodeMap, "address"),
-						ClientAddr: getString(nodeMap, "client_addr"),
-						GossipAddr: getString(nodeMap, "gossip_addr"),
-						HTTPAddr:   getString(nodeMap, "http_addr"),
-						RaftAddr:   getString(nodeMap, "raft_addr"),
-						State:      NodeStateAlive,
-						JoinedAt:   time.Now(),
-						UpdatedAt:  time.Now(),
+						ID:           nodeID,
+						Address:      getString(nodeMap, "address"),
+						ClientAddr:   getString(nodeMap, "client_addr"),
+						Capabilities: getStrings(nodeMap, "capabilities"),
+						GossipAddr:   getString(nodeMap, "gossip_addr"),
+						HTTPAddr:     getString(nodeMap, "http_addr"),
+						RaftAddr:     getString(nodeMap, "raft_addr"),
+						State:        NodeStateAlive,
+						JoinedAt:     time.Now(),
+						UpdatedAt:    time.Now(),
 					}
 					if err := m.Join(node); err != nil {
 						log.Printf("[MEMBERSHIP] Failed to register discovered node %s: %v", nodeID, err)
@@ -1128,6 +1155,18 @@ func getString(m map[string]interface{}, key string) string {
 		return v
 	}
 	return ""
+}
+
+// getStrings extracts a list of strings from a decoded JSON map.
+func getStrings(m map[string]interface{}, key string) []string {
+	list, _ := m[key].([]interface{})
+	out := make([]string, 0, len(list))
+	for _, v := range list {
+		if str, ok := v.(string); ok {
+			out = append(out, str)
+		}
+	}
+	return normalizeCapabilities(out)
 }
 
 // Heartbeat represents a heartbeat message exchanged between nodes.

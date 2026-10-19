@@ -32,17 +32,18 @@ type MemberlistMembership struct {
 // NewMemberlistMembership creates a new membership using HashiCorp Memberlist.
 func NewMemberlistMembership(config *ClusterConfig) (*MemberlistMembership, error) {
 	localNode := &Node{
-		ID:         config.NodeID,
-		Address:    config.GRPCAddr,
-		ClientAddr: config.ClientAddr,
-		GossipAddr: config.BindAddr,
-		HTTPAddr:   config.HTTPAddr,
-		RaftAddr:   config.RaftAddr,
-		State:      NodeStateAlive,
-		Role:       NodeRoleFollower,
-		Meta:       make(map[string]string),
-		JoinedAt:   time.Now(),
-		UpdatedAt:  time.Now(),
+		ID:           config.NodeID,
+		Address:      config.GRPCAddr,
+		ClientAddr:   config.ClientAddr,
+		Capabilities: normalizeCapabilities(config.Capabilities),
+		GossipAddr:   config.BindAddr,
+		HTTPAddr:     config.HTTPAddr,
+		RaftAddr:     config.RaftAddr,
+		State:        NodeStateAlive,
+		Role:         NodeRoleFollower,
+		Meta:         make(map[string]string),
+		JoinedAt:     time.Now(),
+		UpdatedAt:    time.Now(),
 	}
 
 	mm := &MemberlistMembership{
@@ -253,6 +254,7 @@ func (mm *MemberlistMembership) nodeFromMember(m *memberlist.Node) *Node {
 		if err := json.Unmarshal(m.Meta, &meta); err == nil {
 			node.Address = meta.GRPCAddr
 			node.ClientAddr = meta.ClientAddr
+			node.Capabilities = normalizeCapabilities(meta.Capabilities)
 			node.GossipAddr = meta.GossipAddr
 			node.HTTPAddr = meta.HTTPAddr
 			node.RaftAddr = meta.RaftAddr
@@ -263,12 +265,13 @@ func (mm *MemberlistMembership) nodeFromMember(m *memberlist.Node) *Node {
 
 func (mm *MemberlistMembership) metaBytes() []byte {
 	meta := nodeMeta{
-		NodeID:     mm.config.NodeID,
-		GRPCAddr:   mm.config.GRPCAddr,
-		ClientAddr: mm.config.ClientAddr,
-		GossipAddr: mm.config.BindAddr,
-		HTTPAddr:   mm.config.HTTPAddr,
-		RaftAddr:   mm.config.RaftAddr,
+		NodeID:       mm.config.NodeID,
+		GRPCAddr:     mm.config.GRPCAddr,
+		ClientAddr:   mm.config.ClientAddr,
+		Capabilities: normalizeCapabilities(mm.config.Capabilities),
+		GossipAddr:   mm.config.BindAddr,
+		HTTPAddr:     mm.config.HTTPAddr,
+		RaftAddr:     mm.config.RaftAddr,
 	}
 	data, _ := json.Marshal(meta)
 	return data
@@ -281,7 +284,8 @@ type nodeMeta struct {
 	// GRPCAddr is the internal cluster gRPC advertise address.
 	GRPCAddr string `json:"grpc_addr"`
 	// ClientAddr is the address clients reach the public gRPC port at.
-	ClientAddr string `json:"client_addr,omitempty"`
+	ClientAddr   string   `json:"client_addr,omitempty"`
+	Capabilities []string `json:"capabilities,omitempty"`
 	// GossipAddr is the membership/gossip advertise address.
 	GossipAddr string `json:"gossip_addr"`
 	// HTTPAddr is the HTTP (health/UI) advertise address when known.

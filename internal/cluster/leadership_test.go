@@ -17,6 +17,7 @@ type fsmStore struct {
 	fsm       *ClusterFSM
 	leader    bool
 	proposals int
+	voters    []string
 }
 
 func (s *fsmStore) IsLeader() bool                           { return s.leader }
@@ -37,6 +38,28 @@ func (s *fsmStore) ProposePartition(info *PartitionInfo, assign bool) error {
 		return err
 	}
 	return nil
+}
+
+func (s *fsmStore) RequirePartition(id int32, caps []string) error {
+	if !s.leader {
+		return fmt.Errorf("not leader")
+	}
+	s.proposals++
+	payload, _ := json.Marshal(partitionRequirement{PartitionID: id, Capabilities: caps})
+	data, _ := json.Marshal(Command{Type: CommandTypeRequirePartition, Payload: payload})
+	if err, ok := s.fsm.Apply(&raft.Log{Data: data}).(error); ok && err != nil {
+		return err
+	}
+	return nil
+}
+
+// Voters lists the Raft voters a test gives the store.
+func (s *fsmStore) Voters() ([]Voter, error) {
+	out := make([]Voter, 0, len(s.voters))
+	for _, id := range s.voters {
+		out = append(out, Voter{ID: id, Address: id})
+	}
+	return out, nil
 }
 
 // fakePositions answers position queries by node address ("" is this node).
