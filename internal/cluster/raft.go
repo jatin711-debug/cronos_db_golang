@@ -317,6 +317,16 @@ func (n *RaftNode) ProposePartition(info *PartitionInfo, assign bool) error {
 	return n.Apply(&Command{Type: cmdType, Payload: payload})
 }
 
+// RequirePartition commits that a partition requires caps of the nodes that
+// hold it. See Manager.RequirePartitionCapabilities for when that may be.
+func (n *RaftNode) RequirePartition(partitionID int32, caps []string) error {
+	payload, err := json.Marshal(partitionRequirement{PartitionID: partitionID, Capabilities: caps})
+	if err != nil {
+		return fmt.Errorf("marshal partition requirement: %w", err)
+	}
+	return n.Apply(&Command{Type: CommandTypeRequirePartition, Payload: payload})
+}
+
 // WaitForLeader blocks until a Raft leader is known or timeout elapses.
 func (n *RaftNode) WaitForLeader(timeout time.Duration) error {
 	ticker := time.NewTicker(100 * time.Millisecond)
@@ -374,6 +384,11 @@ const (
 	CommandTypeAssignPartition
 	// CommandTypeUpdatePartition updates partition leadership, ISR, or offsets.
 	CommandTypeUpdatePartition
+	// CommandTypeRequirePartition adds capabilities a partition requires of
+	// the nodes that hold it. Builds before it answer the command with an
+	// error and apply nothing, which is why it is committed only when every
+	// voter advertises the capabilities (RequirePartitionCapabilities).
+	CommandTypeRequirePartition
 )
 
 // ClusterFSM implements raft.FSM for durable cluster metadata (nodes and partitions).
@@ -461,6 +476,8 @@ func (f *ClusterFSM) Apply(l *raft.Log) interface{} {
 		return f.applyAssignPartition(cmd.Payload)
 	case CommandTypeUpdatePartition:
 		return f.applyUpdatePartition(cmd.Payload)
+	case CommandTypeRequirePartition:
+		return f.applyRequirePartition(cmd.Payload)
 	default:
 		return fmt.Errorf("unknown command type: %d", cmd.Type)
 	}
@@ -564,11 +581,38 @@ func (f *ClusterFSM) applyUpdatePartition(payload json.RawMessage) interface{} {
 		if info.ReplicaOffsets != nil {
 			existing.ReplicaOffsets = info.ReplicaOffsets
 		}
+		// Requirements only grow. An update proposed by a build that does not
+		// know them carries none, and must not lift them.
+		existing.Requires = unionCapabilities(existing.Requires, info.Requires)
 	} else {
 		f.state.Partitions[info.ID] = &info
 	}
 
 	f.state.UpdatedAt = time.Now()
+	if f.onPartitionChange != nil {
+		f.onPartitionChange()
+	}
+	return nil
+}
+
+// partitionRequirement is the payload of CommandTypeRequirePartition.
+type partitionRequirement struct {
+	PartitionID  int32    `json:"partition_id"`
+	Capabilities []string `json:"capabilities"`
+}
+
+func (f *ClusterFSM) applyRequirePartition(payload json.RawMessage) interface{} {
+	var req partitionRequirement
+	if err := json.Unmarshal(payload, &req); err != nil {
+		return err
+	}
+	existing, ok := f.state.Partitions[req.PartitionID]
+	if !ok {
+		return fmt.Errorf("partition %d has no assignment to add a requirement to", req.PartitionID)
+	}
+	existing.Requires = unionCapabilities(existing.Requires, req.Capabilities)
+	f.state.UpdatedAt = time.Now()
+	log.Printf("[FSM] Partition %d requires %v", req.PartitionID, existing.Requires)
 	if f.onPartitionChange != nil {
 		f.onPartitionChange()
 	}

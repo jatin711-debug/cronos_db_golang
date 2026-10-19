@@ -1,6 +1,7 @@
 # WAL retention, cancellation, and rescheduling
 
-Status: standalone implementation and the accepted-state index prerequisite on
+Status: standalone implementation, the accepted-state index prerequisite, and
+replica capability gating (step 1 of the replicated protocol) on
 `retention-and-cancel`. The opt-in implementation is limited to standalone nodes.
 Cluster rollout is a separate, gated step.
 
@@ -130,7 +131,8 @@ boundary. Retention and replay use that distinction, with held-range tests model
 an unresolved mutation. This prerequisite does not enable replicated lifecycle
 records. The cluster protocol still needs the following state and transitions:
 
-1. **Persist the partition's format requirement in cluster metadata.** Every
+1. **Persist the partition's format requirement in cluster metadata.**
+   Implemented; see [Replica capabilities](#replica-capabilities) below. Every
    assigned replica must advertise support before enabling mutations, and
    placement and elections must exclude unsupported nodes afterwards. Checking
    just the currently connected quorum would leave an assigned older replica
@@ -178,6 +180,49 @@ records. The cluster protocol still needs the following state and transitions:
    a complete old or new generation; it cannot combine old mutation state with
    new offsets.
 
+### Replica capabilities
+
+Each node advertises the capabilities of its build in every membership message
+it sends: join requests and replies, heartbeats, and the broadcast announcing a
+new node. A message without them means none, which is what builds of v0.7.0 and
+earlier send; unlike a missing address, a heartbeat without capabilities replaces
+what the sender advertised before. This build advertises `lifecycle-records/1`:
+it reads version 1 lifecycle records and refuses them on the legacy append path.
+`lifecycle-replication/1` names the versioned append, catch-up and snapshot
+protocol of step 2. No build advertises it yet, so no replicated partition can
+require the lifecycle format (`cluster.LifecycleRequirement`).
+
+A partition's requirement is `PartitionInfo.Requires` in the Raft state. A
+dedicated command adds to it and nothing removes it: an assignment update from a
+coordinator that predates requirements carries none and leaves it as it was, and
+the change does not raise the partition's epoch. The coordinator commits it
+(`Manager.RequirePartitionCapabilities`) only when every node the partition is
+assigned to and every Raft voter is alive and advertises every capability. A
+voter matters because any voter can become the Raft leader, which places
+partitions and elects their leaders, and a voter of an older build would do so
+without knowing the requirement. No admin command exposes it until step 2 can
+be enabled.
+
+Once a partition requires capabilities:
+
+- An election chooses only among replicas that advertise them. When a replica
+  without them holds more of the log than every replica with them, nobody is
+  elected: its extra entries may be acknowledged. The election resumes when it
+  advertises them or a capable replica catches up.
+- Placement follows the hash ring only onto nodes that advertise them;
+  otherwise the partition stays on its replicas, and the refusal is logged when
+  it changes.
+- Leadership is handed over only to a replica that advertises them. A handoff
+  under way is abandoned when its target stops advertising them.
+- A node that lacks a capability some partition requires is not added to the
+  Raft group as a voter.
+
+A node counts as supporting nothing while membership does not count it alive,
+since what it will run when it returns is unknown. The checks cannot reach a
+voter that is downgraded after a requirement is committed: its older build
+ignores the requirement, and as Raft leader would place and elect without it.
+Downgrading a cluster whose partitions require capabilities is unsupported.
+
 Before enabling this protocol, fault tests must cover leader death before and
 after quorum, lost success replies, an unaccepted replacement becoming due,
 replica reconnect to a legacy server, suffix replacement with offset reuse,
@@ -204,6 +249,14 @@ observations, reused offsets with different terms, partial or canceled recovery,
 partial index cleanup, concurrent rebuild readers, and follower prefix resets.
 They assert that an unresolved mutation cannot release a prefix, report success,
 reach replay, or cause redundant evacuation of a segment that must remain pinned.
+
+Capability tests (`internal/cluster/capabilities_test.go`) cover a requirement
+surviving an update from an older coordinator and a snapshot, its refusal while
+an assigned replica lacks it or a voter is not alive, an election that skips an
+incapable replica holding the same log and waits while one holds a longer log,
+placement and handoffs that stay off incapable nodes, a handoff abandoned when
+its target is downgraded, voter admission, and capabilities carried and replaced
+through membership. Each fails with the corresponding check removed.
 
 ## Using the standalone implementation
 
