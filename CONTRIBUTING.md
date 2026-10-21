@@ -37,6 +37,33 @@ make lint               # gofmt + go vet
 go test -tags acceptance -count=1 -timeout 25m ./tests/acceptance/
 ```
 
+### Windows helpers
+
+After `make build`, these PowerShell helpers start a development node and run
+the core unit suites with the staged Rust DLL on `PATH`:
+
+```powershell
+.\scripts\run-node-windows.ps1 -NodeID node1 -GRPCAddr localhost:9000
+.\scripts\run-tests-windows.ps1
+```
+
+### Local cluster and load testing
+
+Run `make node1`, `make node2`, and `make node3` in separate terminals, then
+`make health`. These are development and benchmark presets. For a container
+cluster, follow the [Docker guide](DOCKER.md#cluster-mode).
+
+```bash
+make loadtest-batch PUBLISHERS=20 EVENTS=50000 BATCH_SIZE=1000
+make loadtest-max
+```
+
+The throughput presets use settings that differ from production. Use the
+[measured profiles and their limits](docs/CLUSTER_PERFORMANCE_VALIDATION_2026-10-16.md)
+when comparing results; the full recipes are in the [Makefile](Makefile).
+
+### Documentation guidance
+
 For documentation changes, build the complete site and fail on warnings:
 
 ```sh
