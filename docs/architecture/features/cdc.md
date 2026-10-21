@@ -31,18 +31,20 @@ webhook) without the publish path ever waiting for them.
 
 ## What "accepted" means
 
-`Partition.AcceptedThrough` is the offset up to which every log entry belongs
-to an accepted publish. An entry is **not** accepted while:
+`Partition.AcceptedThrough` is the physical accepted boundary, including
+internal controls. An entry is **not** accepted while:
 
 - its publish is still in flight (`BeginPublish` … `EndPublish`);
 - it is held after a publish that failed past the append (no quorum, a failed
   sync), until a retry or catch-up shows it is replicated;
-- on a replicated partition, it is not known to be on `min-insync-replicas`
-  replicas.
+- on a replicated partition, it is beyond the committed boundary. In
+  term-start mode this requires a current-term proof, not just copies of
+  old-term entries on `min-insync-replicas` replicas.
 
 The feed never passes the first such entry, so events leave in log order. The
-last rule also keeps positions valid across a failover: what a quorum holds is
-in the log of whichever replica leads next.
+last rule keeps exported entries behind the
+[current-term commitment proof](../../REPLICATION_TERM_START.md). Mixed-version
+partitions retain legacy accounting until capability agreement.
 
 ## Production Decisions
 
@@ -65,6 +67,11 @@ in the log of whichever replica leads next.
 
 ## Limits
 
+- Lifecycle v1 rejects CDC and cross-region feeds with `--event-lifecycle`:
+  these sinks have no cancellation/reschedule contract. Ordinary term-start
+  partitions can use CDC. Feeds omit internal controls while advancing their
+  physical cursors; cross-region fetch returns `next_offset` for control-only
+  pages. See [compatibility](../../RETENTION_AND_EVENT_LIFECYCLE.md#change-feeds-and-migration).
 - The feed of a partition is one stream for all sinks. While one sink refuses
   events, the other sinks wait with it for that partition.
 - Retention waits for the feed. `Partition.PruneWAL` removes an entry only

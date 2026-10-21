@@ -1,5 +1,10 @@
 # Bounded throughput measurement
 
+The harness measures the candidate selected for a run; its existence is not
+evidence that v0.8.0 has been measured. Published v0.7.0 comparisons are in the
+[dated results](../../docs/CLUSTER_PERFORMANCE_VALIDATION_2026-10-16.md); the
+[release requirements](../../docs/PRODUCTION_RELEASE.md) track unproven capacity.
+
 From PowerShell 7 on Windows, with the local candidate image already built:
 
 ```powershell

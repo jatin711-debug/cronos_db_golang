@@ -1,9 +1,10 @@
 # WAL retention, cancellation, and rescheduling
 
-Status: implemented on `retention-and-cancel`, off by default. Standalone nodes
-use RF=1. Replicated clusters activate only after every assigned replica and
-Raft voter advertises the required protocols. Release validation is required
-before merging or publishing the branch.
+Status: released in [v0.8.0](RELEASE_V0.8.0.md), off by default. Standalone
+nodes use RF=1 and `--min-insync-replicas=1` in development mode; production
+requires a replicated cluster. Replicated clusters activate only after every
+assigned replica, handoff target and Raft voter advertises the required
+protocols. Activation persists a one-way format requirement.
 
 ## Contract
 

@@ -14,6 +14,7 @@ The cluster module provides node membership, partition routing, leader assignmen
 - [internal/cluster/transport.go](../../../internal/cluster/transport.go) — mutual TLS for the membership and Raft ports.
 - [internal/cluster/memberlist_adapter.go](../../../internal/cluster/memberlist_adapter.go) — not connected; the server refuses `--use-memberlist`.
 - [internal/cluster/raft.go](../../../internal/cluster/raft.go)
+- [internal/cluster/capabilities.go](../../../internal/cluster/capabilities.go) — one-way partition format requirements, replica/handoff/voter compatibility and activation.
 - [internal/cluster/election.go](../../../internal/cluster/election.go) — `ChooseFailoverLeader`, the fallback choice used by `electNewLeader` only when no replica-position source is wired; the normal election asks the replicas for their log positions (see leadership.go).
 - [internal/cluster/autoscaler.go](../../../internal/cluster/autoscaler.go) — logs warnings when CPU, memory, disk or partition lag cross a threshold; it changes nothing in the cluster.
 - [internal/cluster/service.go](../../../internal/cluster/service.go), [internal/cluster/types.go](../../../internal/cluster/types.go)
@@ -42,6 +43,15 @@ The cluster module provides node membership, partition routing, leader assignmen
 ## Production Decisions
 
 - Production clusters require `--replication-factor>=3` and `--min-insync-replicas>=2`.
+- The coordinator activates `term-start/1` only after every assigned replica,
+  handoff target and Raft voter is alive and capable. Lifecycle operations are
+  separately opt-in with `--event-lifecycle`, require majority acknowledgements
+  and the lifecycle append/recovery formats, and exclude CDC/experimental
+  features. Committed requirements constrain future placement, elections,
+  handoffs and replacement voters. Before agreement, legacy old-term commitment
+  behavior remains; after activation, downgrade to an incompatible build is
+  unsupported. See [term-start](../../REPLICATION_TERM_START.md) and
+  [lifecycle upgrades](../../RETENTION_AND_EVENT_LIFECYCLE.md#replication-and-rolling-upgrades).
 - A node skips its own entry in the seed list, introduces itself to every other seed and keeps retrying the ones that do not answer. Nodes that start together therefore find each other in any order; a node that cannot reach its cluster stays not ready.
 - Nodes keep sending heartbeats to the nodes they count as failed, every heartbeat interval while a node is suspected and every fifth once it is counted as dead, and a heartbeat says where its sender is found. Two nodes that lost contact therefore meet again when the network lets them, and a node that restarted with an empty member list, which is the case for the node that names no seeds, learns the others from the heartbeats they still send it. A node that was itself not running for longer than the failure timeout (a frozen process, a suspended machine) gives the others a full timeout to be heard from before it suspects them.
 - A node asked where a partition's log ends answers from disk if the partition is not loaded, which is the state of every partition after a restart. Elections and first assignments would otherwise take a restarted replica for an empty one.

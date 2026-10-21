@@ -51,15 +51,17 @@ Delivery remains at least once. Existing performance measurements are for
 v0.7.0; no new throughput claim is made for v0.8.0.
 
 The Helm chart's version and default application image tag are `0.8.0`.
-Only deploy that tag after image publication, preferably pinned by digest.
+The release and Linux amd64 image were published on 2026-10-19; pin the image
+manifest digest below for deployments.
 
 ## Validation and artifacts
 
 All six checks passed on the implementation revision `39a5216`, including
 Linux cgo/race and non-cgo suites, the process fault campaign, Docker network
 partitions and memory-limited restart, security scans, and production chart
-startup with TLS, authentication and encryption. The release preparation
-revision must pass those checks as well before promotion to `main`.
+startup with TLS, authentication and encryption. The required source checks
+also passed on the release preparation revision `cfba215` before promotion
+to `main` ([successful check run](https://github.com/jatin711-debug/cronos_db_golang/actions/runs/39275875123)).
 
 The GitHub release carries server and `cronos-admin` binaries for Linux and
 macOS (amd64 and arm64) and Windows (amd64), with `SHA256SUMS`. These binaries
@@ -68,16 +70,33 @@ use the Go bloom filter; the Linux amd64 container uses the Rust implementation.
 A manual preparation run of `release.yml` stages the tested image as
 `cronos-db_v0.8.0_linux_amd64_image.tar.gz`, plus `IMAGE_ID`,
 `IMAGE_ARCHIVE_SHA256` and `release-image-scan.json`, on a draft release.
-The archive can be loaded with `docker load` after decompression. Its image
-ID is local content identity, not a registry manifest digest or provenance.
+The gzip archive can be loaded directly with `docker load --input <archive>`.
+`IMAGE_ID` identifies its config digest; a local engine may display a manifest
+digest instead. Neither is a signed provenance statement.
 
-Public image publication requires repository secrets `DOCKERHUB_USERNAME`
-and `DOCKERHUB_TOKEN`. Publishing the GitHub release, or explicitly selecting
-`publish_image=true` in a manual run, builds, scans and fault-tests the image,
-pushes it, attests its registry digest, then publishes
-`johnny711dock/cronos-db:0.8.0` and attaches `IMAGE_DIGEST`. The workflow does
-not move Docker Hub's `latest` tag. A preparation run does not publish either
-public tag or make the GitHub release public.
+`johnny711dock/cronos-db:0.8.0` (Linux amd64) was published from local
+Docker on 2026-10-19 using the exact staged image archive above. Its config
+digest and all nine filesystem layers match the scanned image. Local admin
+and server readiness checks passed, and the published image was verified
+through anonymous Docker Hub registry requests.
+
+Pin the published image for deployments:
+
+```sh
+docker pull johnny711dock/cronos-db@sha256:428690215148b97eb9b6aaed5a3afb7c7a3227613c8fee731ab922e2276d4928
+```
+
+`IMAGE_DIGEST` and `LOCAL_PUBLICATION_EVIDENCE.json` record the registry
+digest, source revision and verification. This local publication has no
+signed GitHub workflow provenance. Docker Hub's `latest` was moved to this
+image on 2026-10-19 as an OCI index (`sha256:a17853491e12898cfa22fa8b698c7c41d7f70ac3773da74c499226ad3efec176`)
+whose only entry, linux/amd64, is the manifest above, so both tags run the same
+image. Pin the digest above for deployments.
+
+Automated publication through `release.yml` requires repository secrets
+`DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`. That workflow builds, scans and
+fault-tests an image, pushes it and attests its registry digest. Local Docker
+publication uses the workstation's saved Docker Hub login instead.
 
 The existing limits in the [release requirements](PRODUCTION_RELEASE.md)
 still apply: validation uses one host, has not simulated a machine power cut,

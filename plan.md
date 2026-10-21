@@ -2,8 +2,8 @@
 
 > **Historical document.** This plan was worked through in July 2026 and has not
 > been kept up since. It is superseded by the
-> [production-readiness audit](docs/PRODUCTION_AUDIT_2026-09-27.md), whose status
-> table and hardening batches are current, and by the
+> [production-readiness audit](docs/PRODUCTION_AUDIT_2026-09-27.md), the
+> [v0.8.0 notes](docs/RELEASE_V0.8.0.md), and the
 > [release requirements](docs/PRODUCTION_RELEASE.md). Behaviour described below
 > may have changed since; for example, a restart no longer delivers events that
 > came due while the node was down at once (since `v0.6.0-rc.4` they stay in the

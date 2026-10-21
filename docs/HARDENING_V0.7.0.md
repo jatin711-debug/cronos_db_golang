@@ -2,6 +2,13 @@
 
 These changes implement the remaining findings of the [October audit](PRODUCTION_AUDIT_2026-10-16.md). They were released as `v0.7.0` on 2026-10-17.
 
+This is the dated v0.7.0 record; its measurements are not v0.8.0 results. The
+[v0.8.0 notes](RELEASE_V0.8.0.md) describe current-term commitment, opt-in event
+mutations/relocation, and lifecycle snapshots that bind progress and dead letters
+to a WAL generation. Those supplement the legacy snapshot path described here.
+The original release automation command below refers to the v0.7.0 workflow;
+current manual runs stage an archive unless `publish_image=true` is explicit.
+
 ## Resource and recovery behavior
 
 The scheduler shares a 64 MiB payload budget across partitions, configurable with `--scheduler-memory` / `CRONOS_SCHEDULER_MEMORY`. Overflow is stored as timestamp/offset references and reloaded in bounded pages. This is a scheduler allocation estimate, not a process RSS limit. Worker queues, Pebble, in-flight requests and a transient record read use additional memory.

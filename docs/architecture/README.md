@@ -5,8 +5,8 @@ subsystem docs independently.
 
 ## Production-Hardening Highlights (current code)
 
-- **WAL v2 record format** with Raft term and payload checksum; upgrading from
-  older layouts requires a clean data directory.
+- **WAL v2 record format** with Raft term and payload checksum; pre-v2 layouts have no
+  automatic migration. The v0.7.0 to v0.8.0 upgrade uses capability agreement.
 - **Encryption at rest v2** uses a **random 12-byte GCM nonce per record**;
   legacy v1 counter nonces remain decrypt-only.
 - **Persistent consumer group metadata** in `OffsetStore`. Exactly-once commit
@@ -22,9 +22,11 @@ subsystem docs independently.
   position that survives restarts and failovers. A failing sink makes its feed
   lag; nothing is dropped.
 - **Log-start pruning**: compaction and retention remove segments only through
-  `Partition.PruneWAL`, only once their events are due, finished by every
-  group and exported. In a cluster only the partition's leader prunes, and
-  only from the start of the log; followers follow its log start.
+  `Partition.PruneWAL`. Active events must be due, completed and exported;
+  accepted terminal controls and superseded copies have no consumer obligation.
+  Replicated and standalone lifecycle partitions prune a contiguous prefix;
+  followers follow their leader's log start. Optional bounded relocation moves
+  never-due work only after the replacement is accepted.
 - **Backups and restore**: scheduled checkpoints of every partition at
   wall-clock multiples of `--backup-interval`; `cronos-admin restore`, and
   `cronos-admin check-log` to report or cut a damaged segment.
@@ -46,6 +48,15 @@ subsystem docs independently.
   partition has no leader, fences the replicas at that epoch, then picks the
   most complete one; a planned leader move waits until the target's log ends
   at the same entry.
+- **Current-term commitment**: after capability agreement, a new leader must
+  replicate a durable term-start record before committing an older prefix.
+  Mixed clusters retain legacy behavior until agreement; activation is one-way.
+- **Lifecycle (off by default)**: future-event cancellation/rescheduling uses
+  stable references and idempotent revision checks. Replicated operations require
+  majority acknowledgements and capable replicas/voters. Recovery snapshots bind
+  consumer progress and dead letters to the matching WAL generation. See the
+  [lifecycle contract](../RETENTION_AND_EVENT_LIFECYCLE.md) and
+  [term-start protocol](../REPLICATION_TERM_START.md).
 - **Topology from leaders**: the admin topology reads each partition's
   in-sync replicas from its leader (`ReplicationService.LeaderReport`).
 - **Node removal**: `cronos-admin cluster remove-node <node-id>` takes a lost
@@ -60,14 +71,15 @@ subsystem docs independently.
 
 ## Known Limitations (documented gaps)
 
-These are **intentional deferred features**, fully called out so docs match reality.
+These are known product gaps. The [release requirements](../PRODUCTION_RELEASE.md)
+also distinguish unvalidated operating conditions from implemented guarantees.
 Details and mermaid: [ARCHITECTURE.md § Known Limitations](../../ARCHITECTURE.md#known-limitations).
 
 | Gap | What works | What does not (yet) | Primary doc |
 |-----|------------|---------------------|-------------|
-| **Lag-driven snapshot** | Bulk `InstallSnapshot` on join / `SyncPartitionFromLeader`; `--snapshot-catchup-threshold` (default 10000) | Mid-flight auto-snapshot when a connected follower’s lag exceeds threshold | [replication.md](features/replication.md) |
+| **Lag-driven snapshot** | Bulk `InstallSnapshot` on join / `SyncPartitionFromLeader` | Mid-flight auto-snapshot; `--snapshot-catchup-threshold` is parsed but unused | [replication.md](features/replication.md) |
 | **Admin TriggerRebalance** | Automatic rebalance on membership + Raft reconcile (~5s) | On-demand `TriggerRebalance` RPC/UI is a soft stub (descriptive response) | [cluster.md](features/cluster.md), [dashboard.md](features/dashboard.md) |
-| **Delivery redrive** | Credits, CB, DLQ, backpressure metrics; held-back events are redelivered from the WAL when credits return; backlog drained on subscribe; consumer progress replicated to followers (`SyncConsumerProgress`) | Progress for a group with no connected subscriber; completions recorded since the leader last sent consumer progress (one maintenance tick) can be redelivered after a failover; a replication-factor-1 handoff does not carry consumer progress | [delivery.md](features/delivery.md) |
+| **Delivery redrive** | Credits, CB, DLQ, WAL redrive and replicated progress; lifecycle snapshots carry consistent recovery state | A disconnected group makes no progress; completions not yet transferred may be redelivered after failover; legacy RF=1 handoff has no atomic progress transfer | [delivery.md](features/delivery.md) |
 
 ## Start Here
 
@@ -75,6 +87,8 @@ Details and mermaid: [ARCHITECTURE.md § Known Limitations](../../ARCHITECTURE.m
 - Narrative guide: [docs/DEVELOPER_ARCHITECTURE_GUIDE.md](../DEVELOPER_ARCHITECTURE_GUIDE.md)
 - Why it is built this way, and what each choice costs: [docs/system-design/README.md](../system-design/README.md)
 - Full architecture: [ARCHITECTURE.md](../../ARCHITECTURE.md)
+- Released lifecycle behavior: [RETENTION_AND_EVENT_LIFECYCLE.md](../RETENTION_AND_EVENT_LIFECYCLE.md)
+- Commitment and rolling upgrades: [REPLICATION_TERM_START.md](../REPLICATION_TERM_START.md)
 - Diagrams: embedded inline (see [Diagram Index](#diagram-index)) so they render on GitHub
 
 ## Feature Documents
