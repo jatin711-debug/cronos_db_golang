@@ -42,6 +42,12 @@ new subscription can receive live events. This closes a registration window in
 which the first acknowledgement could be refused because its group did not yet
 exist. This change also requires the next patch release.
 
+Deduplication lookups also keep buffered IDs visible until their Pebble batch
+has committed. Previously, a lookup during the handoff from the buffer to
+Pebble could briefly report an existing ID as missing. Failed flushes now leave
+those buffered IDs visible while they wait for another attempt. These fixes
+apply to the development source and need the same patch release.
+
 The major correctness work in this release is current-term commitment after
 leader changes, opt-in future-event cancellation/rescheduling, bounded
 relocation, and consistent lifecycle recovery snapshots/backups. See the

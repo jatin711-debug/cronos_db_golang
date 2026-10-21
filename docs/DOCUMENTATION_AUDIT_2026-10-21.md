@@ -135,3 +135,10 @@ an event becoming due during group initialization, rejected initialization,
 and duplicate registration. A public API test also checks server-assigned
 partition membership and its first acknowledgement. The isolation test now
 includes the client's last acknowledgement refusal in its failure diagnostics.
+
+A later non-cgo CI failure exposed a deduplication lookup gap during background
+flush. The store now keeps pending IDs visible until the Pebble commit
+succeeds, using the same flush path for timer, single-write and batch-write
+flushes. A paused-write regression checks existence, offset and timestamp
+lookups during successful and failed commits; the concurrent-access test now
+checks write errors and every accepted ID instead of one sample.
