@@ -11,7 +11,7 @@ Thank you for considering a contribution to CronosDB.
 
 Prerequisites:
 
-- **Go 1.26.9** (the version `go.mod` names)
+- **Go 1.26.10** (the version `go.mod` names)
 - **Rust** / Cargo (optional: the bloom-filter library used through cgo; without cgo the server uses one written in Go)
 - **protoc** (only to regenerate the gRPC code with `make proto`)
 - **Docker** with `docker compose` (the container tests, and `make verify-env`)
