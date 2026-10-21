@@ -296,16 +296,8 @@ func clusterCmd() *cobra.Command {
 
 	statusCmd := &cobra.Command{
 		Use:   "status",
-		Short: "Get cluster status",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			// Use HTTP health endpoint for simple cluster status
-			addr := strings.Replace(serverAddr, ":9000", ":8080", 1)
-			if addr == serverAddr {
-				addr = addr + ":8080"
-			}
-			fmt.Printf("Cluster status endpoint: http://%s/health/deep\n", addr)
-			return nil
-		},
+		Short: "Show cluster status: nodes, partition leaders and replicas (same as admin topology)",
+		RunE:  adminTopologyCmd().RunE,
 	}
 
 	votersCmd := &cobra.Command{
@@ -891,12 +883,11 @@ func adminCompactionRunCmd() *cobra.Command {
 				fmt.Printf("compaction: success=false error=%s\n", resp.GetError())
 				return nil
 			}
-			fmt.Printf("compaction: success=true segments_compacted=%d bytes_reclaimed=%d\n",
-				resp.GetSegmentsCompacted(), resp.GetBytesReclaimed())
+			fmt.Printf("compaction: success=true segments_removed=%d\n", resp.GetSegmentsCompacted())
 			return nil
 		},
 	}
-	cmd.Flags().Int64Var(&partitionID, "partition-id", 0, "Partition ID (required; per-partition primitive)")
+	cmd.Flags().Int64Var(&partitionID, "partition-id", 0, "Partition ID (0 = every partition of the node)")
 	return cmd
 }
 

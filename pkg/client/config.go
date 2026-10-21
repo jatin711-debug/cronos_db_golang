@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/jatin711-debug/cronos_db_golang/pkg/client/internal/circuitbreaker"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/client/internal/hedging"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/client/internal/retry"
 	"google.golang.org/grpc/credentials"
 )
 
@@ -21,6 +23,24 @@ const (
 	defaultMetadataTTL        = 15 * time.Second
 	defaultMetadataRefresh    = 5 * time.Second
 )
+
+// CircuitBreakerConfig controls a per-node circuit breaker: after
+// FailureThreshold consecutive failures the client stops sending to that node
+// for Timeout, then lets requests through again once SuccessThreshold probes
+// succeed. A FailureThreshold of 0 disables the breaker.
+type CircuitBreakerConfig = circuitbreaker.Config
+
+// RetryPolicy controls how often the producer retries a publish that failed
+// for a transient reason (unreachable node, leader change) and how long it
+// waits in between: exponential backoff from MinBackoff up to MaxBackoff,
+// randomized by Jitter.
+type RetryPolicy = retry.Policy
+
+// HedgingPolicy controls request hedging: when Enabled, a publish that has
+// not been answered after Delay is also sent to the next candidate node, up
+// to MaxHedges extra requests, and the first answer wins. It lowers tail
+// latency at the cost of extra requests. Off by default.
+type HedgingPolicy = hedging.Policy
 
 // MetadataConfig controls how the client caches and refreshes cluster metadata.
 type MetadataConfig struct {
@@ -105,9 +125,10 @@ type Config struct {
 	// Hooks receives optional instrumentation callbacks (may be nil → NopHooks).
 	Hooks Hooks
 
-	// CircuitBreaker controls per-address resilience gates for requests issued
-	// through this client (e.g. by Producer). Threshold of 0 disables breakers.
-	CircuitBreaker circuitbreaker.Config
+	// CircuitBreaker controls per-address publish gates shared by producers
+	// of this client. It does not gate consumer or lifecycle calls.
+	// FailureThreshold of 0 disables breakers.
+	CircuitBreaker CircuitBreakerConfig
 }
 
 // DefaultConfig returns a config with throughput-safe defaults.
