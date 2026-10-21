@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -333,13 +334,20 @@ func TestSubscriptionServerAssignmentJoinsTheResolvedPartition(t *testing.T) {
 
 type isolationAckErrors struct {
 	client.NopHooks
-	last atomic.Value
+	last        atomic.Value
+	lastRequest atomic.Value
+	lastError   atomic.Value
 }
 
 func (h *isolationAckErrors) OnError(op string, _ client.ErrorKind, err error) {
+	h.lastError.Store(fmt.Sprintf("%s: %v", op, err))
 	if op == "consumer.ack" {
 		h.last.Store(err.Error())
 	}
+}
+
+func (h *isolationAckErrors) OnRequest(op, _ string, _ time.Duration, err error) {
+	h.lastRequest.Store(fmt.Sprintf("%s: %v", op, err))
 }
 
 // One tenant cannot acknowledge a delivery made to the other, which would
@@ -360,11 +368,17 @@ func TestIsolation_AcknowledgementsBelongToTheirRecipient(t *testing.T) {
 	subscribed := make(chan error, 1)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	// Complete connection setup before timing delivery, and keep the helper's
+	// Fatal calls on the test goroutine.
+	alice := ts.sdk("alice", ackErrors)
 	go func() {
 		cfg := client.DefaultConsumerConfig("alpha", "group-a")
 		cfg.AckMode = client.AckModeManual
 		cfg.AutoAck = false
-		subscribed <- ts.sdk("alice", ackErrors).Subscribe(ctx, cfg, func(_ context.Context, d client.Delivery) error {
+		cfg.OnReconnect = func(_ context.Context, attempt int, err error) {
+			ackErrors.lastError.Store(fmt.Sprintf("reconnect %d: %v", attempt, err))
+		}
+		subscribed <- alice.Subscribe(ctx, cfg, func(_ context.Context, d client.Delivery) error {
 			calls.Add(1)
 			lastCall.Store(fmt.Sprintf("delivery %s, attempt %d", d.DeliveryID, d.Attempt))
 			select {
@@ -393,6 +407,8 @@ func TestIsolation_AcknowledgementsBelongToTheirRecipient(t *testing.T) {
 	select {
 	case held = <-delivered:
 	case <-time.After(20 * time.Second):
+		stacks := make([]byte, 1<<20)
+		t.Logf("last client request: %v; last client error: %v\n%s", ackErrors.lastRequest.Load(), ackErrors.lastError.Load(), stacks[:runtime.Stack(stacks, true)])
 		t.Fatalf("alice did not receive her event: %s", state())
 	}
 
