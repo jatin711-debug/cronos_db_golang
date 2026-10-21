@@ -40,9 +40,10 @@ type Message struct {
 
 	// Meta is optional event metadata key/value pairs sent to the server.
 	Meta map[string]string
-	// PartitionKey selects the partition via consistent hashing when PartitionID is nil.
+	// PartitionKey is hashed by the server to select a partition; empty uses MessageID.
 	PartitionKey string
-	// PartitionID forces a specific partition when non-nil (overrides PartitionKey hashing).
+	// PartitionID selects the client route when non-nil. It must match the
+	// server's hash of PartitionKey (or MessageID when PartitionKey is empty).
 	PartitionID *int32
 
 	// AllowDuplicate permits republishing an existing message_id (server-side testing / overrides).

@@ -10,8 +10,11 @@ The v0.8.1 container targets Linux amd64. Check the [release page](https://githu
 
 ```bash
 docker pull johnny711dock/cronos-db:0.8.1    # :latest selects the current stable release
-# For immutable deployments, pin the digest in the release's IMAGE_DIGEST asset.
+# The tested v0.8.1 Linux amd64 image, pinned for immutable deployments:
+docker pull johnny711dock/cronos-db@sha256:f2839385386b2f44b6a07669fcb001dcab31273a3e7ba14f1f0510f6a9594883
 ```
+
+For another release, take its pin from the `IMAGE_DIGEST` release asset.
 
 Or build it from a checkout:
 
