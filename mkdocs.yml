@@ -121,7 +121,7 @@ nav:
   - Using CronosDB:
       - Go Client: CLIENT_GUIDE.md
       - Dashboard and CLI: ADMINISTRATION.md
-      - Configuration: architecture/features/config.md
+      - Configuration: CONFIGURATION.md
   - Release:
       - Release Requirements: PRODUCTION_RELEASE.md
       - v0.8.1 Patch Notes: RELEASE_V0.8.1.md
@@ -145,6 +145,7 @@ nav:
           - Cluster Control Plane: architecture/features/cluster.md
           - Compliance & Retention: architecture/features/compliance.md
           - Consumer Groups: architecture/features/consumer.md
+          - Configuration: architecture/features/config.md
           - Dashboard: architecture/features/dashboard.md
           - Deduplication: architecture/features/dedup.md
           - Delivery Pipeline: architecture/features/delivery.md

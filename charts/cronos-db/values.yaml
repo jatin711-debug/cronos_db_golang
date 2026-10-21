@@ -101,6 +101,22 @@ config:
   tracingSampleRatio: 0.01
   tracingInsecure: true
 
+# Extra environment variables for the server container, as Kubernetes EnvVar
+# entries. Every server flag can be set this way as CRONOS_<FLAG> (see
+# docs/CONFIGURATION.md); entries here take precedence over the values the
+# chart sets in its ConfigMap.
+# Use valueFrom for secrets, such as a CDC webhook URL. Examples:
+#   - name: CRONOS_RETENTION_MAX_AGE_HOURS
+#     value: "72"
+#   - name: CRONOS_BACKUP_INTERVAL
+#     value: "6h"
+#   - name: CRONOS_EVENT_LIFECYCLE      # also needs config.minInSyncReplicas: 2
+#     value: "true"
+#   - name: CRONOS_CDC_WEBHOOK_URL
+#     valueFrom:
+#       secretKeyRef: {name: cronos-cdc, key: webhook-url}
+extraEnv: []
+
 # Enable only when TLS certificates are provided via secrets.
 tls:
   enabled: false

@@ -155,7 +155,7 @@ includes the hardware, settings, comparisons, and limits.
 | Run Docker or Compose | [Docker guide](DOCKER.md) |
 | Publish, consume, or replay | [Go client guide](docs/CLIENT_GUIDE.md) |
 | Use the dashboard and admin CLI | [Administration](docs/ADMINISTRATION.md) |
-| Configure flags and environment variables | [Configuration reference](docs/architecture/features/config.md#full-flag-reference) |
+| Configure flags and environment variables | [Configuration reference](docs/CONFIGURATION.md) |
 | Deploy and assess guarantees | [Release requirements](docs/PRODUCTION_RELEASE.md) |
 | Use cancellation and rescheduling | [Event lifecycle contract](docs/RETENTION_AND_EVENT_LIFECYCLE.md) |
 | Understand the implementation | [Architecture](ARCHITECTURE.md) · [Developer guide](docs/DEVELOPER_ARCHITECTURE_GUIDE.md) · [Feature docs](docs/architecture/README.md) |
