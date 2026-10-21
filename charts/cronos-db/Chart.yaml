@@ -2,8 +2,8 @@ apiVersion: v2
 name: cronos-db
 description: A Helm chart for CronosDB, a distributed event database.
 type: application
-version: 0.8.0
-appVersion: "0.8.0"
+version: 0.8.1
+appVersion: "0.8.1"
 keywords:
   - cronos
   - database

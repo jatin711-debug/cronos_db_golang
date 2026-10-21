@@ -6,12 +6,11 @@
 
 ### Get the image
 
-The v0.8.0 image is published on Docker Hub for Linux amd64:
+The v0.8.1 container targets Linux amd64. Check the [release page](https://github.com/jatin711-debug/cronos_db_golang/releases/tag/v0.8.1) for publication status and image evidence:
 
 ```bash
-docker pull johnny711dock/cronos-db:0.8.0    # also selected by :latest
-# Immutable deployment reference for this release:
-docker pull johnny711dock/cronos-db@sha256:428690215148b97eb9b6aaed5a3afb7c7a3227613c8fee731ab922e2276d4928
+docker pull johnny711dock/cronos-db:0.8.1    # :latest selects the current stable release
+# For immutable deployments, pin the digest in the release's IMAGE_DIGEST asset.
 ```
 
 Or build it from a checkout:
@@ -20,7 +19,7 @@ Or build it from a checkout:
 docker build -t cronos-db:local .
 ```
 
-The image holds the server at `/app/cronos-api`, built with cgo and the Rust bloom filter, and the administration tool at `/app/cronos-admin`. It runs as the non-root user `cronos`, and keeps its data in the volume `/data`. The `docker run` examples use the published image; replace it with `cronos-db:local` to test your own build. Compose builds from the checkout. The published image was pushed locally from the scanned release archive and has no signed GitHub workflow provenance; see the [release notes](docs/RELEASE_V0.8.0.md).
+The image holds the server at `/app/cronos-api`, built with cgo and the Rust bloom filter, and the administration tool at `/app/cronos-admin`. It runs as the non-root user `cronos`, and keeps its data in the volume `/data`. The `docker run` examples use the published image; replace it with `cronos-db:local` to test your own build. Compose builds from the checkout. Local publication uses the scanned and fault-tested release archive and has no signed GitHub workflow provenance; the [patch notes](docs/RELEASE_V0.8.1.md) explain its identity and evidence.
 
 ### Run single node
 
@@ -34,7 +33,7 @@ docker run -d \
   -p 9000:9000 \
   -p 8080:8080 \
   -v cronos-data:/data \
-  johnny711dock/cronos-db:0.8.0 \
+  johnny711dock/cronos-db:0.8.1 \
   --node-id=my-node \
   --data-dir=/data \
   --dev
@@ -78,7 +77,7 @@ docker run -d \
   -p 9000:9000 \
   -p 8080:8080 \
   -v /path/on/host:/data \
-  johnny711dock/cronos-db:0.8.0 \
+  johnny711dock/cronos-db:0.8.1 \
   --node-id=my-node \
   --data-dir=/data \
   --dev
@@ -208,7 +207,7 @@ docker run -d \
   -v cronos-node1-data:/data \
   -v /etc/cronos/certs:/certs:ro \
   --env-file /etc/cronos/secrets.env \
-  johnny711dock/cronos-db:0.8.0 \
+  johnny711dock/cronos-db:0.8.1 \
   --node-id=node1 \
   --data-dir=/data \
   --cluster \
