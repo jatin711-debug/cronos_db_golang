@@ -128,33 +128,14 @@ func (p *PebbleStore) bufferWrite(messageID string, offset int64) error {
 	p.pendingMu.Lock()
 	p.pending[messageID] = offset
 	full := len(p.pending) >= 1000
-	var toFlush map[string]int64
-	if full {
-		toFlush = p.pending
-		p.pending = make(map[string]int64)
-	}
 	p.pendingMu.Unlock()
 
 	if full {
-		if err := p.flushPendingMap(toFlush); err != nil {
-			p.requeuePending(toFlush)
+		if err := p.flushPendingLocked(p.flushPendingMap); err != nil {
 			return fmt.Errorf("flush pending entry: %w", err)
 		}
 	}
 	return nil
-}
-
-// requeuePending puts failed flushes back into the live buffer. A newer value
-// already present in pending wins, so an older failed flush cannot overwrite a
-// subsequent claim.
-func (p *PebbleStore) requeuePending(entries map[string]int64) {
-	p.pendingMu.Lock()
-	defer p.pendingMu.Unlock()
-	for id, offset := range entries {
-		if _, exists := p.pending[id]; !exists {
-			p.pending[id] = offset
-		}
-	}
 }
 
 // StoreOnly stores a message ID without checking if it exists.
@@ -176,16 +157,10 @@ func (p *PebbleStore) StoreBatch(messageIDs []string, offsets []int64, indices [
 		p.pending[messageIDs[idx]] = offsets[idx]
 	}
 	full := len(p.pending) >= 1000
-	var toFlush map[string]int64
-	if full {
-		toFlush = p.pending
-		p.pending = make(map[string]int64)
-	}
 	p.pendingMu.Unlock()
 
 	if full {
-		if err := p.flushPendingMap(toFlush); err != nil {
-			p.requeuePending(toFlush)
+		if err := p.flushPendingLocked(p.flushPendingMap); err != nil {
 			return fmt.Errorf("flush pending batch: %w", err)
 		}
 	}
@@ -338,20 +313,28 @@ func (p *PebbleStore) startFlushLoop() {
 func (p *PebbleStore) flushPending() error {
 	p.claimMu.Lock()
 	defer p.claimMu.Unlock()
+	return p.flushPendingLocked(p.flushPendingMap)
+}
 
-	p.pendingMu.Lock()
+// flushPendingLocked requires claimMu. Writers cannot change the pending map
+// during the commit, while lookups can still read it. The write must treat the
+// map as read-only and publish all entries before returning nil; only then can
+// the buffer be cleared. Failed writes leave entries visible for a later retry.
+func (p *PebbleStore) flushPendingLocked(write func(map[string]int64) error) error {
+	p.pendingMu.RLock()
 	if len(p.pending) == 0 {
-		p.pendingMu.Unlock()
+		p.pendingMu.RUnlock()
 		return nil
 	}
 	toFlush := p.pending
-	p.pending = make(map[string]int64)
-	p.pendingMu.Unlock()
+	p.pendingMu.RUnlock()
 
-	if err := p.flushPendingMap(toFlush); err != nil {
-		p.requeuePending(toFlush)
+	if err := write(toFlush); err != nil {
 		return err
 	}
+	p.pendingMu.Lock()
+	p.pending = make(map[string]int64)
+	p.pendingMu.Unlock()
 	return nil
 }
 
