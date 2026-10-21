@@ -23,6 +23,9 @@ The auth module handles authentication and authorization policy enforcement befo
 - Supports HMAC (`--auth-jwt-secret`) and Ed25519/RSA public-key (`--auth-jwt-public-key`) JWT verification, and an RBAC policy loaded from a JSON file.
 - Fails closed: with `--auth-enabled`, the server exits at start if the policy file is missing or cannot be loaded, or if the public key cannot be loaded.
 - Runs early in interceptor chain to minimize wasted work for rejected requests.
+- `GetEventState`, `CancelEvent` and `RescheduleEvent` also require topic
+  **publish** permission in the lifecycle handler. A state query is a leader
+  operation, not a bypass of topic authorization. See [API behavior](api.md).
 
 ## Debug Pointers
 

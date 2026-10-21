@@ -79,8 +79,10 @@ Same handler code as gRPC AdminService
 - **Auth mirrors gRPC.** Bearer JWT, same secret/keys/policy; admin requires
   `Subject.Admin=true`. In `--dev` (auth off) middleware is a pass-through.
 - **gRPC status → HTTP.** NotFound→404, PermissionDenied→403, etc.
-- **Schemas and tenant usage are live** when schema registry / tenant
-  accountant are initialized at process start (they are in `cmd/api/main.go`).
+- **Schemas are live; tenant limits are not configured by the shipped server.**
+  The accountant is initialized, but no runtime configuration calls `SetLimits`.
+  The tenant usage view therefore reports zero with `limits_configured: false`;
+  initialization alone does not enable quotas. See [tenant.md](tenant.md).
 - **The topology asks the leaders.** Which replicas of a partition are in
   sync, and their offsets, are known to the node that leads it alone.
   `GetClusterTopology` asks every node that is alive for the partitions it
@@ -93,6 +95,8 @@ Same handler code as gRPC AdminService
   unreported partition has no `isr`. The SPA's types mark such fields
   optional.
 - **`make build` depends on dashboard stage** so release binaries include UI.
+- Lifecycle state/cancel/reschedule operations are gRPC EventService methods;
+  this dashboard has no controls for them. See [api.md](api.md).
 
 ## Debug Pointers
 

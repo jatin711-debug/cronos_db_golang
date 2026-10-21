@@ -45,6 +45,11 @@ a restart or a failover. Delivery is at least once.
 - `--exactly-once-commits` (commit IDs and strict monotonic commits) is
   refused in production ("use per-event at-least-once completion"). The
   commit-ID method in `OffsetStore` is not called by any server path.
+- Lifecycle rescheduling and relocation preserve logical identity but use a new
+  physical offset. Acks complete the copy actually delivered; an old copy's
+  completion never completes its successor. Lifecycle recovery imports group
+  metadata, floors and sparse progress with the matching WAL generation after
+  clearing stale state. See [consistent recovery](../../RETENTION_AND_EVENT_LIFECYCLE.md#consistent-recovery-snapshots-and-backups).
 
 ## Debug Pointers
 

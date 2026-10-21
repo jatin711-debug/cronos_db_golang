@@ -12,6 +12,9 @@ The partition module is the core execution unit that groups WAL, scheduler, dedu
 - [internal/partition/disk_pressure.go](../../../internal/partition/disk_pressure.go) — disk-pressure monitoring, emergency compaction callback.
 - [internal/partition/backpressure.go](../../../internal/partition/backpressure.go) — admission control across ready queue, timing wheel depth, and in-flight deliveries.
 - [internal/partition/snapshot.go](../../../internal/partition/snapshot.go) — partition-recovery `snapshot.json` (HWM + consumer offsets); distinct from the gRPC `ReplicationService.Snapshot` install path used for follower bootstrap.
+- [internal/partition/lifecycle.go](../../../internal/partition/lifecycle.go), [replicated_lifecycle.go](../../../internal/partition/replicated_lifecycle.go) — lifecycle index, mutation/delivery exclusion and replicated activation.
+- [internal/partition/term_start.go](../../../internal/partition/term_start.go) — durable format marker and current-term leadership proof.
+- [internal/partition/recovery_snapshot.go](../../../internal/partition/recovery_snapshot.go) — consistent lifecycle recovery-state capture and import across WAL generation swaps.
 
 ## Main Flow
 
@@ -29,6 +32,17 @@ The partition module is the core execution unit that groups WAL, scheduler, dedu
 - Partition storage uses WAL v2 and default fsync mode `batch`.
 - Epoch handling fences stale leaders; `ReplicateMu` preserves offset order on the RF>1 write path only.
 - Admission control and disk monitor prevent overload and trigger emergency compaction.
+- `--event-lifecycle` enables future-event state queries, cancellation and
+  rescheduling. The disk-backed index tracks heads without payloads and is
+  rebuilt before readers run. A staged mutation suppresses its predecessor
+  but does not make it removable; acceptance requires the current-term proof.
+- Lifecycle snapshot install captures the accepted boundary, epoch, consumer
+  progress and dead letters with the WAL generation. Startup resumes an
+  interrupted state import before serving; suffix replacement clears stale
+  completions and rebuilds the index before offsets can be reused.
+- See the [lifecycle contract](../../RETENTION_AND_EVENT_LIFECYCLE.md) and
+  [term-start protocol](../../REPLICATION_TERM_START.md) for rolling-upgrade
+  requirements, internal offsets and unsupported combinations.
 
 ## Debug Pointers
 

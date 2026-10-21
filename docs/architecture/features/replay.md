@@ -32,6 +32,12 @@ Replay serves historical data from WAL by time or offset, enabling debugging, ba
 - Replay engine reads WAL v2 records with Raft term and trailing checksum validation.
 - Context cancellation is honored for long-running requests.
 - Follower-read policy gate protects consistency expectations.
+- On term-start partitions, public replay is bounded by the committed prefix.
+  In lifecycle mode it emits only active event copies, strips internal mutation
+  metadata, and excludes cancellations and superseded copies. Term-start records
+  are always omitted. A replay is therefore not a physical WAL inventory;
+  acceptance tests use authenticated physical snapshots to compare replicas.
+  See [current-term commitment](../../REPLICATION_TERM_START.md#reader-behavior).
 
 ## Debug Pointers
 

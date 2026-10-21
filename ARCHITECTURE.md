@@ -1,5 +1,11 @@
 # CronosDB Architecture
 
+This guide describes the v0.8.0 source line. Its
+[event lifecycle contract](docs/RETENTION_AND_EVENT_LIFECYCLE.md) and
+[current-term commitment protocol](docs/REPLICATION_TERM_START.md) define the
+format activation and recovery rules; the
+[release requirements](docs/PRODUCTION_RELEASE.md) record validation limits.
+
 > A distributed, timestamp-triggered event database with built-in scheduling, pub/sub messaging, and WAL-based persistence.
 
 > **Production readiness note:** CronosDB has a development and a production run mode. The `--dev` flag disables the production requirements for local testing. Without `--dev` the server refuses to start unless it has TLS, authentication with a policy file, encryption at rest, mutual TLS between nodes, `--replication-factor>=3`, `--min-insync-replicas>=2`, `--fsync-mode` `batch` or `every_event`, and, in cluster mode, `--cluster-seeds`. It also refuses `--exactly-once-commits`, `--experimental-features` and a `--pprof-addr` that is not a loopback address (`config.ValidateConfig`). See [Security](#security) and [Configuration Reference](#configuration-reference) for details.
@@ -44,7 +50,7 @@ Quick navigation:
 CronosDB is a **time-aware event store**. Events are published with a future `schedule_ts` and the system triggers delivery precisely at that timestamp. It combines:
 
 - **Append-only WAL** for durable, ordered storage
-- **Hierarchical Timing Wheel** for O(1) timer scheduling
+- **Hierarchical Timing Wheel** for constant-time bucket operations per level
 - **Bloom Filter + PebbleDB** for deduplication
 - **Raft consensus** for cluster metadata, including which node leads each partition
 - **Consistent hashing** to propose where partition replicas live
@@ -223,12 +229,13 @@ sequenceDiagram
     gRPC->>WAL: AppendEvent(event)
     Note over WAL: Assign offset, CRC32, buffered write
     alt Append fails
-        gRPC->>DD: RollbackBatch(message_id)
-        gRPC-->>Client: error, a retry is not taken for a duplicate
+        gRPC->>gRPC: Check whether the event reached the log and fence failed WAL
+        Note over gRPC,DD: Roll back only a definite pre-append claim.<br/>Retain appended claims and reconcile the original operation
+        gRPC-->>Client: error, an appended operation can have an unknown outcome
     end
 
     gRPC->>REPL: Replicate(event) on a replicated partition
-    Note over REPL: Returns once min-insync-replicas replicas,<br/>the leader included, hold the event
+    Note over REPL: min-insync-replicas includes the leader.<br/>Current-term proof gates commitment of an older prefix
     alt Not on enough replicas
         REPL-->>gRPC: error
         Note over gRPC: Event stays in the log, held unaccepted.<br/>A client retry finishes it
@@ -238,7 +245,7 @@ sequenceDiagram
     gRPC->>SCH: Schedule(event)
     Note over SCH: Timing wheel slot, or cold store when beyond the hot window
     gRPC->>DD: Put(message_id, offset) records the publish as accepted
-    gRPC-->>Client: PublishResponse with offset
+    gRPC-->>Client: PublishResponse with offset and term
 ```
 
 ### Publish Batch - High Throughput
@@ -263,7 +270,7 @@ sequenceDiagram
         DD-->>gRPC: results array
 
         gRPC->>WAL: AppendBatch(events)
-        Note over WAL: Single lock, single buffered write.<br/>On failure the dedup claims are rolled back
+        Note over WAL: Single lock, single buffered write.<br/>Release claims only on definite pre-append failure
 
         gRPC->>REPL: Replicate(events) on a replicated partition
         Note over REPL: Until min-insync-replicas hold the batch.<br/>On failure the batch is held unaccepted
@@ -437,22 +444,28 @@ flowchart LR
     C -->|Yes| Z[Skip: follow the leader's log start]
     C -->|No| D{Active segment?}
     D -->|Yes| K[Keep]
-    D -->|No| E{Every event due, finished by every group that takes it, accepted, exported by the change feed?}
+    D -->|No| E{Accepted terminal records or completed active events; export and DLQ safe?}
     E -->|No| K
     E -->|Yes| F[Delete segment and its .index file]
     F --> G[Raise consumer floors to the new log start]
 ```
 
 **Rules:**
-- Removal goes through `PruneWAL`, which removes a segment only when every
-  event in it is due, is finished by every consumer group that takes it, is
-  accepted (on a replicated partition, on `min-insync-replicas` replicas) and
-  has been exported by the change feed.
+- Removal goes through `PruneWAL`. Ordinary active events must be due and
+  finished by every relevant group, with at least one group, and accepted,
+  exported and safe under dead-letter replication. Accepted cancellations,
+  superseded copies and term-start controls can be terminal without a consumer
+  completion; unaccepted records cannot release a segment.
 - The active segment is never removed.
 - On a replicated partition only the leader prunes, and only from the start of
   the log, so the log stays one unbroken range of offsets. Followers skip the
   scan; every append names the leader's log start, and a follower removes what
   lies below it (`FollowLogStart`).
+- Standalone lifecycle partitions also prune only a contiguous prefix.
+  `--wal-relocation-bytes` optionally copies never-due work out of the oldest
+  selected closed segment within a byte budget. Its replacement must be
+  accepted before the predecessor can go. The active segment and unfinished
+  due work are not evacuated; the default budget is zero.
 - Unloaded partitions and files outside a partition's `segments/` directory are
   not touched.
 
@@ -463,8 +476,8 @@ flowchart LR
     A[Compaction timer - every --compaction-interval] --> B{Replicated partition?}
     B -->|Yes, not the leader| Z[Skip: follow the leader's log start]
     B -->|Yes, leader| P[Oldest closed segment first, stop at the first that stays]
-    B -->|No| Q[Every closed segment]
-    P --> C{Every event due, taken by a group, finished by every group that takes it, exported by the change feed?}
+    B -->|No| Q[Lifecycle: prefix only; otherwise every closed segment]
+    P --> C{Accepted terminal records or completed active events; export and DLQ safe?}
     Q --> C
     C -->|No| K[Keep]
     C -->|Yes| E[Delete segment and index]
@@ -476,7 +489,10 @@ flowchart LR
 
 ## Scheduler and Timing Wheel
 
-The scheduler uses a **hierarchical timing wheel** for O(1) timer management of millions of events.
+The scheduler uses a **hierarchical timing wheel** with constant-time bucket
+insertion/removal at a level. Overflow traversal depends on the number of
+levels, and a tick's work grows with the timers expired or cascaded; a crowded
+slot is not constant total work or a delivery-latency guarantee.
 
 ### Timing Wheel Structure
 
@@ -1223,7 +1239,7 @@ is peer-plane only so arbitrary event inject/fetch stays off `:9000`.
 ```mermaid
 graph TB
     subgraph ReplicationService
-      A[Append - unary]
+      A[Append / AppendLifecycle / AppendTermStart - unary]
       SN[Snapshot - server streaming]
       PO[Position - unary]
       LR[LeaderReport - unary]
@@ -1240,12 +1256,13 @@ graph TB
     end
 ```
 
-The six RPCs are defined in `proto/events.proto` and served by
+The RPCs are defined in `proto/events.proto` and served by
 `internal/api/replication_server.go`.
 
 | RPC | Direction | Body | Used by |
 |-----|-----------|------|---------|
 | `Append` | leader → follower (unary) | `ReplicationAppendRequest{PartitionId, Events, ExpectedNextOffset, Term, PrevLogTerm, Checksum, LeaderId, HasPrevLog, PrevLogOffset, LogStartOffset, LeaderLogEnd}` → `ReplicationAppendResponse{Success, Error, LastOffset, NextOffset, Term, LogMismatch, ConflictTerm, ConflictFirstOffset}` | `Leader.appendToFollower`, from `sendToFollower` on every replicated batch and from `catchUpFollower`; also with no events, to announce the log start (`announceLogStart`) |
+| `AppendLifecycle` / `AppendTermStart` | leader → follower (unary) | Versioned append requests naming the required record formats | Lifecycle-only compatibility transport / required transport for term-start partitions; includes probes and catch-up; incompatible receivers fail without a plain-append fallback |
 | `Snapshot` | follower → leader (server streaming) | `ReplicationSnapshotRequest{PartitionId, StartOffset, MaxBytes}` → stream of `ReplicationSnapshotChunk{Header, Data, Trailer}` with per-file IEEE CRC32 | `Follower.InstallSnapshot`, from `SyncPartitionFromLeader` on join, ownership moves and handoffs |
 | `Position` | any node → replica (unary) | `ReplicationPositionRequest{PartitionId, FenceEpoch}` → the replica's last offset, last term and epoch | Elections (`fencedPositions`, which fences first) and handoff checks |
 | `LeaderReport` | any node → node (unary) | → in-sync replicas and offsets of every partition the node leads | The admin topology, which shows each partition's ISR as its leader has it |
@@ -1262,8 +1279,8 @@ sequenceDiagram
 
     L->>L: Append to local WAL, then Replicate (publish waits)
     L->>L: Compute batch CRC32 checksum
-    L->>INT: gRPC Append(ReplicationAppendRequest with term, leader ID, prev log, log start)
-    INT->>F: ReplicationServiceHandler.Append
+    L->>INT: Versioned append with formats, term, leader ID, prev log, log start
+    INT->>F: Replication handler validates required formats
     F->>F: Accept one leader per term, verify batch CRC32
     F->>F: Check the entry at prev_log_offset, answer log_mismatch on a different term
     F->>F: Follow the leader's log start (FollowLogStart)
@@ -1272,7 +1289,7 @@ sequenceDiagram
     INT-->>L: response
     L->>L: Advance follower NextOffset only on success
     L->>L: Update follower HighWatermark and ISR state
-    L->>L: Acknowledge the publish once min-insync-replicas hold it
+    L->>L: Acknowledge once minISR hold it and current-term record proves commitment
 ```
 
 ### Incremental Catch-Up (through `Append`)
@@ -1364,6 +1381,27 @@ Without the flag, nodes use insecure credentials. That is allowed only with
   `min-insync-replicas` replicas **including the leader** have appended. Default
   is 1 (leader-only); production target is RF=3 / minISR=2 (see
   [Consistency and Guarantees](#consistency-and-guarantees)).
+- **Current-term commitment (v0.8.0)**: a leader appends and fsyncs a term-start
+  control record on promotion/reactivation. The required replicas must hold
+  that record or a later entry before `QuorumOffset` commits its preceding
+  prefix. An older term's copies alone are insufficient. Delivery, held writes,
+  pruning and export share this boundary, including on idle partitions.
+- **Capability agreement**: term-start activation waits for every assigned
+  replica, handoff target and Raft voter. Until then, mixed clusters retain
+  legacy accounting and its old-term defect. Requirements persist in Raft
+  metadata and constrain elections, placement and voter admission afterwards.
+  Downgrading to a build that ignores them is unsupported.
+- **Lifecycle and recovery (opt-in)**: `--event-lifecycle` enables future-event
+  cancellation/rescheduling using stable references, revisions and request IDs.
+  Replicated mutations require majority acknowledgements and the append/recovery
+  formats. Staged mutations freeze old copies without making them removable.
+  Snapshots and full backups bind the WAL cut to its epoch, accepted boundary,
+  consumer progress and dead letters; recovery completes state import before
+  serving. See the [contract](docs/RETENTION_AND_EVENT_LIFECYCLE.md).
+- **Physical offsets are not public event counts**: term-start records consume
+  offsets but are omitted from public replay and delivery. Lifecycle successors
+  have new physical offsets while preserving their original logical reference;
+  an old copy's completion cannot complete the successor.
 - **Durability on followers**: in `batch` and `every_event` fsync modes a
   follower syncs a replicated batch before it answers `Append`.
 - **Trigger gap**: `--snapshot-catchup-threshold` is a **dead config key** —
@@ -1630,7 +1668,7 @@ remaining correctness limits. All three nodes ran on one physical machine.
 | I/O | `periodic` fsync mode: background flush loop | `--dev` only; production mode refuses it |
 | I/O | Dedup store and cold store: PebbleDB with NoSync and its internal WAL disabled | The event log is the durable record |
 | I/O | Atomic file writes for metadata | Crash-safe tx logs and key files |
-| Algorithmic | Timing wheel: O(1) add/remove/tick | Constant time scheduling |
+| Algorithmic | Timing wheel: constant bucket insertion/removal per level | Tick work depends on the expired/cascaded timers; no constant total tick cost |
 | Algorithmic | Sparse index: O(log N) seeks | Binary search |
 | Algorithmic | FNV-1a partition routing | No cryptographic hash on the publish path |
 | Algorithmic | Bloom filter: O(k) checks, at most 7 hashes | Most new IDs are answered without a PebbleDB read |
@@ -1735,9 +1773,9 @@ The release binaries are built without cgo and use the Go Bloom filter
 | Property | Guarantee | Mechanism |
 |----------|-----------|-----------|
 | **Metadata** | Strong consistency | Raft consensus |
-| **WAL writes** | Acknowledged once `min-insync-replicas` replicas hold them | Leader WAL append, then replication to followers before the publish is acknowledged; batch CRC32 and term fencing |
+| **WAL writes** | Acknowledged once `min-insync-replicas` replicas hold them; older entries additionally need current-term proof after activation | Leader append, versioned replication and durable term-start commitment; mixed clusters keep legacy accounting until capability agreement |
 | **Delivery** | At-least-once | Ack-based with retry + DLQ |
-| **Ordering** | By schedule time, not by offset | An event is delivered when its time comes. Redelivery after a retry, a timeout or a failover does not keep the order |
+| **Ordering** | Events become eligible at their schedule time; no total delivery order | Load, credits, retries, timeouts and failover can delay or reorder delivery |
 | **Dedup** | Best-effort 7-day window | Bloom + PebbleDB with TTL |
 | **Admission** | Reject under overload | ReadyQueue / timingWheel / in-flight limits return `ResourceExhausted` |
 | **Resilience** | Dead subscriber isolation | Per-subscription circuit breaker (Closed→Open→HalfOpen) |
@@ -1775,7 +1813,7 @@ stopped node and never contact a server.
 
 | Area | Behavior |
 |------|----------|
-| **Backups** | The backup scheduler checkpoints every partition, the active segment included, every `--backup-interval` (default 1h), at wall-clock multiples of the interval, so that the nodes of a cluster take theirs at the same moment. Backups are written to `--backup-dir` (default `backups` under the data directory) and kept for `--backup-retention` (default 168h). Getting them off the node is the operator's to arrange |
+| **Backups** | The backup scheduler checkpoints every partition, the active segment included, every `--backup-interval` (default 1h), at wall-clock interval boundaries. Nodes take independent checkpoints; this is not a cluster-wide atomic cut. Backups are written to `--backup-dir` (default `backups` under the data directory) and kept for `--backup-retention` (default 168h). Getting them off the node is the operator's to arrange |
 | **Restore** | `cronos-admin restore --from <backup> --data-dir <dir>` copies one backup into an empty data directory and checks every file against the backup's manifest. A backup of an encrypted log is ciphertext and holds no key; `--encryption-key-file` checks the key before anything is restored. Timers are rebuilt from the restored log when the node starts |
 | **Damaged logs** | `cronos-admin check-log --data-dir <dir>` reads every record and reports bytes that are not valid records. At the end of a log they are what a crash leaves, and a node cuts them off when it starts; anywhere else the node refuses to open the partition. In a cluster, remove the partition's directory and the leader fills it again. Without another replica, restore a backup or cut the damage out with `--repair --partition <id>` |
 | **Memory guard** | Publishes are refused with `ResourceExhausted` while the process holds `--max-memory-percent` (default 80) of its memory limit: `--memory-limit`, else the container's limit, else the machine's memory. A node at that point keeps delivering |
@@ -1790,9 +1828,9 @@ What each release has been shown to do, and by which test, is in
 
 ## Known Limitations
 
-These are **documented product/architecture gaps**, not accidental omissions from
-the design docs. Each is implemented enough to operate safely; the deferred
-piece is called out so operators and contributors know what not to rely on yet.
+These are known product and validation gaps. Their presence does not establish
+that every operating condition is safe; rely on the scope and tests recorded
+in the release requirements.
 
 The list of what has not been shown yet is kept in
 [docs/PRODUCTION_RELEASE.md](docs/PRODUCTION_RELEASE.md), and the findings
@@ -1841,9 +1879,15 @@ flowchart LR
 
 ### Other known limits
 
-- In a cluster, log entries are removed from the start of a log only. One
-  event that cannot go yet, such as one scheduled far ahead, keeps every
-  later segment.
+- Prefix pruning remains conservative. Optional lifecycle relocation can move
+  never-due work within a byte budget, but unfinished due work and unresolved
+  mutations can still pin later segments. The dead-letter journal is not compacted.
+- Lifecycle v1 excludes CDC, transactions, online splitting and cross-region
+  replication. Mixed clusters keep the old-term limitation until every required
+  replica and voter is capable; format activation does not support downgrade.
+- The v0.8.0 image is Linux amd64 and was published locally without signed
+  workflow provenance. Fault tests ran on one host; real power loss,
+  deployment-specific capacity and a v0.8.0 throughput comparison are unproven.
 - Clients find a node that joins a running cluster since `v0.7.0`, when
   the node is started with `--advertise-grpc-addr`: partition metadata gives
   them that address. Clients of `v0.6.0` and before, and nodes started

@@ -27,6 +27,12 @@ The config module defines defaults, merges runtime settings, and supports safe i
 - Helm `config.dev` defaults to `true`; `values-production.yaml` disables dev and requires TLS/auth/encryption/replication-mTLS secrets. The chart configures the binary through `CRONOS_*` variables (ConfigMap and StatefulSet), including `CRONOS_AUTH_POLICY_FILE`.
 - Feature flags gate behavior that is off by default (`--follower-reads`, tracing, TLS, auth). `--experimental-features` enables transactions, online partition splitting and cross-region replication; it requires `--dev`. `--exactly-once-commits` is also refused in production.
 - SIGHUP reload updates selected safe runtime fields only; data-dir/partition-count/seeds still require restart. SIGHUP is a no-op on Windows.
+- `--event-lifecycle` is off by default. Standalone use requires RF=1/minISR=1;
+  replicated use requires a cluster and majority acknowledgements, then durable
+  capability agreement before operations are served. It cannot be combined
+  with CDC feeds or `--experimental-features`. Format activation is one-way;
+  toggling the flag is not a supported downgrade. See the
+  [lifecycle contract](../../RETENTION_AND_EVENT_LIFECYCLE.md).
 - **Snapshot threshold:** `--snapshot-catchup-threshold` (default `10000`) is currently a **dead config key** — parsed but never read anywhere; `SyncPartitionFromLeader` installs snapshots unconditionally. **Known limitation (documented):** automatic mid-flight lag-driven InstallSnapshot is not wired (connected followers use incremental catch-up only). Full write-up: [replication.md](replication.md), [ARCHITECTURE.md § Known Limitations](../../../ARCHITECTURE.md#known-limitations).
 
 ## Full Flag Reference
@@ -55,11 +61,13 @@ Defaults from `internal/config/defaults.go` unless noted. Every flag has a `CRON
 | `--fsync-mode` | `batch` | `every_event` \| `batch` \| `periodic`. Production mode refuses `periodic`: it acknowledges before the data is on disk |
 | `--flush-interval` | `1000` | Background flush interval (ms) for batch/periodic fsync |
 | `--compaction-interval` | `10m` | How often a partition looks for log segments whose events are all finished and removes them |
+| `--event-lifecycle` | `false` | Opt-in future-event cancellation/rescheduling; replicated activation requires capable replicas/voters and majority acknowledgements |
+| `--wal-relocation-bytes` | `0` | Encoded future-event bytes copied per retention pass; requires lifecycle mode; 0 disables copying |
 | `--backup-interval` | `1h` | How often the node backs up its partitions, at wall-clock multiples of the interval. `0` = no scheduled backups |
 | `--backup-retention` | `168h` | How long a backup is kept. `0` = for good |
 | `--backup-dir` | *(empty)* | Where backups go; default `backups` under `--data-dir` |
-| `--retention-max-age-hours` | `168` | Delete WAL segments older than this (0 = disable) |
-| `--retention-max-size-gb` | `0` | Size-based WAL retention in GB (0 = disable) |
+| `--retention-max-age-hours` | `168` | Propose closed segments older than this; completion/acceptance checks still apply (0 = disable) |
+| `--retention-max-size-gb` | `0` | Size-based retention target in GB; pinned work can prevent reaching it (0 = disable) |
 
 ### Scheduler
 
@@ -109,9 +117,10 @@ Defaults from `internal/config/defaults.go` unless noted. Every flag has a `CRON
 | `--cluster-formation-wait` | `5s` | When the expected nodes are unknown or not all up: how long membership must be unchanged before first leaders are assigned. `0` assigns at once |
 | `--cluster-gossip-addr` | `:7946` | Membership gossip listen address |
 | `--cluster-grpc-addr` | `:7947` | Internal gRPC (replication/raft/cross-region) address |
+| `--advertise-grpc-addr` | *(empty)* | Public client endpoint advertised in metadata; must be client-routable and covered by the public TLS certificate |
 | `--cluster-raft-addr` | `:7948` | Raft transport listen address |
 | `--raft-dir` | `./raft` | Raft log/state directory |
-| `--raft-join` | *(empty)* | Raft cluster join address |
+| `--raft-join` | *(empty)* | Parsed but unused; join uses `--cluster-seeds` |
 | `--virtual-nodes` | `2048` | Virtual nodes per physical node on the hash ring |
 | `--heartbeat-interval` | `1s` | Membership heartbeat period |
 | `--failure-timeout` | `5s` | Heartbeat silence before marking a node failed |
@@ -157,7 +166,7 @@ Defaults from `internal/config/defaults.go` unless noted. Every flag has a `CRON
 | `--max-ingest-rate` | `0` | Max events/sec per partition (0 = unlimited) |
 | `--ingest-burst-size` | `0` | Ingest token-bucket burst size |
 | `--follower-reads` | `false` | Allow followers to serve Replay reads |
-| `--exactly-once-commits` | `false` | Exactly-once consumer offset commits. Refused in production |
+| `--exactly-once-commits` | `false` | Experimental commit-ID storage; refused in production and unused by the Ack path; no end-to-end exactly-once guarantee |
 
 ### Tracing
 

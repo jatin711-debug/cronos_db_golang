@@ -28,6 +28,13 @@ The scheduler controls when events become deliverable, using a hot timing wheel 
 - `--hot-window-minutes=0` disables time-based cold routing; budget overflow still uses cold references.
 - **Crash recovery:** restore `timer_state.json` when present and rebase `currentTick` from the wall clock. `replayWALTimers` then walks the retained log from its first offset and schedules only the events that are not due yet. A replicated partition does this when its node becomes leader, not at start. Events that came due while the node was down are not queued: they stay in the log, and a subscription reads what its group has not finished from the log when it starts, at the pace its consumers take it (`redriveRetained` in `internal/api/handlers.go`). Nothing is dropped, and the backlog is not loaded into memory at start.
 - Ready-queue and wheel size admission limits reject publish under overload (`ResourceExhausted`).
+- In lifecycle mode, reconstruction and delivery consult the partition's active
+  event index. Canceled and superseded copies, stale timers and internal
+  term-start records are not delivered. The partition holds the same gate
+  across the active-state check and send that a mutation takes while appending,
+  so a cancellation cannot race between that check and delivery. A staged
+  successor stays behind the accepted boundary. See the
+  [lifecycle contract](../../RETENTION_AND_EVENT_LIFECYCLE.md).
 
 ## Debug Pointers
 
