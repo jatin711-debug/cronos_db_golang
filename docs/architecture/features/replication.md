@@ -33,10 +33,13 @@ exist:
 
 1. A publish enters `Leader.Replicate(events)` with a contiguous batch.
 2. `Leader` snapshots its follower list and `minISR` under a read lock.
-3. For each connected follower, `sendToFollower` issues a gRPC
-   `ReplicationService.Append` carrying `PartitionId`, `Events`,
+3. For each connected follower, `sendToFollower` issues a gRPC append carrying `PartitionId`, `Events`,
    `ExpectedNextOffset`, `Term`, `PrevLogTerm`, and an IEEE CRC32 batch
    checksum (`computeBatchChecksum`).
+   Legacy partitions use `Append`; term-start partitions use `AppendTermStart`,
+   including probes and catch-up, with separate term-start and lifecycle format
+   versions. `AppendLifecycle` is the lifecycle-only compatibility transport.
+   An incompatible receiver is refused; there is no downgrade to plain append.
 4. The follower handler (`ReplicationServiceHandler.Append`) verifies the
    batch checksum, then decides whether the sender may write: it rejects a
    term older than the one it has accepted and a second node claiming a term
@@ -51,6 +54,14 @@ exist:
    the remaining followers finish in the background, in offset order.
    Each `Append` RPC is bounded by `--replication-timeout`.
 
+Replica counting alone cannot commit an earlier leader's entries. In v0.8.0
+term-start mode, promotion or reactivation first appends and fsyncs a
+current-term control record. `Leader.QuorumOffset` exposes a committed prefix
+only once the required replicas hold that record or a later entry. Delivery,
+held-write resolution, retention and export share that boundary. See
+[current-term commitment](../../REPLICATION_TERM_START.md), including the
+legacy behavior retained during a mixed-version upgrade.
+
 ### Incremental catch-up (`Sync`)
 
 When a follower falls behind (`f.NextOffset < events[0].Offset`),
@@ -60,7 +71,7 @@ When a follower falls behind (`f.NextOffset < events[0].Offset`),
 own. A request has to stay under the transport's 64 MiB limit whatever the
 events weigh, so a chunk that does not fit goes as several requests, each
 continuing from the follower's acknowledged offset, and replays them through
-the same `Append` RPC.
+the same format-appropriate append RPC.
 A follower with more than four batches outstanding is skipped for new
 batches instead of queueing without bound; it is caught up from the WAL by
 its next send, or by the leader's maintenance loop (every 500 ms) when the
@@ -110,6 +121,16 @@ Newly joined replicas or freshly wiped followers are initialized via
    install whenever the WAL is opened.
 7. The installed epoch is persisted, so the replica refuses appends from an
    older leader after a restart as well.
+
+Lifecycle snapshots use recovery format 1: the WAL cut travels with a bounded,
+checksummed recovery file containing the epoch, accepted boundary, consumer
+progress and dead-letter state. Payload-bearing pages use the WAL encryption
+key when enabled. The receiver validates the complete generation before the
+swap, then clears stale completion state and imports and syncs the matching
+dead letters and progress before serving. A crash after WAL publication resumes
+that import on open. This generation protocol supplements the legacy
+dead-letter-page path described above. See
+[consistent recovery](../../RETENTION_AND_EVENT_LIFECYCLE.md#consistent-recovery-snapshots-and-backups).
 
 The full install is wrapped in a 10-minute `context` by
 `PartitionManager.SyncPartitionFromLeader`
@@ -227,18 +248,14 @@ paused only while it notes where each file ends.
   removed when a partition starts and when a replica is made leader. Without
   this the events that later took those offsets counted as finished and were
   never delivered.
-- **Only replicated entries are delivered.** A leader hands its consumers
-  entries up to the offset that the required replicas hold
-  (`Partition.DeliverableThrough`), and holds back the rest of its log until
-  they have it. An entry that only the leader holds can still be removed, and
-  a consumer cannot give an event back. What the required replicas held at
-  any time since the leader began to lead counts
-  (`Leader.ReplicatedThrough`): a leader that loses its followers goes on
-  delivering what was replicated before, since every later leader has it. A
-  new leader delivers nothing until it has heard from enough followers,
-  which takes one round of its maintenance loop. A replica that does not
-  lead delivers nothing. With `--min-insync-replicas=1` the leader alone is
-  enough, and it delivers everything it has written.
+- **Only committed entries are delivered.** `Partition.DeliverableThrough`
+  bounds delivery by `Leader.ReplicatedThrough`. On a term-start partition,
+  a new leader first establishes a durable current-term record on the required
+  replicas; counting old-term copies is insufficient. Once proven, a prefix
+  remains committed even if a follower disconnects. A new epoch needs a fresh
+  proof, including on idle partitions. Non-leaders deliver nothing. Legacy
+  partitions retain replica-count accounting until capability agreement;
+  their old-term limitation is not fixed by merely upgrading one node.
 
 ## Log start
 
@@ -261,6 +278,12 @@ when a partition is idle, names the offset the leader's log starts at
 - Either way the entries below that offset count as complete for every
   consumer group on that replica, so that it does not look for them if it
   leads next.
+
+With opt-in relocation, a retained successor can represent a logical event
+whose original offset lies below the new start. Raising a completion floor
+for the removed prefix must not complete that successor's newer physical
+offset. Accepted cancellations and superseded copies are terminal; the
+replacement must reach the committed boundary before its predecessor can go.
 
 A follower never removes anything by its own decision: its copy of the
 consumer progress trails the leader's. A new leader removes nothing until it
@@ -321,8 +344,8 @@ retry is published as new.
   + at least one follower must ack before the client write is
   acknowledged. If the cluster degrades below minISR, writes fail closed
   rather than silently succeeding on a leader-only ack. The count comes from
-  what followers have acknowledged (`Leader.QuorumOffset` reads each
-  follower's last acknowledgement and acknowledged offset), not from the
+  what followers have acknowledged and, in term-start mode, the current-term
+  commitment proof (`Leader.QuorumOffset`), not from the
   `InSync` flag; `InSync` feeds only reports (`GetInSyncReplicas`, the
   leader's stats). A follower of a partition whose log is empty on both sides
   counts as in sync, since it holds all of the leader's log
@@ -363,6 +386,12 @@ retry is published as new.
   region does not stall local writes.
 - **Conflict resolution**: cross-region uses last-write-wins; intra-cluster
   uses Raft-style term fencing (the leader with the higher epoch wins).
+- **Durable capability agreement:** `internal/cluster/capabilities.go` commits
+  format requirements only once every assigned replica, handoff target and
+  Raft voter is alive and capable. Requirements constrain subsequent placement,
+  elections, handoffs and voter admission. Lifecycle v1 additionally requires
+  majority acknowledgements and excludes CDC and experimental features.
+  Downgrading to a build that ignores committed requirements is unsupported.
 
 ## Trigger Policy & Known Limitation
 

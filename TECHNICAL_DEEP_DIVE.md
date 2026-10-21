@@ -10,6 +10,12 @@
 > [docs/architecture/features/](docs/architecture/features/) and
 > [docs/PRODUCTION_RELEASE.md](docs/PRODUCTION_RELEASE.md).
 
+> The v0.8.0 [lifecycle contract](docs/RETENTION_AND_EVENT_LIFECYCLE.md) and
+> [current-term protocol](docs/REPLICATION_TERM_START.md) supersede the old
+> mutation, commitment and recovery sketches here. Code snippets in this
+> historical theory manual are illustrative, not current API examples or
+> release guarantees.
+
 > **Purpose**: This document explains every technical concept, algorithm, and data structure used in CronosDB so you can understand the codebase before reading it. Think of this as the "theory manual" that makes the "code manual" readable.
 
 ---

@@ -20,7 +20,7 @@ $privateDir = Join-Path $runDir 'private'
 $docker = (Get-Command docker.exe -ErrorAction SilentlyContinue).Source
 if (-not $docker) { $docker = 'C:\Program Files\Docker\Docker\resources\bin\docker.exe' }
 if (-not (Test-Path -LiteralPath $docker)) { throw 'Docker CLI is unavailable' }
-$go = Join-Path $env:USERPROFILE 'go/pkg/mod/golang.org/toolchain@v0.0.1-go1.26.9.windows-amd64/bin/go.exe'
+$go = Join-Path $env:USERPROFILE 'go/pkg/mod/golang.org/toolchain@v0.0.1-go1.26.10.windows-amd64/bin/go.exe'
 if (-not (Test-Path -LiteralPath $go)) { $go = (Get-Command go.exe).Source }
 $binary = Join-Path $repo 'build/throughput/throughput.exe'
 $containers = @()

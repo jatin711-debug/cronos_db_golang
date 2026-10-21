@@ -2,14 +2,14 @@
 
 > Distributed Timestamp-Triggered Event Database with Built-in Scheduling, Pub/Sub & Replay
 
-[![Go](https://img.shields.io/badge/Go-1.26.9-blue.svg)](https://golang.org)
+[![Go](https://img.shields.io/badge/Go-1.26.10-blue.svg)](https://golang.org)
 [![Rust](https://img.shields.io/badge/Rust-FFI-dea584.svg)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/jatin711-debug/cronos_db_golang?include_prereleases)](https://github.com/jatin711-debug/cronos_db_golang/releases)
 
 > **Production Readiness:** See the [latest published release](https://github.com/jatin711-debug/cronos_db_golang/releases/latest) for available artifacts and the [v0.8.0 release notes](docs/RELEASE_V0.8.0.md) for the new lifecycle and replication protocols. What a release promises, the test behind each promise, and what has not been shown yet are in the [release requirements](docs/PRODUCTION_RELEASE.md); findings and their status are in the [September](docs/PRODUCTION_AUDIT_2026-09-27.md) and [October](docs/PRODUCTION_AUDIT_2026-10-16.md) audits. Transactions, online partition splitting and cross-region replication are disabled by default and require `--dev --experimental-features`; they are unsupported in production. End-to-end exactly-once delivery is not supported.
 
-CronosDB is a distributed database purpose-built for **timestamp-triggered event processing**. Publish events with a future timestamp — CronosDB stores them durably and delivers them precisely when the time arrives.
+CronosDB is a distributed database purpose-built for **timestamp-triggered event processing**. Publish events with a future timestamp — CronosDB retains them and makes them eligible for delivery at that time. Consumer capacity, scheduling load and failures can delay delivery; no latency bound is promised.
 
 It combines the durability of a write-ahead log, the precision of a hierarchical timing wheel, and the scalability of partitioned, replicated storage — all accessible through a streaming gRPC API.
 
@@ -44,10 +44,10 @@ promised. See the
 - **Memory-Mapped Reads** — Zero-copy segment reads on Linux/Windows
 - **Configurable Fsync** — `every_event` | `batch` (default) | `periodic` modes
 - **Damage Detection** — A log that holds unreadable bytes anywhere but at its end refuses to open instead of dropping what follows; `cronos-admin check-log` reports and repairs offline
-- **Automatic Compaction** — Removes closed WAL segments only after every relevant consumer group has completed every event. In a cluster the partition's leader removes them from the start of the log and the other replicas follow
+- **Automatic Compaction** — Removes eligible closed WAL segments after accepted-state, consumer, export and dead-letter checks. In a cluster the leader prunes from the start and followers follow. Lifecycle mode additionally recognizes accepted cancellations and superseded copies
 - **Retention Enforcer** — Age/size policies use the same completion checks and preserve future timers and active segments
 - **Backups** — Independent backups of every loaded partition, hourly by default (`-backup-interval`, `-backup-dir`): event log including the active segment, consumer progress, dedup store, dead-letter queue and epoch, with per-file checksums and all logs cut at one instant; `cronos-admin restore` verifies and restores one into an empty data directory, and can check the encryption key first (see [maintenance validation](docs/MAINTENANCE_VALIDATION_2026-09-29.md))
-- **Hierarchical Timing Wheel** — O(1) timer add/remove/tick for millions of events
+- **Hierarchical Timing Wheel** — Constant bucket insertion/removal per level; tick work grows with the timers expired or cascaded
 - **Two-Tier Cold/Hot Scheduler** — PebbleDB cold store for far-future events (>1hr); adaptive hydrator adjusts scan frequency based on load (5s–5min). Keeps hot memory bounded.
 - **Absolute Time Tracking** — No drift across overflow wheel cascades
 - **Batch Scheduling** — Single lock acquisition for entire batch
@@ -56,7 +56,7 @@ promised. See the
 ### Deduplication
 - **Rust Bloom Filter (FFI)** — Lock-free AtomicU64 arrays, XxHash64, Rayon parallel batch
 - **PebbleDB Fallback** — LSM tree with 64MB memtable, 7-day TTL auto-expiration
-- **Two-Tier Fast Path** — 99% of checks skip disk entirely
+- **Two-Tier Fast Path** — Bloom negatives avoid persistent lookups; the hit rate depends on the workload and filter occupancy
 
 ### Delivery
 - **Credit-Based Flow Control** — Backpressure prevents consumer overload
@@ -77,6 +77,8 @@ promised. See the
 - **Bulk snapshot install** — `ReplicationService.Snapshot` streams segment and index files with per-file size and CRC32; the follower stages them, checks every file, and installs them through a journaled swap that recovers from a crash at any point. An interrupted transfer resumes with the files that already arrived. Used to fill a new or emptied replica
 - **Node removal** — `cronos-admin cluster remove-node` takes a node that is lost for good out of Raft and off every node's member list, so it no longer counts towards a majority
 - **Clock Skew Detection** — Cross-node heartbeat timestamp comparison; warns if absolute skew exceeds 5 seconds
+- **Current-term commitment** — A new leader establishes a durable current-term term-start record on the required replicas before committing older entries. Activation waits for capable replicas and Raft voters; mixed-version clusters keep the legacy limitation until agreement
+- **Future-event lifecycle (opt-in)** — `GetEventState`, `CancelEvent` and `RescheduleEvent` use stable references, revision checks and request IDs. Bounded WAL relocation can move never-due work; lifecycle v1 excludes CDC and experimental features. See the [contract](docs/RETENTION_AND_EVENT_LIFECYCLE.md)
 
 ### API
 - **gRPC Streaming** — Bidirectional subscribe, streaming replay
@@ -144,12 +146,14 @@ For the details see **[ARCHITECTURE.md](ARCHITECTURE.md)** and the per-feature d
 Each release has binaries of the server and of `cronos-admin` for Linux and macOS (amd64, arm64) and Windows (amd64), with `SHA256SUMS`, on the [releases page](https://github.com/jatin711-debug/cronos_db_golang/releases). They are built without cgo and use the bloom filter written in Go. The container image uses the one written in Rust:
 
 ```bash
-docker pull johnny711dock/cronos-db:latest  # pin the release digest for deployments
+docker pull johnny711dock/cronos-db:0.8.0
+# Pin the exact Linux amd64 release image for deployments:
+docker pull johnny711dock/cronos-db@sha256:428690215148b97eb9b6aaed5a3afb7c7a3227613c8fee731ab922e2276d4928
 ```
 
 ### Prerequisites to build
 
-- **Go 1.26.9** (the version `go.mod` names)
+- **Go 1.26.10** (the version `go.mod` names)
 - **npm** for the dashboard that `make build` compiles into the server
 - **Rust** (optional) for the faster bloom filter through cgo — install via [rustup](https://rustup.rs). Without cgo the server uses the one written in Go
 - **protoc** only to regenerate the gRPC code (`make proto`)
@@ -353,6 +357,7 @@ Example startup of the first of three nodes. The other two differ in their ID an
   --cluster-gossip-addr=node1.cronos:7946 \
   --cluster-grpc-addr=node1.cronos:7947 \
   --cluster-raft-addr=node1.cronos:7948 \
+  --advertise-grpc-addr=node1.cronos:9000 \
   --replication-factor=3 \
   --min-insync-replicas=2 \
   --fsync-mode=batch \
@@ -377,7 +382,10 @@ For Kubernetes, use `values-production.yaml` and create the referenced TLS/auth/
 helm install cronos-db ./charts/cronos-db -f ./charts/cronos-db/values-production.yaml
 ```
 
-**Note:** The on-disk WAL segment format was upgraded to v2 (per-entry terms). Upgrading from older builds requires a clean `--data-dir`.
+**Upgrade note:** Pre-v2 WAL layouts have no automatic migration. The v0.7.0
+to v0.8.0 upgrade preserves its v2 WAL and activates new formats through
+capability agreement; it does not call for deleting the data directory.
+See the [release notes](docs/RELEASE_V0.8.0.md) before upgrading or downgrading.
 
 ### Test with grpcurl
 
@@ -576,7 +584,7 @@ set through an environment variable (see [Environment Variables](#environment-va
 | `-index-interval` | `1000` | Sparse index interval (events per entry) |
 | `-fsync-mode` | `batch` | `every_event` \| `batch` \| `periodic` — `batch` is the durable default, `periodic` is the throughput ceiling |
 | `-flush-interval` | `1000` | Background flush interval (ms) |
-| `-backup-interval` | `1h` | How often the node backs up its partitions, at wall-clock multiples of the interval, so the nodes of a cluster back up at the same moment. `0` = no scheduled backups |
+| `-backup-interval` | `1h` | Independent node checkpoints aligned to wall-clock interval boundaries; not a cluster-wide atomic cut. `0` = no scheduled backups |
 | `-backup-retention` | `168h` | How long a backup is kept. `0` = for good |
 | `-backup-dir` | *(empty)* | Where backups go; default `backups` under `-data-dir`. A backup on the volume of the data it copies does not survive the loss of that volume |
 | `-retention-max-age-hours` | `168` | Remove WAL segments older than this many hours, once every consumer group has finished them and the change feed has exported them; in a cluster only the leader removes, from the start of the log (0 = disable) |
@@ -591,6 +599,8 @@ set through an environment variable (see [Environment Variables](#environment-va
 | `-max-ready-queue` | `1000000` | Max ready queue depth per partition (admission control) |
 | `-max-timing-wheel-size` | `10000000` | Max active timers in hot timing wheel (admission control) |
 | `-max-in-flight` | `500000` | Max in-flight deliveries per partition (admission control) |
+| `-max-disk-usage` | `0.95` | Refuse new log growth at this filesystem usage; 0 disables disk admission |
+| `-scheduler-memory` | `67108864` | Shared scheduler payload/accounting budget in bytes; minimum 32 MiB; not an RSS cap |
 | `-ack-timeout` | `30s` | Default delivery ack timeout |
 | `-max-retries` | `5` | Maximum delivery retry attempts |
 | `-retry-backoff` | `1s` | Delay before a retry, multiplied by the attempt number |
@@ -734,7 +744,7 @@ cronos_db/
 
 | Service | Methods | Purpose |
 |---------|---------|---------|
-| **EventService** | `Publish`, `PublishBatch`, `Subscribe`, `Ack`, `Replay`, `GetEventState`, `CancelEvent`, `RescheduleEvent` | Pub/sub and opt-in standalone event mutations |
+| **EventService** | `Publish`, `PublishBatch`, `Subscribe`, `Ack`, `Replay`, `GetEventState`, `CancelEvent`, `RescheduleEvent` | Pub/sub; opt-in future-event mutations on standalone nodes or capable replicated clusters |
 | **PartitionService** | `GetPartition`, `ListPartitions`, `GetWALStatus`, `GetSchedulerStatus`, `Compact`, `RunRetention`, `SplitPartition` | Partition metadata and admin |
 | **ConsumerGroupService** | `CreateConsumerGroup`, `GetConsumerGroup`, `ListConsumerGroups`, `RebalanceConsumerGroup` | Group management |
 | **ReplicationService** | `Append`, `Sync`, `Snapshot`, `Position`, `LeaderReport`, `SyncConsumerProgress` | Internal: replication, elections, topology (intra-cluster, internal listener) |
@@ -779,7 +789,7 @@ Experimental and refused in production: transactions, online partition splitting
 
 | Component | Technology | Why |
 |-----------|-----------|-----|
-| **Language** | Go 1.26.9 | Concurrency, performance, ecosystem |
+| **Language** | Go 1.26.10 | Concurrency, performance, ecosystem |
 | **Bloom Filter** | Rust (FFI via CGO) in the image; Go without cgo | Lock-free atomics |
 | **Storage** | PebbleDB (CockroachDB) | LSM tree, built-in compaction, Go-native |
 | **Consensus** | HashiCorp Raft | Battle-tested, BoltDB backend |
@@ -821,7 +831,7 @@ automatically on every docs change via `.github/workflows/docs.yml`.
 
 This is a reference implementation demonstrating production-grade patterns for distributed systems:
 
-- Hierarchical timing wheels for O(1) scheduling
+- Hierarchical timing wheels with constant-time bucket operations per level
 - Two-tier deduplication (bloom filter in Rust or Go, then PebbleDB)
 - gRPC-based replication with mTLS and snapshot install
 - Consistent hashing with virtual nodes

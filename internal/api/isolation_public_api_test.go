@@ -91,11 +91,14 @@ func newTenants(t *testing.T) *tenants {
 }
 
 // sdk returns a client library connection that authenticates as who.
-func (ts *tenants) sdk(who string) *client.Client {
+func (ts *tenants) sdk(who string, hooks ...client.Hooks) *client.Client {
 	ts.t.Helper()
 	cfg := client.DefaultConfig(ts.addr)
 	cfg.Security.Insecure = true
 	cfg.Security.BearerToken = ts.tokens[who]
+	if len(hooks) > 0 {
+		cfg.Hooks = hooks[0]
+	}
 	c, err := client.Dial(context.Background(), cfg)
 	if err != nil {
 		ts.t.Fatalf("connect as %s: %v", who, err)
@@ -287,6 +290,58 @@ func TestIsolation_TwoPrincipalsShareAPartition(t *testing.T) {
 	}
 }
 
+func TestSubscriptionServerAssignmentJoinsTheResolvedPartition(t *testing.T) {
+	ts := newTenants(t)
+	if err := ts.publish("alice", "alpha", 1); err != nil {
+		t.Fatal(err)
+	}
+	events, ctx := ts.raw("alice")
+	stream, err := events.Subscribe(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const groupID, memberID = "server-assigned", "alice-auto"
+	if err := stream.Send(&types.SubscribeRequest{ConsumerGroup: groupID, Topic: "alpha", PartitionId: -1, SubscriptionId: memberID}); err != nil {
+		t.Fatal(err)
+	}
+	held, err := stream.Recv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	group, ok := ts.p.ConsumerGroup.GetGroup(groupID)
+	if !ok || len(group.Partitions) != 1 || group.Partitions[0] != ts.p.ID {
+		t.Fatalf("subscription did not join its resolved partition: %+v", group)
+	}
+	if member := group.Members[memberID]; member == nil || member.AssignedPartition != ts.p.ID {
+		t.Fatalf("member was not assigned to partition %d: %+v", ts.p.ID, member)
+	}
+	acks, err := events.Ack(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivery := client.Delivery{Event: held.GetEvent(), Batch: held.GetBatch()}
+	if err := acks.Send(&types.AckRequest{DeliveryId: held.GetDeliveryId(), Success: true, NextOffset: delivery.LastOffset() + 1}); err != nil {
+		t.Fatal(err)
+	}
+	if resp, err := acks.Recv(); err != nil || !resp.GetSuccess() {
+		t.Fatalf("first acknowledgement failed: response=%v, error=%v", resp, err)
+	}
+	if !ts.p.ConsumerGroup.IsCompleted(groupID, ts.p.ID, delivery.LastOffset()) {
+		t.Fatal("first acknowledgement did not complete the event")
+	}
+}
+
+type isolationAckErrors struct {
+	client.NopHooks
+	last atomic.Value
+}
+
+func (h *isolationAckErrors) OnError(op string, _ client.ErrorKind, err error) {
+	if op == "consumer.ack" {
+		h.last.Store(err.Error())
+	}
+}
+
 // One tenant cannot acknowledge a delivery made to the other, which would
 // mark the other's event as done without it having been processed.
 func TestIsolation_AcknowledgementsBelongToTheirRecipient(t *testing.T) {
@@ -301,6 +356,7 @@ func TestIsolation_AcknowledgementsBelongToTheirRecipient(t *testing.T) {
 	delivered := make(chan client.Delivery, 1)
 	var calls atomic.Int32
 	var lastCall atomic.Value // string
+	ackErrors := &isolationAckErrors{}
 	subscribed := make(chan error, 1)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -308,7 +364,7 @@ func TestIsolation_AcknowledgementsBelongToTheirRecipient(t *testing.T) {
 		cfg := client.DefaultConsumerConfig("alpha", "group-a")
 		cfg.AckMode = client.AckModeManual
 		cfg.AutoAck = false
-		subscribed <- ts.sdk("alice").Subscribe(ctx, cfg, func(_ context.Context, d client.Delivery) error {
+		subscribed <- ts.sdk("alice", ackErrors).Subscribe(ctx, cfg, func(_ context.Context, d client.Delivery) error {
 			calls.Add(1)
 			lastCall.Store(fmt.Sprintf("delivery %s, attempt %d", d.DeliveryID, d.Attempt))
 			select {
@@ -329,9 +385,9 @@ func TestIsolation_AcknowledgementsBelongToTheirRecipient(t *testing.T) {
 			ended = fmt.Sprintf("ended with: %v", err)
 		default:
 		}
-		return fmt.Sprintf("the log ends at offset %d and may be delivered through %d; the server has %d subscriptions, %d deliveries waiting for an acknowledgement and %d waiting to be sent again; the group has finished everything below offset %d; her handler was called %d times, last with %v; her subscription %s",
+		return fmt.Sprintf("the log ends at offset %d and may be delivered through %d; the server has %d subscriptions, %d deliveries waiting for an acknowledgement and %d waiting to be sent again; the group has finished everything below offset %d; her handler was called %d times, last with %v; her subscription %s; last acknowledgement error: %v",
 			ts.p.Wal.GetLastOffset(), ts.p.DeliverableThrough(), stats.ActiveSubscriptions, stats.ActiveDeliveries, stats.RetryQueueDepth,
-			committed, calls.Load(), lastCall.Load(), ended)
+			committed, calls.Load(), lastCall.Load(), ended, ackErrors.last.Load())
 	}
 	var held client.Delivery
 	select {

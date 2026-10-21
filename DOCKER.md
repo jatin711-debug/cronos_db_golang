@@ -6,19 +6,21 @@
 
 ### Get the image
 
-Each release is published on Docker Hub (linux/amd64):
+The v0.8.0 image is published on Docker Hub for Linux amd64:
 
 ```bash
-docker pull johnny711dock/cronos-db:0.7.0    # the current release; also :latest
+docker pull johnny711dock/cronos-db:0.8.0    # also selected by :latest
+# Immutable deployment reference for this release:
+docker pull johnny711dock/cronos-db@sha256:428690215148b97eb9b6aaed5a3afb7c7a3227613c8fee731ab922e2276d4928
 ```
 
 Or build it from a checkout:
 
 ```bash
-docker build -t cronos-db:latest .
+docker build -t cronos-db:local .
 ```
 
-The image holds the server at `/app/cronos-api`, built with cgo and the Rust bloom filter, and the administration tool at `/app/cronos-admin`. It runs as the non-root user `cronos`, and keeps its data in the volume `/data`. The examples below use the local tag `cronos-db:latest`; use `johnny711dock/cronos-db:0.7.0` for the published image.
+The image holds the server at `/app/cronos-api`, built with cgo and the Rust bloom filter, and the administration tool at `/app/cronos-admin`. It runs as the non-root user `cronos`, and keeps its data in the volume `/data`. The `docker run` examples use the published image; replace it with `cronos-db:local` to test your own build. Compose builds from the checkout. The published image was pushed locally from the scanned release archive and has no signed GitHub workflow provenance; see the [release notes](docs/RELEASE_V0.8.0.md).
 
 ### Run single node
 
@@ -32,7 +34,7 @@ docker run -d \
   -p 9000:9000 \
   -p 8080:8080 \
   -v cronos-data:/data \
-  cronos-db:latest \
+  johnny711dock/cronos-db:0.8.0 \
   --node-id=my-node \
   --data-dir=/data \
   --dev
@@ -76,7 +78,7 @@ docker run -d \
   -p 9000:9000 \
   -p 8080:8080 \
   -v /path/on/host:/data \
-  cronos-db:latest \
+  johnny711dock/cronos-db:0.8.0 \
   --node-id=my-node \
   --data-dir=/data \
   --dev
@@ -180,7 +182,7 @@ go build -tags clustertest -o bin/cluster_loadtest cluster_loadtest.go
 1. **Use named volumes** - Data survives container restarts
 2. **Non-root user** - Image runs as `cronos` user for security
 3. **Health checks** - Built-in HTTP health endpoint; `/health/ready` answers 200 once the node serves publishes
-4. **Resource limits** - Set a memory limit (`--memory`). The server reads it from the container and refuses publishes while it holds 80% of it (`--max-memory-percent`), instead of being killed
+4. **Resource limits** - Set a memory limit (`--memory`). The server reads it from the container and refuses publishes while it holds 80% of it (`--max-memory-percent`). This sampled admission check and the scheduler budget reduce pressure; they are not a guarantee against an OOM kill
 5. **Kubernetes** - The Helm chart in `charts/cronos-db` with `values-production.yaml` sets all of the below up; see [the release requirements](docs/PRODUCTION_RELEASE.md)
 
 ### Production deployment example
@@ -206,7 +208,7 @@ docker run -d \
   -v cronos-node1-data:/data \
   -v /etc/cronos/certs:/certs:ro \
   --env-file /etc/cronos/secrets.env \
-  johnny711dock/cronos-db:0.7.0 \
+  johnny711dock/cronos-db:0.8.0 \
   --node-id=node1 \
   --data-dir=/data \
   --cluster \
@@ -215,6 +217,7 @@ docker run -d \
   --cluster-gossip-addr=node1.cronos:7946 \
   --cluster-grpc-addr=node1.cronos:7947 \
   --cluster-raft-addr=node1.cronos:7948 \
+  --advertise-grpc-addr=node1.cronos:9000 \
   --replication-factor=3 \
   --min-insync-replicas=2 \
   --fsync-mode=batch \
@@ -239,3 +242,18 @@ over HTTPS, so health checks and Prometheus have to use `https://`.
 > `secrets.env` holds `CRONOS_AUTH_JWT_SECRET=...`. Passing the JWT secret through the
 > environment (an env file or an orchestrator secret) keeps it out of process listings,
 > where a `--auth-jwt-secret` flag would show.
+
+### v0.8.0 upgrade and lifecycle options
+
+Upgrade every assigned replica, handoff target and Raft voter before relying
+on current-term commitment. Mixed clusters keep legacy accounting until the
+coordinator commits capability agreement. Activation is one-way; downgrade
+to a build that ignores the required formats is unsupported.
+
+`CRONOS_EVENT_LIFECYCLE=true` (or `--event-lifecycle`) separately enables future
+event cancellation/rescheduling. Standalone development use requires RF=1 and
+minISR=1; replicated use requires a cluster, majority acknowledgements and
+capability agreement. `CRONOS_WAL_RELOCATION_BYTES` defaults to 0; a positive
+encoded-byte budget enables bounded future-event relocation during retention.
+Lifecycle v1 cannot be combined with CDC feeds, transactions, splitting or
+cross-region replication. See the [lifecycle contract](docs/RETENTION_AND_EVENT_LIFECYCLE.md).

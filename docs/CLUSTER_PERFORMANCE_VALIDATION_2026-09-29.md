@@ -1,5 +1,10 @@
 # Three-node publish validation — 2026-09-29
 
+This is a historical measurement record. It does not measure v0.8.0, current-term
+format activation or lifecycle operations. For the released scope and remaining
+capacity limits, see [release requirements](PRODUCTION_RELEASE.md); no v0.8.0
+throughput claim is made.
+
 These measurements use three local Windows/amd64 processes on one AMD Ryzen 7
 6800H host, Go 1.26.7, 256-byte payloads, periodic fsync, and the gRPC batch
 load test. All reported runs had a nonzero share of partition leaders on each

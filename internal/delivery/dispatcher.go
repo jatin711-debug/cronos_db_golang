@@ -388,12 +388,25 @@ func (d *Dispatcher) releaseCredit(sub *Subscription) {
 // Subscribe registers a subscription, initializes credits and circuit breaker,
 // and indexes it under its partition for O(1) dispatch lookups.
 func (d *Dispatcher) Subscribe(sub *Subscription) error {
+	return d.SubscribeWithInit(sub, nil)
+}
+
+// SubscribeWithInit prepares consumer state before exposing a subscription to
+// dispatch. Duplicate IDs are rejected before initialize runs. The callback
+// runs under the subscription shard's registration lock and must not call back
+// into the dispatcher.
+func (d *Dispatcher) SubscribeWithInit(sub *Subscription, initialize func() error) error {
 	shard := d.getShard(sub.ID)
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 
 	if _, exists := shard.subscriptions[sub.ID]; exists {
 		return fmt.Errorf("subscription %s already exists", sub.ID)
+	}
+	if initialize != nil {
+		if err := initialize(); err != nil {
+			return err
+		}
 	}
 
 	if sub.MaxCredits == 0 {

@@ -1,5 +1,10 @@
 # Current-term commitment and term-start records
 
+Released in [v0.8.0](RELEASE_V0.8.0.md). The coordinator activates this protocol
+after capability agreement; it does not require `--event-lifecycle`. A mixed
+cluster retains legacy commitment accounting, including the old-term defect,
+until agreement. Complete the upgrade before relying on this guarantee.
+
 An entry written by an earlier leader is not committed just because a later
 leader copies it to enough replicas. A conflicting replica whose last log term
 is newer can still win the next election and replace it. The regression in

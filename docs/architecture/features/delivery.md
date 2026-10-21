@@ -23,6 +23,14 @@ The delivery module moves scheduled events to subscribers with backpressure, ret
 
 ## Production Decisions
 
+- **Lifecycle delivery gate:** canceled and superseded copies are suppressed,
+  including stale wheel/ready-queue entries. A staged mutation freezes its
+  predecessor without releasing retention; the successor cannot be delivered
+  until accepted. The active-state check and send share a gate with mutations.
+  Acks always refer to the delivered physical offset. Lifecycle operations only
+  change future work; they cannot recall work already sent to a consumer. See
+  the [contract](../../RETENTION_AND_EVENT_LIFECYCLE.md).
+
 - Circuit breaker isolates unstable subscribers.
 - Retry queue is non-blocking and deadline ordered (no inline sleep in timeout loop).
 - Dispatcher sharding reduces lock contention in high concurrency.

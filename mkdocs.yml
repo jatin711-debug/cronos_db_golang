@@ -121,6 +121,9 @@ nav:
   - Release:
       - Release Requirements: PRODUCTION_RELEASE.md
       - v0.8.0 Release Notes: RELEASE_V0.8.0.md
+      - Event Lifecycle and Retention: RETENTION_AND_EVENT_LIFECYCLE.md
+      - Current-Term Commitment: REPLICATION_TERM_START.md
+      - Documentation Review (2026-10-21): DOCUMENTATION_AUDIT_2026-10-21.md
       - v0.7.0 Hardening: HARDENING_V0.7.0.md
       - October Production Audit: PRODUCTION_AUDIT_2026-10-16.md
       - Production Audit: PRODUCTION_AUDIT_2026-09-27.md
@@ -164,3 +167,4 @@ nav:
       - Technical Deep Dive (July 2026): TECHNICAL_DEEP_DIVE.md
       - Performance Baseline (July 2026): PERFORMANCE.md
       - Audit Probes: audit-probes/README.md
+      - October Audit Probes: audit-probes/2026-10-16/README.md
