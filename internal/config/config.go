@@ -3,8 +3,9 @@
 //
 // LoadConfig applies defaults, environment values, then explicit flags.
 // Production mode enforces TLS, auth, encryption, and replication safety unless
-// --dev is set. ReloadableConfig supports SIGHUP-driven updates of a safe
-// subset of runtime tunables.
+// --dev is set. ReloadableConfig re-reads selected values on SIGHUP, but the
+// composition root does not reconfigure most running components; restart to
+// apply changes consistently. See docs/CONFIGURATION.md.
 package config
 
 import (
@@ -20,7 +21,7 @@ import (
 )
 
 // LoadConfig loads node configuration from command-line flags and environment
-// variables. Defaults are applied first, then flags, then CRONOS_* env overrides.
+// variables. Defaults are applied first, then CRONOS_* env overrides, then flags.
 // It returns an error if validation fails (see ValidateConfig).
 func LoadConfig() (*types.Config, error) {
 	var config types.Config
@@ -178,11 +179,11 @@ func LoadConfig() (*types.Config, error) {
 	flag.IntVar(&config.ReplicationBatchSize, "replication-batch", DefaultReplicationBatchSize, "Replication batch size")
 	flag.DurationVar(&config.ReplicationTimeout, "replication-timeout", 10*time.Second, "Replication timeout")
 	flag.IntVar(&config.MinInSyncReplicas, "min-insync-replicas", DefaultMinInSyncReplicas, "Minimum in-sync replicas (incl. leader) required to ack a write; 0 = 1")
-	flag.Int64Var(&config.SnapshotCatchupThreshold, "snapshot-catchup-threshold", DefaultSnapshotCatchupThreshold, "Replication lag (events) above which a follower requests a full snapshot; 0 = disable")
+	flag.Int64Var(&config.SnapshotCatchupThreshold, "snapshot-catchup-threshold", DefaultSnapshotCatchupThreshold, "Reserved; currently unused (does not trigger snapshots based on lag)")
 
 	// Raft configuration
 	flag.StringVar(&config.RaftDir, "raft-dir", DefaultRaftDir, "Raft data directory")
-	flag.StringVar(&config.RaftJoinAddr, "raft-join", DefaultRaftJoinAddr, "Raft cluster join address")
+	flag.StringVar(&config.RaftJoinAddr, "raft-join", DefaultRaftJoinAddr, "Reserved; currently unused (join through cluster-seeds)")
 
 	// Cluster configuration
 	flag.BoolVar(&config.ClusterEnabled, "cluster", DefaultClusterEnabled, "Enable cluster mode")
@@ -198,7 +199,7 @@ func LoadConfig() (*types.Config, error) {
 	flag.IntVar(&config.ClusterExpectedNodes, "cluster-expected-nodes", 0, "Nodes a new cluster starts with; first partition leaders are assigned as soon as that many are up (0 = unknown, use --cluster-formation-wait)")
 	flag.DurationVar(&config.ClusterFormationWait, "cluster-formation-wait", DefaultClusterFormationWait, "How long membership must be unchanged before a new cluster assigns first partition leaders when --cluster-expected-nodes is unset or not reached (0 = assign at once)")
 	flag.BoolVar(&config.UseMemberlist, "use-memberlist", DefaultUseMemberlist, "Not supported; the server refuses to start with it")
-	flag.Int64Var(&config.ClockSkewThresholdMs, "clock-skew-threshold-ms", DefaultClockSkewThresholdMs, "Max allowed clock skew from leader in ms (0 = disabled)")
+	flag.Int64Var(&config.ClockSkewThresholdMs, "clock-skew-threshold-ms", DefaultClockSkewThresholdMs, "Reserved; currently unused (no clock-skew limit is enforced)")
 
 	// TLS flags
 	flag.BoolVar(&config.TLSEnabled, "tls-enabled", false, "Enable TLS for gRPC")
