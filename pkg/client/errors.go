@@ -29,6 +29,16 @@ const (
 	ErrorKindTransport ErrorKind = "transport"
 	// ErrorKindInternal indicates an unexpected client or server internal error.
 	ErrorKindInternal ErrorKind = "internal"
+	// ErrorKindNotFound indicates the event reference does not resolve: the
+	// event is no longer retained, or the reference does not match it.
+	ErrorKindNotFound ErrorKind = "not_found"
+	// ErrorKindConflict indicates the event changed after the revision a
+	// cancel or reschedule expected. Read its state and decide again.
+	ErrorKindConflict ErrorKind = "conflict"
+	// ErrorKindPrecondition indicates the request cannot apply in the current
+	// state: the event is canceled or already due, or the server does not have
+	// the feature enabled. Retrying the same request does not help.
+	ErrorKindPrecondition ErrorKind = "precondition"
 )
 
 // Error is a typed client error with operation name and classification.

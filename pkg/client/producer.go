@@ -54,11 +54,14 @@ type Message struct {
 type SendResult struct {
 	// MessageID is the message identifier that was published (generated or caller-supplied).
 	MessageID string
+	// Topic is the topic the message was published to.
+	Topic string
 	// PartitionID is the partition that accepted the write.
 	PartitionID int32
 	// Offset is the durable log offset assigned by the server.
 	Offset int64
 	// Term, with Offset, fences an event reference against log offset reuse.
+	// For SendBatch results it is set only with ProducerConfig.ReturnReferences.
 	Term int64
 	// ScheduleTS is the effective schedule timestamp (Unix ms) after server processing.
 	ScheduleTS int64
@@ -117,7 +120,7 @@ type ProducerConfig struct {
 	// DefaultAllowDuplicate is applied to messages that do not set AllowDuplicate explicitly.
 	DefaultAllowDuplicate bool
 	// RetryPolicy governs retries on transient/leader-change errors.
-	RetryPolicy retry.Policy
+	RetryPolicy RetryPolicy
 	// AutoMessageID generates a MessageID when the message leaves it empty.
 	AutoMessageID bool
 	// Codec is the default encoder for Message.Value when Message.Codec is nil.
@@ -135,10 +138,15 @@ type ProducerConfig struct {
 	MaxInFlight int
 	// MaxQueuedBytes caps total payload bytes waiting in the async queue.
 	MaxQueuedBytes int64
-	// CircuitBreaker gates publishes per target address (FailureThreshold 0 disables).
-	CircuitBreaker circuitbreaker.Config
-	// Hedging optionally issues parallel hedged requests after a delay (see hedging.Policy).
-	Hedging hedging.Policy
+	// CircuitBreaker is reserved and currently unused. Configure
+	// client.Config.CircuitBreaker for publish gates instead.
+	CircuitBreaker CircuitBreakerConfig
+	// Hedging optionally issues parallel hedged requests after a delay (see HedgingPolicy).
+	Hedging HedgingPolicy
+	// ReturnReferences asks the server for each batch event's term, so that
+	// SendBatch results give complete event references (SendResult.Reference)
+	// for cancel and reschedule. Off by default; single sends always get one.
+	ReturnReferences bool
 }
 
 // DefaultProducerConfig returns safe producer defaults.
@@ -160,6 +168,13 @@ func DefaultProducerConfig() ProducerConfig {
 		},
 		Hedging: hedging.DefaultPolicy(),
 	}
+}
+
+// Reference returns the event reference for GetEventState, CancelEvent and
+// RescheduleEvent. Store it with your record of the event. A SendBatch result
+// has a complete reference only with ProducerConfig.ReturnReferences.
+func (r *SendResult) Reference() EventReference {
+	return EventReference{Topic: r.Topic, PartitionID: r.PartitionID, Offset: r.Offset, Term: r.Term, MessageID: r.MessageID}
 }
 
 // asyncSendRequest is a unit of work queued for async producer workers.
@@ -294,6 +309,7 @@ func (p *Producer) Send(ctx context.Context, msg Message) (*SendResult, error) {
 					p.client.noteServed(partitionID, hedgeRes.addr)
 					return &SendResult{
 						MessageID:   msg.MessageID,
+						Topic:       msg.Topic,
 						PartitionID: hedgeRes.resp.GetPartitionId(),
 						Offset:      hedgeRes.resp.GetOffset(),
 						Term:        hedgeRes.resp.GetTerm(),
@@ -357,6 +373,7 @@ func (p *Producer) Send(ctx context.Context, msg Message) (*SendResult, error) {
 				p.client.noteServed(partitionID, addr)
 				return &SendResult{
 					MessageID:   msg.MessageID,
+					Topic:       msg.Topic,
 					PartitionID: resp.GetPartitionId(),
 					Offset:      resp.GetOffset(),
 					Term:        resp.GetTerm(),
@@ -540,6 +557,12 @@ func (p *Producer) SendBatch(ctx context.Context, msgs []Message) (*BatchSendRes
 		// case the server returns a contiguous range [FirstOffset, LastOffset]
 		// for the events in request order.
 		allPublished := resp.GetPublishedCount() == int32(len(group.msgs))
+		references := make(map[string]*types.EventReference, len(resp.GetReferences()))
+		for _, ref := range resp.GetReferences() {
+			if ref.GetPartitionId() == group.partitionID {
+				references[ref.GetMessageId()] = ref
+			}
+		}
 		var baseOffset int64
 		if allPublished {
 			baseOffset = resp.GetFirstOffset()
@@ -547,6 +570,7 @@ func (p *Producer) SendBatch(ctx context.Context, msgs []Message) (*BatchSendRes
 		for i, msg := range group.msgs {
 			sr := &SendResult{
 				MessageID:   msg.MessageID,
+				Topic:       msg.Topic,
 				PartitionID: group.partitionID,
 				NodeAddress: servedBy,
 				ScheduleTS:  resolveScheduleTS(msg),
@@ -554,6 +578,9 @@ func (p *Producer) SendBatch(ctx context.Context, msgs []Message) (*BatchSendRes
 			}
 			if allPublished {
 				sr.Offset = baseOffset + int64(i)
+			}
+			if ref, ok := references[msg.MessageID]; ok {
+				sr.Offset, sr.Term = ref.GetOffset(), ref.GetTerm()
 			}
 			result.Results = append(result.Results, sr)
 		}
@@ -582,8 +609,9 @@ func (p *Producer) publishBatchTo(ctx context.Context, partitionID int32, candid
 		reqCtx, cancel := p.client.requestContext(ctx)
 		start := time.Now()
 		resp, err := client.PublishBatch(reqCtx, &types.PublishBatchRequest{
-			Events:         events,
-			AllowDuplicate: allowDuplicate,
+			Events:           events,
+			AllowDuplicate:   allowDuplicate,
+			ReturnReferences: p.cfg.ReturnReferences,
 		})
 		cancel()
 		p.client.observeRequest("event.publish_batch", addr, start, err)

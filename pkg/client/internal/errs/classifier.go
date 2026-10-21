@@ -76,6 +76,7 @@ func IsLeaderRelatedMessage(message string) bool {
 		"not owned by this node",
 		"changing leader",
 		"retry against the partition leader",
+		"does not lead partition",
 	}
 	for _, p := range phrases {
 		if strings.Contains(m, p) {
