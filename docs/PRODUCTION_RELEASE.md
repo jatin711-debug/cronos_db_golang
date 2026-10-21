@@ -27,11 +27,13 @@ manifest for deployments. This publication has no signed GitHub workflow
 provenance. Evidence and binary checksums are attached to the
 [published release](https://github.com/jatin711-debug/cronos_db_golang/releases/tag/v0.8.0).
 
-Development follow-up on 2026-10-21 raises the build toolchain to Go 1.26.10
-and the dashboard's Vite floor to 7.3.7 after current CI found
-`GO-2026-6809` in `crypto/x509` and the bundled `launch-editor` advisories in
-Vite 7.3.6. See the [Go patch release](https://go.dev/doc/devel/release#go1.26.10)
-and [Vite advisory](https://github.com/advisories/GHSA-r825-w8mm-5pxw).
+Development follow-up on 2026-10-21 raises the build toolchain to Go 1.26.10,
+the dashboard's Vite floor to 7.3.7, and `github.com/klauspost/compress` to
+v1.18.7 after current CI found `GO-2026-6809` in `crypto/x509`, the bundled
+`launch-editor` advisories in Vite 7.3.6, and `CVE-2026-63209` in the image's
+compression dependency. See the [Go patch release](https://go.dev/doc/devel/release#go1.26.10),
+[Vite advisory](https://github.com/advisories/GHSA-r825-w8mm-5pxw), and
+[compression advisory](https://github.com/klauspost/compress/security/advisories/GHSA-259r-337f-4rfw).
 These source updates need a new patch release; the v0.8.0 binaries and image
 above retain their original contents and scan date.
 

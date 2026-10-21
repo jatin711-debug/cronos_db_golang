@@ -116,9 +116,12 @@ This review does not assert that all major issues are fixed.
 ## Merge-gate follow-up
 
 The PR's current dependency scans found a Go standard-library certificate
-advisory and Vite's bundled `launch-editor` advisories after the documentation
-review. The merge follow-up raises Go to 1.26.10 in the module and image builder,
-Vite's minimum to 7.3.7, and the active build prerequisites accordingly. Dated
+advisory, Vite's bundled `launch-editor` advisories, and `CVE-2026-63209` in
+`github.com/klauspost/compress` after the documentation review. The merge
+follow-up raises Go to 1.26.10 in the module and image builder, Vite's minimum
+to 7.3.7, the compression dependency to v1.18.7, and the active build
+prerequisites accordingly. The image scan failed before container and chart
+startup tests ran; those tests must still pass on the patched source. Dated
 measurements and released artifact identities remain historical. A new patch
 release is needed to distribute the updated build; see
 [publication status](PRODUCTION_RELEASE.md#current-release-v080).
