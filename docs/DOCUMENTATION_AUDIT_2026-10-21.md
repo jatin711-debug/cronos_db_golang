@@ -125,3 +125,13 @@ startup tests ran; those tests must still pass on the patched source. Dated
 measurements and released artifact identities remain historical. A new patch
 release is needed to distribute the updated build; see
 [publication status](PRODUCTION_RELEASE.md#current-release-v080).
+
+The Go race job also reported an intermittent first-delivery acknowledgement
+failure. Investigation found that a live subscription could be exposed before
+its consumer group was created. The follow-up initializes group membership
+before publishing the subscription to the dispatcher, while rejecting duplicate
+subscription IDs before changing membership. Controlled regression tests cover
+an event becoming due during group initialization, rejected initialization,
+and duplicate registration. A public API test also checks server-assigned
+partition membership and its first acknowledgement. The isolation test now
+includes the client's last acknowledgement refusal in its failure diagnostics.
