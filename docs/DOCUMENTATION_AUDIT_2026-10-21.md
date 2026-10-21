@@ -112,3 +112,13 @@ still applies to the pull request.
 Remaining product and validation gaps are maintained in
 [release requirements](PRODUCTION_RELEASE.md#what-v080-was-released-without).
 This review does not assert that all major issues are fixed.
+
+## Merge-gate follow-up
+
+The PR's current dependency scans found a Go standard-library certificate
+advisory and Vite's bundled `launch-editor` advisories after the documentation
+review. The merge follow-up raises Go to 1.26.10 in the module and image builder,
+Vite's minimum to 7.3.7, and the active build prerequisites accordingly. Dated
+measurements and released artifact identities remain historical. A new patch
+release is needed to distribute the updated build; see
+[publication status](PRODUCTION_RELEASE.md#current-release-v080).

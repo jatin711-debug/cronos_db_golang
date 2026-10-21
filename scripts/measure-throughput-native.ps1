@@ -28,7 +28,7 @@ $repo = Split-Path -Parent $PSScriptRoot
 $runID = 'cronos-native-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [guid]::NewGuid().ToString('N').Substring(0,6)
 $runDir = Join-Path $repo "build/throughput/$runID"
 $privateDir = Join-Path $runDir 'private'
-$go = Join-Path $env:USERPROFILE 'go/pkg/mod/golang.org/toolchain@v0.0.1-go1.26.9.windows-amd64/bin/go.exe'
+$go = Join-Path $env:USERPROFILE 'go/pkg/mod/golang.org/toolchain@v0.0.1-go1.26.10.windows-amd64/bin/go.exe'
 if (-not (Test-Path -LiteralPath $go)) { throw 'The amd64 Go toolchain is missing' }
 $harnessBinary = Join-Path $repo 'build/throughput/throughput.exe'
 $serverBinary = if ($ServerBinary) { (Resolve-Path -LiteralPath $ServerBinary).Path } else { Join-Path $repo 'build/throughput/cronos-api.exe' }

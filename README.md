@@ -2,7 +2,7 @@
 
 > Distributed Timestamp-Triggered Event Database with Built-in Scheduling, Pub/Sub & Replay
 
-[![Go](https://img.shields.io/badge/Go-1.26.9-blue.svg)](https://golang.org)
+[![Go](https://img.shields.io/badge/Go-1.26.10-blue.svg)](https://golang.org)
 [![Rust](https://img.shields.io/badge/Rust-FFI-dea584.svg)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/jatin711-debug/cronos_db_golang?include_prereleases)](https://github.com/jatin711-debug/cronos_db_golang/releases)
@@ -153,7 +153,7 @@ docker pull johnny711dock/cronos-db@sha256:428690215148b97eb9b6aaed5a3afb7c7a322
 
 ### Prerequisites to build
 
-- **Go 1.26.9** (the version `go.mod` names)
+- **Go 1.26.10** (the version `go.mod` names)
 - **npm** for the dashboard that `make build` compiles into the server
 - **Rust** (optional) for the faster bloom filter through cgo — install via [rustup](https://rustup.rs). Without cgo the server uses the one written in Go
 - **protoc** only to regenerate the gRPC code (`make proto`)
@@ -789,7 +789,7 @@ Experimental and refused in production: transactions, online partition splitting
 
 | Component | Technology | Why |
 |-----------|-----------|-----|
-| **Language** | Go 1.26.9 | Concurrency, performance, ecosystem |
+| **Language** | Go 1.26.10 | Concurrency, performance, ecosystem |
 | **Bloom Filter** | Rust (FFI via CGO) in the image; Go without cgo | Lock-free atomics |
 | **Storage** | PebbleDB (CockroachDB) | LSM tree, built-in compaction, Go-native |
 | **Consensus** | HashiCorp Raft | Battle-tested, BoltDB backend |
