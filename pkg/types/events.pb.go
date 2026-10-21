@@ -748,13 +748,17 @@ type SubscribeRequest struct {
 	Topic string `protobuf:"bytes,2,opt,name=topic,proto3" json:"topic,omitempty"`
 	// Partition ID (optional, if -1 auto-assign)
 	PartitionId int32 `protobuf:"varint,3,opt,name=partition_id,json=partitionId,proto3" json:"partition_id,omitempty"`
-	// Offset to start from (if -1, start from latest)
+	// Lowest offset from which retained, unacknowledged events are redelivered
+	// when the subscription opens. -1 uses the group's committed offset (the
+	// start of the retained log for a new group); a lower value than the
+	// committed offset has no effect.
 	StartOffset int64 `protobuf:"varint,4,opt,name=start_offset,json=startOffset,proto3" json:"start_offset,omitempty"`
-	// Maximum number of events to buffer
+	// Credit limit: how many deliveries may be unacknowledged at once (at most
+	// 50000). 0 uses the node's --max-credits.
 	MaxBufferSize int32 `protobuf:"varint,5,opt,name=max_buffer_size,json=maxBufferSize,proto3" json:"max_buffer_size,omitempty"`
 	// Subscription ID (for tracking)
 	SubscriptionId string `protobuf:"bytes,6,opt,name=subscription_id,json=subscriptionId,proto3" json:"subscription_id,omitempty"`
-	// Whether to replay historical events or only new ones
+	// Not used by the server; read older events with Replay.
 	Replay        bool `protobuf:"varint,7,opt,name=replay,proto3" json:"replay,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
