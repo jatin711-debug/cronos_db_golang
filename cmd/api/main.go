@@ -516,6 +516,9 @@ func run() int {
 	var consumerHandler *api.ConsumerGroupServiceHandler
 	if part != nil {
 		consumerHandler = api.NewConsumerGroupServiceHandler(part.ConsumerGroup)
+		if authConfig != nil {
+			consumerHandler.SetAuthPolicy(authConfig.Policy)
+		}
 	}
 
 	// Create partition metadata service handler

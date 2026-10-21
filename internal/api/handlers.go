@@ -1309,11 +1309,9 @@ func (h *EventServiceHandler) Subscribe(stream grpc.BidiStreamingServer[types.Su
 	// Create subscription ID
 	subID := fmt.Sprintf("%s:%d:%s", req.GetConsumerGroup(), partitionID, req.GetSubscriptionId())
 
-	// Determine credit limit from request or use default
-	maxCredits := req.GetMaxBufferSize()
-	if maxCredits <= 0 {
-		maxCredits = 10000 // Default high credit limit for throughput
-	}
+	// The credit limit the subscriber asks for; without one the dispatcher
+	// gives it the node's --max-credits.
+	maxCredits := max(0, req.GetMaxBufferSize())
 	if maxCredits > 50000 {
 		maxCredits = 50000 // Hard cap to prevent memory abuse
 	}
