@@ -1682,7 +1682,7 @@ remaining correctness limits. All three nodes ran on one physical machine.
 ## Configuration Reference
 
 The full list of flags, with defaults and the production checks, is in
-[docs/architecture/features/config.md](docs/architecture/features/config.md)
+[docs/CONFIGURATION.md](docs/CONFIGURATION.md)
 and in `cronos-api --help`. It is kept there only, so that it is not kept
 twice. The flags that shape a deployment:
 

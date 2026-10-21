@@ -132,16 +132,20 @@ message SubscribeRequest {
   // Partition ID (optional, if -1 auto-assign)
   int32 partition_id = 3;
 
-  // Offset to start from (if -1, start from latest)
+  // Lowest offset from which retained, unacknowledged events are redelivered
+  // when the subscription opens. -1 uses the group's committed offset (the
+  // start of the retained log for a new group); a lower value than the
+  // committed offset has no effect.
   int64 start_offset = 4;
 
-  // Maximum number of events to buffer
+  // Credit limit: how many deliveries may be unacknowledged at once (at most
+  // 50000). 0 uses the node's --max-credits.
   int32 max_buffer_size = 5;
 
   // Subscription ID (for tracking)
   string subscription_id = 6;
 
-  // Whether to replay historical events or only new ones
+  // Not used by the server; read older events with Replay.
   bool replay = 7;
 }
 

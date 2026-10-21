@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 
+	"github.com/jatin711-debug/cronos_db_golang/internal/auth"
 	"github.com/jatin711-debug/cronos_db_golang/internal/consumer"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 )
@@ -13,6 +14,24 @@ type ConsumerGroupServiceHandler struct {
 	types.UnimplementedConsumerGroupServiceServer
 
 	consumerManager *consumer.GroupManager
+
+	authPolicy  *auth.Policy
+	authEnabled bool // true when JWT authentication is active
+}
+
+// SetAuthPolicy makes every ConsumerGroupService RPC require the admin role.
+// It is an operator API: it shows and changes the progress of every group.
+// Call this only when auth is enabled.
+func (h *ConsumerGroupServiceHandler) SetAuthPolicy(p *auth.Policy) {
+	h.authPolicy = p
+	h.authEnabled = true
+}
+
+func (h *ConsumerGroupServiceHandler) requireAdmin(ctx context.Context) error {
+	if !h.authEnabled {
+		return nil
+	}
+	return auth.CheckAdminPermission(ctx, h.authPolicy)
 }
 
 // NewConsumerGroupServiceHandler creates a ConsumerGroupService handler.
@@ -27,6 +46,9 @@ func (h *ConsumerGroupServiceHandler) CreateConsumerGroup(
 	ctx context.Context,
 	req *types.CreateConsumerGroupRequest,
 ) (*types.CreateConsumerGroupResponse, error) {
+	if err := h.requireAdmin(ctx); err != nil {
+		return nil, err
+	}
 	if err := h.consumerManager.CreateGroup(
 		req.GetGroupId(),
 		req.GetTopic(),
@@ -48,6 +70,9 @@ func (h *ConsumerGroupServiceHandler) GetConsumerGroup(
 	ctx context.Context,
 	req *types.GetConsumerGroupRequest,
 ) (*types.ConsumerGroupMetadata, error) {
+	if err := h.requireAdmin(ctx); err != nil {
+		return nil, err
+	}
 	group, exists := h.consumerManager.GetGroup(req.GetGroupId())
 	if !exists {
 		return nil, types.ErrConsumerGroupNotFound
@@ -69,6 +94,9 @@ func (h *ConsumerGroupServiceHandler) ListConsumerGroups(
 	ctx context.Context,
 	req *types.ListConsumerGroupsRequest,
 ) (*types.ListConsumerGroupsResponse, error) {
+	if err := h.requireAdmin(ctx); err != nil {
+		return nil, err
+	}
 	groups := h.consumerManager.ListGroups()
 
 	// Convert to protobuf types
@@ -94,6 +122,9 @@ func (h *ConsumerGroupServiceHandler) RebalanceConsumerGroup(
 	ctx context.Context,
 	req *types.RebalanceConsumerGroupRequest,
 ) (*types.RebalanceConsumerGroupResponse, error) {
+	if err := h.requireAdmin(ctx); err != nil {
+		return nil, err
+	}
 	// Call internal rebalance
 	assignments, err := h.consumerManager.TriggerRebalance(req.GetGroupId())
 	if err != nil {

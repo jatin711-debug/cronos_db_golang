@@ -256,7 +256,7 @@ This section is organized by feature area and tells you where to read first, wha
   - `charts/cronos-db/values-production.yaml`
 - Main flow:
   - Config is loaded once at startup from flags and environment variables. Every flag reads `CRONOS_<FLAG>` (upper-cased, `-` replaced by `_`; aliases `CRONOS_DEDUP_TTL_HOURS`, `CRONOS_MIN_IN_SYNC_REPLICAS`); an explicit flag wins.
-  - SIGHUP listener allows reload updates without process restart.
+  - SIGHUP re-reads selected environment values into the shared config; most running components keep their startup values. Restart to apply changes consistently; see [reload limits](CONFIGURATION.md#apply-changes-and-sighup-limits).
   - New flags include retention controls (`--retention-max-age-hours`, `--retention-max-size-gb`) and the full security surface (TLS, auth, replication mTLS, encryption at rest).
 - Reliability decisions:
   - Default WAL fsync mode is `batch`.

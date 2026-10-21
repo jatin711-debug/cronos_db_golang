@@ -10,10 +10,10 @@ The API layer is the system entrypoint for all client and internal RPC traffic. 
 - [internal/api/internal_grpc_server.go](../../../internal/api/internal_grpc_server.go) — dedicated internal listener (`InternalGRPCServer`, default `:7947`); registers **`ReplicationService`** and, in cluster mode, **`RaftService`**; **`CrossRegionService`** only with `--experimental-features` (`cmd/api/main.go`). Peer traffic never shares the public client port.
 - [internal/api/handlers.go](../../../internal/api/handlers.go) — `EventService` handlers (`Publish`, `PublishBatch`, `Subscribe`, `Ack`, `Replay`) with dedup claims and append-outcome reconciliation.
 - [internal/api/event_lifecycle.go](../../../internal/api/event_lifecycle.go) — `GetEventState`, `CancelEvent`, `RescheduleEvent`; leader routing, publish authorization and disk admission for opt-in lifecycle operations.
-- [internal/api/admin_handler.go](../../../internal/api/admin_handler.go) — operator AdminService (topology, health, lag, retention, compaction, schemas, tenants; **`TriggerRebalance` soft-stub** — see Known Limitations).
+- [internal/api/admin_handler.go](../../../internal/api/admin_handler.go) — operator AdminService (topology, health, lag, retention, compaction, schemas, tenants; **`TriggerRebalance` soft-stub** — see Known Limitations). Every RPC requires the global policy flag `"admin": true` when auth is enabled.
 - [internal/api/web_handler.go](../../../internal/api/web_handler.go) — embedded SPA + `/api/admin/*` JSON proxy on HTTP `:8080`.
-- [internal/api/consumer_handler.go](../../../internal/api/consumer_handler.go)
-- [internal/api/partition_handler.go](../../../internal/api/partition_handler.go) — partition metadata + admin compact/retention/split (authz gated).
+- [internal/api/consumer_handler.go](../../../internal/api/consumer_handler.go) — `ConsumerGroupService` (create, get, list, rebalance) over the consumer-group state of the first local partition (partition 0); requires global `"admin": true` when auth is enabled.
+- [internal/api/partition_handler.go](../../../internal/api/partition_handler.go) — partition metadata (a valid token is enough) + compact/retention/split (global `"admin": true` when auth is enabled). See [authorization by RPC](auth.md#authorization-by-rpc).
 - [internal/api/replication_server.go](../../../internal/api/replication_server.go) — `Append`, versioned `AppendLifecycle` / `AppendTermStart`, `Sync`, `Snapshot`, `Position`, `LeaderReport`, `SyncConsumerProgress` on the internal listener.
 - [internal/api/raft_server.go](../../../internal/api/raft_server.go) — Raft join/leave/status and node removal (`cronos-admin cluster remove-node`) (internal).
 - [internal/api/crossregion_server.go](../../../internal/api/crossregion_server.go) — CrossRegion inject/fetch with LWW (internal only).
@@ -38,7 +38,7 @@ The API layer is the system entrypoint for all client and internal RPC traffic. 
 ## Main Request Flow
 
 1. `cmd/api/main.go` starts **public** and **internal** gRPC servers plus HTTP.
-2. Public unary/stream interceptors apply tracing, SLO, version, auth, topic limits, audit, metrics, and IP rate limiting (heavy ones skipped in `--dev`).
+2. Public unary/stream interceptors apply tracing, SLO, version, authentication, topic limits, audit, metrics, and IP rate limiting (SLO, metrics and IP rate limiting are skipped when auth is disabled, whether or not `--dev` is set).
 3. Handlers validate, authorize, and route via partition manager / cluster router.
 4. Internal replication/cross-region RPCs use optional cluster mTLS credentials.
 

@@ -6,8 +6,10 @@ import (
 	"testing"
 
 	"github.com/jatin711-debug/cronos_db_golang/internal/auth"
+	"github.com/jatin711-debug/cronos_db_golang/internal/partition"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 )
@@ -209,10 +211,9 @@ func TestAdminServiceHandler_RunRetention_PermissionDenied(t *testing.T) {
 	}
 }
 
-// TestAdminServiceHandler_RunCompaction_RequiresPartitionID verifies that
-// RunCompaction returns a structured failure (not Unimplemented) when
-// partition_id=0, because the underlying primitive is per-partition.
-func TestAdminServiceHandler_RunCompaction_RequiresPartitionID(t *testing.T) {
+// TestAdminServiceHandler_RunCompaction_NeedsPartitions verifies that
+// RunCompaction on a node without partitions reports a structured failure.
+func TestAdminServiceHandler_RunCompaction_NeedsPartitions(t *testing.T) {
 	h := NewAdminServiceHandler(nil, nil, nil, "test-node", t.TempDir(), nil, nil)
 	client, teardown := dialAdminServer(t, h)
 	defer teardown()
@@ -221,10 +222,38 @@ func TestAdminServiceHandler_RunCompaction_RequiresPartitionID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunCompaction: %v", err)
 	}
-	if resp.Success {
-		t.Error("expected Success=false when partition_id=0")
+	if resp.Success || resp.Error == "" {
+		t.Fatalf("expected a structured failure without partitions, got %+v", resp)
 	}
-	if resp.Error == "" {
-		t.Error("expected non-empty Error explaining the per-partition primitive")
+}
+
+// Partition 0 is a partition like any other: the default node has only that
+// one, and the per-partition admin RPCs must be able to name it.
+func TestAdminServiceHandler_PartitionZeroCanBeNamed(t *testing.T) {
+	cfg := &types.Config{DataDir: t.TempDir(), PartitionCount: 1, FsyncMode: "periodic", FlushIntervalMS: 10, TickMS: 10, WheelSize: 64, DedupTTLHours: 1, BloomCapacity: 1000}
+	pm := partition.NewPartitionManager("test-node", cfg)
+	defer pm.Close()
+	if err := pm.CreatePartition(0, "orders"); err != nil {
+		t.Fatal(err)
+	}
+	h := NewAdminServiceHandler(pm, nil, nil, "test-node", cfg.DataDir, nil, nil)
+	client, teardown := dialAdminServer(t, h)
+	defer teardown()
+	ctx := context.Background()
+
+	health, err := client.GetPartitionHealth(ctx, &types.PartitionHealth{PartitionId: 0})
+	if err != nil || health.GetPartitionId() != 0 {
+		t.Fatalf("partition health of partition 0: %+v, %v", health, err)
+	}
+	if _, err = client.GetConsumerGroupLag(ctx, &types.AdminConsumerGroupLag{GroupId: "g", PartitionId: 0}); err != nil {
+		t.Fatalf("consumer group lag on partition 0: %v", err)
+	}
+	if _, err = client.GetPartitionHealth(ctx, &types.PartitionHealth{PartitionId: -1}); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("negative partition: %v", err)
+	}
+	// 0 names every partition of the node for compaction, as for retention.
+	resp, err := client.RunCompaction(ctx, &types.RunCompactionRequest{PartitionId: 0})
+	if err != nil || !resp.GetSuccess() {
+		t.Fatalf("compaction of every partition: %+v, %v", resp, err)
 	}
 }

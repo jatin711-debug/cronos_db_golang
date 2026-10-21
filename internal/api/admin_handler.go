@@ -352,8 +352,8 @@ func (h *AdminServiceHandler) GetPartitionHealth(
 	}
 
 	pid := req.GetPartitionId()
-	if pid == 0 {
-		return nil, fmt.Errorf("partition_id is required (got 0)")
+	if pid < 0 {
+		return nil, status.Errorf(codes.InvalidArgument, "partition_id must not be negative (got %d)", pid)
 	}
 	p, err := h.pm.GetInternalPartition(pid)
 	if err != nil {
@@ -558,8 +558,8 @@ func (h *AdminServiceHandler) GetConsumerGroupLag(
 
 	pid := req.GetPartitionId()
 	groupID := req.GetGroupId()
-	if pid == 0 || groupID == "" {
-		return nil, fmt.Errorf("partition_id and group_id are required")
+	if pid < 0 || groupID == "" {
+		return nil, status.Error(codes.InvalidArgument, "group_id and a partition_id that is not negative are required")
 	}
 
 	resp := &types.AdminConsumerGroupLagResponse{
@@ -664,24 +664,34 @@ func (h *AdminServiceHandler) RunCompaction(
 		return nil, err
 	}
 
-	pid := req.GetPartitionId()
-	if pid == 0 {
-		return &types.RunCompactionResponse{
-			Success: false,
-			Error:   "compaction requires an explicit partition_id (per-partition primitive; no aggregation available)",
-		}, nil
+	// As for retention, 0 means every partition of this node.
+	var partitions []*partition.Partition
+	if pid := req.GetPartitionId(); pid != 0 && h.pm != nil {
+		p, err := h.pm.GetInternalPartition(pid)
+		if err != nil {
+			return &types.RunCompactionResponse{
+				Success: false,
+				Error:   fmt.Sprintf("partition %d not found: %v", pid, err),
+			}, nil
+		}
+		partitions = append(partitions, p)
+	} else if h.pm != nil {
+		partitions = h.pm.ListPartitions()
 	}
-	p, err := h.pm.GetInternalPartition(pid)
-	if err != nil {
-		return &types.RunCompactionResponse{
-			Success: false,
-			Error:   fmt.Sprintf("partition %d not found: %v", pid, err),
-		}, nil
+	if len(partitions) == 0 {
+		return &types.RunCompactionResponse{Success: false, Error: "this node has no partitions"}, nil
 	}
-	if _, err := p.PruneWAL(ctx, storage.PruneOptions{AllCompleted: true}); err != nil {
-		return &types.RunCompactionResponse{Success: false, Error: err.Error()}, nil
+	resp := &types.RunCompactionResponse{Success: true}
+	for _, p := range partitions {
+		removed, err := p.PruneWAL(ctx, storage.PruneOptions{AllCompleted: true})
+		resp.SegmentsCompacted += int64(removed)
+		if err != nil {
+			resp.Success = false
+			resp.Error = fmt.Sprintf("partition %d: %v", p.ID, err)
+			return resp, nil
+		}
 	}
-	return &types.RunCompactionResponse{Success: true}, nil
+	return resp, nil
 }
 
 // ---------------------------------------------------------------------------

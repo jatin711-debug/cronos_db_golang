@@ -59,10 +59,31 @@ def check(ephemeral=False, separate_backup=False):
         assert claims["backups"]["spec"]["storageClassName"] == "backup-storage"
 
 
+def check_extra_env():
+    """Settings the chart has no value for are passed with extraEnv."""
+    args = ["helm", "template", "cronos", str(CHART), "--namespace", "cronos-ci",
+            "-f", str(CHART / "values-production.yaml"),
+            "--set", "extraEnv[0].name=CRONOS_EVENT_LIFECYCLE",
+            "--set-string", "extraEnv[0].value=true",
+            "--set", "extraEnv[1].name=CRONOS_BACKUP_INTERVAL",
+            "--set-string", "extraEnv[1].value=6h",
+            "--set", "extraEnv[2].name=CRONOS_TRACING_OTLP_ENDPOINT",
+            "--set", "extraEnv[2].valueFrom.secretKeyRef.name=cronos-telemetry",
+            "--set", "extraEnv[2].valueFrom.secretKeyRef.key=endpoint"]
+    docs = list(yaml.safe_load_all(subprocess.check_output(args, text=True)))
+    sts = next(d for d in docs if d and d["kind"] == "StatefulSet")
+    env = sts["spec"]["template"]["spec"]["containers"][0]["env"]
+    assert {"name": "CRONOS_EVENT_LIFECYCLE", "value": "true"} in env
+    assert {"name": "CRONOS_BACKUP_INTERVAL", "value": "6h"} in env
+    assert {"name": "CRONOS_TRACING_OTLP_ENDPOINT", "valueFrom": {
+        "secretKeyRef": {"name": "cronos-telemetry", "key": "endpoint"}}} in env
+
+
 if __name__ == "__main__":
     subprocess.run(["helm", "lint", str(CHART), "-f", str(CHART / "values-production.yaml")], check=True)
     check()
     check(ephemeral=True)
     check(separate_backup=True)
     check(ephemeral=True, separate_backup=True)
+    check_extra_env()
     print("Production chart assertions passed (persistent/ephemeral data and separate backup volumes).")
