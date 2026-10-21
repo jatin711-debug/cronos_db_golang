@@ -37,6 +37,11 @@ compression dependency. See the [Go patch release](https://go.dev/doc/devel/rele
 These source updates need a new patch release; the v0.8.0 binaries and image
 above retain their original contents and scan date.
 
+The same development follow-up initializes consumer-group membership before a
+new subscription can receive live events. This closes a registration window in
+which the first acknowledgement could be refused because its group did not yet
+exist. This change also requires the next patch release.
+
 The major correctness work in this release is current-term commitment after
 leader changes, opt-in future-event cancellation/rescheduling, bounded
 relocation, and consistent lifecycle recovery snapshots/backups. See the

@@ -1331,9 +1331,18 @@ func (h *EventServiceHandler) Subscribe(stream grpc.BidiStreamingServer[types.Su
 		Stream:        &GRPCStream{stream: stream},
 	}
 
-	// Register subscription with partition's dispatcher
+	// The live scheduler can dispatch as soon as the subscription is visible.
+	// Create its group first so an immediate ACK can record completion. Joining
+	// under the registration lock also rejects duplicate IDs before changing an
+	// existing member. Use the resolved partition for server-assigned requests.
+	joinGroup := func() error {
+		if err := cm.JoinGroup(req.GetConsumerGroup(), req.GetSubscriptionId(), "", req.GetTopic(), partitionID); err != nil {
+			return fmt.Errorf("create consumer group: %w", err)
+		}
+		return nil
+	}
 	if partitionInternal.Dispatcher != nil {
-		if err := partitionInternal.Dispatcher.Subscribe(subscription); err != nil {
+		if err := partitionInternal.Dispatcher.SubscribeWithInit(subscription, joinGroup); err != nil {
 			return fmt.Errorf("register subscription: %w", err)
 		}
 		// Ensure cleanup on disconnect
@@ -1343,11 +1352,8 @@ func (h *EventServiceHandler) Subscribe(stream grpc.BidiStreamingServer[types.Su
 				slog.Warn("Failed to unsubscribe", "subscription_id", subID, "error", err)
 			}
 		}()
-	}
-
-	// Create consumer group subscription
-	if _, err := cm.Subscribe(req); err != nil {
-		return fmt.Errorf("create consumer group: %w", err)
+	} else if err := joinGroup(); err != nil {
+		return err
 	}
 	defer func() {
 		if err := cm.LeaveGroup(req.GetConsumerGroup(), req.GetSubscriptionId()); err != nil {
