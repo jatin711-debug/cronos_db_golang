@@ -4,6 +4,12 @@
 
 This document explains the production architecture as implemented in code, not only at a conceptual level. Use it as a map to navigate subsystems, understand reliability decisions, and trace end-to-end flows.
 
+The v0.8.0 [lifecycle contract](RETENTION_AND_EVENT_LIFECYCLE.md) and
+[current-term commitment protocol](REPLICATION_TERM_START.md) define the
+one-way format activation, mutation and recovery rules. The
+[release requirements](PRODUCTION_RELEASE.md) separate implemented behavior
+from unvalidated operating conditions.
+
 Related docs:
 
 - Feature-split architecture index: [docs/architecture/README.md](architecture/README.md)
@@ -160,15 +166,17 @@ sequenceDiagram
 
     Producer->>API: Publish(event)
     API->>PM: Resolve partition for topic or key
-    API->>Dedup: IsDuplicate(message_id)
+    API->>Dedup: Claim message_id and reconcile an appended retry
     alt duplicate
       Dedup-->>API: duplicate=true
       API-->>Producer: duplicate error
     else new event
       Dedup-->>API: duplicate=false
       API->>WAL: Append event and assign offset
+      Note over API,WAL: Release claims only on definite pre-append failure
+      API->>PM: Replicate to minISR with current-term proof gating commitment
       API->>Scheduler: Schedule by schedule_ts
-      API-->>Producer: success with offset
+      API-->>Producer: success with offset and term
     end
 
     Scheduler->>Worker: ready notification
@@ -267,6 +275,8 @@ This section is organized by feature area and tells you where to read first, wha
   - `internal/partition/split.go` (experimental)
   - `internal/partition/disk_pressure.go`
   - `internal/partition/backpressure.go` (admission control and the memory guard)
+  - `internal/partition/lifecycle.go`, `replicated_lifecycle.go`, `term_start.go`
+  - `internal/partition/recovery_snapshot.go`, `internal/recoverystate/file.go`
 - Main flow:
   - Partition creation wires WAL, scheduler, dedup, consumer group, dispatcher, worker.
   - A partition start replays timers (`replayWALTimers`) only for events whose time has not come. Events already due stay in the log; each subscription reads what its group has not finished at its consumers' pace (`redriveRetained`), so a restart does not load the backlog into memory.
@@ -277,6 +287,12 @@ This section is organized by feature area and tells you where to read first, wha
   - Admission control across ready queue, timing wheel depth, and in-flight deliveries.
   - Memory guard: publishes are refused while the process holds `--max-memory-percent` (default 80) of its memory limit.
   - Disk-pressure callback triggers emergency compaction.
+  - Lifecycle mode reconstructs a payload-free index before serving. Mutations
+    and delivery share a gate: staged successors suppress predecessors but do
+    not release retention, and only accepted replacements can be delivered.
+  - Lifecycle snapshots and backups carry the WAL cut's epoch, accepted boundary,
+    group progress and dead letters; interrupted state import resumes before
+    serving. Suffix replacement clears stale completions before offset reuse.
 
 ### 6.4 Storage (WAL, segments, index, backup, crypto)
 
@@ -291,11 +307,17 @@ This section is organized by feature area and tells you where to read first, wha
   - `pkg/utils/atomicfile.go`
 - Main flow:
   - Append assigns offsets and writes WAL v2 records to the active segment; each record carries an 8-byte Raft term and a 4-byte trailing checksum, and the sparse index is updated.
-  - Segment rotation and compaction reduce long-term storage cost. Compaction runs every `--compaction-interval` and removes closed segments whose events are due, finished by every consumer group and exported by the change feed (`Partition.PruneWAL`).
+  - Compaction runs through `Partition.PruneWAL`. Active events must be due,
+    accepted, completed and exported; accepted terminal controls and superseded
+    copies have no consumer obligation. Lifecycle partitions prune a prefix even
+    when standalone. Optional `--wal-relocation-bytes` moves never-due work within
+    a byte budget, waiting for acceptance before pruning an original copy.
   - In a cluster only the partition's leader prunes, and only from the start of the log; followers drop what lies below the leader's log start (`FollowLogStart`), and a replica whose log ends before it restarts its log there.
   - Backup scheduler checkpoints every partition at wall-clock multiples of `--backup-interval` and keeps backups for `--backup-retention`. `cronos-admin restore` copies a backup into an empty data directory, checking every file against the manifest; `cronos-admin check-log` reports (and with `--repair` cuts) a damaged segment.
 - Reliability decisions:
-  - WAL v2 record format includes a Raft term and trailing checksum; upgrading from older builds requires a clean `--data-dir`.
+  - WAL v2 includes a Raft term and trailing checksum. Pre-v2 layouts are not
+    automatically migrated; that is distinct from the capability-gated v0.8.0
+    upgrade of an existing v0.7.0 WAL. See the release upgrade notes.
   - CRC32 validation for integrity checks.
   - Default fsync mode is `batch`; `every_event` and `periodic` remain available for stricter or looser durability.
   - Critical metadata (transaction logs, encryption key files, backup manifests/checkpoints) is persisted via `utils.AtomicWriteFile` (temp file + fsync + rename + parent-dir fsync).
@@ -364,7 +386,10 @@ This section is organized by feature area and tells you where to read first, wha
 - Reliability decisions:
   - Delivery ID parsing routes ack to correct partition path.
   - `OffsetStore.CommitOffsetExactlyOnce` (commit IDs) exists but is not called by the Ack path; `--exactly-once-commits` is refused in production.
-  - The leader sends consumer progress to followers (`SyncConsumerProgress`) on each maintenance tick when it changed, and at least every 30 s. Completions recorded since the last send can be redelivered after a failover; a replication-factor-1 handoff does not carry progress.
+  - The leader sends progress on changed maintenance ticks and at least every
+    30 s. Completions not yet transferred can be redelivered after failover.
+    Lifecycle snapshots import progress with a consistent WAL generation;
+    legacy RF=1 handoff does not provide that atomic state transfer.
 
 ### 6.9 Cluster Control Plane (membership, router, raft)
 
@@ -391,6 +416,11 @@ This section is organized by feature area and tells you where to read first, wha
   - Configured virtual nodes reduce leadership skew.
   - Join/rebalance includes state transfer hooks to avoid empty ownership.
   - Raft persistence via Bolt-backed log store.
+  - Durable format requirements activate term-start commitment only after all
+    assigned replicas, handoff targets and voters are capable. Lifecycle
+    operations are separately opt-in and require majority acknowledgements.
+    Requirements constrain future elections, placement and replacement voters;
+    incompatible downgrade is unsupported.
   - Membership and Raft ports use the replication mTLS certificates; certificates, keys and CAs are re-read when their files change (`internal/tlsfiles`).
 
 ### 6.10 Cluster Rebalance Flow
@@ -425,7 +455,10 @@ flowchart LR
   - `internal/partition/manager.go` — `PartitionManager.SyncPartitionFromLeader` (trigger for bulk install).
   - `internal/cluster/manager.go` — `Manager.JoinCluster` (calls `SyncPartitionFromLeader` on join; the cluster router also calls it during partition moves).
 - Main flow:
-  - **Happy path** — `Leader.Replicate(events)` fans the contiguous batch out concurrently to every connected follower via gRPC `ReplicationService.Append` on the internal listener. The call carries `PartitionId`, `Events`, `ExpectedNextOffset`, `Term`, `PrevLogTerm`, and an IEEE CRC32 batch checksum.
+  - **Happy path** — `Leader.Replicate(events)` fans a contiguous batch out to
+    connected followers. Legacy partitions use `Append`; term-start partitions
+    use `AppendTermStart`, naming the formats, with no plain-append fallback.
+    Requests carry offset/term matching and a batch CRC32.
   - **Quorum** — `Leader.Replicate` returns success to the client only after `min-insync-replicas` replicas **including the leader** have appended via `WAL.AppendReplicatedBatch`. In `every_event` and `batch` fsync modes a follower syncs the batch before it acknowledges (`batch` through group commit); only `periodic` acknowledges before the data is on disk, and production mode refuses `periodic`.
   - **Incremental catch-up** — when a follower reports `NextOffset < events[0].Offset`, `Leader.catchUpFollower` slices `[from, to)` from the leader's WAL into `batchSize`-sized chunks and replays them through `Append`. For very long ranges the leader also serves the server-streaming `ReplicationService.Sync` RPC.
   - **Bulk install** — `Follower.InstallSnapshot(ctx, leaderAddr, partitionID, 0)` dials the leader over the internal listener and calls `ReplicationService.Snapshot`. The leader flushes its active segment and streams each segment + sparse-index file with a `ReplicationSnapshotHeader` (per-file IEEE CRC32, first/last offset, file size, `is_index`) followed by 1 MB data chunks and a final trailer carrying `{success, last_offset, epoch}`. The follower stages files under `<dataDir>/snapshot-staging/{segments,index}/` and checks every file's size and CRC32 against its header as it completes. An interrupted transfer resumes: staged files are reported to the leader, which answers unchanged ones with a `reuse` header. A trailer epoch below the epoch this replica has accepted is refused. `WAL.InstallCheckpoint` then swaps the logs under a journal (`snapshot-install.state`): old `segments`/`index` moved to `*.old`, staged dirs moved in, the new log loaded and verified, then `*.old` removed; a crash before completion restores the old log.
@@ -438,6 +471,15 @@ flowchart LR
   - **Term fencing** in `ReplicationServiceHandler.Append`: rejects `req.Term < p.Epoch`, rejects a second leader at the current term, and on a newer term persists it to `epoch.json` (stepping down first if this node was leading) before applying the sender's entries. Elections use fence epochs (`fence_epoch` on `Position`), so a replaced leader cannot gather confirmations once the replicas have answered.
   - **Gap rejection** — the handler rejects a batch whose `ExpectedNextOffset` does not match its first event and a batch that starts beyond the local log end ("log gap: catch-up required"); `WAL.AppendReplicatedBatch` also rejects non-contiguous offsets. Both drive leader-side catch-up.
   - **Quorum durability** — `min-insync-replicas` enforced before client ack. With RF=3 / minISR=2 the leader + at least one follower must ack; cluster degradation below minISR fails closed rather than silently succeeding on leader-only.
+  - **Commitment** — replica counting alone cannot commit earlier-term entries.
+    A term-start leader appends/fsyncs a current-term record and gets it onto the
+    required replicas, including on idle partitions. Readers, held writes,
+    pruning and export share this boundary. Mixed clusters retain legacy
+    accounting until capability agreement.
+  - **Lifecycle recovery** — snapshots transfer a validated recovery file bound
+    to the WAL generation. Import clears old completions, makes dead letters
+    durable, and syncs matching progress before serving; a crash after the WAL
+    swap resumes that import on open.
   - **Journaled swap** during snapshot install — WAL closed before rename; every crash point recovers to one complete generation (`RecoverSnapshot` on WAL open).
   - **mTLS between nodes** — `--replication-tls-enabled` plus `--replication-tls-{ca,cert,key}-file`, all three required. The same certificates secure the membership and Raft ports (`internal/cluster/transport.go`). Server enforces `tls.RequireAndVerifyClientCert`; both sides pin against the cluster CA. Certificates, keys and CAs are re-read when their files change, so they are replaced without a restart. `Follower.dialCredentials` falls back to insecure credentials when the flag is off (intentional for `--dev`, refused by `config.ValidateConfig` in production).
   - **Cross-region** (experimental) is intentionally separate from intra-cluster — no ISR, last-write-wins conflict handling, fire-and-forget.
@@ -479,6 +521,9 @@ flowchart TB
 - Reliability decisions:
   - Context cancellation safe exits.
   - Optional follower-read support via config gate.
+  - Public replay omits term-start records and emits only active lifecycle
+    copies with internal metadata removed, bounded by the committed prefix.
+    It is not a physical replica inventory.
 
 ### 6.14 Transactions (2PC coordinator)
 
@@ -498,16 +543,14 @@ flowchart TB
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Started
-    Started --> Preparing: PrepareTransaction
-    Preparing --> Prepared: all participants vote yes
-    Preparing --> Aborted: any vote no or timeout
+    [*] --> Pending: BeginTransaction
+    Pending --> Prepared: PrepareTransaction - all participants vote yes
+    Pending --> Aborted: AbortTransaction or recovery timeout
+    Pending --> Committing: CommitTransaction auto-prepares
     Prepared --> Committing: CommitTransaction
+    Prepared --> Aborted: AbortTransaction
     Committing --> Committed: all commit callbacks succeed
-    Committing --> FailedCommit: commit callback failure
-    FailedCommit --> Recovering: coordinator recovery loop
-    Recovering --> Committed: idempotent commit replay
-    Recovering --> Aborted: rollback path
+    Committing --> Committing: callback failure; recovery retries
     Committed --> [*]
     Aborted --> [*]
 ```
@@ -557,6 +600,9 @@ stateDiagram-v2
 - Reliability decisions:
   - Publishing never waits for a sink: a failing sink makes its partition's feed lag, and nothing is dropped.
   - Nothing queues in memory; events stay in the log until they are handed over.
+  - Term-start controls advance feed cursors without being emitted. Lifecycle
+    v1 refuses CDC and cross-region feeds: a raw publish sink has no mutation
+    contract.
 
 ### 6.19 Auth and Audit
 
@@ -569,7 +615,8 @@ stateDiagram-v2
   - Auth interceptors validate JWT and enforce policy.
   - Audit interceptor records important request actions.
 - Reliability decisions:
-  - Safe defaults with optional strict policy file.
+  - Auth enabled requires a valid policy; production requires auth and policy.
+    `--dev` does not disable explicitly enabled authentication.
   - Audit writes are guarded for thread safety.
 
 ### 6.20 SLO, Metrics, and Tracing
@@ -590,15 +637,19 @@ stateDiagram-v2
 
 ### 6.21 Tenant Resource Accounting
 
-- Purpose: per-tenant publish and delivery control.
+- Purpose: optional per-tenant accounting; limits are not runtime-configurable
+  in the shipped server.
 - Key files:
   - `internal/tenant/tenant.go`
   - `internal/api/handlers.go` (tenant extraction and accounting hooks)
 - Main flow:
-  - Tenant identity is extracted from auth claims or metadata.
-  - Publish and delivery paths record resource usage.
+  - With limits configured, identity is the JWT subject (`default` without
+    claims), and publishes use receipt-based reservations.
+  - No production caller sets limits. Publishing skips the accountant and usage
+    reports zero with `limits_configured: false`.
 - Reliability decisions:
-  - Token-bucket based controls protect shared clusters from noisy tenants.
+  - Reservation/refund regressions cover the optional accountant; they do not
+    enable quotas. See [tenant architecture](architecture/features/tenant.md).
 
 ### 6.22 Admin Dashboard and CLI
 
@@ -610,7 +661,8 @@ stateDiagram-v2
   - `cmd/admin/main.go` — `cronos-admin` gRPC CLI.
 - Main flow:
   - The dashboard calls `/api/admin/*` endpoints served by the JSON proxy.
-  - In dev mode (`--dev`) the proxy allows anonymous requests; with auth enabled it validates the `Authorization: Bearer <jwt>` header via `auth.ParseToken` and `auth.CheckAdminPermission`.
+  - With auth disabled the proxy allows anonymous requests; with auth enabled,
+    including in dev mode, it validates the bearer JWT and admin permission.
   - The dashboard polls topology/health/lag endpoints and renders snapshot bar charts for replication and consumer lag.
 - Reliability decisions:
   - The SPA is built into the Go binary, so the UI is always version-locked to the server.
@@ -638,9 +690,11 @@ flowchart TB
 - Durability:
   - WAL v2 (term + trailing checksum) + CRC32 + fsync modes + backup scheduler (`cronos-admin restore`) + atomic metadata writes.
 - Correctness:
-  - Dedup, schema validation, epoch checks, transaction state machine.
+  - Dedup, schema validation, epoch checks, current-term commitment and lifecycle
+    recovery. Transactions remain experimental and unsupported in production.
 - Backpressure:
-  - Credits, admission control, memory guard (`--max-memory-percent`), rate limiters, tenant accounting, `cronos_dispatcher_backpressure_skips_total`.
+  - Credits, admission control, memory guard (`--max-memory-percent`), rate
+    limiters and backpressure metrics. Per-tenant quotas are not configurable.
   - A restart schedules only future timers; due events are read from the log at consumer pace.
   - Events held back by flow control are redelivered from the WAL when credits return; redrive needs a connected subscriber ([delivery.md](architecture/features/delivery.md), [ARCHITECTURE known limitations](../ARCHITECTURE.md#known-limitations)).
 - Fault isolation:

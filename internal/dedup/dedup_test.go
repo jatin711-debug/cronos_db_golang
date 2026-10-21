@@ -1,6 +1,7 @@
 package dedup
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 )
@@ -198,18 +199,29 @@ func TestPebbleStore_ConcurrentAccess(t *testing.T) {
 		go func(id int) {
 			defer wg.Done()
 			for j := 0; j < 100; j++ {
-				key := "concurrent-" + string(rune('a'+id)) + "-" + string(rune('0'+j%10))
-				store.CheckAndStore(key, int64(id*100+j))
+				key := fmt.Sprintf("concurrent-%d-%d", id, j%10)
+				duplicate, err := store.CheckAndStore(key, int64(id*100+j))
+				if err != nil || duplicate != (j >= 10) {
+					t.Errorf("check %s on iteration %d: duplicate=%v, error=%v", key, j, duplicate, err)
+					return
+				}
 			}
 		}(i)
 	}
 
 	wg.Wait()
 
-	// Verify some entries exist
-	exists, _ := store.Exists("concurrent-a-0")
-	if !exists {
-		t.Error("Expected concurrent entry to exist")
+	// All accepted IDs stay visible while the background flush runs.
+	for id := 0; id < 10; id++ {
+		for j := 0; j < 10; j++ {
+			key := fmt.Sprintf("concurrent-%d-%d", id, j)
+			if exists, err := store.Exists(key); err != nil || !exists {
+				t.Errorf("lookup %s: exists=%v, error=%v", key, exists, err)
+			}
+			if offset, found, err := store.GetOffset(key); err != nil || !found || offset != int64(id*100+j) {
+				t.Errorf("offset for %s: offset=%d, found=%v, error=%v", key, offset, found, err)
+			}
+		}
 	}
 }
 

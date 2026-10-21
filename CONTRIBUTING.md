@@ -11,7 +11,7 @@ Thank you for considering a contribution to CronosDB.
 
 Prerequisites:
 
-- **Go 1.26.9** (the version `go.mod` names)
+- **Go 1.26.10** (the version `go.mod` names)
 - **Rust** / Cargo (optional: the bloom-filter library used through cgo; without cgo the server uses one written in Go)
 - **protoc** (only to regenerate the gRPC code with `make proto`)
 - **Docker** with `docker compose` (the container tests, and `make verify-env`)
@@ -37,6 +37,19 @@ make lint               # gofmt + go vet
 go test -tags acceptance -count=1 -timeout 25m ./tests/acceptance/
 ```
 
+For documentation changes, build the complete site and fail on warnings:
+
+```sh
+python -m pip install -r requirements-docs.txt
+python -m mkdocs build --strict --site-dir build/docs-check
+```
+
+Keep root docs and feature guides consistent with runtime behavior. Preserve
+dated audits, benchmark results and probe output as evidence; update their
+closure notes or add a clearly dated qualification instead of turning old
+results into current claims. Protocol changes must document mixed-version
+behavior, format activation and downgrade limits as well as the happy path.
+
 Architecture and developer walkthrough:
 
 - [README.md](README.md) — product overview and quick start
@@ -44,6 +57,8 @@ Architecture and developer walkthrough:
 - [docs/DEVELOPER_ARCHITECTURE_GUIDE.md](docs/DEVELOPER_ARCHITECTURE_GUIDE.md) — composition root and flows
 - [docs/architecture/README.md](docs/architecture/README.md) — per-feature docs index
 - [docs/PRODUCTION_RELEASE.md](docs/PRODUCTION_RELEASE.md) — what a release promises and the test behind each promise
+- [docs/RETENTION_AND_EVENT_LIFECYCLE.md](docs/RETENTION_AND_EVENT_LIFECYCLE.md) — lifecycle identity, acceptance, retention and recovery
+- [docs/REPLICATION_TERM_START.md](docs/REPLICATION_TERM_START.md) — current-term commitment and rolling upgrades
 
 ## Pull Request Process
 

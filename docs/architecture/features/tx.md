@@ -7,6 +7,10 @@
 > splitting and cross-region replication are not supported in production",
 > `internal/config/config.go`). Nothing on this page is a supported guarantee.
 
+`--event-lifecycle` cannot be combined with `--experimental-features`; lifecycle
+v1 does not support transactions, online splitting or cross-region replication.
+See [compatibility](../../RETENTION_AND_EVENT_LIFECYCLE.md#change-feeds-and-migration).
+
 ## Purpose
 
 The transaction module is an experimental two-phase commit coordinator: it

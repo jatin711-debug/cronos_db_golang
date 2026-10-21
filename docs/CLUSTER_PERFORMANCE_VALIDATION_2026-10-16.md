@@ -1,5 +1,9 @@
 # Three-node throughput validation — 2026-10-16
 
+These are v0.7.0/v0.6.0 results, not measurements of v0.8.0 or its opt-in lifecycle
+operations. They remain unchanged as a dated record. See
+[current release limits](PRODUCTION_RELEASE.md#what-v080-was-released-without).
+
 These measurements compare `v0.6.0` (`f8cc206`) with the `hardening-v0.7.0`
 branch at `e08c1bc`, whose server code is that of `d4702bf` and of `v0.7.0`. All runs use three
 server processes on one AMD Ryzen 7 6800H laptop (16 logical processors,

@@ -6,7 +6,9 @@ The next work should close correctness and bounded-resource gaps before adding f
 
 **Status of the findings**
 
-In `v0.7.0`:
+The runtime fixes below shipped in v0.7.0 and remain in v0.8.0. Closure notes
+were reviewed on 2026-10-21; the original findings and measurements later in
+this document describe the audited v0.6.0 source.
 
 | Finding | Status |
 |---|---|
@@ -25,7 +27,18 @@ In `v0.7.0`:
 
 The probes of findings 1, 2, 3 and 11 are now ordinary tests ([internal/api/publish_integrity_test.go](../internal/api/publish_integrity_test.go), [internal/storage/append_outcome_test.go](../internal/storage/append_outcome_test.go)). The probe of finding 3 changed with the fix: the publish that fills a segment now succeeds, and the test checks that its retry does not append the event again.
 
-The second batch implementation and upgrade behavior are described in [v0.7.0 hardening](HARDENING_V0.7.0.md). The checks below describe the original audit, not a claim that the new release has shipped.
+The second batch implementation and upgrade behavior are described in
+[v0.7.0 hardening](HARDENING_V0.7.0.md). v0.8.0 additionally fixes old-term
+commitment after capability agreement and adds opt-in lifecycle mutations,
+bounded relocation and consistent recovery snapshots. These do not close all
+of finding 12: the image was published locally from the CI-tested archive
+without signed workflow provenance; multi-host validation, real power loss
+and release-specific capacity remain unproven. Lifecycle v1 excludes CDC and
+experimental features; relocation cannot discard unfinished due work. See
+[v0.8.0 notes](RELEASE_V0.8.0.md) and
+[remaining limits](PRODUCTION_RELEASE.md#what-v080-was-released-without).
+
+The checks below describe the original audit, not a new run against v0.8.0.
 
 **What was checked**
 

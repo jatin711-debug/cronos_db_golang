@@ -8,12 +8,13 @@ The API layer is the system entrypoint for all client and internal RPC traffic. 
 
 - [internal/api/grpc_server.go](../../../internal/api/grpc_server.go) — public listener on `:9000`; registers `EventService`, `PartitionService`, `ConsumerGroupService`, and **`AdminService`**; `TransactionService` only with `--experimental-features` (which requires `--dev`).
 - [internal/api/internal_grpc_server.go](../../../internal/api/internal_grpc_server.go) — dedicated internal listener (`InternalGRPCServer`, default `:7947`); registers **`ReplicationService`** and, in cluster mode, **`RaftService`**; **`CrossRegionService`** only with `--experimental-features` (`cmd/api/main.go`). Peer traffic never shares the public client port.
-- [internal/api/handlers.go](../../../internal/api/handlers.go) — `EventService` handlers (`Publish`, `PublishBatch`, `Subscribe`, `Ack`, `Replay`) with dedup claim/rollback.
+- [internal/api/handlers.go](../../../internal/api/handlers.go) — `EventService` handlers (`Publish`, `PublishBatch`, `Subscribe`, `Ack`, `Replay`) with dedup claims and append-outcome reconciliation.
+- [internal/api/event_lifecycle.go](../../../internal/api/event_lifecycle.go) — `GetEventState`, `CancelEvent`, `RescheduleEvent`; leader routing, publish authorization and disk admission for opt-in lifecycle operations.
 - [internal/api/admin_handler.go](../../../internal/api/admin_handler.go) — operator AdminService (topology, health, lag, retention, compaction, schemas, tenants; **`TriggerRebalance` soft-stub** — see Known Limitations).
 - [internal/api/web_handler.go](../../../internal/api/web_handler.go) — embedded SPA + `/api/admin/*` JSON proxy on HTTP `:8080`.
 - [internal/api/consumer_handler.go](../../../internal/api/consumer_handler.go)
 - [internal/api/partition_handler.go](../../../internal/api/partition_handler.go) — partition metadata + admin compact/retention/split (authz gated).
-- [internal/api/replication_server.go](../../../internal/api/replication_server.go) — `Append`, `Sync`, `Snapshot`, `Position`, `LeaderReport`, `SyncConsumerProgress` on the internal listener.
+- [internal/api/replication_server.go](../../../internal/api/replication_server.go) — `Append`, versioned `AppendLifecycle` / `AppendTermStart`, `Sync`, `Snapshot`, `Position`, `LeaderReport`, `SyncConsumerProgress` on the internal listener.
 - [internal/api/raft_server.go](../../../internal/api/raft_server.go) — Raft join/leave/status and node removal (`cronos-admin cluster remove-node`) (internal).
 - [internal/api/crossregion_server.go](../../../internal/api/crossregion_server.go) — CrossRegion inject/fetch with LWW (internal only).
 - [internal/api/audit_interceptor.go](../../../internal/api/audit_interceptor.go) — request-level audit interceptor.
@@ -51,6 +52,16 @@ The API layer is the system entrypoint for all client and internal RPC traffic. 
 - Replay path respects follower-read policy flags for consistency control.
 - Acks on one stream are read ahead and recorded in batches (up to 256): each partition's completions in a batch are written with one durable commit (`processAcks` in handlers.go).
 - `--exactly-once-commits` is refused in production; the Ack path records per-event completions and does not read the flag.
+- Lifecycle RPCs require topic **publish** permission, including `GetEventState`,
+  and run on the partition leader. Save the publish receipt's partition, offset,
+  term, message ID and topic. Mutations require an expected revision and request
+  ID; retry an ambiguous result unchanged. Only future events can be changed.
+  Standalone RF=1 and capable replicated clusters are supported with
+  `--event-lifecycle`; replicated operations require majority acknowledgements.
+  See the [lifecycle contract](../../RETENTION_AND_EVENT_LIFECYCLE.md).
+- Public publishes reject reserved `cronos.internal.*` metadata. Delivery and
+  replay expose active logical events, strip lifecycle envelopes and omit
+  term-start records. Physical offsets can therefore have gaps in public output.
 
 ## Known Limitations (API surface)
 
@@ -100,13 +111,14 @@ sequenceDiagram
       Dedup-->>API: claimed
       API->>API: Tenant quota reservation
       API->>WAL: Append WAL v2 term + payload checksum
-      alt WAL fails
-        API->>Dedup: RollbackBatch
+      alt WAL error
+        API->>API: Inspect append outcome and fence a failed log
+        Note over API,Dedup: Release IDs only if nothing appended, retain appended claims for reconciliation
         API-->>Producer: error
       else appended
         WAL-->>API: offsets
         opt replication leader present
-          API->>Repl: Replicate until ISR quorum incl. leader
+          API->>Repl: Replicate until minISR incl. leader with current-term commitment proof
           Note over API,Repl: On replication failure the dedup claim is KEPT
         end
         opt cronos.durable_ack meta set

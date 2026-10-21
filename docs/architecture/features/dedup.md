@@ -27,6 +27,11 @@ Deduplication prevents duplicate message processing while keeping publish latenc
 - Publish path **claims** IDs before WAL append and **`RollbackBatch`** on definite pre-append failure so retries are not spurious duplicates.
 - **Crash recovery:** on partition start, `recoverDedupFromWAL` re-seeds claims from the WAL tail, because the dedup Pebble store writes with `DisableWAL` + `NoSync` and can lose recent claims in a crash. Recovery walks the retained log in bounded byte pages from a validated `(offset, term, message ID)` checkpoint, skipping events older than the dedup TTL. The checkpoint is saved only after pending IDs and Pebble tables are flushed. Without a valid checkpoint every retained entry is examined; a recovery error blocks startup or promotion.
 - TTL pruning bounds store growth (default 7 days).
+- Deduplication concerns publish retries, not end-to-end processing exactly
+  once. Internal term-start records never claim their empty message IDs.
+  Lifecycle successors preserve their logical identity independently of the
+  dedup TTL; cancellation/reschedule request history is reconstructed from the
+  retained WAL by the lifecycle index, not expired with a publish claim.
 
 ## Debug Pointers
 

@@ -6,18 +6,68 @@ status are on the [releases page](https://github.com/jatin711-debug/cronos_db_go
 Hardening goes on: the
 [audit closure table](PRODUCTION_AUDIT_2026-09-27.md#finding-closure-review)
 tracks unresolved guarantees, and
-[what the release was cut without](#what-v070-was-released-without) is listed
+[current release limits](#what-v080-was-released-without) are listed
 below. A green CI run is necessary but does not establish the complete release
 acceptance contract.
 
+## Current release: v0.8.0
+
+Published on 2026-10-19 from `cfba215208b3a50c830020636a417f7aaeaf3845`.
+The required source checks passed before promotion to `main`; the
+[release staging run](https://github.com/jatin711-debug/cronos_db_golang/actions/runs/39277781872)
+also built the binaries, started the Linux binary, and scanned and fault-tested
+the exact image archived on the release.
+
+The Linux amd64 image is `johnny711dock/cronos-db:0.8.0`, manifest digest
+`sha256:428690215148b97eb9b6aaed5a3afb7c7a3227613c8fee731ab922e2276d4928`.
+It was loaded from that archive and pushed locally, then verified through
+anonymous registry requests. `latest` is an OCI index selecting that same
+manifest; an index digest need not equal the image manifest digest. Pin the
+manifest for deployments. This publication has no signed GitHub workflow
+provenance. Evidence and binary checksums are attached to the
+[published release](https://github.com/jatin711-debug/cronos_db_golang/releases/tag/v0.8.0).
+
+Development follow-up on 2026-10-21 raises the build toolchain to Go 1.26.10,
+the dashboard's Vite floor to 7.3.7, and `github.com/klauspost/compress` to
+v1.18.7 after current CI found `GO-2026-6809` in `crypto/x509`, the bundled
+`launch-editor` advisories in Vite 7.3.6, and `CVE-2026-63209` in the image's
+compression dependency. See the [Go patch release](https://go.dev/doc/devel/release#go1.26.10),
+[Vite advisory](https://github.com/advisories/GHSA-r825-w8mm-5pxw), and
+[compression advisory](https://github.com/klauspost/compress/security/advisories/GHSA-259r-337f-4rfw).
+These source updates need a new patch release; the v0.8.0 binaries and image
+above retain their original contents and scan date.
+
+The same development follow-up initializes consumer-group membership before a
+new subscription can receive live events. This closes a registration window in
+which the first acknowledgement could be refused because its group did not yet
+exist. This change also requires the next patch release.
+
+Deduplication lookups also keep buffered IDs visible until their Pebble batch
+has committed. Previously, a lookup during the handoff from the buffer to
+Pebble could briefly report an existing ID as missing. Failed flushes now leave
+those buffered IDs visible while they wait for another attempt. These fixes
+apply to the development source and need the same patch release.
+
+The major correctness work in this release is current-term commitment after
+leader changes, opt-in future-event cancellation/rescheduling, bounded
+relocation, and consistent lifecycle recovery snapshots/backups. See the
+[lifecycle contract](RETENTION_AND_EVENT_LIFECYCLE.md) and
+[term-start protocol](REPLICATION_TERM_START.md). Current-term activation waits
+for every assigned replica, handoff target and Raft voter to be capable.
+Mixed clusters retain legacy accounting and its old-term defect until then.
+Lifecycle operations additionally require explicit opt-in and majority
+acknowledgements. Once formats activate, incompatible downgrade is unsupported.
+
 ## What v0.7.0 adds
 
-`v0.7.0` closes the findings of the [October audit](PRODUCTION_AUDIT_2026-10-16.md):
+`v0.7.0` implemented fixes for the runtime findings of the
+[October audit](PRODUCTION_AUDIT_2026-10-16.md):
 records that could not be read back, terms chosen by producers, append and
 fsync errors that released message IDs, quota refusals that stranded them,
 scheduler memory, the dedup recovery cutoff, completion and dead-letter
-replication, disk admission on followers, client discovery of new nodes, and a
-release workflow that builds, scans, tests, pushes and attests one image. See
+replication, disk admission on followers and client discovery of new nodes.
+The workflow for building, scanning, testing, pushing and attesting one image
+was also implemented; actual local publications lack that attestation. See
 [hardening and upgrade behavior](HARDENING_V0.7.0.md), including what a
 rolling upgrade from `v0.6.0` holds back, the Docker Hub secret names and the
 optional separate backup PVC.
@@ -228,8 +278,10 @@ arrive, all three are destroyed, each is restored from its own backup, and
 what was acknowledged before the backups is there and is delivered at its
 time. Backups go to `backups` under the data directory unless `--backup-dir`
 names another place. A backup on the volume it copies does not survive the
-loss of that volume, and the chart mounts no other: copy backups off the
-node, or mount a second volume and point `--backup-dir` at it.
+loss of that volume. The chart can provision a separate per-pod backup PVC with
+`backupPersistence.enabled=true`, mounted at `/backups` by default. Choose a
+separate failure domain and preserve the claims during recovery; another PVC
+on the same storage backend does not protect against that backend's loss.
 
 `cronos-admin` is in the image at `/app/cronos-admin`. `restore` and
 `check-log` work on the files of a stopped node: scale the StatefulSet down
@@ -247,8 +299,12 @@ A release carries the server and `cronos-admin` for Linux and macOS (amd64
 and arm64) and Windows (amd64), one archive for each, with `SHA256SUMS`.
 `.github/workflows/release.yml` builds them from the tag when the release is
 published, starts the Linux server it built and waits for it to say it is
-ready, and attaches them. `scripts/build-release-binaries.sh <version>` builds
-the same archives on any machine that has Go and `zip`.
+ready, and attaches them. Manual staging can attach them to a draft before
+publication. To build equivalent binaries locally, build and stage the dashboard
+first (`make dashboard`, requires npm), then run
+`bash scripts/build-release-binaries.sh <version> <output-directory>` with
+Go, Bash, `tar` and `zip` available. Running the script alone from an unstaged
+checkout leaves the dashboard placeholder embedded.
 
 They are built without cgo, which is what lets one machine build all five
 and lets each run without a library beside it. A build without cgo uses the
@@ -262,11 +318,12 @@ and the Rust library everywhere but on Windows.
 
 ## Memory and overload
 
-A node keeps in memory, payload included, every event that is due within the
-hot window (`--hot-window-minutes`, 60 by default) and every event that is due
-and not yet delivered. Events due later are kept on disk as references. So the
-memory a partition's leader needs grows with what producers schedule for the
-next hour and with how far consumers are behind.
+The scheduler shares a node-wide payload/accounting budget, 64 MiB by default
+(`--scheduler-memory`, minimum 32 MiB). Far-future work and overflow within the
+hot window (`--hot-window-minutes`, 60 by default) remain WAL references in the
+cold store. Hydration reads bounded pages and can evict later timers for earlier
+ones. This is an allocation budget, not an RSS cap: worker queues, Pebble caches,
+in-flight requests and temporary WAL reads consume additional memory.
 
 Publishes are refused, with `ResourceExhausted`, while the process holds
 `--max-memory-percent` (80) of its memory limit. The limit is the container's
@@ -289,18 +346,19 @@ quarter larger than the memory limit they are restarted with, and must stay
 below it until a consumer has received everything. In
 `TestRestartInContainersWithABacklogLargerThanTheirMemory` three containers of
 the image, which the kernel kills above 384 MiB, take in a gigabyte, are
-killed, come back and deliver it; in CI the fullest held 141 MiB. This holds
+killed, come back and deliver it. Recorded peaks are specific to each run;
+see [v0.7.0 validation](HARDENING_V0.7.0.md) for its measured results. This holds
 since `v0.6.0-rc.4`. `v0.6.0-rc.3` and everything before it reads the backlog
 into memory at a start, and a node there whose backlog exceeds its memory is
 killed on every start.
 
-What this does not bound: events that are not due yet and fall in the hot
-window are in memory after a restart as they were before it. The queues
-themselves are still bounded by event count (`--max-ready-queue`,
-`--max-timing-wheel-size`, `--max-in-flight`), not by bytes, and a partition's
-leader holds up to 64 MiB of due events for its consumers whatever the limit
-is. Backlogs beyond a gigabyte and sustained load at production sizes have not
-been measured.
+Queue admission also has event-count caps (`--max-ready-queue`,
+`--max-timing-wheel-size`, `--max-in-flight`). These and sampled process memory
+admission do not prove that all workloads avoid an OOM kill. A replay/redrive
+page can exceed its byte target by one valid record. Backlogs beyond the tested
+gigabyte, large future schedules and sustained production-size loads remain
+unmeasured. The harness must not override a node's memory policy with the test
+runner's `GOMEMLIMIT`.
 
 ## What a release promises, and what that rests on
 
@@ -357,10 +415,33 @@ them has to show it for itself first:
   hand, as for `v0.6.0`. It has no signed provenance; its digest is in the
   release notes.
 
+## What v0.8.0 was released without
+
+The runtime fixes do not close every product or validation gap:
+
+- Multi-host fault/load validation, real machine power cuts, deployment-specific
+  capacity, replica refills beyond the tested size, and a new v0.8.0 throughput
+  measurement are not established. Older dated benchmarks are not measurements
+  of this release.
+- Lifecycle v1 excludes CDC, cross-region replication, transactions and online
+  splitting. Cancellation only affects future work; it cannot recall a sent
+  event. Delivery remains at least once. Mixed-version commitment and one-way
+  format activation have the limits above.
+- Relocation is opt-in and bounded. Unfinished due work, unresolved mutations,
+  lagging dead-letter replication and other retention gates can still pin a
+  log. Dead-letter journal/tombstone history is not compacted.
+- Distribution has one Linux amd64 image and five non-cgo binary targets. The
+  image has no signed workflow provenance; automated publishing requires the
+  Docker Hub repository secrets. The thresholded image scan found no fixable
+  HIGH/CRITICAL findings at scan time; it is not a claim of zero vulnerabilities.
+- Lag-driven automatic snapshots remain unwired, `TriggerRebalance` remains a
+  soft stub, and tenant quota configuration remains unavailable in the shipped
+  server. See the [architecture limitations](../ARCHITECTURE.md#known-limitations).
+
 Known limits of what is released are in the
 [audit](PRODUCTION_AUDIT_2026-09-27.md): log entries are removed from the
-start of a log only, so one event that cannot go yet keeps every later
-segment; a partition shared by several topics keeps a completion record per
+start of a replicated log only, so without eligible relocation one pinned event
+keeps later segments; a partition shared by several topics keeps a completion record per
 finished event until the start of its log passes it. Up to `v0.6.0` a leader
 sent its followers at most 100,000 of those per group, so after a failover a
 group could be given events again that it had finished; since `v0.7.0` they

@@ -11,6 +11,11 @@ The aim is that you can carry the reasoning to a different system.
 trees, bloom filters or timing wheels is assumed; each is introduced where it
 is used.
 
+This guide follows v0.8.0. The [lifecycle contract](../RETENTION_AND_EVENT_LIFECYCLE.md)
+and [term-start protocol](../REPLICATION_TERM_START.md) define the precise
+format and upgrade rules. Existing diagrams illustrate the ordinary publish
+path; internal controls and lifecycle successors also occupy physical offsets.
+
 **How to read it.** Sections 1–3 give the whole picture in about fifteen
 minutes. Section 4 is a set of independent deep dives; read the ones you care
 about. Section 5 puts every trade-off on one page, and section 6 lists what
@@ -105,7 +110,8 @@ Three things to take from the picture:
 
 **Write path** — [`EventServiceHandler.Publish` / `PublishBatch`](../../internal/api/handlers.go):
 
-1. **Validate.** Size limits (`message_id` ≤ 128 characters, payload ≤ 4 MB),
+1. **Validate.** Size limits (`message_id` ≤ 128 bytes, payload ≤ 4 MiB and a
+   shared encoded-record limit including metadata/encryption overhead),
    the caller's JWT and topic permission, and the topic's schema if one is
    registered. Cheap checks come first, so a bad request costs nothing durable.
 2. **Route.** The key (the `partition_key` metadata entry if present,
@@ -121,9 +127,11 @@ Three things to take from the picture:
    fsync mode.
 5. **Replicate.** With more than one replica, the leader sends the batch to
    its followers and waits until `min-insync-replicas` replicas (the leader
-   counts as one) hold it.
+   counts as one) hold it. After term-start activation, committing an older
+   prefix additionally requires a current-term record on those replicas.
 6. **Accept.** The timer is armed, the dedup record becomes "accepted at
-   offset N", and the producer gets its answer.
+   offset N", and the producer gets its offset and term. Save both with the
+   partition, message ID and topic for a lifecycle reference.
 
 Steps 4–6 are where a publish can fail *after* the event is already in the
 log. Section [4.3](#43-idempotent-publish) explains what happens then.
@@ -236,8 +244,10 @@ with millions of events pending, some due in a second and some next month.
 
 - **A timing wheel** ([`timing_wheel.go`](../../internal/scheduler/timing_wheel.go))
   is a clock face of buckets. A timer is put into the bucket for its tick;
-  every tick the hand moves on and the current bucket is emptied. Insert,
-  cancel and expire are constant work. The default is 600 slots of 10 ms.
+  every tick the hand moves on and the current bucket is emptied. Insertion
+  and removal within a level are constant work; overflow lookup traverses
+  levels, and a tick costs work for the timers expired or cascaded. The default
+  is 600 slots of 10 ms, not a delivery-latency guarantee.
 - **Higher levels** are coarser wheels: a slot of level 1 is one whole turn of
   level 0 (6 s). A timer far away starts on a coarse wheel and is moved down
   as it gets close.
@@ -246,7 +256,7 @@ with millions of events pending, some due in a second and some next month.
   reference in Pebble, sorted by time. A *hydrator* moves the next window into
   the wheels. This is what keeps memory bounded when events are scheduled
   weeks ahead.
-- **Nothing here is saved to disk as a timer.** After a restart (on a
+- **The WAL is recovery authority.** After a restart (on a
   replicated partition: when the node becomes its leader) the log is re-read
   and only events that are not due yet go back into the wheels. What came due
   while the node was down stays in the log; a subscription reads what its
@@ -445,10 +455,19 @@ one loses nothing — without two machines ever accepting different histories.
   [`replication_server.go`](../../internal/api/replication_server.go)).
 - **Quorum acknowledgement.** The producer gets "success" once
   `min-insync-replicas` replicas, the leader included, hold the batch. With
-  three replicas and min-insync 2, any one node can be lost without losing an
-  acknowledged write, and a slow follower does not slow the producer down. If
+  three replicas and min-insync 2, an acknowledged durable write survives one
+  replica's loss; a follower outside the required acknowledgements need not
+  delay the producer. If
   the quorum cannot be reached, the write *fails* instead of quietly staying
   on one machine.
+- **Commit only with current-term proof.** A new leader may copy old entries
+  to a quorum while a conflicting newer-term replica could still win the next
+  election. Term-start mode first fsyncs a current-term control record and
+  replicates it, proving the prefix before it committed. The coordinator
+  activates this only after every assigned replica, handoff target and Raft
+  voter is capable; mixed clusters keep legacy accounting and the old-term
+  limitation until agreement. Format requirements persist and constrain future
+  elections and placement; incompatible downgrade is unsupported.
 - **Epochs fence stale leaders.** Every committed leadership change raises the
   partition's epoch. A replica stores the epoch and leader it has accepted and
   refuses appends from an older epoch, or from a second node claiming the same
@@ -464,16 +483,18 @@ one loses nothing — without two machines ever accepting different histories.
   acknowledged write is on at least `min-insync` replicas, so any set that
   large contains one that has it. With fewer answers it waits rather than
   guess.
-- **Catching up.** A follower that is a little behind is sent the missing
-  range from the leader's log. A new, wiped or far-behind replica copies the
+- **Catching up.** A connected follower is sent the missing range from the
+  leader's log. A joining/wiped replica receiving bulk state copies the
   leader's segment files as a *snapshot*: each file is checked against its
   CRC, staged beside the old log, and swapped in under a small journal so that
   a crash at any point leaves one complete log. A transfer that breaks resumes
   with the files that already arrived
   ([`follower.go`](../../internal/replication/follower.go),
   [`checkpoint.go`](../../internal/storage/checkpoint.go)).
-- **Consumer progress is replicated too**, separately from the log, so that a
-  promoted follower does not redeliver finished work.
+- **Consumer progress is replicated too**, separately from ordinary appends;
+  completions not yet transferred can be redelivered after failover. Lifecycle
+  snapshots bind the WAL cut to matching progress, dead letters, accepted
+  boundary and epoch; interrupted state import resumes before serving.
 
 **What it costs, and what it does not give you.**
 
@@ -733,7 +754,7 @@ start when memory is short and stops when it runs low.
 
 | Term | Meaning here |
 |---|---|
-| **Offset** | An event's position in its partition's log. Assigned at append, never reused. |
+| **Offset** | A physical position in a partition's WAL. Suffix replacement can reuse it in another term; controls consume positions too. A lifecycle reference therefore includes the original term, message ID and topic as well as partition and offset. |
 | **Segment** | One file of the log. Only the newest is written. |
 | **WAL** | Write-ahead log. In most databases it protects another structure; here it *is* the data. |
 | **fsync** | Asking the operating system to put buffered bytes on the physical disk. Until it returns, a power loss can lose them. |

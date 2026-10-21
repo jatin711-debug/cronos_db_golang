@@ -1,5 +1,13 @@
 # WAL maintenance and pipeline validation — 2026-09-29
 
+This is a dated record of the pre-lifecycle maintenance path, with its noted
+October follow-ups. Current v0.8.0 lifecycle backups/snapshots additionally bind
+consumer progress, dead letters, epoch and accepted boundary to the WAL cut;
+optional bounded relocation changes which future copies can be pruned. See
+the [lifecycle contract](RETENTION_AND_EVENT_LIFECYCLE.md) and
+[release requirements](PRODUCTION_RELEASE.md). The measurements below are not
+new v0.8.0 validation results.
+
 This change fixes the backup path, unsafe live-file retention, and a WAL rotation
 offset defect exposed while testing retention. Existing unrelated working-tree
 hardening changes were preserved.
