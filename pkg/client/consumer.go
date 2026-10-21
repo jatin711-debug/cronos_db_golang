@@ -166,7 +166,12 @@ type ConsumerConfig struct {
 	// carries part of a topic. The handler then runs concurrently across
 	// partitions and must be safe for concurrent use.
 	PartitionID int32
-	// StartOffset is the initial read offset. -1 means latest (server semantics).
+	// StartOffset is the lowest log offset from which the server redelivers
+	// retained, unacknowledged events when the subscription opens. -1 (the
+	// default) uses the group's committed offset, or the start of the retained
+	// log for a new group. A value above the committed offset skips the events
+	// below it; a lower one has no effect. Use Replay to read older events
+	// again.
 	StartOffset int64
 
 	// MaxBufferSize is the max events the server may buffer for this subscription.
@@ -191,7 +196,10 @@ type ConsumerConfig struct {
 	CheckpointStore OffsetCheckpointStore
 	// ResumeCheckpoint loads StartOffset from CheckpointStore when true and a checkpoint exists.
 	ResumeCheckpoint bool
-	// MaxPayloadBytes is reserved for future payload guards (handler-side limits).
+	// MaxPayloadBytes skips deliveries whose payload is larger than this
+	// without calling the handler; with AckModeAuto they are acknowledged as
+	// failed, so the server retries them and finally dead-letters them.
+	// 0 uses the client's MaxRecvMsgSize.
 	MaxPayloadBytes int
 	// PreferredCodec is the default codec for Delivery.Decode helpers.
 	PreferredCodec Codec

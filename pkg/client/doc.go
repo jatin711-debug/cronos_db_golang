@@ -6,6 +6,8 @@
 //   - producer APIs for single, batch, and async publishing
 //   - consumer runtime with stream reconnect, ack control, and checkpoint resume
 //   - replay/seek APIs and replay-to-live transition
+//   - GetEventState, CancelEvent and RescheduleEvent for servers that run
+//     with --event-lifecycle, using SendResult.Reference
 //   - capability detection for graceful compatibility handling
 //
 // # Core workflow
@@ -15,6 +17,9 @@
 //  3. Start a Consumer with Subscribe(topic, group, handler).
 //  4. Ack automatically (default) or manually for custom commit control.
 //  5. Use Replay/Seek APIs for backfill and replay-to-live scenarios.
+//  6. To cancel or move an event before it is due, keep the EventReference
+//     from SendResult.Reference and call CancelEvent or RescheduleEvent with
+//     a request ID and the revision from GetEventState.
 //
 // # Routing and partitioning
 //
