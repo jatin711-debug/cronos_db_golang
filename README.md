@@ -7,7 +7,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/jatin711-debug/cronos_db_golang?include_prereleases)](https://github.com/jatin711-debug/cronos_db_golang/releases)
 
-> **Production Readiness:** See the [latest published release](https://github.com/jatin711-debug/cronos_db_golang/releases/latest) for available artifacts and the [v0.8.0 release notes](docs/RELEASE_V0.8.0.md) for the new lifecycle and replication protocols. What a release promises, the test behind each promise, and what has not been shown yet are in the [release requirements](docs/PRODUCTION_RELEASE.md); findings and their status are in the [September](docs/PRODUCTION_AUDIT_2026-09-27.md) and [October](docs/PRODUCTION_AUDIT_2026-10-16.md) audits. Transactions, online partition splitting and cross-region replication are disabled by default and require `--dev --experimental-features`; they are unsupported in production. End-to-end exactly-once delivery is not supported.
+> **Production Readiness:** See the [latest published release](https://github.com/jatin711-debug/cronos_db_golang/releases/latest) for available artifacts, the [v0.8.1 patch notes](docs/RELEASE_V0.8.1.md) for security and delivery fixes, and the [v0.8.0 notes](docs/RELEASE_V0.8.0.md) for the lifecycle and replication protocols. What a release promises, the test behind each promise, and what has not been shown yet are in the [release requirements](docs/PRODUCTION_RELEASE.md); findings and their status are in the [September](docs/PRODUCTION_AUDIT_2026-09-27.md) and [October](docs/PRODUCTION_AUDIT_2026-10-16.md) audits. Transactions, online partition splitting and cross-region replication are disabled by default and require `--dev --experimental-features`; they are unsupported in production. End-to-end exactly-once delivery is not supported.
 
 CronosDB is a distributed database purpose-built for **timestamp-triggered event processing**. Publish events with a future timestamp — CronosDB retains them and makes them eligible for delivery at that time. Consumer capacity, scheduling load and failures can delay delivery; no latency bound is promised.
 
@@ -146,7 +146,7 @@ For the details see **[ARCHITECTURE.md](ARCHITECTURE.md)** and the per-feature d
 Each release has binaries of the server and of `cronos-admin` for Linux and macOS (amd64, arm64) and Windows (amd64), with `SHA256SUMS`, on the [releases page](https://github.com/jatin711-debug/cronos_db_golang/releases). They are built without cgo and use the bloom filter written in Go. The container image uses the one written in Rust:
 
 ```bash
-docker pull johnny711dock/cronos-db:0.8.0
+docker pull johnny711dock/cronos-db:0.8.1
 # Pin the exact Linux amd64 release image for deployments:
 docker pull johnny711dock/cronos-db@sha256:428690215148b97eb9b6aaed5a3afb7c7a3227613c8fee731ab922e2276d4928
 ```

@@ -10,7 +10,16 @@ tracks unresolved guarantees, and
 below. A green CI run is necessary but does not establish the complete release
 acceptance contract.
 
-## Current release: v0.8.0
+## v0.8.1 patch release
+
+The [v0.8.1 notes](RELEASE_V0.8.1.md) describe the security, subscription
+registration and deduplication lookup fixes. The chart and default image tag
+are `0.8.1`. Publication status, checksums and the exact deployment digest are
+on the [release page](https://github.com/jatin711-debug/cronos_db_golang/releases/tag/v0.8.1).
+Use its `IMAGE_DIGEST` and publication evidence to identify the tested image.
+This patch adds no WAL format and makes no new capacity claim.
+
+## v0.8.0 publication record
 
 Published on 2026-10-19 from `cfba215208b3a50c830020636a417f7aaeaf3845`.
 The required source checks passed before promotion to `main`; the
@@ -21,8 +30,8 @@ the exact image archived on the release.
 The Linux amd64 image is `johnny711dock/cronos-db:0.8.0`, manifest digest
 `sha256:428690215148b97eb9b6aaed5a3afb7c7a3227613c8fee731ab922e2276d4928`.
 It was loaded from that archive and pushed locally, then verified through
-anonymous registry requests. `latest` is an OCI index selecting that same
-manifest; an index digest need not equal the image manifest digest. Pin the
+anonymous registry requests. At publication, `latest` was an OCI index selecting
+that same manifest; an index digest need not equal the image manifest digest. Pin the
 manifest for deployments. This publication has no signed GitHub workflow
 provenance. Evidence and binary checksums are attached to the
 [published release](https://github.com/jatin711-debug/cronos_db_golang/releases/tag/v0.8.0).
@@ -34,19 +43,19 @@ v1.18.7 after current CI found `GO-2026-6809` in `crypto/x509`, the bundled
 compression dependency. See the [Go patch release](https://go.dev/doc/devel/release#go1.26.10),
 [Vite advisory](https://github.com/advisories/GHSA-r825-w8mm-5pxw), and
 [compression advisory](https://github.com/klauspost/compress/security/advisories/GHSA-259r-337f-4rfw).
-These source updates need a new patch release; the v0.8.0 binaries and image
+These source updates are included in v0.8.1; the v0.8.0 binaries and image
 above retain their original contents and scan date.
 
 The same development follow-up initializes consumer-group membership before a
 new subscription can receive live events. This closes a registration window in
 which the first acknowledgement could be refused because its group did not yet
-exist. This change also requires the next patch release.
+exist. This change is included in v0.8.1.
 
 Deduplication lookups also keep buffered IDs visible until their Pebble batch
 has committed. Previously, a lookup during the handoff from the buffer to
 Pebble could briefly report an existing ID as missing. Failed flushes now leave
 those buffered IDs visible while they wait for another attempt. These fixes
-apply to the development source and need the same patch release.
+are included in v0.8.1.
 
 The major correctness work in this release is current-term commitment after
 leader changes, opt-in future-event cancellation/rescheduling, bounded

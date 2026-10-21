@@ -124,7 +124,8 @@ prerequisites accordingly. The image scan failed before container and chart
 startup tests ran; those tests must still pass on the patched source. Dated
 measurements and released artifact identities remain historical. A new patch
 release is needed to distribute the updated build; see
-[publication status](PRODUCTION_RELEASE.md#current-release-v080).
+[v0.8.0 publication record](PRODUCTION_RELEASE.md#v080-publication-record) and
+the [v0.8.1 patch notes](RELEASE_V0.8.1.md).
 
 The Go race job also reported an intermittent first-delivery acknowledgement
 failure. Investigation found that a live subscription could be exposed before
