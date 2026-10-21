@@ -34,20 +34,22 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          test "$GITHUB_SHA" = "$(git rev-parse HEAD)"
-          test "$GITHUB_SHA" = "$(git rev-parse "refs/tags/$TAG^{commit}")"
+          source=$(git rev-parse HEAD)
+          test "$source" = "$(git rev-parse "refs/tags/$TAG^{commit}")"
           git merge-base --is-ancestor HEAD origin/main
+          printf 'TAG_SOURCE=%s\n' "$source" >> "$GITHUB_ENV"
       - name: Download publication evidence
         shell: bash
         run: |
           set -euo pipefail
           mkdir receipt
-          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > receipt/release.json
+          release_api=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json apiUrl --jq .apiUrl)
+          gh api "$release_api" > receipt/release.json
           gh release download "$TAG" --dir receipt --pattern SHA256SUMS \
             --pattern IMAGE_ID --pattern IMAGE_DIGEST --pattern IMAGE_ARCHIVE_SHA256 \
             --pattern release-image-scan.json --pattern LOCAL_PUBLICATION_EVIDENCE.json
       - name: Verify staging and the published Docker tags
-        run: python scripts/verify-staged-publication.py --directory receipt --tag "$TAG" --source "$GITHUB_SHA" --repo "$GITHUB_REPOSITORY"
+        run: python scripts/verify-staged-publication.py --directory receipt --tag "$TAG" --source "$TAG_SOURCE" --repo "$GITHUB_REPOSITORY"
       - name: Publish the verified release as latest
         shell: bash
         run: |

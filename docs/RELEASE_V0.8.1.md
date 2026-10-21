@@ -58,7 +58,7 @@ deployments; `latest` is a mutable convenience tag. Local publication has no
 signed GitHub workflow provenance.
 
 After local publication and evidence upload, dispatch
-`publish-staged-release.yml` with `--ref v0.8.1 -f tag=v0.8.1`. It verifies the
+`publish-staged-release.yml` with `--ref main -f tag=v0.8.1`. It verifies the
 successful staging run, uploaded checksums and registry tags before publishing
 the draft as the latest GitHub release. It does not rebuild the image or need
 Docker Hub write credentials in GitHub.
