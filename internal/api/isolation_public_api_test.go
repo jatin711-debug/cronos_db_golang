@@ -437,6 +437,8 @@ func TestIsolation_AcknowledgementsBelongToTheirRecipient(t *testing.T) {
 		if time.Now().After(deadline) {
 			// Whether the server still waits for this delivery says on which
 			// side the acknowledgement was lost.
+			stacks := make([]byte, 1<<20)
+			t.Logf("last client request: %v; last client error: %v\n%s", ackErrors.lastRequest.Load(), ackErrors.lastError.Load(), stacks[:runtime.Stack(stacks, true)])
 			_, _, _, serverSays := ts.p.Dispatcher.ValidateAck(held.DeliveryID, "alice", held.LastOffset()+1, true)
 			t.Fatalf("alice's own acknowledgement of delivery %s did not finish her event; the server says of an acknowledgement of it now: %v; %s",
 				held.DeliveryID, serverSays, state())

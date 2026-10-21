@@ -13,6 +13,7 @@ import (
 
 	"github.com/jatin711-debug/cronos_db_golang/pkg/client"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 )
 
 // A client given one node of the cluster publishes to every partition, which
@@ -55,16 +56,23 @@ func TestClientsFindTheOtherNodesThroughPartitionMetadata(t *testing.T) {
 
 	servedBy := map[string]int{}
 	for p := int32(0); p < partitionCount; p++ {
-		partition := p
+		// The server hashes the key independently of the client's route.
+		// Choose a key for each partition so this exercises its actual leader.
+		messageID := fmt.Sprintf("discovery-%d", p)
+		for suffix := 0; utils.HashToPartitionID(messageID, partitionCount) != p; suffix++ {
+			messageID = fmt.Sprintf("discovery-%d-%d", p, suffix)
+		}
 		res, err := producer.Send(ctx, client.Message{
-			Topic:       "discovery",
-			MessageID:   fmt.Sprintf("discovery-%d", p),
-			PartitionID: &partition,
-			Payload:     []byte("x"),
-			ScheduleAt:  time.Now().Add(time.Second),
+			Topic:      "discovery",
+			MessageID:  messageID,
+			Payload:    []byte("x"),
+			ScheduleAt: time.Now().Add(time.Second),
 		})
 		if err != nil {
 			t.Fatalf("publish to partition %d through a client given only %s: %v", p, c.nodes[0].id, err)
+		}
+		if res.PartitionID != p {
+			t.Fatalf("publish for partition %d was accepted by partition %d", p, res.PartitionID)
 		}
 		servedBy[res.NodeAddress]++
 	}

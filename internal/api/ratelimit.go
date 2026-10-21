@@ -4,7 +4,6 @@ import (
 	"context"
 	"net"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
@@ -15,28 +14,22 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-const tokenScale = 1_000_000 // micro-tokens per token; allows integer atomic ops
-
 type rateLimiter struct {
 	clients  sync.Map // ip -> *tokenBucket
 	rate     float64  // tokens per second
 	capacity float64  // max tokens
 }
 
-// tokenBucket is a lock-free token bucket. Tokens are stored as micro-tokens in
-// an atomic.Int64; lastRefillNS stores the last refill timestamp in Unix
-// nanoseconds. Refill and consumption use a compare-and-swap loop so many
-// concurrent requests can share one bucket without a mutex.
+// tokenBucket updates its balance and refill time together. Requests may enter
+// the bucket in a different order from the timestamps they captured.
 type tokenBucket struct {
-	tokens       atomic.Int64 // micro-tokens
-	lastRefillNS atomic.Int64 // Unix nanoseconds
+	mu           sync.Mutex
+	tokens       float64
+	lastRefillTS time.Time
 }
 
 func newTokenBucket(tokens float64, now time.Time) *tokenBucket {
-	tb := &tokenBucket{}
-	tb.tokens.Store(int64(tokens * tokenScale))
-	tb.lastRefillNS.Store(now.UnixNano())
-	return tb
+	return &tokenBucket{tokens: tokens, lastRefillTS: now}
 }
 
 func newRateLimiter(rate float64, capacity float64) *rateLimiter {
@@ -58,56 +51,31 @@ func newRateLimiter(rate float64, capacity float64) *rateLimiter {
 
 func (rl *rateLimiter) cleanup() {
 	cutoff := time.Now().Add(-10 * time.Minute)
-	cutoffNS := cutoff.UnixNano()
 	rl.clients.Range(func(key, value interface{}) bool {
 		tb := value.(*tokenBucket)
-		if tb.lastRefillNS.Load() < cutoffNS {
+		tb.mu.Lock()
+		if tb.lastRefillTS.Before(cutoff) {
 			rl.clients.Delete(key)
 		}
+		tb.mu.Unlock()
 		return true
 	})
 }
 
-// tryConsume refills tokens and attempts to consume one. It retries with a
-// compare-and-swap loop until it either consumes a token or confirms that no
-// token is available.
+// tryConsume refills tokens and attempts to consume one. Older timestamps do
+// not refill or rewind the bucket, and rejected requests retain partial tokens.
 func (tb *tokenBucket) tryConsume(now time.Time, rate, capacity float64) bool {
-	nowNS := now.UnixNano()
-	capacityMicro := int64(capacity * tokenScale)
-	// micro-tokens added per nanosecond = rate * tokenScale / 1e9 = rate / 1000
-	refillPerNS := rate / 1000.0
-
-	for {
-		lastNS := tb.lastRefillNS.Load()
-		if lastNS > nowNS {
-			// Clock moved backwards; cap refill to zero for this attempt.
-			lastNS = nowNS
-		}
-		elapsedNS := nowNS - lastNS
-		currentMicro := tb.tokens.Load()
-
-		refillMicro := int64(float64(elapsedNS) * refillPerNS)
-		availableMicro := currentMicro + refillMicro
-		if availableMicro > capacityMicro {
-			availableMicro = capacityMicro
-		}
-
-		if availableMicro < tokenScale {
-			// Not enough for one token. Advance lastRefillNS so we don't
-			// re-count the elapsed time on the next call, then fail.
-			if tb.lastRefillNS.CompareAndSwap(lastNS, nowNS) {
-				return false
-			}
-			continue
-		}
-
-		remainingMicro := availableMicro - tokenScale
-		if tb.tokens.CompareAndSwap(currentMicro, remainingMicro) &&
-			tb.lastRefillNS.CompareAndSwap(lastNS, nowNS) {
-			return true
-		}
-		// Another goroutine mutated state; retry with fresh values.
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+	if now.After(tb.lastRefillTS) {
+		tb.tokens = min(capacity, tb.tokens+now.Sub(tb.lastRefillTS).Seconds()*rate)
+		tb.lastRefillTS = now
 	}
+	if tb.tokens < 1 {
+		return false
+	}
+	tb.tokens--
+	return true
 }
 
 func (rl *rateLimiter) allow(ip string) bool {
