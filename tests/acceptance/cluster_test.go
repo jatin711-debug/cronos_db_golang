@@ -197,20 +197,56 @@ func newCluster(t *testing.T, extraArgs ...string) *cluster {
 	return c
 }
 
+// Keep allocations unique for the entire test process. Listeners are closed
+// before child processes start, so a later call (for example addNode) can be
+// offered a port already assigned to a node that has not bound it yet.
+var testPorts portAllocator
+
+type portAllocator struct {
+	mu   sync.Mutex
+	used map[int]bool
+}
+
+func (a *portAllocator) take(count int, listen func() (net.Listener, error)) ([]int, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.used == nil {
+		a.used = make(map[int]bool)
+	}
+	listeners := make([]net.Listener, 0, count)
+	defer func() {
+		for _, l := range listeners {
+			_ = l.Close()
+		}
+	}()
+	ports := make([]int, 0, count)
+	for len(ports) < count {
+		l, err := listen()
+		if err != nil {
+			return nil, err
+		}
+		// Hold rejected ports too, so the OS cannot offer the same one
+		// repeatedly while we look for a new allocation.
+		listeners = append(listeners, l)
+		port := l.Addr().(*net.TCPAddr).Port
+		if a.used[port] {
+			continue
+		}
+		ports = append(ports, port)
+	}
+	for _, port := range ports {
+		a.used[port] = true
+	}
+	return ports, nil
+}
+
 func freePorts(t *testing.T, count int) []int {
 	t.Helper()
-	listeners := make([]net.Listener, 0, count)
-	ports := make([]int, 0, count)
-	for i := 0; i < count; i++ {
-		l, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatal(err)
-		}
-		listeners = append(listeners, l)
-		ports = append(ports, l.Addr().(*net.TCPAddr).Port)
-	}
-	for _, l := range listeners {
-		_ = l.Close()
+	ports, err := testPorts.take(count, func() (net.Listener, error) {
+		return net.Listen("tcp", "127.0.0.1:0")
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 	return ports
 }
