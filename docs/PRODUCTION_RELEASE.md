@@ -1,10 +1,11 @@
 # Production release requirements
 
-**Development source after v0.8.1:** the WAL segment format is now version 2.
-It requires new data directories on every node; version-1 data and backups are
-not migrated, older binaries cannot read the new files, and mixed-version
-clusters are unsupported. This is a source-line change, not a claim about the
-published v0.8.1 artifacts. See [closed WAL segment boundaries](STORAGE_SEGMENT_BOUNDARIES.md).
+**v0.9.0 changes the WAL segment format to version 2.** It requires new data
+directories on every node; version-1 data and backups are not migrated, older
+binaries cannot read the new files, and mixed-version clusters are
+unsupported. The published v0.8.1 and earlier artifacts are unchanged. See the
+[v0.9.0 notes](RELEASE_V0.9.0.md) and
+[closed WAL segment boundaries](STORAGE_SEGMENT_BOUNDARIES.md).
 
 The `v0.8.0` source line adds the lifecycle and replication changes described
 in the [release notes](RELEASE_V0.8.0.md). Available artifacts and publication
@@ -15,6 +16,17 @@ tracks unresolved guarantees, and
 [current release limits](#what-v080-was-released-without) are listed
 below. A green CI run is necessary but does not establish the complete release
 acceptance contract.
+
+## v0.9.0 release
+
+The [v0.9.0 notes](RELEASE_V0.9.0.md) describe the version-2 WAL segment
+format, which detects erased areas of closed segments, and a fix for a node
+crash when a scheduled backup overlapped the release of a partition. The chart
+and default image tag are `0.9.0`. Publication status, checksums and the exact
+deployment digest are on the
+[release page](https://github.com/jatin711-debug/cronos_db_golang/releases/tag/v0.9.0).
+Use its `IMAGE_DIGEST` and publication evidence to identify the tested image.
+This release breaks on-disk compatibility and makes no new capacity claim.
 
 ## v0.8.1 patch release
 
