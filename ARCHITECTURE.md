@@ -342,10 +342,11 @@ graph LR
 
     subgraph Header Contents
         H1[Magic: CRNOS1]
-        H2[Version: 1]
+        H2[Version: 2]
         H3[First Offset]
         H4[Created Timestamp]
         H5[CRC32 Checksum]
+        H6[Predecessor Boundary]
     end
 
     subgraph Record Format v2
@@ -361,6 +362,10 @@ graph LR
         RF10[Meta Count + Entries]
     end
 ```
+
+The development source requires version-2 segment headers and a fresh data
+directory; it does not migrate version-1 WALs. A successor header records its
+closed predecessor's boundary. See [closed WAL segment boundaries](docs/STORAGE_SEGMENT_BOUNDARIES.md).
 
 ### Record Binary Format
 

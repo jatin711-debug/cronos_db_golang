@@ -6,7 +6,25 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/jatin711-debug/cronos_db_golang/internal/storage"
 )
+
+func TestReadSegmentHeaderUnderstandsCurrentWALFormat(t *testing.T) {
+	dir := t.TempDir()
+	segment, err := storage.NewSegmentWithSize(dir, 7, true, nil, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "segments", segment.GetFilename())
+	if err := segment.Close(); err != nil {
+		t.Fatal(err)
+	}
+	first, created, ok := readSegmentHeader(path)
+	if !ok || first != 7 || created <= 0 {
+		t.Fatalf("read current WAL header: first=%d created=%d ok=%t", first, created, ok)
+	}
+}
 
 func TestMaintenanceAgeAndSizeDoNotDoubleCountDeletedFiles(t *testing.T) {
 	dir := t.TempDir()

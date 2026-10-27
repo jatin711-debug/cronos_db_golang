@@ -16,8 +16,9 @@ type LogDamage struct {
 	Found    string
 	// AfterOffset is the last offset that can be read before the damage.
 	AfterOffset int64
-	// NextOffset is the first offset that can be read after it. The events
-	// from AfterOffset+1 to NextOffset-1 cannot be read.
+	// NextOffset is the start of the following segment, or -1 if none exists.
+	// Repair discards offsets from AfterOffset+1 through NextOffset-1; if
+	// NextOffset is -1, the end of the discarded range is not known.
 	NextOffset int64
 	// EndOfLog is true when nothing follows: the log ends before these bytes,
 	// as it does after a write that a crash interrupted. A node that opens
@@ -89,6 +90,9 @@ func CheckLog(dataDir string, cipher *SegmentCipher, repair bool) (*LogCheck, er
 		check.LastOffset = segment.GetLastOffset()
 		check.Events += segment.GetLastOffset() - segment.GetFirstOffset() + 1
 	}
+	if err := markBoundaryDamage(segments); err != nil {
+		return nil, err
+	}
 
 	for i, segment := range segments {
 		invalid, position, found := segment.InvalidTail()
@@ -101,13 +105,30 @@ func CheckLog(dataDir string, cipher *SegmentCipher, repair bool) (*LogCheck, er
 			Found:       found,
 			AfterOffset: segment.GetLastOffset(),
 			NextOffset:  -1,
-			EndOfLog:    i >= end,
+			EndOfLog:    i >= end && segment.validAfterTail < 0 && !segment.boundaryDamage,
 		}
 		if !damage.EndOfLog {
-			damage.NextOffset = segments[i+1].GetFirstOffset()
+			if i+1 < len(segments) {
+				damage.NextOffset = segments[i+1].GetFirstOffset()
+			}
 			if repair {
+				if segment.boundaryDamage {
+					boundary := segments[i+1].predecessor
+					if segment.GetLastOffset() > boundary.last || segment.GetSize() > boundary.size {
+						return check, fmt.Errorf("repair segment %s: recovered records extend beyond its recorded boundary; restore a backup or rebuild the replica", segment.GetFilename())
+					}
+				}
 				if err := segment.clearInvalidTail(); err != nil {
 					return check, fmt.Errorf("repair segment %s: %w", segment.GetFilename(), err)
+				}
+				if err := segment.index.Truncate(segment.GetLastOffset()); err != nil {
+					return check, fmt.Errorf("repair index %s: %w", segment.GetFilename(), err)
+				}
+				if segment.boundaryDamage && i+1 < len(segments) {
+					boundary := &segmentBoundary{first: segment.GetFirstOffset(), last: segment.GetLastOffset(), size: segment.GetSize()}
+					if err := segments[i+1].setPredecessor(boundary); err != nil {
+						return check, fmt.Errorf("repair boundary after %s: %w", segment.GetFilename(), err)
+					}
 				}
 				damage.Repaired = true
 			}

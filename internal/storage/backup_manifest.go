@@ -215,6 +215,10 @@ func RestoreBackup(backupDir, dataDir string, opts RestoreOptions) (*BackupManif
 			discard()
 			return nil, fmt.Errorf("restore partition %d: %w", partition.PartitionID, err)
 		}
+		if err := validateBackupSegmentVersions(filepath.Join(staging, "segments")); err != nil {
+			discard()
+			return nil, fmt.Errorf("restore partition %d: %w", partition.PartitionID, err)
+		}
 	}
 	for i, partition := range manifest.Partitions {
 		target := filepath.Join(partitionsDir, fmt.Sprint(partition.PartitionID))

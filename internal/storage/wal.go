@@ -328,6 +328,9 @@ func (w *WAL) loadSegments() error {
 		}
 		w.segments = append(w.segments, segment)
 	}
+	if err := markBoundaryDamage(w.segments); err != nil {
+		return err
+	}
 	if err := w.judgeInvalidTails(); err != nil {
 		return err
 	}
@@ -373,6 +376,13 @@ func (w *WAL) judgeInvalidTails() error {
 		invalid, position, found := segment.InvalidTail()
 		if !invalid {
 			continue
+		}
+		if segment.boundaryDamage {
+			return fmt.Errorf("%w: segment %s holds %s at byte %d; the next segment begins at offset %d. Restore from a backup or repair the replica from its leader; 'cronos-admin check-log --repair' discards the segment's remaining records", ErrLogDamaged, segment.GetFilename(), found, position, w.segments[i+1].GetFirstOffset())
+		}
+		if segment.validAfterTail >= 0 {
+			return fmt.Errorf("%w: segment %s holds %s at byte %d, after offset %d; a valid indexed record at offset %d follows. Restore from a backup or repair the replica from its leader; 'cronos-admin check-log --repair' discards the segment's remaining records",
+				ErrLogDamaged, segment.GetFilename(), found, position, segment.GetLastOffset(), segment.validAfterTail)
 		}
 		if i < end {
 			next := w.segments[i+1]
@@ -921,6 +931,9 @@ func (w *WAL) rotateIfFullLocked() {
 	}
 	if err := w.rotateSegment(); err != nil {
 		walRotationErrorsTotal.WithLabelValues(w.partitionLabel).Inc()
+		if w.Failure() != nil {
+			return // The failure was logged when the WAL was fenced.
+		}
 		if now := time.Now(); now.Sub(w.rotateErrorLogged) >= 10*time.Second {
 			w.rotateErrorLogged = now
 			log.Printf("[WAL-%d] Starting a new segment failed; the active segment takes the next append, which tries again: %v", w.partitionID, err)
@@ -940,8 +953,17 @@ func (w *WAL) rotateSegment() error {
 	// start must follow the last record actually appended, not those reservations.
 	// Speculatively naming a segment at 75% capacity also gets this boundary wrong.
 	firstOffset := w.activeSegment.GetLastOffset() + 1
-	nextSeg, err := NewSegmentWithSize(w.dataDir, firstOffset, true, w.cipher, w.config.SegmentSizeBytes)
+	// The successor's header is evidence only after the closed prefix itself is
+	// durable. Creating it first could turn an interrupted flush into damage.
+	if err := w.activeSegment.Flush(); err != nil {
+		return w.fail(fmt.Errorf("sync segment before rotation: %w", err))
+	}
+	boundary := &segmentBoundary{first: w.activeSegment.GetFirstOffset(), last: w.activeSegment.GetLastOffset(), size: w.activeSegment.GetSize()}
+	nextSeg, err := newSegmentWithBoundary(w.dataDir, firstOffset, true, w.cipher, w.config.SegmentSizeBytes, boundary)
 	if err != nil {
+		if errors.Is(err, errBoundaryPublication) {
+			return w.fail(err)
+		}
 		return fmt.Errorf("create new active segment: %w", err)
 	}
 
@@ -1418,6 +1440,9 @@ func (w *WAL) TruncateToOffset(offset int64) (int, error) {
 	}
 	// The number of events removed is exactly oldNext - offset (offsets are dense).
 	removed := int(oldNext - offset)
+	// A successor's old boundary remains in place until that successor is
+	// deleted. A crash while truncating its predecessor can therefore require
+	// replica repair on restart, but cannot silently accept a shortened prefix.
 
 	// Reconcile segments. Segments entirely at/after `offset` are deleted (including
 	// the current active segment). The segment straddling `offset` is truncated to
@@ -1457,8 +1482,16 @@ func (w *WAL) TruncateToOffset(offset int64) (int, error) {
 	}
 
 	// Create a fresh active segment beginning at `offset`.
-	newActive, err := NewSegmentWithSize(w.dataDir, offset, true, w.cipher, w.config.SegmentSizeBytes)
+	var boundary *segmentBoundary
+	if len(kept) > 0 {
+		previous := kept[len(kept)-1]
+		boundary = &segmentBoundary{first: previous.GetFirstOffset(), last: previous.GetLastOffset(), size: previous.GetSize()}
+	}
+	newActive, err := newSegmentWithBoundary(w.dataDir, offset, true, w.cipher, w.config.SegmentSizeBytes, boundary)
 	if err != nil {
+		if errors.Is(err, errBoundaryPublication) {
+			return removed, w.fail(err)
+		}
 		return removed, fmt.Errorf("create new active segment at offset %d: %w", offset, err)
 	}
 	kept = append(kept, newActive)

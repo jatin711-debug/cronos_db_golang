@@ -217,6 +217,16 @@ func (idx *Index) GetEntries() []IndexEntry {
 	return entries
 }
 
+// entriesAfter returns only the candidates beyond the recovered offset. A
+// healthy segment normally has none, avoiding a copy of its entire index on
+// every startup.
+func (idx *Index) entriesAfter(offset int64) []IndexEntry {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	start := sort.Search(len(idx.entries), func(i int) bool { return idx.entries[i].Offset > offset })
+	return append([]IndexEntry(nil), idx.entries[start:]...)
+}
+
 // Truncate drops every index entry whose Offset is strictly greater than
 // maxOffset, and rewrites the on-disk index file to match. This is called
 // during segment recovery (Segment.scan) after a corrupt tail has truncated

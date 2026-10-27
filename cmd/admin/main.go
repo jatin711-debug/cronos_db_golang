@@ -518,10 +518,20 @@ func checkLogCmd() *cobra.Command {
 						fmt.Printf("  %s: %s at byte %d, after the last event (offset %d). An interrupted write; the node cuts it off when it starts.\n",
 							damage.Segment, damage.Found, damage.Position, damage.AfterOffset)
 					case damage.Repaired:
+						if damage.NextOffset < 0 {
+							fmt.Printf("  %s: REPAIRED. It held %s at byte %d. Records from offset %d onward in this segment were given up; the last offset is unknown.\n",
+								damage.Segment, damage.Found, damage.Position, damage.AfterOffset+1)
+							break
+						}
 						fmt.Printf("  %s: REPAIRED. It held %s at byte %d. Offsets %d to %d are given up.\n",
 							damage.Segment, damage.Found, damage.Position, damage.AfterOffset+1, damage.NextOffset-1)
 					default:
 						damaged++
+						if damage.NextOffset < 0 {
+							fmt.Printf("  %s: DAMAGED. It holds %s at byte %d. Records from offset %d onward in this segment cannot be read or would be discarded by repair; the last offset is unknown.\n",
+								damage.Segment, damage.Found, damage.Position, damage.AfterOffset+1)
+							break
+						}
 						fmt.Printf("  %s: DAMAGED. It holds %s at byte %d. Offsets %d to %d cannot be read.\n",
 							damage.Segment, damage.Found, damage.Position, damage.AfterOffset+1, damage.NextOffset-1)
 					}
