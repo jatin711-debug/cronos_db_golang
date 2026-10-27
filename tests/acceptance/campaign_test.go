@@ -226,9 +226,10 @@ func checkLogs(t *testing.T, c *cluster, topic string, sent *ledger, pruned bool
 }
 
 // agreedLog waits until the replicas of a partition hold logs that end at the
-// same offset, checks that the logs are the same entry for entry from the
-// point where all of them have entries, and returns the log from there and
-// the offset of that point.
+// same offset and hold the same entries from the point where all of them have
+// entries, then returns the log from there and the offset of that point. A
+// replica that is still reconciling with its leader is read again, for up to a
+// minute; logs that still differ after that are reported entry by entry.
 //
 // The replicas need not start at the same offset. The leader removes whole
 // segments from the start of its log and tells the others where its log
@@ -262,7 +263,24 @@ func agreedLog(t *testing.T, c *cluster, partition int32, topic string) ([]*type
 			if i == 0 {
 				end = last
 			}
+			// The log and its bounds are read one after the other, and a
+			// replica that is still reconciling (cutting off a tail the
+			// leader never committed, or catching up) can change between
+			// the two. A log is only used when it ends where its bounds,
+			// read after it, say it does; otherwise it is read again.
+			if !endsAt(log, first, last) {
+				t.Logf("partition %d: %s changed while it was read (log ends at %s, bounds end at offset %d); reading it again", partition, n.id, logEnd(log), last)
+				same = false
+			}
 			start, same = max(start, first), same && last == end
+		}
+		// Replicas restored from backups taken at different moments hold
+		// different tails, and the leader's replaces the others'. Entries
+		// that end at the same offset can therefore still differ for a
+		// moment, so the logs must also agree before they are compared.
+		if same && len(logs) == len(c.nodes) && !sameEntries(logs, start) {
+			t.Logf("partition %d: the replicas end at offset %d but do not hold the same entries yet; reading them again", partition, end)
+			same = false
 		}
 		if same || time.Now().After(deadline) {
 			break
@@ -273,10 +291,7 @@ func agreedLog(t *testing.T, c *cluster, partition int32, topic string) ([]*type
 		t.Fatalf("partition %d: could not read the log of every node", partition)
 	}
 	for i, log := range logs {
-		for len(log) > 0 && log[0].GetOffset() < start {
-			log = log[1:]
-		}
-		logs[i] = log
+		logs[i] = trimBelow(log, start)
 	}
 
 	reference := logs[0]
@@ -306,4 +321,45 @@ func agreedLog(t *testing.T, c *cluster, partition int32, topic string) ([]*type
 		t.Logf("partition %d: offsets %d to %d on every replica", partition, start, reference[len(reference)-1].GetOffset())
 	}
 	return reference, start
+}
+
+// trimBelow drops the entries below offset start.
+func trimBelow(log []*types.Event, start int64) []*types.Event {
+	for len(log) > 0 && log[0].GetOffset() < start {
+		log = log[1:]
+	}
+	return log
+}
+
+// sameEntries reports whether the logs hold the same entries from offset start.
+func sameEntries(logs [][]*types.Event, start int64) bool {
+	reference := trimBelow(logs[0], start)
+	for _, log := range logs[1:] {
+		log = trimBelow(log, start)
+		if len(log) != len(reference) {
+			return false
+		}
+		for i := range log {
+			if !proto.Equal(reference[i], log[i]) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// endsAt reports whether a log read from a replica ends where the replica's
+// bounds say its log ends. A log with no entries ends before its first offset.
+func endsAt(log []*types.Event, first, last int64) bool {
+	if len(log) == 0 {
+		return last < first
+	}
+	return log[len(log)-1].GetOffset() == last
+}
+
+func logEnd(log []*types.Event) string {
+	if len(log) == 0 {
+		return "nothing"
+	}
+	return fmt.Sprintf("offset %d", log[len(log)-1].GetOffset())
 }
