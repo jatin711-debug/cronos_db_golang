@@ -98,6 +98,15 @@ type Partition struct {
 	background   sync.WaitGroup
 	// deliveryQuitOnce ensures deliveryQuit is closed at most once.
 	deliveryQuitOnce sync.Once
+	// stopOnce makes stopPartition run once; stopErr is its result.
+	stopOnce sync.Once
+	stopErr  error
+	// storesMu keeps the stores of a partition open while a backup copies them:
+	// the backup holds it for reading (holdStores), and closePartition takes it
+	// for writing before it closes the first store. storesClosed, which it
+	// guards, tells a backup that began later to leave the partition out.
+	storesMu     sync.RWMutex
+	storesClosed bool
 	// replayErr holds the last WAL timer-replay error, if any.
 	replayErr atomic.Pointer[error]
 	// replicated is true for a partition of a cluster or with more than one
@@ -1432,8 +1441,16 @@ func (pm *PartitionManager) StopPartition(partitionID int32) error {
 	return stopPartition(partition)
 }
 
-// stopPartition stops a partition's workers and closes its stores.
+// stopPartition stops a partition's workers and closes its stores. A partition
+// is stopped once: closing a store twice panics, and the manager keeps a
+// stopped partition listed, so a release and a shutdown can both reach it. A
+// second caller waits for the first and gets its result.
 func stopPartition(partition *Partition) error {
+	partition.stopOnce.Do(func() { partition.stopErr = closePartition(partition) })
+	return partition.stopErr
+}
+
+func closePartition(partition *Partition) error {
 
 	// Signal delivery goroutines to stop FIRST to avoid circular lock deadlock
 	// Delivery goroutines read from deliveryQuit channel - closing it allows them to exit
@@ -1457,6 +1474,11 @@ func stopPartition(partition *Partition) error {
 		}
 		partition.Dispatcher.Close()
 	}
+
+	// Wait for a backup that is copying the stores, and keep later ones off them.
+	partition.storesMu.Lock()
+	partition.storesClosed = true
+	partition.storesMu.Unlock()
 
 	// Close the dead-letter queue so its segment writer flushes and releases the
 	// data directory before WAL close / temp cleanup.
@@ -1495,6 +1517,19 @@ func stopPartition(partition *Partition) error {
 
 	return nil
 }
+
+// holdStores keeps the partition's stores open until releaseStores. It reports
+// false, holding nothing, if they are already closed.
+func (p *Partition) holdStores() bool {
+	p.storesMu.RLock()
+	if p.storesClosed {
+		p.storesMu.RUnlock()
+		return false
+	}
+	return true
+}
+
+func (p *Partition) releaseStores() { p.storesMu.RUnlock() }
 
 // PinPartition keeps a partition loaded on this node whether or not the
 // cluster assigns it here. The node's first partition is pinned because the

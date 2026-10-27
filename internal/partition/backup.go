@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -37,6 +38,10 @@ import (
 // A publish is appended to one partition at a time, so a batch that spans
 // partitions can be in the backup for some of them and not for others.
 //
+// A partition that is released or stopped while the backup runs is not closed
+// until the backup has finished with it; one that was already stopped when the
+// backup began is left out of it.
+//
 // A backup holds no key material. For an encrypted log the manifest records a
 // value that identifies the master key, and restore can check the key against
 // it. Credentials and TLS material are deployment configuration and are not
@@ -51,6 +56,25 @@ func (pm *PartitionManager) Backup(dest string) error {
 	}
 	pm.mu.RUnlock()
 	sort.Slice(partitions, func(i, j int) bool { return partitions[i].ID < partitions[j].ID })
+	// A partition can be released, or stopped for shutdown, while this runs, and
+	// closing a store that is being copied panics. Hold the stores of each
+	// partition, in order, until the backup is done; a partition whose stores
+	// are already closed is no longer on this node's disk to protect, and is
+	// left out.
+	held := make([]*Partition, 0, len(partitions))
+	for _, p := range partitions {
+		if p.holdStores() {
+			held = append(held, p)
+		} else {
+			log.Printf("[BACKUP] Partition %d was stopped; it is left out of the backup", p.ID)
+		}
+	}
+	defer func() {
+		for _, p := range held {
+			p.releaseStores()
+		}
+	}()
+	partitions = held
 	if len(partitions) == 0 {
 		return fmt.Errorf("no loaded partitions to back up")
 	}
