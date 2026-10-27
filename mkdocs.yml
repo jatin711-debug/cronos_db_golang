@@ -124,6 +124,7 @@ nav:
       - Configuration: CONFIGURATION.md
   - Release:
       - Release Requirements: PRODUCTION_RELEASE.md
+      - v0.9.0 Release Notes: RELEASE_V0.9.0.md
       - v0.8.1 Patch Notes: RELEASE_V0.8.1.md
       - v0.8.0 Release Notes: RELEASE_V0.8.0.md
       - Event Lifecycle and Retention: RETENTION_AND_EVENT_LIFECYCLE.md

@@ -53,7 +53,7 @@ docker run --rm --name cronos-dev \
   -p 127.0.0.1:9000:9000 \
   -p 127.0.0.1:8080:8080 \
   -v cronos-data:/data \
-  johnny711dock/cronos-db:0.8.1 \
+  johnny711dock/cronos-db:0.9.0 \
   --dev --node-id=local --data-dir=/data
 ```
 
@@ -77,7 +77,7 @@ and admin binaries for Linux, macOS, and Windows are on the
 With Go 1.26.10 or later, add the SDK to your application:
 
 ```bash
-go get github.com/jatin711-debug/cronos_db_golang@v0.8.1
+go get github.com/jatin711-debug/cronos_db_golang@v0.9.0
 ```
 
 This program connects to the development node and publishes a JSON event
@@ -138,7 +138,7 @@ Future-event cancellation and rescheduling are opt-in and have upgrade
 constraints. Transactions, online partition splitting, cross-region
 replication, and exactly-once commits are refused in production.
 Read the [release requirements and limits](docs/PRODUCTION_RELEASE.md) and
-[upgrade notes](docs/RELEASE_V0.8.1.md) before deploying.
+[upgrade notes](docs/RELEASE_V0.9.0.md) before deploying.
 
 ## Performance
 

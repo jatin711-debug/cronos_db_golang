@@ -50,7 +50,7 @@ header CRC and requires recovery from a healthy replica or backup.
 
 ## Clean-start requirement and limits
 
-This development version reads and writes only version-2 WAL segments. It
+From v0.9.0 the server reads and writes only version-2 WAL segments. It
 rejects version-1 data and backups without modifying or migrating their WAL
 segments. Older binaries reject version-2 segments. Start with new, empty data
 directories and use the updated binary on every node; rolling upgrades and

@@ -363,8 +363,8 @@ graph LR
     end
 ```
 
-The development source requires version-2 segment headers and a fresh data
-directory; it does not migrate version-1 WALs. A successor header records its
+Version 0.9.0 and later require version-2 segment headers and a fresh data
+directory; they do not migrate version-1 WALs. A successor header records its
 closed predecessor's boundary. See [closed WAL segment boundaries](docs/STORAGE_SEGMENT_BOUNDARIES.md).
 
 ### Record Binary Format
