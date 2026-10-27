@@ -28,6 +28,28 @@ deployment digest are on the
 Use its `IMAGE_DIGEST` and publication evidence to identify the tested image.
 This release breaks on-disk compatibility and makes no new capacity claim.
 
+Published on 2026-10-27 from `12507c7fb43e93b0812d987ccb916e02f14a7042`. The
+required source checks passed on
+[PR #15](https://github.com/jatin711-debug/cronos_db_golang/pull/15) (second
+attempt of [the run](https://github.com/jatin711-debug/cronos_db_golang/actions/runs/40526717149);
+the first failed a cluster start-up timing test and passed when re-run on the
+same revision). The
+[release staging run](https://github.com/jatin711-debug/cronos_db_golang/actions/runs/40531400344)
+built the binaries, started the Linux binary, and scanned and fault-tested the
+exact image archived on the release, including container network faults and a
+restart with a backlog larger than memory.
+
+The Linux amd64 image is `johnny711dock/cronos-db:0.9.0`, manifest digest
+`sha256:b597796916f59408801e37577ea591e38bac312828d7bbc6bf06b15e07b3abf4`.
+It was loaded from the staged archive and pushed locally; its configuration and
+all nine filesystem layers match the scanned image, and anonymous registry
+requests select the same manifest for `0.9.0` and `latest`. Pin the manifest
+for deployments. This publication has no signed GitHub workflow provenance.
+`latest` previously selected v0.8.1
+(`sha256:f2839385386b2f44b6a07669fcb001dcab31273a3e7ba14f1f0510f6a9594883`); a
+node started from `latest` on a v0.8.1 data directory now refuses it, because
+the WAL segment format changed.
+
 ## v0.8.1 patch release
 
 The [v0.8.1 notes](RELEASE_V0.8.1.md) describe the security, subscription
