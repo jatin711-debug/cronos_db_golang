@@ -17,6 +17,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/jatin711-debug/cronos_db_golang/internal/storage"
 )
 
 // RetentionPolicy defines data lifecycle rules for WAL segments.
@@ -224,7 +226,7 @@ func readSegmentHeader(path string) (int64, int64, bool) {
 	if string(header[0:6]) != "CRNOS1" {
 		return 0, 0, false
 	}
-	if header[7] != 1 {
+	if header[7] != storage.SegmentHeaderVersion {
 		return 0, 0, false
 	}
 	stored := binary.BigEndian.Uint32(header[60:64])

@@ -1,5 +1,11 @@
 # Production release requirements
 
+**Development source after v0.8.1:** the WAL segment format is now version 2.
+It requires new data directories on every node; version-1 data and backups are
+not migrated, older binaries cannot read the new files, and mixed-version
+clusters are unsupported. This is a source-line change, not a claim about the
+published v0.8.1 artifacts. See [closed WAL segment boundaries](STORAGE_SEGMENT_BOUNDARIES.md).
+
 The `v0.8.0` source line adds the lifecycle and replication changes described
 in the [release notes](RELEASE_V0.8.0.md). Available artifacts and publication
 status are on the [releases page](https://github.com/jatin711-debug/cronos_db_golang/releases).

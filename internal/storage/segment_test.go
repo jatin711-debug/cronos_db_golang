@@ -1,13 +1,65 @@
 package storage
 
 import (
+	"encoding/binary"
 	"fmt"
+	"hash/crc32"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 )
+
+func TestSegmentVersionRequiresCleanStart(t *testing.T) {
+	dir := t.TempDir()
+	segment, err := NewSegmentWithSize(dir, 0, true, nil, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := segment.GetFilename()
+	if err := segment.Close(); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "segments", name)
+	header := make([]byte, 64)
+	file, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.ReadAt(header, 0); err != nil {
+		t.Fatal(err)
+	}
+	if header[7] != 2 || binary.BigEndian.Uint32(header[60:]) != crc32.ChecksumIEEE(header[:60]) {
+		t.Fatalf("new header is not valid version 2: %v", header)
+	}
+	// Previous releases explicitly accepted only version 1, so they refuse
+	// this header even though its checksum remains compatible.
+	if header[7] == 1 {
+		t.Fatal("version 1 readers would accept the new header")
+	}
+	header[7] = 1
+	binary.BigEndian.PutUint32(header[60:], crc32.ChecksumIEEE(header[:60]))
+	if _, err := file.WriteAt(header, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	opened, err := NewWAL(dir, 0, damageConfig, nil)
+	if err == nil {
+		opened.Close()
+		t.Fatal("opened version 1 data")
+	}
+	if !strings.Contains(err.Error(), "unsupported segment version: 1") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || after[7] != 1 {
+		t.Fatalf("opening altered the version 1 segment: %v", err)
+	}
+}
 
 func TestSegment_AppendAndRead(t *testing.T) {
 	tmpDir := t.TempDir()

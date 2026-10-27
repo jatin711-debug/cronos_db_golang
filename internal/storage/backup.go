@@ -1,8 +1,10 @@
 package storage
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"os"
 	"path/filepath"
@@ -125,6 +127,35 @@ func BackupWAL(walDir string, destDir string) error {
 		backedUpIndexes++
 	}
 
+	// The active segment is excluded from this incremental backup, but its
+	// header may be the only durable boundary of the last closed segment.
+	// Preserve that header as an empty successor; a later incremental backup
+	// replaces it with the full segment after rotation. No active records are
+	// included, so the original backup contract is unchanged.
+	if activeSegment != "" && maxBackedUpOffset >= 0 {
+		file, err := os.Open(filepath.Join(segmentsDir, activeSegment))
+		if err != nil {
+			return fmt.Errorf("open active segment header: %w", err)
+		}
+		header := make([]byte, 64)
+		_, readErr := io.ReadFull(file, header)
+		closeErr := file.Close()
+		if readErr != nil {
+			return fmt.Errorf("read active segment header: %w", readErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("close active segment header: %w", closeErr)
+		}
+		if string(header[:6]) != "CRNOS1" || header[7] != SegmentHeaderVersion || binary.BigEndian.Uint32(header[60:64]) != crc32.ChecksumIEEE(header[:60]) {
+			return fmt.Errorf("invalid active segment header %s", activeSegment)
+		}
+		if string(header[32:36]) == boundaryMagic && int64(binary.BigEndian.Uint64(header[36:44])) == maxBackedUpOffset {
+			if err := utils.AtomicWriteFile(filepath.Join(destSegmentsDir, activeSegment), header, 0644); err != nil {
+				return fmt.Errorf("copy active segment boundary: %w", err)
+			}
+		}
+	}
+
 	// Write backup manifest atomically with fsync.
 	manifest := fmt.Sprintf("backup_time=%s\nsegments=%d\nindexes=%d\nlast_offset=%d\n",
 		time.Now().UTC().Format(time.RFC3339), backedUpSegments, backedUpIndexes, maxBackedUpOffset)
@@ -182,6 +213,9 @@ func RestoreWAL(backupDir string, walDir string) error {
 	backupIndexDir := filepath.Join(backupDir, "index")
 	segmentsDir := filepath.Join(walDir, "segments")
 	indexDir := filepath.Join(walDir, "index")
+	if err := validateBackupSegmentVersions(backupSegmentsDir); err != nil {
+		return err
+	}
 
 	if err := os.MkdirAll(segmentsDir, 0755); err != nil {
 		return fmt.Errorf("create wal segments dir: %w", err)
@@ -220,6 +254,40 @@ func RestoreWAL(backupDir string, walDir string) error {
 		}
 	}
 
+	return nil
+}
+
+// validateBackupSegmentVersions checks headers without opening a WAL or
+// modifying its index. Restore must reject unsupported data before publishing it.
+func validateBackupSegmentVersions(segmentsDir string) error {
+	entries, err := os.ReadDir(segmentsDir)
+	if err != nil {
+		return fmt.Errorf("read backup segments: %w", err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".log" {
+			continue
+		}
+		file, err := os.Open(filepath.Join(segmentsDir, entry.Name()))
+		if err != nil {
+			return err
+		}
+		var header [64]byte
+		_, readErr := io.ReadFull(file, header[:])
+		closeErr := file.Close()
+		if readErr != nil {
+			return fmt.Errorf("read segment %s header: %w", entry.Name(), readErr)
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		if string(header[:6]) != "CRNOS1" || binary.BigEndian.Uint32(header[60:]) != crc32.ChecksumIEEE(header[:60]) {
+			return fmt.Errorf("invalid backup segment header: %s", entry.Name())
+		}
+		if header[7] != SegmentHeaderVersion {
+			return fmt.Errorf("unsupported segment version: %d in %s (this build requires version %d; older WAL data is not migrated)", header[7], entry.Name(), SegmentHeaderVersion)
+		}
+	}
 	return nil
 }
 

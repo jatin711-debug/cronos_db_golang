@@ -61,7 +61,25 @@ type Segment struct {
 	invalidTail bool
 	invalidAt   int64
 	invalidWhy  string
+	// validAfterTail is a verified indexed record beyond the scan boundary,
+	// or -1 when the sparse index proves nothing about the tail.
+	validAfterTail int64
+	// predecessor is a durable boundary of the preceding segment, stored in
+	// this segment's checksummed header. The first retained segment may omit it.
+	predecessor    *segmentBoundary
+	boundaryDamage bool
 }
+
+type segmentBoundary struct {
+	first, last, size int64
+}
+
+const boundaryMagic = "BND1"
+
+// SegmentHeaderVersion is the on-disk WAL segment format understood by this build.
+const SegmentHeaderVersion = 2
+
+var errBoundaryPublication = errors.New("segment boundary publication is uncertain")
 
 const defaultSegmentPreallocSize = 64 * 1024 * 1024
 
@@ -76,6 +94,10 @@ func NewSegment(dataDir string, firstOffset int64, isActive bool, cipher *Segmen
 // configured segment size. Keeping this value tied to WALConfig avoids mapping
 // 1GB for every partition regardless of the requested segment size.
 func NewSegmentWithSize(dataDir string, firstOffset int64, isActive bool, cipher *SegmentCipher, segmentSize int64) (*Segment, error) {
+	return newSegmentWithBoundary(dataDir, firstOffset, isActive, cipher, segmentSize, nil)
+}
+
+func newSegmentWithBoundary(dataDir string, firstOffset int64, isActive bool, cipher *SegmentCipher, segmentSize int64, predecessor *segmentBoundary) (*Segment, error) {
 	filename := fmt.Sprintf("%020d.log", firstOffset)
 	filePath := filepath.Join(dataDir, "segments", filename)
 
@@ -88,7 +110,11 @@ func NewSegmentWithSize(dataDir string, firstOffset int64, isActive bool, cipher
 	// Open or create segment file. We intentionally avoid os.O_APPEND; on Windows
 	// O_APPEND can cause SetEndOfFile to return ERROR_ACCESS_DENIED during
 	// pre-allocation, and the code already writes sequentially at the current offset.
-	file, err := os.OpenFile(filePath, os.O_RDWR|os.O_CREATE, 0644)
+	flags := os.O_RDWR | os.O_CREATE
+	if predecessor != nil {
+		flags |= os.O_EXCL
+	}
+	file, err := os.OpenFile(filePath, flags, 0644)
 	if err != nil {
 		return nil, fmt.Errorf("open segment file: %w", err)
 	}
@@ -97,6 +123,9 @@ func NewSegmentWithSize(dataDir string, firstOffset int64, isActive bool, cipher
 	stat, err := file.Stat()
 	if err != nil {
 		file.Close()
+		if predecessor != nil {
+			return nil, fmt.Errorf("%w: stat file: %v", errBoundaryPublication, err)
+		}
 		return nil, fmt.Errorf("stat file: %w", err)
 	}
 	isNewFile := stat.Size() == 0
@@ -115,6 +144,9 @@ func NewSegmentWithSize(dataDir string, firstOffset int64, isActive bool, cipher
 	stat, err = file.Stat()
 	if err != nil {
 		file.Close()
+		if predecessor != nil {
+			return nil, fmt.Errorf("%w: stat preallocated file: %v", errBoundaryPublication, err)
+		}
 		return nil, fmt.Errorf("stat file after preallocate: %w", err)
 	}
 
@@ -125,13 +157,25 @@ func NewSegmentWithSize(dataDir string, firstOffset int64, isActive bool, cipher
 	// mmap or buffered writer is set up. This guarantees the header is at offset 0
 	// and leaves the file position at the end of the header for subsequent writes.
 	if isNewFile {
-		if _, err := file.Write(buildSegmentHeader(firstOffset, createdTS)); err != nil {
+		if _, err := file.Write(buildSegmentHeaderWithBoundary(firstOffset, createdTS, predecessor)); err != nil {
 			file.Close()
+			if predecessor != nil {
+				return nil, fmt.Errorf("%w: write header: %v", errBoundaryPublication, err)
+			}
 			return nil, fmt.Errorf("write header: %w", err)
 		}
 		if err := file.Sync(); err != nil {
 			file.Close()
+			if predecessor != nil {
+				return nil, fmt.Errorf("%w: sync header: %v", errBoundaryPublication, err)
+			}
 			return nil, fmt.Errorf("sync header: %w", err)
+		}
+		if predecessor != nil {
+			if err := SyncDirectory(segmentsDir); err != nil {
+				file.Close()
+				return nil, fmt.Errorf("%w: sync segment directory: %v", errBoundaryPublication, err)
+			}
 		}
 		dataEnd = 64
 	}
@@ -140,6 +184,9 @@ func NewSegmentWithSize(dataDir string, firstOffset int64, isActive bool, cipher
 	index, err := NewIndex(dataDir, firstOffset)
 	if err != nil {
 		file.Close()
+		if predecessor != nil {
+			return nil, fmt.Errorf("%w: open index: %v", errBoundaryPublication, err)
+		}
 		return nil, fmt.Errorf("create index: %w", err)
 	}
 
@@ -172,6 +219,7 @@ func NewSegmentWithSize(dataDir string, firstOffset int64, isActive bool, cipher
 		index:           index,
 		recordBuf:       make([]byte, 0, 4096), // Pre-allocate 4KB
 		cipher:          cipher,
+		predecessor:     predecessor,
 	}
 
 	return segment, nil
@@ -224,21 +272,22 @@ func OpenSegment(dataDir string, filename string, cipher *SegmentCipher) (*Segme
 	}
 
 	segment := &Segment{
-		segmentFile:   file,
-		reader:        file,
-		mmapData:      mmapData,
-		mmapWritePos:  stat.Size(), // Start writing at end of existing data
-		mmapSize:      mmapSize,
-		firstOffset:   firstOffset,
-		createdTS:     time.Now().UnixMilli(),
-		isActive:      true, // Opened segments are active by default
-		sizeBytes:     stat.Size(),
-		dataDir:       dataDir,
-		filename:      filename,
-		indexFilename: fmt.Sprintf("%020d.index", firstOffset),
-		index:         index,
-		recordBuf:     make([]byte, 0, 4096),
-		cipher:        cipher,
+		segmentFile:    file,
+		reader:         file,
+		mmapData:       mmapData,
+		mmapWritePos:   stat.Size(), // Start writing at end of existing data
+		mmapSize:       mmapSize,
+		firstOffset:    firstOffset,
+		createdTS:      time.Now().UnixMilli(),
+		isActive:       true, // Opened segments are active by default
+		sizeBytes:      stat.Size(),
+		dataDir:        dataDir,
+		filename:       filename,
+		indexFilename:  fmt.Sprintf("%020d.index", firstOffset),
+		index:          index,
+		recordBuf:      make([]byte, 0, 4096),
+		cipher:         cipher,
+		validAfterTail: -1,
 	}
 
 	// Validate header before scanning records.
@@ -293,13 +342,24 @@ func (s *Segment) readHeader() error {
 	if string(header[0:6]) != "CRNOS1" {
 		return fmt.Errorf("bad header magic: %q", header[0:7])
 	}
-	if header[7] != 1 {
-		return fmt.Errorf("unsupported segment version: %d", header[7])
+	if header[7] != SegmentHeaderVersion {
+		return fmt.Errorf("unsupported segment version: %d (this build requires version %d; older WAL data is not migrated)", header[7], SegmentHeaderVersion)
 	}
 	stored := binary.BigEndian.Uint32(header[60:64])
 	computed := crc32.ChecksumIEEE(header[0:60])
 	if stored != computed {
 		return fmt.Errorf("header CRC mismatch: stored=%08x computed=%08x", stored, computed)
+	}
+	if string(header[32:36]) == boundaryMagic {
+		boundary := &segmentBoundary{
+			first: int64(binary.BigEndian.Uint64(header[36:44])),
+			last:  int64(binary.BigEndian.Uint64(header[44:52])),
+			size:  int64(binary.BigEndian.Uint64(header[52:60])),
+		}
+		if boundary.first < 0 || boundary.last < boundary.first-1 || boundary.last >= s.firstOffset || boundary.size < 64 {
+			return fmt.Errorf("invalid predecessor boundary in segment header")
+		}
+		s.predecessor = boundary
 	}
 	return nil
 }
@@ -307,13 +367,17 @@ func (s *Segment) readHeader() error {
 // buildSegmentHeader returns the 64-byte segment header with magic, version,
 // first offset, created timestamp, and CRC32.
 func buildSegmentHeader(firstOffset, createdTS int64) []byte {
+	return buildSegmentHeaderWithBoundary(firstOffset, createdTS, nil)
+}
+
+func buildSegmentHeaderWithBoundary(firstOffset, createdTS int64, predecessor *segmentBoundary) []byte {
 	header := make([]byte, 64)
 
 	// Magic number "CRNOS1" (7 bytes)
 	copy(header[0:7], []byte("CRNOS1"))
 
 	// Version (1 byte)
-	header[7] = 1
+	header[7] = SegmentHeaderVersion
 
 	// First offset (8 bytes)
 	binary.BigEndian.PutUint64(header[8:16], uint64(firstOffset))
@@ -321,14 +385,69 @@ func buildSegmentHeader(firstOffset, createdTS int64) []byte {
 	// Created timestamp (8 bytes)
 	binary.BigEndian.PutUint64(header[24:32], uint64(createdTS))
 
-	// Reserved (32 bytes for future use)
-	// ...
+	if predecessor != nil {
+		copy(header[32:36], boundaryMagic)
+		binary.BigEndian.PutUint64(header[36:44], uint64(predecessor.first))
+		binary.BigEndian.PutUint64(header[44:52], uint64(predecessor.last))
+		binary.BigEndian.PutUint64(header[52:60], uint64(predecessor.size))
+	}
 
 	// CRC32 of header (4 bytes)
 	crc := crc32.ChecksumIEEE(header[0:60])
 	binary.BigEndian.PutUint32(header[60:64], crc)
 
 	return header
+}
+
+// setPredecessor updates the successor's evidence during an explicit repair.
+// Callers exclude checkpoint copies and appends. A torn
+// header is rejected by its CRC.
+func (s *Segment) setPredecessor(boundary *segmentBoundary) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
+	header := make([]byte, 64)
+	if _, err := s.segmentFile.ReadAt(header, 0); err != nil {
+		return err
+	}
+	clear(header[32:60])
+	if boundary != nil {
+		copy(header[32:36], boundaryMagic)
+		binary.BigEndian.PutUint64(header[36:44], uint64(boundary.first))
+		binary.BigEndian.PutUint64(header[44:52], uint64(boundary.last))
+		binary.BigEndian.PutUint64(header[52:60], uint64(boundary.size))
+	}
+	binary.BigEndian.PutUint32(header[60:64], crc32.ChecksumIEEE(header[:60]))
+	if _, err := s.segmentFile.WriteAt(header, 0); err != nil {
+		return err
+	}
+	if err := s.segmentFile.Sync(); err != nil {
+		return err
+	}
+	s.predecessor = boundary
+	return nil
+}
+
+// markBoundaryDamage compares the recovered prefix with a successor's durable
+// record of the closed segment. Each successor must carry boundary evidence.
+func markBoundaryDamage(segments []*Segment) error {
+	for i := 1; i < len(segments); i++ {
+		previous, boundary := segments[i-1], segments[i].predecessor
+		if boundary == nil {
+			return fmt.Errorf("%w: segment %s has no predecessor boundary", ErrLogDamaged, segments[i].GetFilename())
+		}
+		if boundary.first != previous.firstOffset {
+			continue // A segment may have been intentionally removed by retention.
+		}
+		if previous.lastOffset != boundary.last || previous.sizeBytes != boundary.size {
+			previous.boundaryDamage = true
+			previous.invalidTail = true
+			previous.invalidAt = previous.sizeBytes
+			previous.invalidWhy = fmt.Sprintf("a recovered boundary at offset %d and byte %d, but the next segment records offset %d and byte %d", previous.lastOffset, previous.sizeBytes, boundary.last, boundary.size)
+		}
+	}
+	return nil
 }
 
 // AppendEvent appends a single event to the active segment. indexInterval
@@ -1400,6 +1519,19 @@ func (s *Segment) scan() error {
 	// lastGoodPos, which left mmapWritePos at the preallocated EOF — so the first
 	// append after reopen wrote ~prealloc-size bytes past the data, corrupting
 	// range reads on every restart.
+	// An indexed, independently verified record beyond the scan boundary proves
+	// this is not simply an interrupted final write or preallocated space. Check
+	// before truncating the advisory index, so repeated opens retain the proof.
+	if s.index != nil {
+		offset, err := s.indexedRecordAfter(lastGoodPos, origSizeBytes)
+		if err != nil {
+			return err
+		}
+		s.validAfterTail = offset
+		if offset >= 0 && invalid == "" {
+			invalid = "zero-filled space before a later valid indexed record"
+		}
+	}
 	realDataEnd := lastGoodPos
 	s.sizeBytes = realDataEnd
 	s.invalidTail, s.invalidAt, s.invalidWhy = invalid != "", lastGoodPos, invalid
@@ -1413,7 +1545,7 @@ func (s *Segment) scan() error {
 	// the write cursor is already at the real data end and reads are bounded by
 	// lastOffset. Deliberate truncation (follower realign, retention) still goes
 	// through WAL.TruncateToOffset / truncateToPosition.
-	if realDataEnd < origSizeBytes && s.index != nil {
+	if realDataEnd < origSizeBytes && s.index != nil && s.validAfterTail < 0 {
 		// Reconcile the sparse index so it holds no entries past the real data end
 		// (a genuine corrupt tail could otherwise leave index entries pointing past
 		// lastOffset). s.lastOffset is the last valid event offset.
@@ -1428,6 +1560,38 @@ func (s *Segment) scan() error {
 	}
 
 	return nil
+}
+
+// indexedRecordAfter uses the index only as a hint. A record is evidence of
+// damage only if its length, checksum (and authentication when encrypted),
+// and offset all verify. Stale or missing index entries are not evidence.
+func (s *Segment) indexedRecordAfter(position, fileSize int64) (int64, error) {
+	for _, entry := range s.index.entriesAfter(s.lastOffset) {
+		if entry.FilePosition <= position || entry.FilePosition > fileSize-4 {
+			continue
+		}
+		var lengthBytes [4]byte
+		if _, err := s.segmentFile.ReadAt(lengthBytes[:], entry.FilePosition); err != nil {
+			return -1, fmt.Errorf("read indexed record length: %w", err)
+		}
+		length := int64(binary.BigEndian.Uint32(lengthBytes[:]))
+		if length <= 4 || length > MaxRecordLength || length > fileSize-entry.FilePosition {
+			continue
+		}
+		data := make([]byte, int(length-4))
+		if _, err := s.segmentFile.ReadAt(data, entry.FilePosition+4); err != nil {
+			return -1, fmt.Errorf("read indexed record: %w", err)
+		}
+		plain, err := s.decryptRecord(data, entry.FilePosition+4)
+		if err != nil {
+			continue
+		}
+		event, err := parseEventRecordWithoutLength(plain)
+		if err == nil && event.Offset == entry.Offset {
+			return event.Offset, nil
+		}
+	}
+	return -1, nil
 }
 
 // dataFollows reports whether anything but zero bytes comes next in r. It
