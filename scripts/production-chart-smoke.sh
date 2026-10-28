@@ -29,7 +29,10 @@ kubectl -n "$namespace" create secret generic cronos-db-auth \
   --from-file=jwt-secret="$cert_dir/jwt-secret" --from-file=policy.json="$cert_dir/policy.json"
 kubectl -n "$namespace" create secret generic cronos-db-encryption --from-file=master.key="$cert_dir/master.key"
 
+# The kind cluster has one node, and production values require one pod per
+# node; check-production-chart.py asserts that rule on the rendered chart.
 helm install cronos charts/cronos-db -n "$namespace" -f charts/cronos-db/values-production.yaml \
+  --set podAntiAffinity=soft \
   --set replicaCount=3 --set image.repository=cronos-db --set image.tag=ci --set image.pullPolicy=Never \
   --set config.partitionCount=3 --set config.bloomCapacity=1000 --set config.segmentSizeBytes=1048576 \
   --set persistence.size=1Gi --set metrics.serviceMonitor.enabled=false --set alerts.enabled=false \
