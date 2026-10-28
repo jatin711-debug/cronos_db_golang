@@ -1,5 +1,12 @@
 # Production release requirements
 
+**v0.10.0 fixes the thirteen defects of the
+[1.0 readiness review](RELEASE_READINESS_1.0.0_2026-10-28.md)** and keeps
+v0.9.0 data directories. Message IDs are unique per topic and v0.9.0
+duplicate records are not carried over; see the
+[v0.10.0 notes](RELEASE_V0.10.0.md). The review's release gates (a multi-host
+soak, recovery and upgrade drills, machine or power-loss testing) are open.
+
 **v0.9.0 changes the WAL segment format to version 2.** It requires new data
 directories on every node; version-1 data and backups are not migrated, older
 binaries cannot read the new files, and mixed-version clusters are
@@ -16,6 +23,20 @@ tracks unresolved guarantees, and
 [current release limits](#what-v080-was-released-without) are listed
 below. A green CI run is necessary but does not establish the complete release
 acceptance contract.
+
+## v0.10.0 release
+
+The [v0.10.0 notes](RELEASE_V0.10.0.md) describe the fixes for the thirteen
+defects of the [1.0 readiness review](RELEASE_READINESS_1.0.0_2026-10-28.md),
+among them two ways to lose acknowledged writes (replica placement changes
+and retried publishes after a change of leader), scheduler drift, duplicate
+detection that forgot accepted IDs, and an encrypted node that could not
+restart after a crash. The chart and default image tag are `0.10.0`.
+Publication status, checksums and the exact deployment digest are on the
+[release page](https://github.com/jatin711-debug/cronos_db_golang/releases/tag/v0.10.0).
+Use its `IMAGE_DIGEST` and publication evidence to identify the tested image.
+v0.9.0 data directories are kept; duplicate records are not. This release
+makes no new capacity claim.
 
 ## v0.9.0 release
 
