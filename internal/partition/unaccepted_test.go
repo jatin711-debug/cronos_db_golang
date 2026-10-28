@@ -53,7 +53,7 @@ func TestHeldPublishesAreAcceptedInOrderAndOnce(t *testing.T) {
 	}
 	outcome := func(id string) (dedup.Outcome, bool) {
 		t.Helper()
-		o, _, found, err := p.DedupStore.Outcome(id)
+		o, _, found, err := p.DedupStore.Outcome(dedup.Key("orders", id))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -146,10 +146,10 @@ func TestRecoverDedupFromWALRecordsLogPosition(t *testing.T) {
 		t.Fatal(err)
 	}
 	// m0 was accepted, m1 only claimed, m2 has no record at all.
-	if err := p.DedupStore.Put("m0", 0, now); err != nil {
+	if err := p.DedupStore.Put(dedup.Key("orders", "m0"), 0, now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := p.DedupStore.IsDuplicate("m1", dedup.ClaimedOffset); err != nil {
+	if _, err := p.DedupStore.IsDuplicate(dedup.Key("orders", "m1"), dedup.ClaimedOffset); err != nil {
 		t.Fatal(err)
 	}
 
@@ -160,7 +160,7 @@ func TestRecoverDedupFromWALRecordsLogPosition(t *testing.T) {
 		offset  int64
 	}{{dedup.Accepted, 0}, {dedup.Appended, 1}, {dedup.Appended, 2}}
 	for i, w := range want {
-		outcome, offset, found, err := p.DedupStore.Outcome(fmt.Sprintf("m%d", i))
+		outcome, offset, found, err := p.DedupStore.Outcome(dedup.Key("orders", fmt.Sprintf("m%d", i)))
 		if err != nil || !found || outcome != w.outcome || offset != w.offset {
 			t.Errorf("m%d after recovery: %v at %d (found=%v err=%v), want %v at %d", i, outcome, offset, found, err, w.outcome, w.offset)
 		}

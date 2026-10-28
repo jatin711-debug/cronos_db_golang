@@ -47,6 +47,9 @@ type Config struct {
 	RetryBackoff time.Duration
 	// MaxDeliveryCredits is the default credit window for a subscription (flow control).
 	MaxDeliveryCredits int
+	// MaxConsumerGroups is how many consumer groups a partition holds at most;
+	// 0 means the default and a negative value no limit.
+	MaxConsumerGroups int
 	// DeliveryPollMS is how often the delivery worker polls the ready queue (milliseconds).
 	DeliveryPollMS int
 	// DedupTTLHours is how long message IDs are retained in the dedup store.

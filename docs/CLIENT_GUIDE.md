@@ -93,7 +93,11 @@ are batched asynchronously by default. Delivery is at least once, so handlers
 should tolerate duplicates and partial processing of a batch.
 
 For manual control, use `AckModeManual` and `Delivery.AckSuccess` or
-`Delivery.AckFailure` to queue acknowledgements explicitly.
+`Delivery.AckFailure` to queue acknowledgements explicitly. With
+`CommitStrategySync` these calls return the server's answer: `nil` once it has
+recorded the acknowledgement, an error when it refused it, the stream ended
+first or the context expired. With the default asynchronous strategy they
+return once the acknowledgement is queued.
 See the SDK reference for checkpoint stores, retries, and flow-control options.
 
 ## Run the end-to-end demo
@@ -211,7 +215,7 @@ documents every field.
 
 | Field | Default | What it is for |
 |-------|---------|----------------|
-| `AutoMessageID` | `true` | Generate a message ID when a message has none. Set your own IDs when a retry after a crash must not publish twice: the server does not store a message ID again within `--dedup-ttl` |
+| `AutoMessageID` | `true` | Generate a message ID when a message has none. Set your own IDs when a retry after a crash must not publish twice: the server does not store a message ID again on the same topic within `--dedup-ttl`. The same ID on two topics names two events |
 | `DefaultAllowDuplicate` | `false` | Publish even if the message ID was already stored. For tests |
 | `Codec` | JSON | Encodes `Message.Value` when `Payload` is empty |
 | `MaxPayloadBytes` | `MaxSendMsgSize` | Refuse larger payloads before sending them |
@@ -235,9 +239,9 @@ documents every field.
 | `MaxBufferSize` | `1024` | How many deliveries may be unacknowledged at once (at most 50000). Higher means more throughput and more events redelivered after a crash |
 | `WorkerConcurrency` | `1` | Handler goroutines per partition stream |
 | `AckMode`, `AutoAck` | auto, `true` | `AckModeAuto` acknowledges when the handler returns; `AckModeManual` needs `Delivery.AckSuccess` or `AckFailure`. `AutoAck` is the older compatibility field; prefer an explicit `AckMode` |
-| `CommitStrategy` | async | Async batches acknowledgements (`AckBatchSize` 64, every `AckFlushInterval` 50ms); sync waits for each one |
+| `CommitStrategy` | async | Async batches acknowledgements (`AckBatchSize` 64, every `AckFlushInterval` 50ms); sync sends each one at once and returns the server's answer from `Ack` |
 | `AckQueueSize` | `4096` | Acknowledgements waiting to be sent |
-| `CheckpointStore`, `ResumeCheckpoint` | none, `true` | Optional local store of progress, used as `StartOffset` for a single pinned partition |
+| `CheckpointStore`, `ResumeCheckpoint` | none, `true` | Optional local store of progress, used as `StartOffset` for a single pinned partition. It holds the group's completion floor as the server reports it: every offset below it is complete. Events are delivered in schedule order, not offset order, so the offset of the last acknowledged delivery is not saved |
 | `MaxPayloadBytes` | `MaxRecvMsgSize` | Larger deliveries skip the handler and, in auto mode, count as failed |
 | `PreferredCodec` | JSON | Codec for `Delivery.Decode` |
 | `NodeAddress` | empty | Try this node first |

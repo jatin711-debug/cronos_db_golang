@@ -5,8 +5,10 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"strconv"
 	"strings"
 	"sync"
@@ -312,10 +314,12 @@ const (
 	duplicateReleased
 )
 
-// classifyDuplicate looks up what became of the earlier publish of messageID.
-// For duplicateAppended it returns that publish's event as read from the log.
-func classifyDuplicate(p *partition.Partition, messageID string) (duplicateKind, *types.Event, error) {
-	outcome, offset, found, err := p.DedupStore.Outcome(messageID)
+// classifyDuplicate looks up what became of the earlier publish of event's
+// message ID on its topic. For duplicateAppended it returns that publish's
+// event as read from the log.
+func classifyDuplicate(p *partition.Partition, event *types.Event) (duplicateKind, *types.Event, error) {
+	key := dedup.EventKey(event)
+	outcome, offset, found, err := p.DedupStore.Outcome(key)
 	if err != nil || !found {
 		// Not found: the holder released the ID between the claim attempt and
 		// this lookup. The caller's retry will claim it.
@@ -328,7 +332,7 @@ func classifyDuplicate(p *partition.Partition, messageID string) (duplicateKind,
 		return duplicateInProgress, nil, nil
 	}
 
-	logged, inLog, err := p.LoggedEvent(messageID, offset)
+	logged, inLog, err := p.LoggedEvent(event.GetTopic(), event.GetMessageId(), offset)
 	if err != nil {
 		return duplicateInProgress, nil, err
 	}
@@ -338,11 +342,11 @@ func classifyDuplicate(p *partition.Partition, messageID string) (duplicateKind,
 	// The log does not hold the earlier event any more, for instance because a
 	// newer leader replaced this node's unreplicated tail. That publish cannot
 	// complete, so its record must not keep refusing the ID.
-	released, err := p.DedupStore.ReleaseIf(messageID, dedup.AppendedAt(offset))
+	released, err := p.DedupStore.ReleaseIf(key, dedup.AppendedAt(offset))
 	if err != nil || !released {
 		return duplicateInProgress, nil, err
 	}
-	taken, err := p.DedupStore.IsDuplicate(messageID, dedup.ClaimedOffset)
+	taken, err := p.DedupStore.IsDuplicate(key, dedup.ClaimedOffset)
 	if err != nil || taken {
 		return duplicateInProgress, nil, err
 	}
@@ -569,7 +573,7 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 			return nil, status.Error(codes.Unavailable, "dedup manager not initialized on this node")
 		}
 
-		isDuplicate, err := dedupMgr.IsDuplicate(event.GetMessageId(), -1) // offset will be assigned
+		isDuplicate, err := dedupMgr.IsDuplicate(dedup.EventKey(event), -1) // offset will be assigned
 		if err != nil {
 			return &types.PublishResponse{
 				Success: false,
@@ -577,7 +581,7 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 			}, nil
 		}
 		if isDuplicate {
-			kind, logged, err := classifyDuplicate(partitionInternal, event.GetMessageId())
+			kind, logged, err := classifyDuplicate(partitionInternal, event)
 			switch {
 			case err != nil:
 				return &types.PublishResponse{
@@ -626,7 +630,7 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 		reservation, allowed = h.tenantAccountant.ReservePublishBatchWithReceipt(tenantID, 1, int64(len(event.Payload)))
 		if !allowed {
 			if dedupMgr != nil {
-				if rbErr := dedupMgr.RollbackBatch([]string{event.GetMessageId()}); rbErr != nil {
+				if rbErr := dedupMgr.RollbackBatch([]string{dedup.EventKey(event)}); rbErr != nil {
 					slog.Warn("dedup rollback after quota refusal failed",
 						"messageId", event.GetMessageId(), "error", rbErr)
 				}
@@ -651,7 +655,7 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 		if dedupMgr == nil {
 			return
 		}
-		if rbErr := dedupMgr.RollbackBatch([]string{event.GetMessageId()}); rbErr != nil {
+		if rbErr := dedupMgr.RollbackBatch([]string{dedup.EventKey(event)}); rbErr != nil {
 			slog.Warn("dedup rollback after WAL append failure failed",
 				"messageId", event.GetMessageId(), "error", rbErr)
 		}
@@ -727,7 +731,7 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 	}
 
 	if !req.AllowDuplicate {
-		if err := partitionInternal.DedupStore.Put(event.MessageId, event.Offset, event.CreatedTs); err != nil {
+		if err := partitionInternal.DedupStore.Put(dedup.EventKey(event), event.Offset, event.CreatedTs); err != nil {
 			return nil, status.Errorf(codes.Internal, "record publish completion: %v", err)
 		}
 	}
@@ -940,7 +944,7 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 			messageIDs := make([]string, len(evts))
 			offsets := make([]int64, len(evts))
 			for i, e := range evts {
-				messageIDs[i] = e.GetMessageId()
+				messageIDs[i] = dedup.EventKey(e)
 				offsets[i] = -1
 			}
 			dedupMgr := partitionInternals[pid].DedupStore
@@ -970,7 +974,7 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 				// A recorded ID alone does not prove the previous publish was
 				// replicated or scheduled. Only an accepted one is a duplicate
 				// that needs nothing more.
-				kind, logged, err := classifyDuplicate(partitionInternals[pid], e.MessageId)
+				kind, logged, err := classifyDuplicate(partitionInternals[pid], e)
 				if kind == duplicateReleased {
 					kept = append(kept, e)
 					continue
@@ -1015,7 +1019,7 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 				if !req.AllowDuplicate {
 					ids := make([]string, len(events))
 					for i, event := range events {
-						ids[i] = event.MessageId
+						ids[i] = dedup.EventKey(event)
 					}
 					if err := partitionInternals[pid].DedupStore.RollbackBatch(ids); err != nil {
 						slog.Warn("dedup rollback after batch quota refusal failed", "partition", pid, "error", err)
@@ -1094,7 +1098,7 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 				}
 				ids := make([]string, len(evts))
 				for i, e := range evts {
-					ids[i] = e.GetMessageId()
+					ids[i] = dedup.EventKey(e)
 				}
 				if rbErr := partitionInternal.DedupStore.RollbackBatch(ids); rbErr != nil {
 					slog.Warn("dedup rollback after WAL append failure failed",
@@ -1183,7 +1187,7 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 				offsets := make([]int64, len(evts))
 				createdTS := make([]int64, len(evts))
 				for i, event := range evts {
-					ids[i], offsets[i], createdTS[i] = event.MessageId, event.Offset, event.CreatedTs
+					ids[i], offsets[i], createdTS[i] = dedup.EventKey(event), event.Offset, event.CreatedTs
 				}
 				if err := partitionInternal.DedupStore.PutBatch(ids, offsets, createdTS); err != nil {
 					setError(int32(len(evts)), fmt.Sprintf("record publish completion: %v", err))
@@ -1268,6 +1272,12 @@ func (h *EventServiceHandler) Subscribe(stream grpc.BidiStreamingServer[types.Su
 	if req.GetTopic() == "" {
 		return status.Error(codes.InvalidArgument, "topic is required")
 	}
+	if err := consumer.ValidateGroupID(req.GetConsumerGroup()); err != nil {
+		return status.Error(codes.InvalidArgument, err.Error())
+	}
+	if err := consumer.ValidateMemberID(req.GetSubscriptionId()); err != nil {
+		return status.Error(codes.InvalidArgument, err.Error())
+	}
 	// Topic-level authorization
 	if err := h.checkTopicAuth(ctx, req.GetTopic(), "subscribe"); err != nil {
 		return err
@@ -1341,7 +1351,7 @@ func (h *EventServiceHandler) Subscribe(stream grpc.BidiStreamingServer[types.Su
 	}
 	if partitionInternal.Dispatcher != nil {
 		if err := partitionInternal.Dispatcher.SubscribeWithInit(subscription, joinGroup); err != nil {
-			return fmt.Errorf("register subscription: %w", err)
+			return groupStatus(fmt.Errorf("register subscription: %w", err))
 		}
 		// Ensure cleanup on disconnect
 		defer func() {
@@ -1351,7 +1361,7 @@ func (h *EventServiceHandler) Subscribe(stream grpc.BidiStreamingServer[types.Su
 			}
 		}()
 	} else if err := joinGroup(); err != nil {
-		return err
+		return groupStatus(err)
 	}
 	defer func() {
 		if err := cm.LeaveGroup(req.GetConsumerGroup(), req.GetSubscriptionId()); err != nil {
@@ -1364,6 +1374,17 @@ func (h *EventServiceHandler) Subscribe(stream grpc.BidiStreamingServer[types.Su
 		origin = max(origin, req.GetStartOffset())
 	}
 	return h.redriveRetained(stream.Context(), partitionInternal, req.GetConsumerGroup(), req.GetTopic(), origin)
+}
+
+// groupStatus gives a refused consumer group the status code that says why.
+func groupStatus(err error) error {
+	switch {
+	case errors.Is(err, consumer.ErrInvalidGroup):
+		return status.Error(codes.InvalidArgument, err.Error())
+	case errors.Is(err, consumer.ErrTooManyGroups):
+		return status.Error(codes.ResourceExhausted, err.Error())
+	}
+	return err
 }
 
 const (
@@ -1667,10 +1688,17 @@ func (h *EventServiceHandler) processAcks(ctx context.Context, acks []*types.Ack
 	return responses
 }
 
+// minReplaySpeed bounds the pause of a replay at speed s, 10 ms / s between
+// events, to 10 s. A speed of 1e-9 asked for months.
+const minReplaySpeed = 0.001
+
 // Replay handles replay requests
 func (h *EventServiceHandler) Replay(req *types.ReplayRequest, stream types.EventService_ReplayServer) error {
 	if req.GetTopic() == "" {
 		return status.Error(codes.InvalidArgument, "topic is required")
+	}
+	if speed := req.GetSpeed(); speed != 0 && (!(speed >= minReplaySpeed) || math.IsInf(speed, 1)) {
+		return status.Errorf(codes.InvalidArgument, "speed must be 0 (as fast as possible) or at least %g", minReplaySpeed)
 	}
 	// Topic-level authorization: Replay reads full partition history, so it
 	// requires at least subscribe permission on the topic. Skipped when auth is

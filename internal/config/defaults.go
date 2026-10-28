@@ -50,6 +50,9 @@ const (
 	DefaultMaxRetries = 5
 	// DefaultMaxDeliveryCredits is the default per-subscription credit budget.
 	DefaultMaxDeliveryCredits = 1000
+	// DefaultMaxConsumerGroups is how many consumer groups a partition holds
+	// at most. Subscribe creates a group for any new name, and groups are kept.
+	DefaultMaxConsumerGroups = 10_000
 	// DefaultDeliveryPollMS is the delivery worker poll interval in milliseconds.
 	DefaultDeliveryPollMS = 50
 

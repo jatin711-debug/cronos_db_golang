@@ -3,6 +3,7 @@
 package consumer
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -30,9 +31,54 @@ type Subscription struct {
 	quit chan struct{}
 }
 
+// Limits on what clients can create. Subscribe creates a group for whatever
+// name it is given, and a group is kept, with its progress, after the
+// subscription ends: without limits one principal could fill a node's memory
+// and disk with groups.
+const (
+	// MaxGroupIDLength is the longest consumer group name, in bytes.
+	MaxGroupIDLength = 255
+	// MaxMemberIDLength is the longest member (subscription) ID, in bytes.
+	MaxMemberIDLength = 255
+	// DefaultMaxGroups is how many consumer groups a partition holds at most
+	// unless SetMaxGroups says otherwise.
+	DefaultMaxGroups = 10_000
+)
+
+var (
+	// ErrInvalidGroup is returned for a group name or member ID that is empty
+	// or too long.
+	ErrInvalidGroup = errors.New("invalid consumer group")
+	// ErrTooManyGroups is returned for a new group on a partition that holds
+	// as many as it may.
+	ErrTooManyGroups = errors.New("too many consumer groups")
+)
+
+// ValidateGroupID checks a consumer group name.
+func ValidateGroupID(groupID string) error {
+	switch {
+	case groupID == "":
+		return fmt.Errorf("%w: the group name is empty", ErrInvalidGroup)
+	case len(groupID) > MaxGroupIDLength:
+		return fmt.Errorf("%w: the group name is %d bytes, longer than %d", ErrInvalidGroup, len(groupID), MaxGroupIDLength)
+	}
+	return nil
+}
+
+// ValidateMemberID checks a member (subscription) ID. Empty is allowed.
+func ValidateMemberID(memberID string) error {
+	if len(memberID) > MaxMemberIDLength {
+		return fmt.Errorf("%w: the subscription ID is %d bytes, longer than %d", ErrInvalidGroup, len(memberID), MaxMemberIDLength)
+	}
+	return nil
+}
+
 // GroupManager manages consumer groups, membership, rebalancing, and offset commits.
 type GroupManager struct {
-	mu          sync.RWMutex
+	mu sync.RWMutex
+	// maxGroups is how many groups may exist; 0 means DefaultMaxGroups and a
+	// negative value no limit. Guarded by mu.
+	maxGroups   int
 	groups      map[string]*types.ConsumerGroup
 	partitions  map[int32]*types.Partition // partition_id -> partition
 	offsetStore *OffsetStore               // persistent offset storage
@@ -64,6 +110,30 @@ func NewGroupManager() *GroupManager {
 		groups:     make(map[string]*types.ConsumerGroup),
 		partitions: make(map[int32]*types.Partition),
 	}
+}
+
+// SetMaxGroups sets how many groups may exist: 0 means DefaultMaxGroups and a
+// negative value no limit. Groups that exist already are kept either way.
+func (g *GroupManager) SetMaxGroups(n int) {
+	g.mu.Lock()
+	g.maxGroups = n
+	g.mu.Unlock()
+}
+
+// admitGroupLocked checks that a group named groupID may be created. The
+// caller holds g.mu.
+func (g *GroupManager) admitGroupLocked(groupID string) error {
+	if err := ValidateGroupID(groupID); err != nil {
+		return err
+	}
+	limit := g.maxGroups
+	if limit == 0 {
+		limit = DefaultMaxGroups
+	}
+	if limit > 0 && len(g.groups) >= limit {
+		return fmt.Errorf("%w: the partition holds %d, the most it may; delete groups that are no longer used, or raise --max-consumer-groups", ErrTooManyGroups, len(g.groups))
+	}
+	return nil
 }
 
 // NewGroupManagerWithStore creates a group manager backed by a persistent OffsetStore
@@ -113,6 +183,9 @@ func (g *GroupManager) CreateGroup(groupID, topic string, partitions []int32) er
 	// Check if group already exists
 	if _, exists := g.groups[groupID]; exists {
 		return fmt.Errorf("group %s already exists", groupID)
+	}
+	if err := g.admitGroupLocked(groupID); err != nil {
+		return err
 	}
 
 	// Create consumer group
@@ -230,8 +303,14 @@ func (g *GroupManager) JoinGroup(groupID, memberID, address, topic string, parti
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
+	if err := ValidateMemberID(memberID); err != nil {
+		return err
+	}
 	group, exists := g.groups[groupID]
 	if !exists {
+		if err := g.admitGroupLocked(groupID); err != nil {
+			return err
+		}
 		// Auto-create group if it doesn't exist
 		group = &types.ConsumerGroup{
 			GroupID:          groupID,

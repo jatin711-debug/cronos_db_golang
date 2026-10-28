@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -16,6 +17,14 @@ const (
 	indexMagic        = "CRNIDX1"
 	indexVersion      = 1
 	indexSyncInterval = 100 // Sync every N entries for performance
+
+	// indexWriteBufSize holds a whole number of entries. Entries are written
+	// one at a time, so a full buffer then always ends at an entry boundary and
+	// what it puts out on its own is whole entries. A 64 KiB buffer put out
+	// 65536 bytes, 16 bytes into an entry: a crash before the next flush left
+	// a partial entry, and the entries appended after the restart were read
+	// 16 bytes off from the one after it.
+	indexWriteBufSize = indexEntrySize * 2730
 )
 
 // IndexEntry is one sparse index entry mapping an event to a byte position.
@@ -59,7 +68,7 @@ func NewIndex(dataDir string, segmentFirstOffset int64) (*Index, error) {
 	idx := &Index{
 		entries:  make([]IndexEntry, 0),
 		file:     file,
-		writer:   bufio.NewWriterSize(file, 64*1024), // 64KB buffer
+		writer:   bufio.NewWriterSize(file, indexWriteBufSize),
 		filePath: filePath,
 	}
 
@@ -72,7 +81,12 @@ func NewIndex(dataDir string, segmentFirstOffset int64) (*Index, error) {
 	return idx, nil
 }
 
-// load reads index entries from disk
+// load reads index entries from disk. It keeps the entries up to the first one
+// that cannot be right, and cuts the file there: a partial entry at the end,
+// which a crash during a write leaves, or an entry whose offset or position
+// does not follow the one before it. Entries appended later are then written
+// on a whole-entry boundary. The index only says where to start reading; what
+// is cut is found again by reading the segment.
 func (idx *Index) load() error {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
@@ -111,9 +125,23 @@ func (idx *Index) load() error {
 			Offset:       int64(binary.BigEndian.Uint64(entryBytes[8:16])),
 			FilePosition: int64(binary.BigEndian.Uint64(entryBytes[16:24])),
 		}
+		if entry.FilePosition < 64 || entry.Offset < 0 {
+			break
+		}
+		if n := len(idx.entries); n > 0 && (entry.Offset <= idx.entries[n-1].Offset || entry.FilePosition <= idx.entries[n-1].FilePosition) {
+			break
+		}
 		idx.entries = append(idx.entries, entry)
 	}
 
+	if keep := int64(len(idx.entries)) * indexEntrySize; keep != stat.Size() {
+		log.Printf("[INDEX] %s: keeping the first %d bytes; the %d after them do not hold valid entries",
+			filepath.Base(idx.filePath), keep, stat.Size()-keep)
+		// By path: on Windows the append-only handle cannot change the size.
+		if err := os.Truncate(idx.filePath, keep); err != nil {
+			return fmt.Errorf("cut index after its last valid entry: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -312,7 +340,7 @@ func (idx *Index) rewriteLocked() error {
 		return fmt.Errorf("reopen index: %w", err)
 	}
 	idx.file = newFile
-	idx.writer = bufio.NewWriterSize(newFile, 64*1024)
+	idx.writer = bufio.NewWriterSize(newFile, indexWriteBufSize)
 	return nil
 }
 

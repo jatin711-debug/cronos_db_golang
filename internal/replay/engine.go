@@ -133,7 +133,16 @@ func (r *ReplayEngine) ReplayStream(ctx context.Context, req *ReplayRequest, eve
 		}
 
 		if delay > 0 {
-			time.Sleep(delay)
+			// Cancellation ends the pause. A plain sleep kept the replay,
+			// its handler and the chunk it holds for the whole delay after
+			// the client had gone.
+			pause := time.NewTimer(delay)
+			select {
+			case <-ctx.Done():
+				pause.Stop()
+				return ctx.Err()
+			case <-pause.C:
+			}
 		}
 	}
 }

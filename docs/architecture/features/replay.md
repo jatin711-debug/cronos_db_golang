@@ -19,6 +19,12 @@ Replay serves historical data from WAL by time or offset, enabling debugging, ba
 
 ## Production Decisions
 
+- `speed` paces a replay at 10 ms / `speed` between events: 0 sends as fast as
+  the client takes them, and other values must be at least 0.001 (10 s between
+  events); anything else is refused with `INVALID_ARGUMENT`. Cancelling a
+  replay ends its pause. Before 1.0 the pause was a plain sleep, and a tiny
+  speed asked for months of it: a cancelled replay kept its handler and the
+  chunk of log it held until the sleep ended.
 - A replay reads the log 4 MiB at a time (`replayChunkBytes`) and sends each
   event before it reads on, so what it holds does not depend on the size of
   the range. The range is fixed when the replay starts: an event appended

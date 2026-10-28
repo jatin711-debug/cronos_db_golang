@@ -19,8 +19,9 @@ import (
 
 // Backup writes the durable state of every loaded partition to dest: the event
 // log including its active segment, consumer groups with their offsets and
-// completion records, the dedup store, the dead-letter queue and the fencing
-// epoch. storage.RestoreBackup puts it back into a fresh data directory.
+// completion records, the dedup store, the dead-letter queue, the change
+// feed's export position and the fencing epoch. storage.RestoreBackup puts it
+// back into a fresh data directory.
 //
 // The node keeps serving while the backup is taken. The logs of all partitions
 // are cut at one instant, recorded in the manifest: each backed-up log holds
@@ -210,6 +211,17 @@ func (p *Partition) backupStores(dir string) (storage.BackupPartition, error) {
 		entry.Components = append(entry.Components, "lifecycle")
 	case !os.IsNotExist(err):
 		return entry, fmt.Errorf("lifecycle format: %w", err)
+	}
+	// The change feed's position: without it a restored partition took its
+	// feed for newly switched on and started at the end of the log, and the
+	// events not yet exported when the backup was taken were never exported.
+	// It is taken before the log is cut, so it is never ahead of the log;
+	// what was exported after it is exported again.
+	switch err := copyIfPresent(filepath.Join(p.DataDir, feedCursorFile), filepath.Join(dir, feedCursorFile)); {
+	case err == nil:
+		entry.Components = append(entry.Components, "changefeed")
+	case !os.IsNotExist(err):
+		return entry, fmt.Errorf("change feed position: %w", err)
 	}
 	return entry, nil
 }

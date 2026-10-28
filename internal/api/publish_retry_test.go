@@ -86,7 +86,7 @@ func (p *publisher) scheduled() int64 { return p.p.Scheduler.GetTimingWheelDepth
 
 func (p *publisher) outcome(messageID string) dedup.Outcome {
 	p.t.Helper()
-	outcome, _, found, err := p.p.DedupStore.Outcome(messageID)
+	outcome, _, found, err := p.p.DedupStore.Outcome(dedup.Key("orders", messageID))
 	if err != nil || !found {
 		p.t.Fatalf("no record for %s (found=%v, err=%v)", messageID, found, err)
 	}

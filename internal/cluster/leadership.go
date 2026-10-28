@@ -489,8 +489,9 @@ func (m *Manager) electNewLeader(partitionID int32, info *PartitionInfo) {
 	}
 
 	alive := m.aliveNodes()
+	members := electionMembers(*info)
 	candidates := make(map[string]string)
-	for _, id := range info.Replicas {
+	for _, id := range members {
 		// A leader counted dead is not asked. Once the partition is recorded
 		// as having none, every replica that can be reached is a candidate,
 		// the former leader too if it has come back.
@@ -507,7 +508,7 @@ func (m *Manager) electNewLeader(partitionID int32, info *PartitionInfo) {
 	var positions map[string]ReplicaPosition
 	if hasPositions {
 		positions = m.fencedPositions(partitionID, candidates, fenceEpoch)
-		need, guaranteed := cleanElectionQuorum(len(info.Replicas), m.config.MinInSyncReplicas)
+		need, guaranteed := cleanElectionQuorum(len(members), m.config.MinInSyncReplicas)
 		if guaranteed && len(positions) < need {
 			log.Printf("[CLUSTER] Partition %d: not electing a leader, only %d of the %d replicas needed to rule out losing acknowledged writes answered",
 				partitionID, len(positions), need)
@@ -528,15 +529,18 @@ func (m *Manager) electNewLeader(partitionID int32, info *PartitionInfo) {
 		return
 	}
 
+	// A retiring replica can be the most complete one. It leads, and is a
+	// replica again; the ring moves leadership on later through a handoff.
 	updated := &PartitionInfo{
 		ID:             partitionID,
 		Topic:          info.Topic,
 		LeaderID:       newLeader,
-		Replicas:       info.Replicas,
+		Replicas:       withNode(info.Replicas, newLeader),
 		ISR:            info.ISR,
 		Epoch:          epochAbove(positions, info.Epoch+1),
 		State:          PartitionStateOnline,
 		ReplicaOffsets: info.ReplicaOffsets,
+		Retiring:       slices.DeleteFunc(slices.Clone(info.Retiring), func(id string) bool { return id == newLeader }),
 	}
 	if store != nil {
 		if err := store.ProposePartition(updated, false); err != nil {
@@ -616,6 +620,22 @@ func (m *Manager) reconcileLocalLeadership() {
 			log.Printf("[CLUSTER] reconcile: skip partition %d with no positive leadership epoch", partitionID)
 			continue
 		}
+		// A leader replicates to the replicas of its assignment and to no
+		// other node. The followers placement has dropped go before the
+		// assignment's epoch is taken up: a leader that reports the epoch
+		// counts no acknowledgement of theirs any more (see releaseRetired).
+		// It used to keep them for as long as it ran, and a dropped node
+		// took up the partition again to store what it was sent.
+		if pruner, ok := pa.(followerPruner); ok && replicated && isCommitted {
+			keep := followers
+			if transferTo != "" {
+				keep = append(append([]string(nil), followers...), transferTo)
+			}
+			if err := pruner.RetainFollowers(partitionID, keep); err != nil {
+				log.Printf("[CLUSTER] reconcile: drop former followers of partition %d failed: %v", partitionID, err)
+				continue
+			}
+		}
 		// Idempotent: once the local replication leader exists this only
 		// refreshes its epoch.
 		if err := pa.PromoteToLeader(partitionID, epoch); err != nil {
@@ -648,18 +668,19 @@ type partitionReleaser interface {
 	ReleasePartition(partitionID int32) error
 }
 
-// holdsReplica reports whether nodeID is the leader, a replica or the handoff
-// target of a committed assignment.
+// followerPruner is implemented by a partition accessor that can stop a
+// leader replicating to nodes that are no longer replicas.
+type followerPruner interface {
+	RetainFollowers(partitionID int32, keep []string) error
+}
+
+// holdsReplica reports whether nodeID is the leader, a replica, a retiring
+// former replica or the handoff target of a committed assignment.
 func holdsReplica(info PartitionInfo, nodeID string) bool {
 	if info.LeaderID == nodeID || info.TransferTo == nodeID {
 		return true
 	}
-	for _, replica := range info.Replicas {
-		if replica == nodeID {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(info.Replicas, nodeID) || slices.Contains(info.Retiring, nodeID)
 }
 
 // pullForHandoff copies a partition from its leader to this node, which is
@@ -835,9 +856,124 @@ func (m *Manager) syncClusterState() {
 		if !placementChanged {
 			continue
 		}
+		if m.tracksRetiring(hasPositions) {
+			updated.Retiring = retiringAfter(existing, updated.Replicas)
+		} else {
+			updated.Retiring = nil
+		}
 		if err := store.ProposePartition(&updated, false); err != nil {
 			log.Printf("[CLUSTER] Failed to update partition %d metadata in Raft: %v", partitionID, err)
 		}
+	}
+	if hasPositions {
+		m.releaseRetired(store, alive)
+	}
+}
+
+// tracksRetiring reports whether replicas that placement drops are kept on
+// the retiring list. That takes replica positions to end, and with one
+// in-sync replica an acknowledged write may be on the leader alone anyway.
+func (m *Manager) tracksRetiring(hasPositions bool) bool {
+	return hasPositions && m.config.MinInSyncReplicas > 1
+}
+
+// retiringAfter is the retiring list of a partition whose replicas become
+// replicas: the replicas it drops and those already retiring, less any that
+// placement takes back.
+//
+// Placement used to drop a replica at once. A replica that joined in its
+// place starts empty, and the one that stayed may be behind: until they had
+// caught up, the dropped replica could hold the only copy, besides the
+// leader's, of writes acknowledged with its help. Elections ask only the
+// replicas, so a failure of the leader then elected one without them, and
+// growing a cluster by two nodes could elect an empty replica.
+func retiringAfter(existing PartitionInfo, replicas []string) []string {
+	var retiring []string
+	for _, id := range append(append([]string(nil), existing.Retiring...), existing.Replicas...) {
+		if !slices.Contains(replicas, id) && !slices.Contains(retiring, id) {
+			retiring = append(retiring, id)
+		}
+	}
+	return retiring
+}
+
+// electionMembers is who an election asks: the replicas and the retiring
+// former replicas.
+func electionMembers(info PartitionInfo) []string {
+	members := append([]string(nil), info.Replicas...)
+	for _, id := range info.Retiring {
+		if !slices.Contains(members, id) {
+			members = append(members, id)
+		}
+	}
+	return members
+}
+
+// retireMark is what a partition's leader held once it had taken up the
+// assignment that retired replicas, and so had stopped replicating to them.
+type retireMark struct {
+	epoch   int64
+	through ReplicaPosition
+}
+
+// releaseRetired ends the retiring of former replicas once nothing that was
+// acknowledged can be on them alone. The caller holds leadershipMu.
+//
+// A leader replicates only to the replicas of the assignment it has taken up
+// (see reconcileLocalLeadership), and it reports that assignment's epoch once
+// it has. From then on a publish is acknowledged with the help of replicas
+// alone; everything acknowledged before is within the log the leader held at
+// that point. When minISR-1 replicas other than the leader hold that log too,
+// every acknowledged write is on minISR replicas, and the retiring ones may go.
+// The leader's position is taken in one round and compared in a later one, so
+// replicas that trail a busy leader by a little can still get past it.
+func (m *Manager) releaseRetired(store assignmentStore, alive map[string]string) {
+	need := m.config.MinInSyncReplicas - 1
+	for partitionID, info := range store.Partitions() {
+		if len(info.Retiring) == 0 || info.TransferTo != "" {
+			delete(m.retireMarks, partitionID)
+			continue
+		}
+		leaderAddr, ok := alive[info.LeaderID]
+		if !ok {
+			continue
+		}
+		mark, marked := m.retireMarks[partitionID]
+		if !marked || mark.epoch != info.Epoch {
+			leaderPos, ok := m.replicaPositions(partitionID, map[string]string{info.LeaderID: leaderAddr})[info.LeaderID]
+			if !ok || !leaderPos.Found || leaderPos.Epoch < info.Epoch {
+				continue // the leader has not taken up this assignment yet
+			}
+			if m.retireMarks == nil {
+				m.retireMarks = make(map[int32]retireMark)
+			}
+			m.retireMarks[partitionID] = retireMark{epoch: info.Epoch, through: leaderPos}
+			continue
+		}
+		nodes := make(map[string]string, len(info.Replicas))
+		for _, id := range info.Replicas {
+			if addr, ok := alive[id]; ok && id != info.LeaderID {
+				nodes[id] = addr
+			}
+		}
+		holding := 0
+		for _, position := range m.replicaPositions(partitionID, nodes) {
+			if position.Found && !moreComplete(mark.through, position) {
+				holding++
+			}
+		}
+		if holding < need {
+			continue
+		}
+		updated := info.clone()
+		updated.Retiring = nil
+		if err := store.ProposePartition(&updated, false); err != nil {
+			log.Printf("[CLUSTER] Partition %d: releasing retired replicas %v failed: %v", partitionID, info.Retiring, err)
+			continue
+		}
+		delete(m.retireMarks, partitionID)
+		log.Printf("[CLUSTER] Partition %d: %d replicas hold the log through offset %d; former replicas %v are released",
+			partitionID, holding, mark.through.LastOffset, info.Retiring)
 	}
 }
 

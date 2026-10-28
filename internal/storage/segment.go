@@ -1054,11 +1054,21 @@ func (s *Segment) ReadEvent(targetOffset int64) (*types.Event, error) {
 		}
 	}
 
-	// Try to read from mmap first
+	event, err := s.readEventFrom(targetOffset, startPos)
+	if err != nil && startPos > 64 {
+		// The index only says where to start; it can be wrong. The record is
+		// in the segment, so look from its start.
+		return s.readEventFrom(targetOffset, 64)
+	}
+	return event, err
+}
+
+// readEventFrom reads the event at targetOffset scanning from startPos. The
+// caller holds s.mu.
+func (s *Segment) readEventFrom(targetOffset, startPos int64) (*types.Event, error) {
 	if s.mmapData != nil && startPos < int64(len(s.mmapData)) {
 		return s.readEventMmap(targetOffset, startPos)
 	}
-
 	return s.readEventFile(targetOffset, startPos)
 }
 
@@ -1258,7 +1268,24 @@ func (s *Segment) readOffsetRange(startOffset, endOffset, maxBytes int64) (resul
 			startPos = pos
 		}
 	}
+	result, size, err = s.scanOffsetRange(startPos, startOffset, endOffset, maxBytes)
+	if startPos > 64 {
+		// The index only says where to start; it can be wrong. A scan that
+		// does not begin with the first offset of the range the segment holds
+		// started in the wrong place, and is done again from the segment's
+		// start. It used to return nothing, and no error.
+		want := max(startOffset, s.firstOffset)
+		if want <= endOffset && want <= s.lastOffset &&
+			(err != nil || len(result) == 0 || result[0].Offset != want) {
+			return s.scanOffsetRange(64, startOffset, endOffset, maxBytes)
+		}
+	}
+	return result, size, err
+}
 
+// scanOffsetRange reads the events of an inclusive offset range, scanning the
+// segment from startPos. The caller holds s.mu.
+func (s *Segment) scanOffsetRange(startPos, startOffset, endOffset, maxBytes int64) (result []*types.Event, size int64, err error) {
 	// ReadAt on the existing file handle is safe alongside appends.
 	scanner := newRecordScanner(s.segmentFile, startPos)
 
@@ -1495,7 +1522,15 @@ func (s *Segment) scan() error {
 		// Decrypt if needed, then parse event to get offset and timestamp
 		decrypted, err := s.decryptRecord(recordData, lastGoodPos+4)
 		if err != nil {
-			return fmt.Errorf("decrypt existing record at %d (wrong key or corrupt data): %w", lastGoodPos, err)
+			torn, tornErr := s.tornRecord(recordData, lastGoodPos > 64, reader)
+			if tornErr != nil {
+				return fmt.Errorf("read after the record at %d: %w", lastGoodPos, tornErr)
+			}
+			if !torn {
+				return fmt.Errorf("decrypt existing record at %d (wrong key or corrupt data): %w", lastGoodPos, err)
+			}
+			invalid = fmt.Sprintf("a record of %d bytes that was not completely written", length)
+			break
 		}
 		event, err := parseEventRecordWithoutLength(decrypted)
 		if err != nil {
@@ -1610,6 +1645,43 @@ func dataFollows(r io.Reader) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// tornRecord reports whether an encrypted record that does not decrypt is what
+// an interrupted write leaves: nothing is written after it, and it ends in
+// bytes that were never written. A record is written front to back and ends
+// with its authentication tag, so the zeros of preallocated space are still
+// there at its end until the write completes. An encrypted segment is written
+// through a buffer that may put out part of a record and keep the rest until
+// the next flush, so a crash can leave one.
+//
+// A wrong key fails every record, the first included. After a record of the
+// same segment has decrypted, the key is known to be right and an unwritten
+// last byte is enough; the first record of a segment must have its whole tag
+// unwritten, which a written tag is with negligible probability. Anything else
+// is reported as it was: a wrong key or damage. A torn record is then handled
+// like a plaintext record whose checksum fails (see WAL.judgeInvalidTails):
+// cut off at the end of the log, damage anywhere before it.
+func (s *Segment) tornRecord(record []byte, afterValid bool, rest io.Reader) (bool, error) {
+	if s.cipher == nil || len(record) == 0 {
+		return false, nil
+	}
+	if follows, err := dataFollows(rest); err != nil || follows {
+		return false, err
+	}
+	unwritten := 1
+	if !afterValid {
+		unwritten = s.cipher.aead.Overhead()
+	}
+	if len(record) < unwritten {
+		unwritten = len(record)
+	}
+	for _, b := range record[len(record)-unwritten:] {
+		if b != 0 {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // InvalidTail reports whether the bytes after the segment's last valid record

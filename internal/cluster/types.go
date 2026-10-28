@@ -161,6 +161,13 @@ type PartitionInfo struct {
 	// Requires names the capabilities every node that holds, leads or takes
 	// over the partition must advertise (see capabilities.go). It only grows.
 	Requires []string `json:"requires,omitempty"`
+	// Retiring names former replicas that placement has dropped and that may
+	// still hold acknowledged writes the remaining replicas lack. Elections
+	// ask them too and count them in the replicas they must hear from, and
+	// they keep their copy, until the leader is known to have stopped
+	// replicating to them and enough of Replicas hold everything it had then
+	// (see Manager.releaseRetired).
+	Retiring []string `json:"retiring,omitempty"`
 }
 
 // clone returns a copy that shares no slices or maps with the receiver.
@@ -168,6 +175,7 @@ func (p PartitionInfo) clone() PartitionInfo {
 	p.Replicas = append([]string(nil), p.Replicas...)
 	p.ISR = append([]string(nil), p.ISR...)
 	p.Requires = append([]string(nil), p.Requires...)
+	p.Retiring = append([]string(nil), p.Retiring...)
 	if p.ReplicaOffsets != nil {
 		offsets := make(map[string]int64, len(p.ReplicaOffsets))
 		for id, offset := range p.ReplicaOffsets {

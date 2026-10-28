@@ -203,9 +203,8 @@ type BloomPebbleStore struct {
 	pebbleHits    uint64 // Actually found in PebbleDB
 
 	// Configuration for bloom filter maintenance
-	bloomCapacity       uint64      // Max items before considering reset
-	falsePositiveThresh float64     // FPR threshold (e.g., 0.05 = 5%) to trigger reset
-	resetInProgress     atomic.Bool // True when a reset is in progress (kept for compat)
+	bloomCapacity       uint64  // Max items before considering reset
+	falsePositiveThresh float64 // FPR threshold (e.g., 0.05 = 5%) to trigger a rebuild
 }
 
 // NewBloomPebbleStore creates a bloom-accelerated Pebble dedup store.
@@ -348,11 +347,15 @@ func (s *BloomPebbleStore) CheckAndStore(messageID string, offset int64) (bool, 
 		metrics.ObserveDedupCheck(strconv.FormatInt(int64(s.pebble.partitionID), 10), path, time.Since(start))
 	}()
 
-	// Until the startup rebuild completes, always consult Pebble. A false bloom
-	// result during this window would overwrite an ID that already exists on
-	// disk and break idempotency after restart.
+	// Until a rebuild completes, always consult Pebble. A false bloom result
+	// during this window would overwrite an ID that already exists on disk and
+	// break idempotency. The ID goes into the filter first: a rebuild running
+	// alongside has already taken its snapshot of Pebble and will not see it.
 	if !s.bloomReady.Load() {
 		path = "pebble_rebuild"
+		s.bloomMu.Lock()
+		s.bloom.Add(messageID)
+		s.bloomMu.Unlock()
 		exists, err := s.pebble.CheckAndStore(messageID, offset)
 		if exists {
 			atomic.AddUint64(&s.pebbleHits, 1)
@@ -439,6 +442,11 @@ func (s *BloomPebbleStore) CheckAndStoreBatch(messageIDs []string, offsets []int
 	}
 
 	if !s.bloomReady.Load() {
+		s.bloomMu.Lock()
+		for _, id := range uniqueIDs {
+			s.bloom.Add(id)
+		}
+		s.bloomMu.Unlock()
 		for i, id := range uniqueIDs {
 			exists, err := s.pebble.CheckAndStore(id, uniqueOffsets[i])
 			if err != nil {
@@ -548,9 +556,10 @@ func (s *BloomPebbleStore) GetOffset(messageID string) (int64, bool, error) {
 	if !s.bloomReady.Load() {
 		return s.pebble.GetOffset(messageID)
 	}
-	// Fast path: bloom filter says "definitely not exists"
+	// Fast path: bloom filter says "definitely not exists". Readiness is
+	// checked again under the lock: a rebuild empties the filter under it.
 	s.bloomMu.RLock()
-	if !s.bloom.MayContain(messageID) {
+	if s.bloomReady.Load() && !s.bloom.MayContain(messageID) {
 		s.bloomMu.RUnlock()
 		return 0, false, nil
 	}
@@ -565,9 +574,10 @@ func (s *BloomPebbleStore) Exists(messageID string) (bool, error) {
 	if !s.bloomReady.Load() {
 		return s.pebble.Exists(messageID)
 	}
-	// Fast path: bloom filter says "definitely not exists"
+	// Fast path: bloom filter says "definitely not exists". Readiness is
+	// checked again under the lock: a rebuild empties the filter under it.
 	s.bloomMu.RLock()
-	if !s.bloom.MayContain(messageID) {
+	if s.bloomReady.Load() && !s.bloom.MayContain(messageID) {
 		s.bloomMu.RUnlock()
 		return false, nil
 	}
@@ -582,9 +592,10 @@ func (s *BloomPebbleStore) GetTimestamp(messageID string) (time.Time, bool, erro
 	if !s.bloomReady.Load() {
 		return s.pebble.GetTimestamp(messageID)
 	}
-	// Fast path: bloom filter says "definitely not exists"
+	// Fast path: bloom filter says "definitely not exists". Readiness is
+	// checked again under the lock: a rebuild empties the filter under it.
 	s.bloomMu.RLock()
-	if !s.bloom.MayContain(messageID) {
+	if s.bloomReady.Load() && !s.bloom.MayContain(messageID) {
 		s.bloomMu.RUnlock()
 		return time.Time{}, false, nil
 	}
@@ -626,58 +637,122 @@ func (s *BloomPebbleStore) PutBatch(messageIDs []string, offsets, createdTS []in
 	return nil
 }
 
-// PruneExpired removes expired Pebble entries and may reset the bloom filter
-// when the observed false-positive rate exceeds the configured threshold.
+// PruneExpired removes expired Pebble entries and, when the filter has become
+// too full to be useful, rebuilds it from the entries that are left.
 func (s *BloomPebbleStore) PruneExpired() (int, error) {
 	// Prune expired entries from PebbleDB
 	count, err := s.pebble.PruneExpired()
 	if err != nil {
 		return count, err
 	}
-
-	// Check bloom filter health and reset if FPR is too high.
-	// Hold the write lock for the duration so Add/Check callers cannot race
-	// the reset.
-	s.bloomMu.Lock()
-	defer s.bloomMu.Unlock()
-	s.checkAndResetBloomLocked()
-
+	if s.bloomSaturated() {
+		s.refreshBloom()
+	}
 	return count, nil
 }
 
-// checkAndResetBloomLocked checks false positive rate and resets bloom if needed.
-// Must be called with bloomMu held to prevent race with Add operations.
-func (s *BloomPebbleStore) checkAndResetBloomLocked() {
-	// The denominator must be the number of items the bloom said "maybe" for
-	// (i.e. the slow-path lookups). bloomHits are true negatives, so including
-	// them dilutes the FPR and prevents the filter from ever being reset.
-	bloomLookups := atomic.LoadUint64(&s.pebbleHits) + atomic.LoadUint64(&s.bloomFalsePos)
-	if bloomLookups < 1000 {
-		// Not enough slow-path data to judge FPR yet
-		return
-	}
+// minFalsePositiveSample is how many checks of absent IDs the filter must have
+// answered before its false-positive rate is judged.
+const minFalsePositiveSample = 10_000
 
+// bloomSaturated reports whether the filter answers "maybe" for absent IDs
+// more often than falsePositiveThresh. Bits are never cleared as IDs expire, so
+// a filter fills up with every ID claimed since it was built.
+//
+// The rate is false positives over all checks of absent IDs: the true
+// negatives (bloomHits) and the false positives. It used to be taken over the
+// "maybe" answers only. With ordinary traffic, whose IDs are almost all new,
+// nearly every "maybe" is false, so that ratio was close to 1 and the filter
+// was judged full once about a thousand of them had been seen.
+func (s *BloomPebbleStore) bloomSaturated() bool {
 	falsePos := atomic.LoadUint64(&s.bloomFalsePos)
-	actualFPR := float64(falsePos) / float64(bloomLookups)
+	absent := atomic.LoadUint64(&s.bloomHits) + falsePos
+	if absent < minFalsePositiveSample {
+		return false
+	}
+	return float64(falsePos)/float64(absent) > s.falsePositiveThresh
+}
 
-	if actualFPR > s.falsePositiveThresh {
-		// FPR too high, reset bloom filter. Lock is already held.
-		s.resetInProgress.Store(true)
-		s.bloom.Reset()
-		s.bloomEpoch.Add(1)
-		atomic.StoreUint64(&s.bloomHits, 0)
-		atomic.StoreUint64(&s.bloomFalsePos, 0)
-		atomic.StoreUint64(&s.pebbleHits, 0)
-		s.resetInProgress.Store(false)
+// CheckAndResetBloom rebuilds the filter if its false-positive rate is too high.
+func (s *BloomPebbleStore) CheckAndResetBloom() {
+	if s.bloomSaturated() {
+		s.refreshBloom()
 	}
 }
 
-// CheckAndResetBloom forces a bloom health check and reset if FPR is too high.
-// Prefer calling this during low-traffic maintenance windows.
-func (s *BloomPebbleStore) CheckAndResetBloom() {
+// ResetBloom rebuilds the filter from the IDs the store holds now.
+func (s *BloomPebbleStore) ResetBloom() {
+	s.refreshBloom()
+}
+
+// refreshBloom empties the filter and fills it again from Pebble, which drops
+// the bits of expired IDs.
+//
+// Emptying it is not enough. The fast path takes "not in the filter" for "not
+// stored", so an empty filter had every ID still within its TTL claimed again
+// as new and the earlier record overwritten: a retried publish was accepted a
+// second time. Until the filter holds what Pebble holds, bloomReady is false
+// and every check goes to Pebble.
+//
+// Claims are stopped only while the filter is emptied and a snapshot of Pebble
+// is taken, not for the scan. One that finished before has its ID in the
+// snapshot or in the pending buffer, which is read with it; one that runs
+// after adds its ID to the filter itself (see CheckAndStore).
+func (s *BloomPebbleStore) refreshBloom() {
+	for i := 0; i < bloomClaimStripeCount; i++ {
+		s.claimLocks[i].Lock()
+	}
+	s.pebble.claimMu.Lock()
 	s.bloomMu.Lock()
-	defer s.bloomMu.Unlock()
-	s.checkAndResetBloomLocked()
+	s.bloomReady.Store(false)
+	s.bloom.Reset()
+	s.bloomEpoch.Add(1)
+	atomic.StoreUint64(&s.bloomHits, 0)
+	atomic.StoreUint64(&s.bloomFalsePos, 0)
+	atomic.StoreUint64(&s.pebbleHits, 0)
+	s.bloomMu.Unlock()
+	iter, iterErr := s.pebble.db.NewIter(nil)
+	s.pebble.pendingMu.RLock()
+	pending := make([]string, 0, len(s.pebble.pending))
+	for key := range s.pebble.pending {
+		pending = append(pending, key)
+	}
+	s.pebble.pendingMu.RUnlock()
+	s.pebble.claimMu.Unlock()
+	for i := bloomClaimStripeCount - 1; i >= 0; i-- {
+		s.claimLocks[i].Unlock()
+	}
+	if iterErr != nil {
+		// Checks keep going to Pebble, which is correct, until a later
+		// refresh succeeds.
+		log.Printf("[DEDUP-%d] bloom refresh iterator failed; checking every ID in Pebble: %v", s.pebble.partitionID, iterErr)
+		return
+	}
+	defer iter.Close()
+
+	const addBatch = 4096
+	keys := make([]string, 0, addBatch)
+	add := func() {
+		s.bloomMu.Lock()
+		for _, key := range keys {
+			s.bloom.Add(key)
+		}
+		s.bloomMu.Unlock()
+		keys = keys[:0]
+	}
+	for iter.First(); iter.Valid(); iter.Next() {
+		keys = append(keys, string(iter.Key()))
+		if len(keys) == addBatch {
+			add()
+		}
+	}
+	keys = append(keys, pending...)
+	add()
+	if err := iter.Error(); err != nil {
+		log.Printf("[DEDUP-%d] bloom refresh failed; checking every ID in Pebble: %v", s.pebble.partitionID, err)
+		return
+	}
+	s.bloomReady.Store(true)
 }
 
 // GetStats returns Pebble stats merged with bloom hit/false-positive counters.
@@ -707,15 +782,4 @@ func (s *BloomPebbleStore) Close() error {
 // state on the restored node.
 func (s *BloomPebbleStore) Checkpoint(destDir string) error {
 	return s.pebble.Checkpoint(destDir)
-}
-
-// ResetBloom clears the bloom filter under bloomMu (maintenance only).
-// Stale bits after a partial rebuild only force the Pebble slow path.
-func (s *BloomPebbleStore) ResetBloom() {
-	s.bloomMu.Lock()
-	defer s.bloomMu.Unlock()
-	s.resetInProgress.Store(true)
-	s.bloom.Reset()
-	s.bloomEpoch.Add(1)
-	s.resetInProgress.Store(false)
 }

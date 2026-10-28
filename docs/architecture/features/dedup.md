@@ -7,6 +7,7 @@ Deduplication prevents duplicate message processing while keeping publish latenc
 ## Key Files
 
 - [internal/dedup/store.go](../../../internal/dedup/store.go)
+- [internal/dedup/key.go](../../../internal/dedup/key.go) — `Key`: what is recorded for a message ID on a topic.
 - [internal/dedup/bloom_store.go](../../../internal/dedup/bloom_store.go)
 - [internal/dedup/pebble_store.go](../../../internal/dedup/pebble_store.go)
 - [internal/dedup/rust_bloom_unix.go](../../../internal/dedup/rust_bloom_unix.go) — Unix CGO bindings for the Rust bloom filter.
@@ -22,7 +23,22 @@ Deduplication prevents duplicate message processing while keeping publish latenc
 
 ## Production Decisions
 
+- A message ID is unique within its topic. The store records `dedup.Key(topic,
+  message ID)`, so the same ID on two topics names two events. IDs were
+  recorded per partition alone before 1.0; with the default partition key (the
+  message ID) the same ID on two topics met in one partition, and a principal
+  allowed to publish to one topic could block, or detect, IDs used on another.
+  Records written before 1.0 are not carried over.
 - Two-tier design balances speed and correctness (bloom fast-path, Pebble source of truth).
+- The filter's bits are never cleared as IDs expire. Hourly maintenance
+  rebuilds it from Pebble once its false-positive rate over checks of absent
+  IDs exceeds 5%. Until the rebuild has read Pebble, every check goes to
+  Pebble, and a claim made meanwhile adds its ID to the filter itself; claims
+  pause only while the filter is emptied and a snapshot is taken. Before 1.0
+  maintenance emptied the filter and left it empty, so a retry of an accepted
+  ID was taken for new, and its rate was taken over "maybe" answers alone,
+  which ordinary traffic puts near 100%. A filter that stays full after a
+  rebuild needs a larger `--bloom-capacity`.
 - The Rust bloom filter is used only in cgo builds. Any build without cgo, on any system, uses the pure-Go bloom filter (`rust_bloom_nocgo.go` returns nil and callers fall back to `GoBloomFilter`); the release binaries are built this way. The Docker image is built with cgo and ships `libcronos_dedup.so`, so it uses the Rust filter.
 - Publish path **claims** IDs before WAL append and **`RollbackBatch`** on definite pre-append failure so retries are not spurious duplicates.
 - **Crash recovery:** on partition start, `recoverDedupFromWAL` re-seeds claims from the WAL tail, because the dedup Pebble store writes with `DisableWAL` + `NoSync` and can lose recent claims in a crash. Recovery walks the retained log in bounded byte pages from a validated `(offset, term, message ID)` checkpoint, skipping events older than the dedup TTL. The checkpoint is saved only after pending IDs and Pebble tables are flushed. Without a valid checkpoint every retained entry is examined; a recovery error blocks startup or promotion.
