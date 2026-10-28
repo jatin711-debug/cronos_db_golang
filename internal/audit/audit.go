@@ -42,24 +42,6 @@ const (
 	auditBatchSize = 256
 )
 
-// Option configures a Logger at construction time.
-type Option func(*loggerConfig)
-
-type loggerConfig struct {
-	bufferSize int
-}
-
-// WithBufferSize overrides the event channel buffer size (default
-// DefaultBufferSize). Useful for high-throughput deployments that want to
-// absorb larger bursts without dropping audit events.
-func WithBufferSize(n int) Option {
-	return func(c *loggerConfig) {
-		if n > 0 {
-			c.bufferSize = n
-		}
-	}
-}
-
 // Event represents a single audit log entry written as one NDJSON line.
 type Event struct {
 	// Timestamp is when the event was accepted by Log (UTC).
@@ -102,17 +84,6 @@ type Logger struct {
 
 // NewLogger creates an audit logger and starts the background writer.
 func NewLogger(dataDir string) (*Logger, error) {
-	return NewLoggerWithOptions(dataDir)
-}
-
-// NewLoggerWithOptions creates an audit logger with the supplied functional
-// options (e.g. WithBufferSize).
-func NewLoggerWithOptions(dataDir string, opts ...Option) (*Logger, error) {
-	lc := loggerConfig{bufferSize: DefaultBufferSize}
-	for _, o := range opts {
-		o(&lc)
-	}
-
 	logDir := filepath.Join(dataDir, "audit")
 	if err := os.MkdirAll(logDir, 0750); err != nil {
 		return nil, fmt.Errorf("create audit dir: %w", err)
@@ -128,7 +99,7 @@ func NewLoggerWithOptions(dataDir string, opts ...Option) (*Logger, error) {
 		file:      f,
 		bufWriter: bufio.NewWriterSize(f, 64*1024),
 		logDir:    logDir,
-		events:    make(chan Event, lc.bufferSize),
+		events:    make(chan Event, DefaultBufferSize),
 		quit:      make(chan struct{}),
 	}
 	l.encoder = json.NewEncoder(l.bufWriter)

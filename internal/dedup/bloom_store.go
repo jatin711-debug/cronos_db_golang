@@ -30,12 +30,10 @@ type BloomFilter interface {
 
 // GoBloomFilter is a lock-free pure-Go bloom filter for fast dedup negative checks.
 type GoBloomFilter struct {
-	bits       []uint64
-	size       uint64     // Number of bits
-	numHash    uint64     // Number of hash functions
-	count      uint64     // Approximate number of items (atomic)
-	resetMu    sync.Mutex // Protects reset operations
-	generation uint64     // Generation counter for detecting resets
+	bits    []uint64
+	size    uint64 // Number of bits
+	numHash uint64 // Number of hash functions
+	count   uint64 // Approximate number of items (atomic)
 }
 
 // NewBloomFilter creates a bloom filter sized for expectedItems at targetFPR.

@@ -3,7 +3,7 @@
 Two jobs:
 
 1. ``on_files`` — inject the repo-root markdown docs (README.md, ARCHITECTURE.md,
-   DOCKER.md, plan.md, ...) into the site as virtual pages. The root files stay
+   DOCKER.md, ...) into the site as virtual pages. The root files stay
    canonical (single source of truth for GitHub browsing); at build time their
    content is copied with ``docs/``-prefixed link targets rebased to the site
    root, so cross-links resolve identically in both places.
@@ -29,13 +29,12 @@ ROOT_PAGES = {
     "DOCKER.md": "DOCKER.md",
     "CONTRIBUTING.md": "CONTRIBUTING.md",
     "CODE_OF_CONDUCT.md": "CODE_OF_CONDUCT.md",
-    "plan.md": "plan.md",
 }
 
 # Matches markdown links/images: [text](target) — target captured without title.
 LINK_RE = re.compile(r"(\]\()([^)\s]+)(\s*[^)]*)\)")
 
-# Line-number suffix used by plan.md and friends, e.g. internal/x/y.go:1232.
+# Line-number suffix on a source link, e.g. internal/x/y.go:1232.
 LINE_SUFFIX_RE = re.compile(r"^(?P<path>.+?):(?P<line>\d+)$")
 
 

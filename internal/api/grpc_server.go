@@ -232,28 +232,6 @@ func (g *GRPCServer) RegisterServices(
 	}
 }
 
-// RegisterCrossRegionServer registers the cross-region replication service.
-func (g *GRPCServer) RegisterCrossRegionServer(srv types.CrossRegionServiceServer) {
-	types.RegisterCrossRegionServiceServer(g.server, srv)
-}
-
-// RegisterAdminServer registers the operator-facing AdminService. Use this
-// for late / optional registration; otherwise pass adminHandler to
-// RegisterServices.
-func (g *GRPCServer) RegisterAdminServer(srv types.AdminServiceServer) {
-	types.RegisterAdminServiceServer(g.server, srv)
-}
-
-// RegisterReplicationServer registers the internal replication service.
-func (g *GRPCServer) RegisterReplicationServer(srv types.ReplicationServiceServer) {
-	types.RegisterReplicationServiceServer(g.server, srv)
-}
-
-// RegisterRaftServer registers the internal raft metadata service.
-func (g *GRPCServer) RegisterRaftServer(srv types.RaftServiceServer) {
-	types.RegisterRaftServiceServer(g.server, srv)
-}
-
 // Start starts the gRPC server.
 // The returned error is only from net.Listen; server-serve errors can be read
 // from ServeError().
@@ -301,13 +279,6 @@ func (g *GRPCServer) Stop() {
 	}
 	if g.listener != nil {
 		_ = g.listener.Close()
-	}
-}
-
-// GracefulStop performs graceful shutdown.
-func (g *GRPCServer) GracefulStop() {
-	if g.server != nil {
-		g.server.GracefulStop()
 	}
 }
 

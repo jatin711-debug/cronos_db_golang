@@ -172,7 +172,6 @@ nav:
       - Contributing: CONTRIBUTING.md
       - Code of Conduct: CODE_OF_CONDUCT.md
   - History:
-      - Remediation Plan (July 2026): plan.md
       - Technical Deep Dive (July 2026): TECHNICAL_DEEP_DIVE.md
       - Performance Baseline (July 2026): PERFORMANCE.md
       - Audit Probes: audit-probes/README.md

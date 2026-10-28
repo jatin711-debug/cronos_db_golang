@@ -599,9 +599,9 @@ On restart the scheduler:
    `internal/api/handlers.go`). Nothing is delivered without a subscription,
    and a backlog larger than memory does not have to fit in memory.
 
-`timer_replay_checkpoint.json` is still written after the walk, but nothing
-reads it at start (`readTimerCheckpoint` and `replayWALTimersFromOffset` have
-no callers).
+Up to v0.10.0 a `timer_replay_checkpoint.json` was written after the walk that
+nothing read; it is no longer written, and one left in a data directory is
+ignored.
 
 ```mermaid
 flowchart TD
@@ -1900,9 +1900,7 @@ flowchart LR
 - Transactions, online partition splitting and cross-region replication run
   only with `--dev --experimental-features` and are not verified.
 - The client unit test `TestSendAsyncContextCancellation` has failed
-  intermittently in full-suite runs (see `plan.md`).
-- `plan.md` is the historical remediation plan. Its checkboxes are not kept
-  up to date; it is not a statement of what the server does today.
+  intermittently in full-suite runs.
 
 ---
 

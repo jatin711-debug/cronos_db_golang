@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/cockroachdb/pebble"
-	"github.com/google/uuid"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 )
@@ -42,19 +41,6 @@ func parseCommitIDValue(v []byte) int64 {
 		return 0
 	}
 	return int64(binary.BigEndian.Uint64(v))
-}
-
-func (s *OffsetStore) offsetKey(groupID string, partitionID int32) []byte {
-	key := make([]byte, len(offsetKeyPrefix)+4+len(groupID)+4)
-	offset := 0
-	copy(key[offset:], offsetKeyPrefix)
-	offset += len(offsetKeyPrefix)
-	binary.BigEndian.PutUint32(key[offset:], uint32(partitionID))
-	offset += 4
-	copy(key[offset:], groupID)
-	offset += len(groupID)
-	key[offset] = 0
-	return key
 }
 
 func (s *OffsetStore) commitIDKey(commitID string) []byte {
@@ -135,7 +121,6 @@ type OffsetStore struct {
 
 	// Exactly-once commit dedup: in-memory LRU of recent commit IDs.
 	// Protected by commitMu. Capacity ~1M entries per partition.
-	exactlyOnce       bool
 	commitMu          sync.RWMutex
 	recentCommits     map[string]struct{}
 	commitQueue       []string            // FIFO for eviction
@@ -515,15 +500,6 @@ func (s *OffsetStore) buildKey(groupID string, partitionID int32) []byte {
 func (s *OffsetStore) buildValue(offset int64) []byte {
 	value := make([]byte, 8)
 	binary.BigEndian.PutUint64(value, uint64(offset))
-	return value
-}
-
-// buildValueExactlyOnce builds storage value with commit ID
-func (s *OffsetStore) buildValueExactlyOnce(offset int64, commitID string) []byte {
-	idBytes := uuid.MustParse(commitID)
-	value := make([]byte, 8+16)
-	binary.BigEndian.PutUint64(value[0:8], uint64(offset))
-	copy(value[8:24], idBytes[:])
 	return value
 }
 

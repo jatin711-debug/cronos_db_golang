@@ -364,12 +364,6 @@ func (s *Segment) readHeader() error {
 	return nil
 }
 
-// buildSegmentHeader returns the 64-byte segment header with magic, version,
-// first offset, created timestamp, and CRC32.
-func buildSegmentHeader(firstOffset, createdTS int64) []byte {
-	return buildSegmentHeaderWithBoundary(firstOffset, createdTS, nil)
-}
-
 func buildSegmentHeaderWithBoundary(firstOffset, createdTS int64, predecessor *segmentBoundary) []byte {
 	header := make([]byte, 64)
 

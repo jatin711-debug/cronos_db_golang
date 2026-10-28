@@ -129,8 +129,9 @@ cannot form a five-voter Raft majority, and a three-replica partition can lose
 all of its replicas. Readiness changes after an eviction do not prevent requests
 already admitted concurrently under that budget.
 
-Probe: `python docs/audit-probes/release_readiness_chart.py` renders the actual
-production chart and fails the quorum assertion. Evidence:
+Probe: a script that rendered the actual production chart and failed the
+quorum assertion; it is now `check_disruption` in
+`scripts/check-production-chart.py`. Evidence:
 `build/audit-1.0-chart-probe.log`. This is a rendered-configuration proof, not a
 live Kubernetes drain experiment. The existing chart assertion script passes.
 

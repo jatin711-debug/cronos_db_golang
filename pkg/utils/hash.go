@@ -20,9 +20,7 @@ type Hash interface {
 }
 
 // CRC32Calculator computes and verifies IEEE CRC32 checksums (WAL/record integrity).
-type CRC32Calculator struct {
-	crc uint32 // reserved for streaming use; Calculate uses IEEE over full buffers
-}
+type CRC32Calculator struct{}
 
 // NewCRC32Calculator returns a new CRC32Calculator.
 func NewCRC32Calculator() *CRC32Calculator {

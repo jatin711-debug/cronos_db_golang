@@ -619,12 +619,6 @@ func TestCheckAdminPermission_TopicAdminDoesNotImplySubjectAdmin(t *testing.T) {
 	}
 }
 
-var jwtSigningMethodHS256 = jwt.SigningMethodHS256
 var jwtSigningMethodEdDSA = jwt.SigningMethodEdDSA
 var jwtSigningMethodRS256 = jwt.SigningMethodRS256
 var jwtSigningMethodES256 = jwt.SigningMethodES256
-
-// ParseTokenForTest parses a token for use in other package tests
-func ParseTokenForTest(tokenStr string, secret []byte) (*Claims, error) {
-	return ParseToken(tokenStr, &Config{JWTSecret: secret})
-}

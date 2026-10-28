@@ -13,7 +13,6 @@ import (
 // BackupScheduler publishes complete backup generations and expires old ones
 // only after a successful replacement. Stop waits for active checkpoint work.
 type BackupScheduler struct {
-	walDir    string        // source partition data directory (contains segments/)
 	backupDir string        // root directory for timestamped backup subdirs
 	interval  time.Duration // how often to run BackupWAL
 	retention time.Duration // age after which backup subdirs are deleted
@@ -24,16 +23,6 @@ type BackupScheduler struct {
 	stopped   bool
 	wg        sync.WaitGroup
 	runMu     sync.Mutex
-}
-
-// NewBackupScheduler creates a scheduler that backs up walDir into backupDir
-// every interval and deletes backups older than retention.
-func NewBackupScheduler(walDir, backupDir string, interval, retention time.Duration) *BackupScheduler {
-	bs := NewCheckpointBackupScheduler(backupDir, interval, retention, func(dest string) error {
-		return BackupWAL(walDir, dest)
-	})
-	bs.walDir = walDir
-	return bs
 }
 
 // NewCheckpointBackupScheduler schedules independently restorable checkpoints.
