@@ -35,11 +35,10 @@ const snapshotFilename = "snapshot.json"
 
 // SnapshotManager creates and loads partition recovery snapshots under dataDir.
 type SnapshotManager struct {
-	mu               sync.RWMutex
-	dataDir          string    // partition data directory
-	partitionID      int32     // owning partition
-	lastSnapshot     *Snapshot // cached last loaded/created snapshot
-	lastSnapshotTime time.Time // wall time of last successful CreateSnapshot
+	mu           sync.RWMutex
+	dataDir      string    // partition data directory
+	partitionID  int32     // owning partition
+	lastSnapshot *Snapshot // cached last loaded/created snapshot
 }
 
 // NewSnapshotManager creates a snapshot manager for the given partition dataDir.
@@ -89,7 +88,6 @@ func (sm *SnapshotManager) CreateSnapshot(partition *Partition) error {
 
 	sm.mu.Lock()
 	sm.lastSnapshot = snapshot
-	sm.lastSnapshotTime = time.Now()
 	sm.mu.Unlock()
 
 	log.Printf("[Partition %d] Snapshot created: HWM=%d, offsets=%d, time=%s",
@@ -148,13 +146,6 @@ func (sm *SnapshotManager) HasSnapshot() bool {
 	snapshotPath := filepath.Join(sm.dataDir, snapshotFilename)
 	_, err := os.Stat(snapshotPath)
 	return err == nil
-}
-
-// GetLastSnapshotTime returns when the last snapshot was created.
-func (sm *SnapshotManager) GetLastSnapshotTime() time.Time {
-	sm.mu.RLock()
-	defer sm.mu.RUnlock()
-	return sm.lastSnapshotTime
 }
 
 // SnapshotStats returns snapshot statistics for metrics.

@@ -11,9 +11,6 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"sort"
-	"strconv"
-	"strings"
 
 	"github.com/jatin711-debug/cronos_db_golang/internal/lifecycle"
 	"github.com/jatin711-debug/cronos_db_golang/internal/logcontrol"
@@ -778,68 +775,6 @@ func snapshotFileKey(filename string, isIndex bool) string {
 	return "segments/" + filename
 }
 
-// buildSnapshotFileList returns segment log and index files that overlap the
-// requested start offset, ordered by first offset.
-func (h *ReplicationServiceHandler) buildSnapshotFileList(p *partition.Partition, startOffset int64) ([]snapshotFile, error) {
-	dataDir := p.Wal.GetDataDir()
-	segmentsDir := filepath.Join(dataDir, "segments")
-	indexDir := filepath.Join(dataDir, "index")
-
-	var files []snapshotFile
-	for _, seg := range p.Wal.GetSegments() {
-		if seg.GetLastOffset() < startOffset {
-			continue
-		}
-
-		logPath := filepath.Join(segmentsDir, seg.GetFilename())
-		logInfo, statErr := os.Stat(logPath)
-		if statErr != nil {
-			return nil, fmt.Errorf("stat segment %s: %w", seg.GetFilename(), statErr)
-		}
-		logCRC, crcErr := fileCRC32(logPath)
-		if crcErr != nil {
-			return nil, fmt.Errorf("checksum segment %s: %w", seg.GetFilename(), crcErr)
-		}
-		files = append(files, snapshotFile{
-			filename:    seg.GetFilename(),
-			path:        logPath,
-			firstOffset: seg.GetFirstOffset(),
-			lastOffset:  seg.GetLastOffset(),
-			fileSize:    logInfo.Size(),
-			crc32:       logCRC,
-			isIndex:     false,
-		})
-
-		indexFilename := strings.TrimSuffix(seg.GetFilename(), ".log") + ".index"
-		indexPath := filepath.Join(indexDir, indexFilename)
-		if indexInfo, statErr := os.Stat(indexPath); statErr == nil {
-			indexCRC, crcErr := fileCRC32(indexPath)
-			if crcErr != nil {
-				return nil, fmt.Errorf("checksum index %s: %w", indexFilename, crcErr)
-			}
-			files = append(files, snapshotFile{
-				filename:    indexFilename,
-				path:        indexPath,
-				firstOffset: seg.GetFirstOffset(),
-				lastOffset:  seg.GetFirstOffset(),
-				fileSize:    indexInfo.Size(),
-				crc32:       indexCRC,
-				isIndex:     true,
-			})
-		}
-	}
-
-	sort.Slice(files, func(i, j int) bool {
-		if files[i].firstOffset != files[j].firstOffset {
-			return files[i].firstOffset < files[j].firstOffset
-		}
-		// Log files before indexes for the same offset.
-		return !files[i].isIndex && files[j].isIndex
-	})
-
-	return files, nil
-}
-
 // fileCRC32 computes the IEEE CRC32 of a file.
 func fileCRC32(path string) (uint32, error) {
 	f, err := os.Open(path)
@@ -853,13 +788,4 @@ func fileCRC32(path string) (uint32, error) {
 		return 0, err
 	}
 	return h.Sum32(), nil
-}
-
-// parseOffsetFromFilename extracts the starting offset from a segment filename
-// such as "00000000000000001234.log". It is used as a fallback when a segment
-// object is not available.
-func parseOffsetFromFilename(name string) (int64, error) {
-	name = strings.TrimSuffix(name, ".log")
-	name = strings.TrimSuffix(name, ".index")
-	return strconv.ParseInt(name, 10, 64)
 }

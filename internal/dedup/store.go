@@ -68,14 +68,6 @@ func NewMemoryStore() *MemoryStore {
 	}
 }
 
-// NewMemoryStoreWithTTL creates an in-memory store with the given TTL in hours.
-func NewMemoryStoreWithTTL(ttlHours int32) *MemoryStore {
-	return &MemoryStore{
-		entries:  make(map[string]Entry),
-		ttlHours: ttlHours,
-	}
-}
-
 // CheckAndStore claims messageID if absent. Returns true when it already exists.
 func (m *MemoryStore) CheckAndStore(messageID string, offset int64) (bool, error) {
 	m.mu.Lock()

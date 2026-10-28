@@ -138,12 +138,6 @@ func (h *AdminServiceHandler) checkAdmin(ctx context.Context) error {
 	return auth.CheckAdminPermission(ctx, h.authCfg.Policy)
 }
 
-// statusUnimplementedErr returns the canonical gRPC Unimplemented error
-// for RPCs that we explicitly defer rather than auto-stub.
-func statusUnimplementedErr() error {
-	return status.Error(codes.Unimplemented, "not implemented in this build")
-}
-
 // ---------------------------------------------------------------------------
 // GetClusterTopology
 // ---------------------------------------------------------------------------

@@ -116,29 +116,3 @@ func TestSnapshotManager_SnapshotStats(t *testing.T) {
 		t.Errorf("consumer offsets count mismatch: got %d, want 1", stats["consumer_offsets"])
 	}
 }
-
-func TestReplayWALTimersFromOffset(t *testing.T) {
-	// This test verifies that replayWALTimersFromOffset correctly
-	// replays events from a specific offset without reading checkpoint.
-	// We'll test the basic logic by creating a simple scenario.
-
-	// Create a temporary partition with some WAL events
-	tmpDir := t.TempDir()
-
-	// Create a minimal partition setup
-	partition := &Partition{
-		ID:      0,
-		DataDir: tmpDir,
-	}
-
-	// We can't easily test the full WAL replay without a real WAL,
-	// but we can verify the function exists and handles edge cases.
-	// The actual integration is tested via the snapshot recovery path.
-
-	// Test with empty WAL (no WAL file)
-	// This should not panic
-	if partition.Wal == nil {
-		// Expected - WAL not initialized in this minimal test
-		t.Log("WAL not initialized in minimal test - this is expected")
-	}
-}

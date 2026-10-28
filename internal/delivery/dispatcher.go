@@ -380,11 +380,6 @@ func (d *Dispatcher) releaseCredits(sub *Subscription, n int32) {
 	}
 }
 
-// releaseCredit returns one credit to a subscription.
-func (d *Dispatcher) releaseCredit(sub *Subscription) {
-	d.releaseCredits(sub, 1)
-}
-
 // Subscribe registers a subscription, initializes credits and circuit breaker,
 // and indexes it under its partition for O(1) dispatch lookups.
 func (d *Dispatcher) Subscribe(sub *Subscription) error {
@@ -491,19 +486,6 @@ func (d *Dispatcher) Unsubscribe(subscriptionID string) error {
 	return nil
 }
 
-// nextGroupStart returns the next subscriber index for a consumer group and
-// advances the persistent cursor by one. Used by the single-event Dispatch
-// path; the batch path uses snapshotGroupCursors/advanceGroupCursors to avoid
-// a mutex acquire per event.
-func (d *Dispatcher) nextGroupStart(groupID string, numSubs int) int {
-	d.groupCursorMu.Lock()
-	defer d.groupCursorMu.Unlock()
-
-	start := d.groupCursor[groupID]
-	d.groupCursor[groupID] = (start + 1) % numSubs
-	return start
-}
-
 // snapshotGroupCursors returns a snapshot of the current cursor position for
 // each group ID in groupIDs. The caller mutates the returned map locally
 // (per-event increment) without any locking, then commits the final positions
@@ -579,66 +561,6 @@ func (d *Dispatcher) pickSubscriber(groupSubs []*Subscription, startIdx int) *Su
 // event's partition, subject to credits, circuit breakers, and in-flight limits.
 func (d *Dispatcher) Dispatch(event *types.Event) error {
 	return d.DispatchBatch([]*types.Event{event})
-}
-
-// dispatchToSub handles the fast path for a single subscriber.
-// No map allocation, no round-robin selection needed.
-func (d *Dispatcher) dispatchToSub(sub *Subscription, event *types.Event) error {
-	if d.LockEvents != nil {
-		unlock := d.LockEvents()
-		defer unlock()
-	}
-	if d.EventEligible != nil && !d.EventEligible(event) {
-		return nil
-	}
-	if d.PublicEvent != nil {
-		event = d.PublicEvent(event)
-	}
-	// Circuit breaker check: skip open circuits without consuming credits
-	if sub.circuitBreaker != nil && !sub.circuitBreaker.CanTry() {
-		return nil
-	}
-
-	if !d.tryConsumeCredit(sub) {
-		return nil // No credits available
-	}
-
-	delivery := deliveryMessagePool.Get().(*DeliveryMessage)
-	delivery.Event = event
-	delivery.DeliveryID = makeDeliveryID(sub.ID, event.Offset)
-	delivery.Attempt = 1
-	delivery.AckTimeout = int32(d.config.DefaultAckTimeout / time.Millisecond)
-	delivery.Batch = nil
-
-	if !d.tryReserveInFlight(1) {
-		deliveryMessagePool.Put(delivery)
-		d.releaseCredit(sub)
-		return fmt.Errorf("in-flight limit exceeded")
-	}
-
-	if err := sub.Stream.Send(delivery); err != nil {
-		if err := d.decInFlight(1); err != nil {
-			log.Printf("[DISPATCHER] in-flight underflow: %v", err)
-		}
-		d.releaseCredit(sub)
-		deliveryMessagePool.Put(delivery)
-		if sub.circuitBreaker != nil {
-			sub.circuitBreaker.RecordFailure(
-				d.config.CircuitBreakerFailureThreshold,
-				d.config.CircuitBreakerMinAttempts,
-				d.config.CircuitBreakerOpenDurationMs,
-			)
-		}
-		log.Printf("[DISPATCHER] Failed to send to subscriber %s: %v", sub.ID, err)
-		return nil
-	}
-
-	if sub.circuitBreaker != nil {
-		sub.circuitBreaker.RecordSuccess()
-	}
-	countDelivered(delivery, false)
-	d.trackDelivery(delivery, sub)
-	return nil
 }
 
 // countDelivered records that a delivery was sent to its consumer: how many

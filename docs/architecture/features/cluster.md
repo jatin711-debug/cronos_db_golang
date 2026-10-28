@@ -17,7 +17,7 @@ The cluster module provides node membership, partition routing, leader assignmen
 - [internal/cluster/capabilities.go](../../../internal/cluster/capabilities.go) — one-way partition format requirements, replica/handoff/voter compatibility and activation.
 - [internal/cluster/election.go](../../../internal/cluster/election.go) — `ChooseFailoverLeader`, the fallback choice used by `electNewLeader` only when no replica-position source is wired; the normal election asks the replicas for their log positions (see leadership.go).
 - [internal/cluster/autoscaler.go](../../../internal/cluster/autoscaler.go) — logs warnings when CPU, memory, disk or partition lag cross a threshold; it changes nothing in the cluster.
-- [internal/cluster/service.go](../../../internal/cluster/service.go), [internal/cluster/types.go](../../../internal/cluster/types.go)
+- [internal/cluster/types.go](../../../internal/cluster/types.go)
 - [cmd/api/main.go](../../../cmd/api/main.go)
 
 ## Main Flow

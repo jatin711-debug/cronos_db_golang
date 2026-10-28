@@ -33,11 +33,6 @@ func (vg *VersionGate) IsCompatible(clientVersion int32) bool {
 	return clientVersion >= vg.minClientVersion.Load() && clientVersion <= vg.maxClientVersion.Load()
 }
 
-// SetMinVersion updates the minimum supported client version (for deprecations).
-func (vg *VersionGate) SetMinVersion(v int32) {
-	vg.minClientVersion.Store(v)
-}
-
 // VersionInterceptor adds wire version compatibility to gRPC metadata.
 // Clients send "x-cronos-version" header; servers validate.
 func VersionInterceptor(vg *VersionGate) grpc.UnaryServerInterceptor {
@@ -65,27 +60,3 @@ func VersionInterceptor(vg *VersionGate) grpc.UnaryServerInterceptor {
 // - Future versions add new optional fields; never remove old fields
 // - Servers ignore unknown fields (protobuf forward compat)
 // - New features gated behind version check
-
-// UpgradePolicy documents and validates zero-downtime rolling upgrade strategy.
-//
-// 1. Deploy new binary to follower nodes first
-// 2. Verify followers catch up and pass health checks
-// 3. Trigger leader transfer away from old binary nodes
-// 4. Deploy new binary to former leaders
-// 5. All nodes running new binary → enable new features
-//
-// During rolling upgrade, cluster runs in mixed-version mode.
-// New features are disabled until all nodes report compatible version.
-type UpgradePolicy struct{}
-
-// ValidateRollingUpgrade returns an error if targetVersion is a downgrade or
-// skips more than one major version ahead of currentVersion.
-func (UpgradePolicy) ValidateRollingUpgrade(currentVersion, targetVersion int) error {
-	if targetVersion < currentVersion {
-		return fmt.Errorf("downgrades not supported: %d -> %d", currentVersion, targetVersion)
-	}
-	if targetVersion-currentVersion > 1 {
-		return fmt.Errorf("can only upgrade one major version at a time: %d -> %d", currentVersion, targetVersion)
-	}
-	return nil
-}

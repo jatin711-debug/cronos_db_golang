@@ -59,7 +59,7 @@ subsequent fixes.
 | [Throughput harness](../tools/throughput/README.md) | Distinguished available tooling from an executed release measurement. |
 | [September probes](audit-probes/README.md) | Retained archived-probe versus ordinary-regression distinction and toolchain prerequisites. |
 | [October probes](audit-probes/2026-10-16/README.md) | Removed obsolete open-DLQ statement; distinguished historical overlays from current tests. |
-| [Historical remediation plan](../plan.md) | Updated superseding references; retained historical checkboxes. |
+| [Historical remediation plan](https://github.com/jatin711-debug/cronos_db_golang/blob/32e31a0/plan.md) | Updated superseding references; retained historical checkboxes. |
 | [Historical technical deep dive](../TECHNICAL_DEEP_DIVE.md) | Added protocol references and qualified illustrative old code. |
 | [Feature index](architecture/README.md) | Updated current hardening, lifecycle links, retention and deferred-feature claims. |
 | [API](architecture/features/api.md) | Updated lifecycle RPCs, authorization, control visibility and append-error diagram. |

@@ -132,14 +132,6 @@ func (g *InternalGRPCServer) ServeError() <-chan error {
 	return g.serveErr
 }
 
-// Address returns the address the server is listening on.
-func (g *InternalGRPCServer) Address() string {
-	if g.listener != nil {
-		return g.listener.Addr().String()
-	}
-	return ""
-}
-
 // Stop stops the server immediately.
 func (g *InternalGRPCServer) Stop() {
 	if g.server != nil {
@@ -147,13 +139,6 @@ func (g *InternalGRPCServer) Stop() {
 	}
 	if g.listener != nil {
 		_ = g.listener.Close()
-	}
-}
-
-// GracefulStop performs a graceful shutdown.
-func (g *InternalGRPCServer) GracefulStop() {
-	if g.server != nil {
-		g.server.GracefulStop()
 	}
 }
 

@@ -54,16 +54,6 @@ type HealthCheck struct {
 	Healthy bool `json:"healthy"`
 }
 
-// MetricsResponse is a simple JSON metrics snapshot (not Prometheus exposition).
-type MetricsResponse struct {
-	// Timestamp is the snapshot wall-clock time in unix milliseconds.
-	Timestamp int64 `json:"timestamp"`
-	// NodeID is the responding node's identifier.
-	NodeID string `json:"node_id"`
-	// Metrics is an arbitrary map of metric names to values.
-	Metrics map[string]interface{} `json:"metrics"`
-}
-
 // NewHealthChecker creates a health checker.
 func NewHealthChecker(cfg *types.Config, pm *partition.PartitionManager, cm *cluster.Manager) *HealthChecker {
 	return &HealthChecker{
@@ -295,67 +285,6 @@ func (h *HealthChecker) handleDeepHealth(w http.ResponseWriter, r *http.Request)
 	} else {
 		w.WriteHeader(http.StatusOK)
 	}
-	_ = json.NewEncoder(w).Encode(resp)
-}
-
-// handleMetrics returns a simple JSON metrics endpoint.
-// For Prometheus compatibility, this outputs basic metrics in a simple format.
-func (h *HealthChecker) handleMetrics(w http.ResponseWriter, r *http.Request) {
-	metrics := make(map[string]interface{})
-
-	// Basic node metrics
-	metrics["cronos_node_uptime_ms"] = time.Since(h.startTime).Milliseconds()
-	metrics["cronos_node_partitions_total"] = h.Config.PartitionCount
-
-	// Partition metrics
-	if h.PartitionMgr != nil {
-		stats := h.PartitionMgr.GetStats()
-		metrics["cronos_partitions_active"] = stats.TotalPartitions
-		metrics["cronos_partitions_leader"] = stats.LeaderPartitions
-
-		for i := int32(0); i < int32(h.Config.PartitionCount); i++ {
-			p, err := h.PartitionMgr.GetInternalPartition(i)
-			if err != nil || p == nil {
-				continue
-			}
-			label := strconv.FormatInt(int64(i), 10)
-
-			if p.Wal != nil {
-				metrics["cronos_wal_high_watermark{partition=\""+label+"\"}"] = p.Wal.GetHighWatermark()
-				metrics["cronos_wal_segments{partition=\""+label+"\"}"] = len(p.Wal.GetSegments())
-			}
-
-			if p.Scheduler != nil {
-				schedStats := p.Scheduler.GetStats()
-				metrics["cronos_scheduler_active_timers{partition=\""+label+"\"}"] = schedStats.ActiveTimers
-				metrics["cronos_scheduler_overflow_level{partition=\""+label+"\"}"] = schedStats.OverflowLevel
-			}
-
-			if p.Dispatcher != nil {
-				dispStats := p.Dispatcher.GetStats()
-				metrics["cronos_dispatcher_active_deliveries{partition=\""+label+"\"}"] = dispStats.ActiveDeliveries
-				metrics["cronos_dispatcher_credits_in_use{partition=\""+label+"\"}"] = dispStats.CreditsInUse
-			}
-		}
-	}
-
-	// Cluster metrics
-	if h.Config.ClusterEnabled && h.ClusterMgr != nil {
-		clusterStats := h.ClusterMgr.GetStats()
-		metrics["cronos_cluster_nodes_total"] = clusterStats.TotalNodes
-		metrics["cronos_cluster_nodes_alive"] = clusterStats.AliveNodes
-		metrics["cronos_cluster_partitions"] = clusterStats.NumPartitions
-		metrics["cronos_cluster_leaders"] = clusterStats.LeaderPartitions
-	}
-
-	resp := MetricsResponse{
-		Timestamp: time.Now().UnixMilli(),
-		NodeID:    h.Config.NodeID,
-		Metrics:   metrics,
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(resp)
 }
 

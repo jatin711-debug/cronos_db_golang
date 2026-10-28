@@ -3,13 +3,11 @@ package cluster
 import (
 	"fmt"
 	"log/slog"
-	"runtime"
 	"time"
 
 	"github.com/shirou/gopsutil/v3/cpu"
 	"github.com/shirou/gopsutil/v3/disk"
 	"github.com/shirou/gopsutil/v3/mem"
-	"github.com/shirou/gopsutil/v3/net"
 )
 
 // AutoScalerMetrics provides resource metrics for cluster scaling decisions.
@@ -143,39 +141,4 @@ func (SystemMetrics) RequestRate() float64 {
 func (SystemMetrics) PartitionLag() map[int32]int64 {
 	// Would integrate with consumer offset store
 	return nil
-}
-
-// SimpleMetrics is a basic metrics implementation using runtime stats.
-// Deprecated: use SystemMetrics for real host metrics.
-type SimpleMetrics struct{}
-
-// CPUUsage always returns 0 for SimpleMetrics.
-func (SimpleMetrics) CPUUsage() float64 { return 0 }
-
-// MemoryUsage returns process Sys memory in gibibytes (not a 0–1 ratio).
-func (SimpleMetrics) MemoryUsage() float64 {
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
-	return float64(m.Sys) / float64(1<<30)
-}
-
-// DiskUsage always returns 0 for SimpleMetrics.
-func (SimpleMetrics) DiskUsage() float64 { return 0 }
-
-// RequestRate always returns 0 for SimpleMetrics.
-func (SimpleMetrics) RequestRate() float64 { return 0 }
-
-// PartitionLag always returns nil for SimpleMetrics.
-func (SimpleMetrics) PartitionLag() map[int32]int64 { return nil }
-
-// NetworkStats provides host network I/O statistics via gopsutil.
-type NetworkStats struct{}
-
-// IOStats returns aggregate bytes sent and received on host network interfaces.
-func (NetworkStats) IOStats() (sent uint64, recv uint64, err error) {
-	ioCounters, err := net.IOCounters(false)
-	if err != nil || len(ioCounters) == 0 {
-		return 0, 0, err
-	}
-	return ioCounters[0].BytesSent, ioCounters[0].BytesRecv, nil
 }

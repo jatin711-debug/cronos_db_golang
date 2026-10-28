@@ -19,7 +19,7 @@ import (
 )
 
 // These tests began as the reproductions of the audit of 2026-10-16
-// (docs/audit-probes/2026-10-16). Each asserts an invariant that the audited
+// (docs/PRODUCTION_AUDIT_2026-10-16.md). Each asserts an invariant that the audited
 // v0.6.0 broke.
 
 // publishOne publishes e alone, through Publish or PublishBatch, and reports

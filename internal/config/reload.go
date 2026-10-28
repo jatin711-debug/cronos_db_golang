@@ -23,9 +23,6 @@ import (
 type ReloadableConfig struct {
 	mu     sync.RWMutex
 	config *types.Config
-
-	// onChange holds callbacks invoked when a successful Reload changes fields.
-	onChange []func(old, new *types.Config)
 }
 
 // NewReloadableConfig creates a reloadable configuration wrapper.
@@ -33,20 +30,6 @@ func NewReloadableConfig(cfg *types.Config) *ReloadableConfig {
 	return &ReloadableConfig{
 		config: cfg,
 	}
-}
-
-// Get returns a copy of the current configuration (safe for reads).
-func (rc *ReloadableConfig) Get() types.Config {
-	rc.mu.RLock()
-	defer rc.mu.RUnlock()
-	return *rc.config
-}
-
-// RegisterCallback adds a callback invoked on every successful reload.
-func (rc *ReloadableConfig) RegisterCallback(fn func(old, new *types.Config)) {
-	rc.mu.Lock()
-	defer rc.mu.Unlock()
-	rc.onChange = append(rc.onChange, fn)
 }
 
 // Reload reads environment variables and updates reloadable fields.
@@ -110,9 +93,6 @@ func (rc *ReloadableConfig) Reload() bool {
 
 	if changed {
 		slog.Info("Config reloaded from environment", "changed_fields", diffConfig(&old, rc.config))
-		for _, cb := range rc.onChange {
-			cb(&old, rc.config)
-		}
 	}
 	return changed
 }

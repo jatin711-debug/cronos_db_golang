@@ -38,8 +38,6 @@ func (m *MockDedupManager) RollbackBatch(messageIDs []string) error {
 }
 
 type MockConsumerManager struct {
-	sub *types.SubscribeRequest
-	ack *types.AckRequest
 	err error
 }
 
