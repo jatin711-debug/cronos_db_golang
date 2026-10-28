@@ -4,6 +4,7 @@ package acceptance
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -62,7 +63,7 @@ func TestClientsFindTheOtherNodesThroughPartitionMetadata(t *testing.T) {
 		for suffix := 0; utils.HashToPartitionID(messageID, partitionCount) != p; suffix++ {
 			messageID = fmt.Sprintf("discovery-%d-%d", p, suffix)
 		}
-		res, err := producer.Send(ctx, client.Message{
+		res, err := sendWhileLeadershipSettles(ctx, t, producer, client.Message{
 			Topic:      "discovery",
 			MessageID:  messageID,
 			Payload:    []byte("x"),
@@ -86,4 +87,27 @@ func TestClientsFindTheOtherNodesThroughPartitionMetadata(t *testing.T) {
 		}
 	}
 	t.Logf("published through %v; the partitions are led at %v", servedBy, leaders)
+}
+
+// sendWhileLeadershipSettles publishes msg, and publishes it again while the
+// cluster refuses it as unavailable. Right after start-up the leadership of a
+// partition can still be moving to the node the ring prefers, and the node
+// giving it up refuses publishes meanwhile ("partition 1 is local but this node
+// is not the leader"). The producer's own retries could run out before that
+// ended, and the test failed now and then in CI.
+func sendWhileLeadershipSettles(ctx context.Context, t *testing.T, producer *client.Producer, msg client.Message) (*client.SendResult, error) {
+	t.Helper()
+	for {
+		res, err := producer.Send(ctx, msg)
+		var refused *client.Error
+		if err == nil || !errors.As(err, &refused) || refused.Kind != client.ErrorKindUnavailable {
+			return res, err
+		}
+		t.Logf("publish of %s refused while leadership settles; trying again: %v", msg.MessageID, err)
+		select {
+		case <-ctx.Done():
+			return res, err
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
 }
