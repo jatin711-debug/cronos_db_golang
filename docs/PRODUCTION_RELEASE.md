@@ -38,6 +38,30 @@ Use its `IMAGE_DIGEST` and publication evidence to identify the tested image.
 v0.9.0 data directories are kept; duplicate records are not. This release
 makes no new capacity claim.
 
+Published on 2026-10-28 from `315532780d117a3260758c8034a6504cee9c8037`. The
+fixes passed the required checks on
+[PR #17](https://github.com/jatin711-debug/cronos_db_golang/pull/17), and the
+release revision on
+[PR #18](https://github.com/jatin711-debug/cronos_db_golang/pull/18). The
+[run on `main`](https://github.com/jatin711-debug/cronos_db_golang/actions/runs/40758628646)
+passed on its second attempt; the first failed the discovery test, which
+published before leadership had settled after start-up, while the fault
+campaign in the same attempt passed. The
+[release staging run](https://github.com/jatin711-debug/cronos_db_golang/actions/runs/40758708786)
+built the binaries, started the Linux binary, and scanned and fault-tested the
+exact image archived on the release, including container network faults and a
+restart with a backlog larger than memory. The scan reported no findings.
+
+The Linux amd64 image is `johnny711dock/cronos-db:0.10.0`, manifest digest
+`sha256:9e21824133d9dd76aabe00d4dbb96b1fa2219014cd3fdc8ba11d19b58c575011`.
+It was loaded from the staged archive and pushed locally; its configuration and
+all nine filesystem layers match the scanned image, and anonymous registry
+requests select the same manifest for `0.10.0` and `latest`. Pin the manifest
+for deployments. This publication has no signed GitHub workflow provenance.
+`latest` previously selected v0.9.0
+(`sha256:b597796916f59408801e37577ea591e38bac312828d7bbc6bf06b15e07b3abf4`); a
+node started from `latest` on a v0.9.0 data directory keeps it.
+
 ## v0.9.0 release
 
 The [v0.9.0 notes](RELEASE_V0.9.0.md) describe the version-2 WAL segment
