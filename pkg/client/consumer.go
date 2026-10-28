@@ -433,6 +433,42 @@ type ackEnvelope struct {
 	req         *types.AckRequest
 	partitionID int32
 	topic       string
+	// done receives the server's answer to req with CommitStrategySync: nil
+	// when it took the acknowledgement, or why not. It is nil otherwise.
+	done chan error
+}
+
+// finish reports the outcome of the acknowledgement to whoever waits for it.
+func (e ackEnvelope) finish(err error) {
+	if e.done != nil {
+		e.done <- err
+	}
+}
+
+// sentAcks is the acknowledgements of one stream that have been sent and not
+// answered yet, in the order they were sent. The server answers each one, in
+// order.
+type sentAcks struct {
+	mu   sync.Mutex
+	acks []ackEnvelope
+}
+
+func (s *sentAcks) push(e ackEnvelope) {
+	s.mu.Lock()
+	s.acks = append(s.acks, e)
+	s.mu.Unlock()
+}
+
+func (s *sentAcks) pop() (ackEnvelope, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.acks) == 0 {
+		return ackEnvelope{}, false
+	}
+	e := s.acks[0]
+	s.acks[0] = ackEnvelope{}
+	s.acks = s.acks[1:]
+	return e, true
 }
 
 type deliveryAcker struct {
@@ -750,18 +786,19 @@ func (c *Consumer) consumeFromNode(ctx context.Context, addr string) error {
 	// the subscription's credits it sends nothing more. So when the ack stream
 	// fails, the subscription ends with it, and the reconnect that follows
 	// opens both again.
+	sent := &sentAcks{}
 	infraWG.Add(1)
 	utils.GoSafe("consumer-ack-sender", func() {
 		defer infraWG.Done()
 		defer cancel()
-		c.ackSender(subCtx, addr, ackStream, ackQueue)
+		c.ackSender(subCtx, addr, ackStream, ackQueue, sent)
 	})
 	if c.cfg.CommitStrategy == CommitStrategyAsync {
 		infraWG.Add(1)
 		utils.GoSafe("consumer-ack-drain", func() {
 			defer infraWG.Done()
 			defer cancel()
-			c.drainAckResponses(subCtx, addr, ackStream)
+			c.drainAckResponses(subCtx, addr, ackStream, sent)
 		})
 	}
 
@@ -844,15 +881,39 @@ func (c *Consumer) worker(ctx context.Context, deliveries <-chan *types.Delivery
 		}
 
 		defaultAck := c.buildDefaultAck(delivery, nil)
+		streamCtx := ctx
 		d.acker = &deliveryAcker{
 			template: defaultAck,
 			sendRequest: func(ctx context.Context, env ackEnvelope) error {
+				// With CommitStrategySync the acknowledgement returns the
+				// server's answer. It used to return once it was queued.
+				if c.cfg.CommitStrategy == CommitStrategySync {
+					env.done = make(chan error, 1)
+				}
 				select {
 				case <-ctx.Done():
 					return ctx.Err()
 				case ackQueue <- env:
 					c.observeState(len(deliveries), len(ackQueue))
+				}
+				if env.done == nil {
 					return nil
+				}
+				// The caller's context need not end with the stream, and an
+				// acknowledgement queued after the sender stopped is never
+				// answered.
+				select {
+				case err := <-env.done:
+					return err
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-streamCtx.Done():
+					select {
+					case err := <-env.done:
+						return err
+					default:
+						return errAckStreamClosed
+					}
 				}
 			},
 		}
@@ -915,43 +976,60 @@ func (c *Consumer) ackSender(
 	addr string,
 	stream grpc.BidiStreamingClient[types.AckRequest, types.AckResponse],
 	acks <-chan ackEnvelope,
+	sent *sentAcks,
 ) {
 	batch := make([]ackEnvelope, 0, c.cfg.AckBatchSize)
 	timer := time.NewTimer(c.cfg.AckFlushInterval)
 	defer timer.Stop()
+	// Whoever waits for an acknowledgement that cannot be sent any more is
+	// told so when the stream ends.
+	defer func() {
+		for _, ack := range batch {
+			ack.finish(errAckStreamClosed)
+		}
+		for {
+			select {
+			case ack, ok := <-acks:
+				if !ok {
+					return
+				}
+				ack.finish(errAckStreamClosed)
+			default:
+				return
+			}
+		}
+	}()
 
 	flush := func() bool {
-		for _, ack := range batch {
+		for i, ack := range batch {
 			if ack.req == nil {
 				continue
+			}
+			sync := c.cfg.CommitStrategy == CommitStrategySync
+			if !sync {
+				// Noted before it is sent: its answer can arrive first.
+				sent.push(ack)
 			}
 			start := time.Now()
 			err := stream.Send(ack.req)
 			c.client.observeRequest("event.ack.send", addr, start, err)
 			if err != nil {
+				ack.finish(wrapError("consumer.ack", ErrorKindTransport, err))
+				batch = batch[i+1:]
 				return false
 			}
 
-			if c.cfg.CommitStrategy == CommitStrategySync {
+			if sync {
 				start = time.Now()
 				resp, recvErr := stream.Recv()
 				c.client.observeRequest("event.ack.recv", addr, start, recvErr)
 				if recvErr != nil {
+					ack.finish(wrapError("consumer.ack", ErrorKindTransport, recvErr))
+					batch = batch[i+1:]
 					return false
 				}
-				if resp != nil && !resp.GetSuccess() {
-					c.ackRefused(ack.req, resp)
-					continue
-				}
-				committed := ack.req.GetNextOffset()
-				if resp != nil && resp.GetCommittedOffset() > 0 {
-					committed = resp.GetCommittedOffset()
-				}
-				c.persistCheckpoint(ctx, ack, committed)
-				continue
+				ack.finish(c.ackAnswered(ctx, ack, resp))
 			}
-
-			c.persistCheckpoint(ctx, ack, ack.req.GetNextOffset())
 		}
 		batch = batch[:0]
 		c.observeState(0, len(acks))
@@ -973,7 +1051,8 @@ func (c *Consumer) ackSender(
 			}
 			batch = append(batch, ack)
 			c.observeState(0, len(acks))
-			if len(batch) >= c.cfg.AckBatchSize {
+			// Someone waits for the answer: it is not held for a batch.
+			if len(batch) >= c.cfg.AckBatchSize || ack.done != nil {
 				if !flush() {
 					return
 				}
@@ -998,6 +1077,7 @@ func (c *Consumer) drainAckResponses(
 	ctx context.Context,
 	addr string,
 	stream grpc.BidiStreamingClient[types.AckRequest, types.AckResponse],
+	sent *sentAcks,
 ) {
 	for {
 		select {
@@ -1012,10 +1092,33 @@ func (c *Consumer) drainAckResponses(
 		if err != nil {
 			return
 		}
-		if resp != nil && !resp.GetSuccess() {
-			c.ackRefused(nil, resp)
+		ack, ok := sent.pop()
+		if !ok {
+			if resp != nil && !resp.GetSuccess() {
+				c.ackRefused(nil, resp)
+			}
+			continue
 		}
+		_ = c.ackAnswered(ctx, ack, resp)
 	}
+}
+
+// errAckStreamClosed is the outcome of an acknowledgement that was not sent,
+// or not answered, before its stream ended.
+var errAckStreamClosed = wrapError("consumer.ack", ErrorKindTransport, errors.New("the acknowledgement stream ended before the server answered"))
+
+// ackAnswered handles the server's answer to an acknowledgement: it saves the
+// group's progress the answer reports, or reports a refusal, which it returns.
+func (c *Consumer) ackAnswered(ctx context.Context, ack ackEnvelope, resp *types.AckResponse) error {
+	if resp == nil {
+		return wrapError("consumer.ack", ErrorKindTransport, errors.New("empty acknowledgement response"))
+	}
+	if !resp.GetSuccess() {
+		c.ackRefused(ack.req, resp)
+		return wrapError("consumer.ack", ErrorKindValidation, fmt.Errorf("acknowledgement of %s refused: %s", ack.req.GetDeliveryId(), resp.GetError()))
+	}
+	c.persistCheckpoint(ctx, ack, resp.GetCommittedOffset())
+	return nil
 }
 
 // ackRefused reports an acknowledgement the server did not take. The delivery
@@ -1095,14 +1198,26 @@ func (c *Consumer) resolveStartOffset(ctx context.Context) int64 {
 	return offset
 }
 
-func (c *Consumer) persistCheckpoint(ctx context.Context, ack ackEnvelope, committedOffset int64) {
-	if c.cfg.CheckpointStore == nil || ack.partitionID < 0 || ack.topic == "" {
+// persistCheckpoint saves the group's completion floor on a partition, as the
+// server reports it in the answer to an acknowledgement: every offset below
+// it is complete. A consumer that resumes from a checkpoint asks for nothing
+// below it.
+//
+// It used to save the offset after the acknowledged delivery, as soon as the
+// acknowledgement was sent, or when the server reported a floor of 0. Events
+// are delivered in the order of their schedule, not of their offsets, so that
+// offset was routinely past unfinished events, and the server does not
+// redeliver below the offset a subscription asks to start from: they were
+// skipped. A floor of 0 is a floor like any other; a negative one says that
+// nothing is complete and is not saved.
+func (c *Consumer) persistCheckpoint(ctx context.Context, ack ackEnvelope, floor int64) {
+	if c.cfg.CheckpointStore == nil || ack.partitionID < 0 || ack.topic == "" || floor < 0 {
 		return
 	}
 	if ack.req == nil || !ack.req.GetSuccess() {
 		return
 	}
-	_ = c.cfg.CheckpointStore.SaveOffset(ctx, c.cfg.ConsumerGroup, ack.topic, ack.partitionID, committedOffset)
+	_ = c.cfg.CheckpointStore.SaveOffset(ctx, c.cfg.ConsumerGroup, ack.topic, ack.partitionID, floor)
 }
 
 func deliveryPayloadBytes(d *types.Delivery) int {

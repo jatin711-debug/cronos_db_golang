@@ -47,6 +47,7 @@ func LoadConfig() (*types.Config, error) {
 	config.MaxRetries = DefaultMaxRetries
 	config.RetryBackoff = 1 * time.Second
 	config.MaxDeliveryCredits = DefaultMaxDeliveryCredits
+	config.MaxConsumerGroups = DefaultMaxConsumerGroups
 	config.DeliveryPollMS = DefaultDeliveryPollMS
 	config.DedupTTLHours = DefaultDedupTTLHours
 	config.BloomCapacity = DefaultBloomCapacity
@@ -167,6 +168,7 @@ func LoadConfig() (*types.Config, error) {
 	flag.IntVar(&config.MaxRetries, "max-retries", DefaultMaxRetries, "Delivery retries before an event goes to the dead-letter queue")
 	flag.DurationVar(&config.RetryBackoff, "retry-backoff", 1*time.Second, "Delay before a retry, multiplied by the attempt number")
 	flag.IntVar(&config.MaxDeliveryCredits, "max-credits", DefaultMaxDeliveryCredits, "Credit ceiling for a subscription that does not set its own")
+	flag.IntVar(&config.MaxConsumerGroups, "max-consumer-groups", DefaultMaxConsumerGroups, "Consumer groups a partition holds at most; Subscribe refuses a new group beyond it (negative: no limit)")
 	flag.Float64Var(&config.CircuitBreakerFailureThreshold, "cb-failure-threshold", DefaultCircuitBreakerFailureThreshold, "Circuit breaker failure rate to trip (0.0-1.0)")
 	flag.Int64Var(&config.CircuitBreakerMinAttempts, "cb-min-attempts", DefaultCircuitBreakerMinAttempts, "Min attempts before circuit breaker evaluates")
 	flag.Int64Var(&config.CircuitBreakerOpenDurationMs, "cb-open-duration-ms", DefaultCircuitBreakerOpenDurationMs, "Circuit breaker open duration in milliseconds")

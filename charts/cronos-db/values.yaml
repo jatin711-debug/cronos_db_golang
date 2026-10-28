@@ -41,10 +41,21 @@ nodeSelector: {}
 
 tolerations: []
 
+# Used as given when set; podAntiAffinity is ignored then.
 affinity: {}
+
+# Keeps pods of this release on different Kubernetes nodes, so that a node
+# failure takes one Raft voter and one replica of a partition: "soft" asks the
+# scheduler to, "hard" requires it (at least replicaCount nodes are needed),
+# "" leaves placement to the scheduler.
+podAntiAffinity: soft
 
 podDisruptionBudget:
   enabled: true
+  # How many pods a voluntary disruption (a drain, a cluster upgrade) may take
+  # at once. More than one can take a majority of the Raft voters or every
+  # replica of a partition.
+  maxUnavailable: 1
 
 persistence:
   enabled: true

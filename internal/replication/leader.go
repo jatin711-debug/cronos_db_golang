@@ -304,6 +304,17 @@ func (l *Leader) connectFollower(id, address string) {
 	log.Printf("[LEADER] Connected to follower %s at %s (gRPC replication)", id, address)
 }
 
+// FollowerIDs returns the IDs of the followers this leader replicates to.
+func (l *Leader) FollowerIDs() []string {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	ids := make([]string, 0, len(l.followers))
+	for id := range l.followers {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
 // RemoveFollower removes a follower and closes its connection.
 func (l *Leader) RemoveFollower(id string) error {
 	l.mu.Lock()
@@ -339,6 +350,13 @@ func (l *Leader) Replicate(events []*types.Event) error {
 	}
 	if term := l.newerTerm.Load(); term > 0 {
 		return fmt.Errorf("partition %d has a leader of term %d; this one, of term %d, takes no more publishes", l.partitionID, term, l.GetEpoch())
+	}
+	start, err := l.termStartAfter(events[len(events)-1].Offset)
+	if err != nil {
+		return err
+	}
+	if start != nil {
+		events = []*types.Event{start}
 	}
 
 	l.mu.RLock()
@@ -401,6 +419,30 @@ func (l *Leader) Replicate(events []*types.Event) error {
 			acks, minISR, l.partitionID, events[len(events)-1].Offset)
 	}
 	return nil
+}
+
+// termStartAfter returns this term's start record when it comes after offset
+// last, and nil otherwise. In term-start mode an entry of an earlier term is
+// committed only together with an entry of the current one (see
+// docs/REPLICATION_TERM_START.md), and the first of those is the start record.
+// A publish retried after this node took over leadership can concern such an
+// entry: replicating it alone put it on a quorum without committing it, and
+// the publisher was told it was committed. Replicating through the start
+// record covers it, as followers hold a prefix of this log.
+func (l *Leader) termStartAfter(last int64) (*types.Event, error) {
+	state := l.termCommit.Load()
+	if state == nil || state.epoch != l.GetEpoch() || l.wal == nil {
+		return nil, nil
+	}
+	first := state.firstNext.Load()
+	if first <= 0 || first-1 <= last {
+		return nil, nil
+	}
+	start, err := l.wal.ReadEvent(first - 1)
+	if err != nil {
+		return nil, fmt.Errorf("read the start of term %d at offset %d: %w", state.epoch, first-1, err)
+	}
+	return start, nil
 }
 
 // queueSend starts an ordered send of events to one follower and reports its

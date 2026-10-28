@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/jatin711-debug/cronos_db_golang/internal/dedup"
 	"github.com/jatin711-debug/cronos_db_golang/internal/lifecycle"
 	"github.com/jatin711-debug/cronos_db_golang/internal/logcontrol"
 	"github.com/jatin711-debug/cronos_db_golang/internal/partition"
@@ -84,14 +85,14 @@ func (s *CrossRegionServer) ReplicateEvents(ctx context.Context, req *types.Regi
 
 		// Check dedup store
 		if p.DedupStore != nil {
-			isDup, dupErr := p.DedupStore.IsDuplicate(event.MessageId, event.Offset)
+			isDup, dupErr := p.DedupStore.IsDuplicate(dedup.EventKey(event), event.Offset)
 			if dupErr != nil {
 				slog.Warn("Cross-region dedup check failed", "message_id", event.MessageId, "error", dupErr)
 				conflictResolutionCounter.WithLabelValues("no_conflict").Inc()
 				// On dedup error, proceed with append (safer than dropping)
 			} else if isDup {
 				// Event exists — apply LWW: keep the one with higher created_ts
-				storedTS, exists, tsErr := p.DedupStore.GetTimestamp(event.MessageId)
+				storedTS, exists, tsErr := p.DedupStore.GetTimestamp(dedup.EventKey(event))
 				if tsErr != nil {
 					slog.Warn("Cross-region LWW: failed to get stored timestamp", "message_id", event.MessageId, "error", tsErr)
 					conflictResolutionCounter.WithLabelValues("no_conflict").Inc()
@@ -153,7 +154,7 @@ func (s *CrossRegionServer) ReplicateEvents(ctx context.Context, req *types.Regi
 			} else {
 				incomingTS = event.CreatedTs * 1_000_000
 			}
-			if err := p.DedupStore.Put(event.MessageId, event.Offset, incomingTS); err != nil {
+			if err := p.DedupStore.Put(dedup.EventKey(event), event.Offset, incomingTS); err != nil {
 				slog.Warn("Failed to update dedup store after append", "message_id", event.MessageId, "error", err)
 			}
 		}

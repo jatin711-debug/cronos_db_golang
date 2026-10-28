@@ -59,6 +59,32 @@ def check(ephemeral=False, separate_backup=False):
         assert claims["backups"]["spec"]["storageClassName"] == "backup-storage"
 
 
+def check_disruption():
+    """Voluntary disruptions keep a Raft majority and a replica of every partition.
+
+    Every pod is a Raft voter and holds partition replicas. The budget used to
+    keep floor(RF/2)+1 pods, which let a drain take 3 of 5 production pods at
+    once, and pods were not kept on separate nodes.
+    """
+    args = ["helm", "template", "cronos", str(CHART), "--namespace", "cronos-ci",
+            "-f", str(CHART / "values-production.yaml")]
+    docs = [d for d in yaml.safe_load_all(subprocess.check_output(args, text=True)) if d]
+    sts = next(d for d in docs if d["kind"] == "StatefulSet")
+    pdb = next(d for d in docs if d["kind"] == "PodDisruptionBudget")
+    config = next(d["data"] for d in docs if d["kind"] == "ConfigMap")
+    pods = sts["spec"]["replicas"]
+    rf = int(config["CRONOS_REPLICATION_FACTOR"])
+    min_isr = int(config["CRONOS_MIN_IN_SYNC_REPLICAS"])
+    assert "minAvailable" not in pdb["spec"]
+    unavailable = pdb["spec"]["maxUnavailable"]
+    assert unavailable <= pods - (pods // 2 + 1), "a drain could take a majority of the Raft voters"
+    assert unavailable <= rf - min_isr, "a drain could take a partition below its in-sync replicas"
+    assert pdb["spec"]["selector"]["matchLabels"] == sts["spec"]["selector"]["matchLabels"]
+    terms = sts["spec"]["template"]["spec"]["affinity"]["podAntiAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"]
+    assert any(t["topologyKey"] == "kubernetes.io/hostname" and
+               t["labelSelector"]["matchLabels"] == sts["spec"]["selector"]["matchLabels"] for t in terms)
+
+
 def check_extra_env():
     """Settings the chart has no value for are passed with extraEnv."""
     args = ["helm", "template", "cronos", str(CHART), "--namespace", "cronos-ci",
@@ -86,4 +112,5 @@ if __name__ == "__main__":
     check(separate_backup=True)
     check(ephemeral=True, separate_backup=True)
     check_extra_env()
-    print("Production chart assertions passed (persistent/ephemeral data and separate backup volumes).")
+    check_disruption()
+    print("Production chart assertions passed (persistent/ephemeral data, separate backup volumes, disruption budget and pod spread).")

@@ -40,6 +40,10 @@ alerts:
 
 podDisruptionBudget:
   enabled: true
+  maxUnavailable: 1
+
+# One pod per Kubernetes node: five nodes are needed for the five pods.
+podAntiAffinity: hard
 
 # Production requires TLS, auth, encryption at rest, and replication mTLS.
 # Create the referenced secrets (or use cert-manager) before installing.

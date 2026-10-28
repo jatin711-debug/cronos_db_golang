@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -554,6 +555,7 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 
 	// Create consumer group manager with persistent offset store
 	consumerGroup := consumer.NewGroupManagerWithStore(offsetStore)
+	consumerGroup.SetMaxGroups(pm.config.MaxConsumerGroups)
 	defer func() {
 		if createErr != nil {
 			consumerGroup.Close()
@@ -1156,7 +1158,7 @@ func (pm *PartitionManager) recoverDedupFromWAL(partition *Partition) (retErr er
 				// A durable replacement proves the logical publish existed. Seed
 				// its ID as accepted if the original was pruned or this is a restore.
 				if minCreatedTS == 0 || ev.CreatedTs == 0 || ev.CreatedTs >= minCreatedTS {
-					if err := partition.DedupStore.Put(ev.MessageId, ev.Offset, ev.CreatedTs); err != nil {
+					if err := partition.DedupStore.Put(dedup.EventKey(ev), ev.Offset, ev.CreatedTs); err != nil {
 						return fmt.Errorf("recover lifecycle dedup: %w", err)
 					}
 				}
@@ -1170,7 +1172,8 @@ func (pm *PartitionManager) recoverDedupFromWAL(partition *Partition) (retErr er
 			if minCreatedTS > 0 && ev.GetCreatedTs() > 0 && ev.GetCreatedTs() < minCreatedTS {
 				continue
 			}
-			stored, exists, err := partition.DedupStore.GetOffset(mid)
+			key := dedup.EventKey(ev)
+			stored, exists, err := partition.DedupStore.GetOffset(key)
 			if err != nil {
 				return fmt.Errorf("dedup recovery lookup %q: %w", mid, err)
 			}
@@ -1180,7 +1183,7 @@ func (pm *PartitionManager) recoverDedupFromWAL(partition *Partition) (retErr er
 			// The log holds the event, which does not show that its publish
 			// was accepted. Recording where it is lets a retry finish that
 			// publish instead of appending the event a second time.
-			if err := partition.DedupStore.Put(mid, dedup.AppendedAt(ev.Offset), ev.GetCreatedTs()); err != nil {
+			if err := partition.DedupStore.Put(key, dedup.AppendedAt(ev.Offset), ev.GetCreatedTs()); err != nil {
 				return fmt.Errorf("dedup recovery put %q: %w", mid, err)
 			}
 			recovered++
@@ -1924,6 +1927,27 @@ func (pm *PartitionManager) AddFollower(partitionID int32, followerID string, fo
 	}
 
 	log.Printf("[PARTITION] Follower %s added to partition %d", followerID, partitionID)
+	return nil
+}
+
+// RetainFollowers stops a leading partition replicating to every follower
+// whose ID is not in keep. A partition this node does not lead has none.
+func (pm *PartitionManager) RetainFollowers(partitionID int32, keep []string) error {
+	pm.mu.RLock()
+	partition, exists := pm.partitions[partitionID]
+	pm.mu.RUnlock()
+	if !exists || partition.ReplLeader == nil {
+		return nil
+	}
+	for _, id := range partition.ReplLeader.FollowerIDs() {
+		if slices.Contains(keep, id) {
+			continue
+		}
+		if err := partition.ReplLeader.RemoveFollower(id); err != nil {
+			return fmt.Errorf("remove follower %s: %w", id, err)
+		}
+		log.Printf("[PARTITION] Follower %s removed from partition %d: it is no longer a replica", id, partitionID)
+	}
 	return nil
 }
 

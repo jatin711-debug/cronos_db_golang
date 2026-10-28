@@ -9,7 +9,10 @@ spec:
   selector:
     matchLabels:
       {{- include "cronos-db.selectorLabels" . | nindent 6 }}
-  # Ensure at least a majority of replicas stay available during disruptions.
-  # For replication factor RF, minAvailable = floor(RF/2) + 1.
-  minAvailable: {{ add (div (int .Values.config.replicationFactor) 2) 1 }}
+  # Every pod is a Raft voter and holds replicas of partitions, and a budget
+  # counts pods, not either of those. It used to keep floor(RF/2) + 1 pods,
+  # which let a drain take 3 of 5 pods at once: a majority of the voters, or
+  # every replica of a partition. One at a time keeps both, given
+  # --min-insync-replicas below the replication factor.
+  maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable }}
 {{- end }}

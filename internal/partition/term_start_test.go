@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jatin711-debug/cronos_db_golang/internal/dedup"
 	"github.com/jatin711-debug/cronos_db_golang/internal/logcontrol"
 	"github.com/jatin711-debug/cronos_db_golang/internal/storage"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
@@ -77,7 +78,7 @@ func TestTermStartReadPathsRetentionBackupAndRecovery(t *testing.T) {
 	if p.Scheduler.GetColdStoreCount() != 1 {
 		t.Fatal("term-start record was scheduled as work")
 	}
-	if _, found, err := p.DedupStore.GetOffset(""); err != nil || found {
+	if _, found, err := p.DedupStore.GetOffset(dedup.Key("", "")); err != nil || found {
 		t.Fatalf("internal record acquired a dedup claim: %v %v", found, err)
 	}
 	if n, err := p.PruneWAL(context.Background(), storage.PruneOptions{AllCompleted: true}); err != nil || n == 0 || p.Wal.GetFirstOffset() != user.Offset {
@@ -105,7 +106,7 @@ func TestTermStartReadPathsRetentionBackupAndRecovery(t *testing.T) {
 	if p.Scheduler.GetColdStoreCount() != 1 {
 		t.Fatal("restart scheduled control records")
 	}
-	if _, found, err := p.DedupStore.GetOffset(""); err != nil || found {
+	if _, found, err := p.DedupStore.GetOffset(dedup.Key("", "")); err != nil || found {
 		t.Fatal("restart seeded an internal dedup ID")
 	}
 	if err := pm.Close(); err != nil {

@@ -65,7 +65,7 @@ func TestRecoverDedupBeyondFormerCutoff(t *testing.T) {
 	if err := pm.recoverDedupFromWAL(p); err != nil {
 		t.Fatal(err)
 	}
-	if _, exists, err := p.DedupStore.GetOffset("id-0"); err != nil || !exists {
+	if _, exists, err := p.DedupStore.GetOffset(dedup.Key("t", "id-0")); err != nil || !exists {
 		t.Fatalf("oldest live ID missing: exists=%v err=%v", exists, err)
 	}
 	point, err := p.DedupStore.LoadRecoveryPoint()
@@ -78,7 +78,7 @@ func TestRecoverDedupBeyondFormerCutoff(t *testing.T) {
 	if err := pm.recoverDedupFromWAL(p); err != nil {
 		t.Fatal(err)
 	}
-	if _, exists, err := p.DedupStore.GetOffset("suffix"); err != nil || !exists {
+	if _, exists, err := p.DedupStore.GetOffset(dedup.Key("", "suffix")); err != nil || !exists {
 		t.Fatalf("suffix missing: exists=%v err=%v", exists, err)
 	}
 }
@@ -142,7 +142,7 @@ func TestRecoverDedupFromWAL(t *testing.T) {
 	ids := make([]string, n)
 	for i := 0; i < n; i++ {
 		id := fmt.Sprintf("recover-msg-%d", i)
-		ids[i] = id
+		ids[i] = dedup.Key("test-topic", id)
 		ev := &types.Event{
 			MessageId:  id,
 			ScheduleTs: int64(1_000_000 + i),

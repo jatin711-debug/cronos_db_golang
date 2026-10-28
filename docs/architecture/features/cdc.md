@@ -64,6 +64,14 @@ partitions retain legacy accounting until capability agreement.
   per sink and partition, the last offset that sink took.
 - **Switching the feed on does not replay history.** A partition without a
   stored position starts at the end of its log.
+- **A backup keeps the position.** A partition backup includes
+  `changefeed.json` (component `changefeed`), taken before the log is cut, so
+  a restored partition exports again whatever the destination had not taken
+  when the backup was made, and possibly a little more. Before 1.0 a backup
+  left it out, and a restored partition started its feed at the end of the
+  restored log: events the destination had not yet taken were never exported.
+  Restoring a backup taken before 1.0 still starts the feed at the end of the
+  log.
 
 ## Limits
 

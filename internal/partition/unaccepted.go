@@ -56,7 +56,7 @@ func (p *Partition) HoldUnaccepted(events []*types.Event, claimed bool) {
 	stored := make([]int64, len(events))
 	createdTS := make([]int64, len(events))
 	for i, event := range events {
-		ids[i], stored[i], createdTS[i] = event.MessageId, dedup.AppendedAt(event.Offset), event.CreatedTs
+		ids[i], stored[i], createdTS[i] = dedup.EventKey(event), dedup.AppendedAt(event.Offset), event.CreatedTs
 	}
 	if err := p.DedupStore.PutBatch(ids, stored, createdTS); err != nil {
 		// The IDs stay claimed, so retries are refused until the next restart
@@ -160,11 +160,12 @@ func (p *Partition) recordAccepted(events []*types.Event) {
 	offsets := make([]int64, 0, len(events))
 	createdTS := make([]int64, 0, len(events))
 	for _, event := range events {
-		stored, found, err := p.DedupStore.GetOffset(event.MessageId)
+		key := dedup.EventKey(event)
+		stored, found, err := p.DedupStore.GetOffset(key)
 		if err != nil || !found || stored != dedup.AppendedAt(event.Offset) {
 			continue
 		}
-		ids = append(ids, event.MessageId)
+		ids = append(ids, key)
 		offsets = append(offsets, event.Offset)
 		createdTS = append(createdTS, event.CreatedTs)
 	}
@@ -196,10 +197,10 @@ func (p *Partition) AcceptAppended(logged []*types.Event) error {
 }
 
 // LoggedEvent returns the log entry at offset if it is the event with
-// messageID. inLog is false when the log does not hold that event there: it
+// messageID on topic. inLog is false when the log does not hold that event there: it
 // ends earlier, the entry was replaced by a newer leader's, or it was removed
 // by retention. An error means the log could not be read.
-func (p *Partition) LoggedEvent(messageID string, offset int64) (event *types.Event, inLog bool, err error) {
+func (p *Partition) LoggedEvent(topic, messageID string, offset int64) (event *types.Event, inLog bool, err error) {
 	if offset < 0 || offset > p.Wal.GetLastOffset() {
 		return nil, false, nil
 	}
@@ -207,7 +208,7 @@ func (p *Partition) LoggedEvent(messageID string, offset int64) (event *types.Ev
 	if err != nil {
 		return nil, false, err
 	}
-	if len(events) != 1 || events[0].Offset != offset || events[0].MessageId != messageID {
+	if len(events) != 1 || events[0].Offset != offset || events[0].MessageId != messageID || events[0].Topic != topic {
 		return nil, false, nil
 	}
 	return events[0], true, nil

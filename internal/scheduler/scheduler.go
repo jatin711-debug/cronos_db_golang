@@ -423,6 +423,32 @@ func (s *Scheduler) Start() {
 	})
 }
 
+// maxCatchUpTicks bounds how far one ticker fire moves a wheel that has fallen
+// behind the clock, so that catching up after a long stall does not hold
+// tickMu for the whole distance; the following fires go on from there.
+const maxCatchUpTicks = 1000
+
+// advanceWheel moves the wheel to the tick the clock has reached at nowMs. A
+// slot is expired only once the clock has passed its end, so nothing fires
+// early. The caller holds tickMu.
+//
+// The wheel used to move one tick per ticker fire. A time.Ticker drops the
+// fires its receiver is too late for, so every stall of the worker longer
+// than a tick (a hydration pass holding tickMu, a GC pause, CPU throttling)
+// set the wheel back for good, and every later event fired that much later.
+func (s *Scheduler) advanceWheel(nowMs int64) {
+	tw := s.timingWheel
+	tickMs := int64(tw.tickMs)
+	if tickMs <= 0 {
+		tickMs = 1
+	}
+	target := (nowMs - tw.startTimeMs) / tickMs
+	for n := 0; n < maxCatchUpTicks && tw.GetCurrentTick() < target; n++ {
+		tw.Tick()
+		s.drainExpiredToReady()
+	}
+}
+
 // worker is the scheduler worker loop
 func (s *Scheduler) worker() {
 	log.Printf("[SCHEDULER-WORKER] Started for partition %d", s.partitionID)
@@ -436,8 +462,7 @@ func (s *Scheduler) worker() {
 		select {
 		case <-ticker.C:
 			s.tickMu.Lock()
-			s.timingWheel.Tick()
-			s.drainExpiredToReady()
+			s.advanceWheel(time.Now().UnixMilli())
 			s.tickMu.Unlock()
 
 			// FIX: Only emit metrics every 10th tick to reduce

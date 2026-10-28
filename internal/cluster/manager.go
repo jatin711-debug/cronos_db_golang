@@ -43,7 +43,11 @@ type Manager struct {
 	// refusal is logged when it changes and not every round. Guarded by
 	// leadershipMu.
 	refusedPlacement map[int32]string
-	pulling          map[int32]bool
+	// retireMarks is, per partition with retiring replicas, what its leader
+	// held once it had stopped replicating to them (see releaseRetired).
+	// Guarded by leadershipMu.
+	retireMarks map[int32]retireMark
+	pulling     map[int32]bool
 	// inSyncSeen is how many replicas were last seen in sync for each
 	// partition this node leads. Only updateReplicaOffsets uses it.
 	inSyncSeen map[int32]int

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jatin711-debug/cronos_db_golang/internal/dedup"
 	"github.com/jatin711-debug/cronos_db_golang/internal/partition"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 	"google.golang.org/grpc/metadata"
@@ -149,7 +150,7 @@ func TestCrossRegionServer_ReplicateEvents_LWW(t *testing.T) {
 	}
 
 	// Verify it exists in dedup store and has correct timestamp
-	ts1, exists, err := p.DedupStore.GetTimestamp("event-123")
+	ts1, exists, err := p.DedupStore.GetTimestamp(dedup.Key("test-topic", "event-123"))
 	if err != nil {
 		t.Fatalf("GetTimestamp failed: %v", err)
 	}
@@ -185,7 +186,7 @@ func TestCrossRegionServer_ReplicateEvents_LWW(t *testing.T) {
 	}
 
 	// Timestamp should still be the older version's 1000 Unix ms
-	ts2, _, _ := p.DedupStore.GetTimestamp("event-123")
+	ts2, _, _ := p.DedupStore.GetTimestamp(dedup.Key("test-topic", "event-123"))
 	if !ts2.Equal(expectedTS1) {
 		t.Errorf("Expected timestamp %v, got %v (LWW failed, older overwrite occurred)", expectedTS1, ts2)
 	}
@@ -214,7 +215,7 @@ func TestCrossRegionServer_ReplicateEvents_LWW(t *testing.T) {
 	}
 
 	// Timestamp in dedup store should now be updated to 2000 ms (2_000_000_000 ns)
-	ts3, _, _ := p.DedupStore.GetTimestamp("event-123")
+	ts3, _, _ := p.DedupStore.GetTimestamp(dedup.Key("test-topic", "event-123"))
 	expectedTS3 := time.Unix(0, 2000*1_000_000)
 	if !ts3.Equal(expectedTS3) {
 		t.Errorf("Expected timestamp %v, got %v (LWW failed to update timestamp)", expectedTS3, ts3)

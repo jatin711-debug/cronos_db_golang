@@ -569,6 +569,7 @@ func (f *ClusterFSM) applyUpdatePartition(payload json.RawMessage) interface{} {
 		existing.State = info.State
 		existing.TransferTo = info.TransferTo
 		existing.TransferStartedMs = info.TransferStartedMs
+		existing.Retiring = info.Retiring
 		// Every change raises the epoch. A proposal may ask for a higher one:
 		// replicas restored from a backup have accepted epochs this cluster
 		// never issued, and would refuse a leader below them.

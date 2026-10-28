@@ -50,7 +50,7 @@ func TestSnapshot_InstalledReplicaCanTakeOver(t *testing.T) {
 	if got := replica.p.Scheduler.GetTimingWheelDepth(); got != 12 {
 		t.Fatalf("%d timers on the promoted replica, want 12", got)
 	}
-	outcome, offset, found, err := replica.p.DedupStore.Outcome("order-7")
+	outcome, offset, found, err := replica.p.DedupStore.Outcome(dedup.Key("orders", "order-7"))
 	if err != nil || !found || outcome != dedup.Appended || offset != 7 {
 		t.Fatalf("promoted replica's record of order-7: %v at %d (found=%v err=%v), want appended at 7", outcome, offset, found, err)
 	}
