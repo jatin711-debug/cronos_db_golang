@@ -1,0 +1,25 @@
+package config
+
+import (
+	"flag"
+	"os"
+	"testing"
+)
+
+func TestAuditDeploymentEnvironmentIsHonored(t *testing.T) {
+	oldArgs, oldFlags := os.Args, flag.CommandLine
+	defer func() { os.Args = oldArgs; flag.CommandLine = oldFlags }()
+	os.Args = []string{"audit", "--dev", "--node-id=audit"}
+	flag.CommandLine = flag.NewFlagSet("audit", flag.ContinueOnError)
+	t.Setenv("CRONOS_PARTITION_COUNT", "32")
+	t.Setenv("CRONOS_REPLICATION_FACTOR", "3")
+	t.Setenv("CRONOS_FSYNC_MODE", "periodic")
+	t.Setenv("CRONOS_CLUSTER_GRPC_ADDR", "audit:7947")
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PartitionCount != 32 || cfg.ReplicationFactor != 3 || cfg.FsyncMode != "periodic" || cfg.ClusterGRPCAddr != "audit:7947" {
+		t.Fatalf("deployment env ignored: partitions=%d replicationFactor=%d fsync=%s clusterAddr=%s", cfg.PartitionCount, cfg.ReplicationFactor, cfg.FsyncMode, cfg.ClusterGRPCAddr)
+	}
+}
