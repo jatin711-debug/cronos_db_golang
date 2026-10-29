@@ -1,6 +1,6 @@
 **Production audit probes — 2026-10-16**
 
-These probes accompany [the audit](../../PRODUCTION_AUDIT_2026-10-16.md) of `f8cc2063534be4aa97ffac602d9297b15d636e56`. They assert desired safety invariants and fail on the audited implementation. They do not alter runtime code or ordinary test discovery.
+These probes accompany [the audit](../../PRODUCTION_AUDIT_2026-10-16.md) of `babee9c2d76743666fb732d8c96580d255e60687`. They assert desired safety invariants and fail on the audited implementation. They do not alter runtime code or ordinary test discovery.
 
 Run from the repository root:
 

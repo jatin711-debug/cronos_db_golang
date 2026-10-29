@@ -1,6 +1,6 @@
 **CronosDB production hardening audit — 2026-10-16**
 
-Audited `developement` at `f8cc2063534be4aa97ffac602d9297b15d636e56`. The working tree was clean when the audit began. `git diff v0.6.0 HEAD -- internal pkg cmd` is empty: the audited runtime source matches the local v0.6.0 tag. This does not verify the provenance of a published container or binary.
+Audited `developement` at `babee9c2d76743666fb732d8c96580d255e60687`. The working tree was clean when the audit began. `git diff v0.6.0 HEAD -- internal pkg cmd` is empty: the audited runtime source matches the local v0.6.0 tag. This does not verify the provenance of a published container or binary.
 
 The next work should close correctness and bounded-resource gaps before adding features. Much of the prior hardening is present: durable batch fsync, quorum completion, epoch fencing, log matching, restart/redrive, consumer-progress replication, authenticated internal traffic, and CI fault/restore/overload campaigns. They should be preserved. The findings below distinguish reproduced defects, code-traced limits, and missing validation; the September audit's historical defects are not being treated as still open without checking the current code.
 

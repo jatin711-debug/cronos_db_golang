@@ -1,6 +1,6 @@
 # 1.0.0 readiness review — 2026-10-28
 
-Reviewed source: `460f8a2` on `main` (v0.9.0 source line). This is an assessment,
+Reviewed source: `77a9d49` on `main` (v0.9.0 source line). This is an assessment,
 not a release approval or an implementation of the fixes.
 
 **The earlier nine findings are not the complete work list.** This follow-up
@@ -12,7 +12,7 @@ ordinary SDK, backup and chart tests pass.
 ## Resolution
 
 All thirteen are fixed on branch `fix/1.0-readiness`. Each probe became a
-regression test that fails on `460f8a2` and passes with the fix; the opt-in
+regression test that fails on `77a9d49` and passes with the fix; the opt-in
 `releaseaudit` probes and the `zz_audit_*` files are gone. The release gates
 below are not covered by these fixes and remain open.
 

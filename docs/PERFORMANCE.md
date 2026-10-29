@@ -2,14 +2,14 @@
 
 This document records the write-path throughput baseline used to validate the Tier 3 optimizations in July 2026, before `v0.3.0`.
 
-> **Historical numbers.** They were measured on one Windows laptop with Go 1.25.0 at commit `3bbbfd5`, and the code has changed a great deal since (group commit in `batch` mode, per-entry terms, encryption v2, quorum replication). Use them to see the shape of the costs, not as current figures. A change to the write path is compared with `benchstat` against the same benchmarks run on its own base commit, as described under [How to Compare a Change](#how-to-compare-a-change). Later dated measurements are in the [three-node throughput validation of 2026-10-16](CLUSTER_PERFORMANCE_VALIDATION_2026-10-16.md), the [three-node validation of 2026-09-29](CLUSTER_PERFORMANCE_VALIDATION_2026-09-29.md) and the [maintenance validation](MAINTENANCE_VALIDATION_2026-09-29.md). No throughput or latency figure is promised for a release ([release requirements](PRODUCTION_RELEASE.md)).
+> **Historical numbers.** They were measured on one Windows laptop with Go 1.25.0 at commit `bbf37d7`, and the code has changed a great deal since (group commit in `batch` mode, per-entry terms, encryption v2, quorum replication). Use them to see the shape of the costs, not as current figures. A change to the write path is compared with `benchstat` against the same benchmarks run on its own base commit, as described under [How to Compare a Change](#how-to-compare-a-change). Later dated measurements are in the [three-node throughput validation of 2026-10-16](CLUSTER_PERFORMANCE_VALIDATION_2026-10-16.md), the [three-node validation of 2026-09-29](CLUSTER_PERFORMANCE_VALIDATION_2026-09-29.md) and the [maintenance validation](MAINTENANCE_VALIDATION_2026-09-29.md). No throughput or latency figure is promised for a release ([release requirements](PRODUCTION_RELEASE.md)).
 
 ## Environment
 
 | Item | Value |
 |------|-------|
 | Date | 2026-07-10 |
-| Git SHA | `3bbbfd5c4c42e07248a57478ad26be35e76f64f9` (Tier 3 patches applied on top) |
+| Git SHA | `bbf37d7fda3c728b697e536d88b395da49ebe438` (Tier 3 patches applied on top) |
 | Go version | `go1.25.0 windows/amd64` |
 | OS | Windows 11 (win32 10.0.26200) |
 | CPU | AMD Ryzen 7 6800H |

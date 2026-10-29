@@ -1,7 +1,7 @@
 # Documentation review — 2026-10-21
 
 Reviewed the 47 Markdown documents tracked at release source
-`cfba215208b3a50c830020636a417f7aaeaf3845`, plus the documentation build,
+`ed7910fa85150d7e6701cf17bdcf37b3388a4883`, plus the documentation build,
 release workflows, Helm settings and referenced source paths. This review
 aligns descriptions and examples with v0.8.0; it is not a new runtime security
 audit, fault campaign or capacity measurement. This report is the 48th
@@ -59,7 +59,7 @@ subsequent fixes.
 | [Throughput harness](../tools/throughput/README.md) | Distinguished available tooling from an executed release measurement. |
 | [September probes](audit-probes/README.md) | Retained archived-probe versus ordinary-regression distinction and toolchain prerequisites. |
 | [October probes](audit-probes/2026-10-16/README.md) | Removed obsolete open-DLQ statement; distinguished historical overlays from current tests. |
-| [Historical remediation plan](https://github.com/jatin711-debug/cronos_db_golang/blob/32e31a0/plan.md) | Updated superseding references; retained historical checkboxes. |
+| [Historical remediation plan](https://github.com/jatin711-debug/cronos_db_golang/blob/f7d411c/plan.md) | Updated superseding references; retained historical checkboxes. |
 | [Historical technical deep dive](../TECHNICAL_DEEP_DIVE.md) | Added protocol references and qualified illustrative old code. |
 | [Feature index](architecture/README.md) | Updated current hardening, lifecycle links, retention and deferred-feature claims. |
 | [API](architecture/features/api.md) | Updated lifecycle RPCs, authorization, control visibility and append-error diagram. |

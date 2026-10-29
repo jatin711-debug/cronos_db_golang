@@ -24,6 +24,11 @@ tracks unresolved guarantees, and
 below. A green CI run is necessary but does not establish the complete release
 acceptance contract.
 
+Commit IDs in these notes refer to the history as rewritten on 2026-10-29 to
+correct commit attribution; no source tree changed. Images and binaries
+published before that date carry the earlier commit ID, for example in the
+image's `org.opencontainers.image.revision` label.
+
 ## v0.10.0 release
 
 The [v0.10.0 notes](RELEASE_V0.10.0.md) describe the fixes for the thirteen
@@ -38,7 +43,7 @@ Use its `IMAGE_DIGEST` and publication evidence to identify the tested image.
 v0.9.0 data directories are kept; duplicate records are not. This release
 makes no new capacity claim.
 
-Published on 2026-10-28 from `315532780d117a3260758c8034a6504cee9c8037`. The
+Published on 2026-10-28 from `359e5ba0efd169e6c723bf576f8aa7c24b57f78f`. The
 fixes passed the required checks on
 [PR #17](https://github.com/jatin711-debug/cronos_db_golang/pull/17), and the
 release revision on
@@ -73,7 +78,7 @@ deployment digest are on the
 Use its `IMAGE_DIGEST` and publication evidence to identify the tested image.
 This release breaks on-disk compatibility and makes no new capacity claim.
 
-Published on 2026-10-27 from `12507c7fb43e93b0812d987ccb916e02f14a7042`. The
+Published on 2026-10-27 from `31e809248d850766726c381438c9b2a284f4352b`. The
 required source checks passed on
 [PR #15](https://github.com/jatin711-debug/cronos_db_golang/pull/15) (second
 attempt of [the run](https://github.com/jatin711-debug/cronos_db_golang/actions/runs/40526717149);
@@ -106,7 +111,7 @@ This patch adds no WAL format and makes no new capacity claim.
 
 ## v0.8.0 publication record
 
-Published on 2026-10-19 from `cfba215208b3a50c830020636a417f7aaeaf3845`.
+Published on 2026-10-19 from `ed7910fa85150d7e6701cf17bdcf37b3388a4883`.
 The required source checks passed before promotion to `main`; the
 [release staging run](https://github.com/jatin711-debug/cronos_db_golang/actions/runs/39277781872)
 also built the binaries, started the Linux binary, and scanned and fault-tested

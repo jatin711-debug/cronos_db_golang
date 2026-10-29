@@ -1,10 +1,10 @@
 # CronosDB production readiness audit
 
-Date: 2026-09-27. Audited commit: `1de04d6575a810c79f716dfe48b54e1744b42a33`.
+Date: 2026-09-27. Audited commit: `2d87a133dff7fa863a2210a8be3e6345b8a82f08`.
 
 ## Status of the findings — reviewed for v0.8.0 on 2026-10-21
 
-The audit itself (from "Verdict" on) describes commit `1de04d6` and is kept as
+The audit itself (from "Verdict" on) describes commit `2d87a13` and is kept as
 it was. The closure table tracks v0.8.0; the nine hardening batches that follow
 record earlier work through v0.6.0. Current release scope and remaining gaps
 are in the [release requirements](PRODUCTION_RELEASE.md#what-v080-was-released-without).
