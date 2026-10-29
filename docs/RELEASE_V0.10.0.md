@@ -91,7 +91,7 @@ constraints still apply. Delivery remains at least once.
 
 ## Validation and artifacts
 
-Every defect has a regression test that failed on v0.9.0's source (`460f8a2`)
+Every defect has a regression test that failed on v0.9.0's source (`77a9d49`)
 and passes here. The full Go suite passes, the changed packages pass under
 the race detector, and the process acceptance suite passes on three-node
 clusters. Node logs from its node-replacement and node-removal runs show the

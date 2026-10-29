@@ -1,6 +1,6 @@
 # Production audit probes
 
-These focused regression probes accompany the [production audit](../PRODUCTION_AUDIT_2026-09-27.md) of commit `1de04d6575a810c79f716dfe48b54e1744b42a33`.
+These focused regression probes accompany the [production audit](../PRODUCTION_AUDIT_2026-09-27.md) of commit `2d87a133dff7fa863a2210a8be3e6345b8a82f08`.
 
 They assert the desired behavior and **failed against the audited implementation**. Every one of them has since become a normal test, in the `production_audit_test.go` file of its package, and passes: they run with the rest of the suite in CI and with `go test ./...`. The `.go.txt` copies here are the probes as they were written for the audit, and are kept as its record. Probe data uses Go test temporary directories; no production database or running cluster is needed.
 
@@ -27,7 +27,7 @@ Those paths are machine-specific prerequisites, not installation instructions. F
 
 ## Recorded results
 
-What each probe found at commit `1de04d6`, when the audit ran. All of these are fixed; the status of each finding is in the [audit](../PRODUCTION_AUDIT_2026-09-27.md).
+What each probe found at commit `2d87a13`, when the audit ran. All of these are fixed; the status of each finding is in the [audit](../PRODUCTION_AUDIT_2026-09-27.md).
 
 | Probe | Observed result | Finding |
 |---|---|---|

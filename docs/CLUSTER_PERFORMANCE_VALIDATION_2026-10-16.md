@@ -4,8 +4,8 @@ These are v0.7.0/v0.6.0 results, not measurements of v0.8.0 or its opt-in lifecy
 operations. They remain unchanged as a dated record. See
 [current release limits](PRODUCTION_RELEASE.md#what-v080-was-released-without).
 
-These measurements compare `v0.6.0` (`f8cc206`) with the `hardening-v0.7.0`
-branch at `e08c1bc`, whose server code is that of `d4702bf` and of `v0.7.0`. All runs use three
+These measurements compare `v0.6.0` (`babee9c`) with the `hardening-v0.7.0`
+branch at `fd84f4b`, whose server code is that of `d5c7269` and of `v0.7.0`. All runs use three
 server processes on one AMD Ryzen 7 6800H laptop (16 logical processors,
 15 GB of memory, one Micron 2450 NVMe SSD), Windows/amd64, Go 1.26.9 with cgo
 disabled (the Go bloom filter), and 256-byte payloads. The two server builds

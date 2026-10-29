@@ -56,11 +56,11 @@ manifest digest below for deployments.
 
 ## Validation and artifacts
 
-All six checks passed on the implementation revision `39a5216`, including
+All six checks passed on the implementation revision `8bb7e2b`, including
 Linux cgo/race and non-cgo suites, the process fault campaign, Docker network
 partitions and memory-limited restart, security scans, and production chart
 startup with TLS, authentication and encryption. The required source checks
-also passed on the release preparation revision `cfba215` before promotion
+also passed on the release preparation revision `ed7910f` before promotion
 to `main` ([successful check run](https://github.com/jatin711-debug/cronos_db_golang/actions/runs/39275875123)).
 
 The GitHub release carries server and `cronos-admin` binaries for Linux and
