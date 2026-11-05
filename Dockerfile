@@ -10,7 +10,7 @@ FROM rust:1.86 AS rust-builder
 WORKDIR /build/rust-dedup
 
 # Install build dependencies for the library
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get -o Acquire::Retries=0 update && apt-get -o Acquire::Retries=0 install -y --no-install-recommends \
     gcc \
     libc6-dev \
     && rm -rf /var/lib/apt/lists/*
@@ -39,7 +39,7 @@ RUN npm run build
 FROM golang:1.26.10-bookworm AS go-builder
 
 # Install build dependencies for cgo
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get -o Acquire::Retries=0 update && apt-get -o Acquire::Retries=0 install -y --no-install-recommends \
     gcc \
     libc6-dev \
     && rm -rf /var/lib/apt/lists/*
@@ -71,15 +71,16 @@ RUN CGO_ENABLED=0 go build -trimpath -o /cronos-admin ./cmd/admin
 # -----------------------------------------------------------------------------
 # Stage 3: Final runtime image (Debian for glibc compatibility)
 # =============================================================================
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim AS runtime
 
 # Install runtime dependencies. The upgrade takes the security fixes Debian has
 # published since the base image was built: the image scan in CI fails on a
 # known vulnerability that has a fix, and the base image lags behind them.
-RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
+RUN apt-get -o Acquire::Retries=0 update && apt-get -o Acquire::Retries=0 upgrade -y && apt-get -o Acquire::Retries=0 install -y --no-install-recommends \
     ca-certificates \
     tzdata \
     curl \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' apt)" ge 2.6.2 \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user for security

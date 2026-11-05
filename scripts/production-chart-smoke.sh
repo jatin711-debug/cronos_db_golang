@@ -29,18 +29,21 @@ kubectl -n "$namespace" create secret generic cronos-db-auth \
   --from-file=jwt-secret="$cert_dir/jwt-secret" --from-file=policy.json="$cert_dir/policy.json"
 kubectl -n "$namespace" create secret generic cronos-db-encryption --from-file=master.key="$cert_dir/master.key"
 
-# The kind cluster has one node, and production values require one pod per
-# node; check-production-chart.py asserts that rule on the rendered chart.
+# Ordinary CI uses one kind node with soft affinity. The topology workflow
+# supplies five workers and hard affinity, matching production pod separation.
+replicas=${CRONOS_SMOKE_REPLICAS:-3}
+anti_affinity=${CRONOS_SMOKE_ANTI_AFFINITY:-soft}
+[[ "$replicas" =~ ^[3-9]$ ]] || { echo "replicas must be 3 through 9" >&2; exit 1; }
 helm install cronos charts/cronos-db -n "$namespace" -f charts/cronos-db/values-production.yaml \
-  --set podAntiAffinity=soft \
-  --set replicaCount=3 --set image.repository=cronos-db --set image.tag=ci --set image.pullPolicy=Never \
+  --set podAntiAffinity="$anti_affinity" \
+  --set replicaCount="$replicas" --set image.repository=cronos-db --set image.tag=ci --set image.pullPolicy=Never \
   --set config.partitionCount=3 --set config.bloomCapacity=1000 --set config.segmentSizeBytes=1048576 \
   --set persistence.size=1Gi --set metrics.serviceMonitor.enabled=false --set alerts.enabled=false \
   --set resources.requests.cpu=100m --set resources.requests.memory=256Mi \
   --set resources.limits.cpu=1 --set resources.limits.memory=1Gi \
   --wait --timeout 7m
 
-for ordinal in 0 1 2; do
+for ((ordinal=0; ordinal<replicas; ordinal++)); do
   pod="cronos-cronos-db-$ordinal"
   kubectl -n "$namespace" exec "$pod" -- sh -ec '
     test "$(stat -c %a /etc/cronos/encryption/master.key)" = 600
@@ -109,7 +112,7 @@ spec:
 EOF
 kubectl -n "$namespace" wait --for=jsonpath='{.status.phase}'=Succeeded pod/empty-volume-0 --timeout=3m
 kubectl -n "$namespace" delete pod empty-volume-0
-kubectl -n "$namespace" scale "$statefulset" --replicas=3
+kubectl -n "$namespace" scale "$statefulset" --replicas="$replicas"
 kubectl -n "$namespace" rollout status "$statefulset" --timeout=10m
 kubectl -n "$namespace" wait --for=condition=Ready pod -l app.kubernetes.io/instance=cronos --timeout=5m
 first_log=$(logs_of cronos-cronos-db-0)

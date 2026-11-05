@@ -128,7 +128,7 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Build once from the release source
-        run: docker build --pull --label "org.opencontainers.image.revision=$(git rev-parse HEAD)" --label "org.opencontainers.image.version=$TAG" -t "$CRONOS_IMAGE" .
+        run: docker build --pull --no-cache-filter runtime --label "org.opencontainers.image.revision=$(git rev-parse HEAD)" --label "org.opencontainers.image.version=$TAG" -t "$CRONOS_IMAGE" .
       - name: Scan the image that will be published
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:

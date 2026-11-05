@@ -1,0 +1,42 @@
+name: five-node-production-topology
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  topology:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - uses: azure/setup-helm@v5.0.0
+        with:
+          version: v3.17.3
+      - run: docker build --pull --no-cache-filter runtime -t cronos-db:ci .
+      - name: Create five separate Kubernetes worker nodes
+        run: |
+          go install sigs.k8s.io/kind@v0.33.0
+          kind create cluster --name cronos-ci --config scripts/kind-five-workers.yaml --wait 120s
+          kind load docker-image cronos-db:ci --name cronos-ci
+      - name: Startup, rolling restart and lost-volume recovery with hard anti-affinity
+        env:
+          CRONOS_SMOKE_REPLICAS: "5"
+          CRONOS_SMOKE_ANTI_AFFINITY: hard
+        run: bash scripts/production-chart-smoke.sh
+      - name: Keep diagnostics
+        if: always()
+        run: |
+          mkdir -p build/topology
+          kubectl -n cronos-ci get pods -o wide > build/topology/pods.txt || true
+          kubectl -n cronos-ci get events --sort-by=.lastTimestamp > build/topology/events.txt || true
+          kubectl -n cronos-ci logs -l app.kubernetes.io/instance=cronos --all-containers --tail=500 --prefix > build/topology/logs.txt || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: five-node-topology
+          path: build/topology
+      - run: kind delete cluster --name cronos-ci
+        if: always()

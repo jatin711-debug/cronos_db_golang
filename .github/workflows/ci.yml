@@ -133,7 +133,7 @@ jobs:
         with:
           version: v3.17.3
       - name: Build the shipped image
-        run: docker build -t cronos-db:ci .
+        run: docker build --pull --no-cache-filter runtime -t cronos-db:ci .
       # Known vulnerabilities in what is shipped: the packages of the base
       # image and the libraries compiled into the binary. One that has a fix
       # fails the build. The action is pinned to a commit, not a tag.

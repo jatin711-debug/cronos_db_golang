@@ -66,7 +66,7 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Build the image
-        run: docker build -t cronos-db:nightly .
+        run: docker build --pull --no-cache-filter runtime -t cronos-db:nightly .
       - name: Acceptance tests on three containers, several times
         run: go test -tags acceptance -count="$COUNT" -timeout 110m -v -run 'TestNetworkPartitions|TestRestartInContainers' ./tests/acceptance/
       - name: Keep the node logs
