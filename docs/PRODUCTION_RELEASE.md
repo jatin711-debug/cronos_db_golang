@@ -17,6 +17,10 @@ changes to read before upgrading. The chart and default image tag are `0.11.0`.
 Publication status, checksums and the exact deployment digest are on the
 [release page](https://github.com/jatin711-debug/cronos_db_golang/releases/tag/v0.11.0).
 Use its `IMAGE_DIGEST` and publication evidence to identify the tested image.
+v0.11.0 was published on 2026-11-05; its image is `sha256:85a71b959765e47d4d6f5cdcb0970444f918f57761eda33eb97970916d2812a8`, published as
+`johnny711dock/cronos-db:0.11.0` and `:latest`, and the release is marked latest.
+The image is a containerd-store image index (the linux/amd64 manifest and a
+provenance attestation), so its image id is that digest and not a config digest.
 This release makes no new capacity claim.
 
 **v0.10.0 fixes the thirteen defects of the
