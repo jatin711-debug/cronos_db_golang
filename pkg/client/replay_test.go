@@ -127,3 +127,22 @@ func TestSeekLatest(t *testing.T) {
 		t.Fatalf("expected latest offset 101, got %d", offset)
 	}
 }
+
+func TestReplayRequestCount(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		req  ReplayRequest
+		want int64
+	}{
+		{"count alone", ReplayRequest{Topic: "t", Count: 100}, 100},
+		{"count from a later offset", ReplayRequest{Topic: "t", StartOffset: 5, Count: 100}, 100},
+		{"range", ReplayRequest{Topic: "t", StartOffset: 5, EndOffset: 14}, 10},
+		{"range wins over count", ReplayRequest{Topic: "t", StartOffset: 5, EndOffset: 14, Count: 100}, 10},
+		{"one event at an offset", ReplayRequest{Topic: "t", StartOffset: 7, EndOffset: 7}, 1},
+		{"one event at offset 0", ReplayRequest{Topic: "t"}, 1},
+	} {
+		if got := tc.req.toProto().Count; got != tc.want {
+			t.Errorf("%s: count %d, want %d", tc.name, got, tc.want)
+		}
+	}
+}

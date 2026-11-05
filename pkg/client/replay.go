@@ -13,28 +13,44 @@ import (
 
 // ReplayRequest describes historical replay query options for Client.Replay.
 type ReplayRequest struct {
-	// Topic is the topic to replay (required).
+	// Topic is the topic to replay (required). Only its events are returned.
 	Topic string
-	// PartitionID is the partition to replay (required; must be >= 0).
+	// PartitionID is the partition to replay (required; must be >= 0, and 0 is
+	// partition 0). A replay reads one partition.
 	PartitionID int32
 
-	// StartOffset is the first offset to include when replaying by offset (server-defined if 0).
+	// StartOffset is the first offset to include when replaying by offset.
 	StartOffset int64
-	// EndOffset is the last offset bound when replaying by offset (0 may mean unbounded).
+	// EndOffset is the last offset to include when replaying by offset. When
+	// StartOffset >= 0 and EndOffset >= StartOffset, the request asks for
+	// EndOffset-StartOffset+1 events and Count is ignored. A zero EndOffset is
+	// treated as unset when Count is positive, so Count alone works; with both
+	// offsets and Count at zero the request asks for one event (offset 0).
+	// ReplayByOffsetRange sets both offsets.
 	EndOffset int64
-	// Count limits how many events to return (0 means server default / unbounded).
+	// Count is the most events to return when replaying by offset and the
+	// range above does not set it; the server uses 1000 when it is not
+	// positive. A time-based replay ignores it.
 	Count int64
 
-	// StartTime selects events at or after this wall time when using time-based replay.
+	// StartTime selects events whose schedule time is at or after it. A replay
+	// with StartTime or EndTime set is time-based; it reads the whole partition
+	// log as of the request and returns the events in offset order.
 	StartTime time.Time
-	// EndTime selects events at or before this wall time when using time-based replay.
+	// EndTime selects events whose schedule time is at or before it; when only
+	// StartTime is set the server uses the current time.
 	EndTime time.Time
 
 	// ConsumerGroup is an optional group ID associated with the replay session.
+	// The server does not act on it: a replay neither reads nor changes a
+	// group's progress.
 	ConsumerGroup string
-	// SubscriptionID is an optional client-visible subscription label for the stream.
+	// SubscriptionID is an optional client-visible subscription label for the stream
+	// (not acted on by the server).
 	SubscriptionID string
-	// Speed controls replay pacing: 0 = as-fast-as-possible, 1 = real-time (server semantics).
+	// Speed paces the replay. 0 and 1 send events without a pause. Any other
+	// value pauses 10 ms divided by Speed after each event (2 gives 5 ms, 0.5
+	// gives 20 ms). The server refuses a negative Speed or one below 0.001.
 	Speed float64
 }
 
@@ -42,7 +58,9 @@ type ReplayRequest struct {
 type ReplayEvent struct {
 	// Event is the historical event payload and metadata.
 	Event *types.Event
-	// ReplayOffset is the server's replay cursor offset for this event.
+	// ReplayOffset is the event's position in this replay's range, counting
+	// from 0 (including events of other topics that the replay skipped). It is
+	// not a log offset; use Event.Offset for that.
 	ReplayOffset int64
 }
 
@@ -196,7 +214,12 @@ func (c *Client) SeekTimestamp(ctx context.Context, topic string, partitionID in
 	return c.SeekLatest(ctx, partitionID)
 }
 
-// ReplayToLive replays history and then transitions to live subscription.
+// ReplayToLive replays history and then transitions to live subscription. The
+// handler gets replayed events as Deliveries with no acknowledgement to send
+// (Delivery.Ack returns an error), and live ones as for Subscribe. When
+// liveCfg.PartitionID is negative the live subscription uses
+// replayReq.PartitionID, and when liveCfg.StartOffset is negative it starts
+// after the last replayed offset.
 func (c *Client) ReplayToLive(ctx context.Context, replayReq ReplayRequest, liveCfg ConsumerConfig, handler MessageHandler) error {
 	var resumeOffset int64 = replayReq.StartOffset
 	if resumeOffset < 0 {
@@ -312,7 +335,9 @@ func (r ReplayRequest) toProto() *types.ReplayRequest {
 	if !r.EndTime.IsZero() {
 		protoReq.EndTs = r.EndTime.UnixMilli()
 	}
-	if r.StartOffset >= 0 && r.EndOffset >= r.StartOffset {
+	// A zero EndOffset next to a zero StartOffset is more likely an unset range
+	// than a request for offset 0 alone, so a positive Count wins there.
+	if r.StartOffset >= 0 && r.EndOffset >= r.StartOffset && (r.EndOffset > 0 || r.Count <= 0) {
 		protoReq.Count = (r.EndOffset - r.StartOffset) + 1
 	}
 	return protoReq
