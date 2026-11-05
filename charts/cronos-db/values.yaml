@@ -143,6 +143,8 @@ tls:
 auth:
   enabled: false
   policyKey: policy.json
+  # Optional JSON rate limits key in the existing auth Secret; restart to reload.
+  tenantLimitsKey: ""
   # existingSecret: cronos-db-auth
   # secretKey: jwt-secret
 

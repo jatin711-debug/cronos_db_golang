@@ -143,6 +143,16 @@ func run() int {
 
 	// Initialize tenant accountant
 	tenantAccountant := tenant.NewAccountant()
+	if cfg.TenantLimitsFile != "" {
+		if !cfg.AuthEnabled {
+			slog.Error("tenant-limits-file requires authentication so limits identify the caller")
+			return 1
+		}
+		if err := tenantAccountant.LoadRateLimits(cfg.TenantLimitsFile); err != nil {
+			slog.Error("Failed to load tenant rate limits", "error", err)
+			return 1
+		}
+	}
 
 	// Initialize CDC manager
 	cdcManager := cdc.NewManager()

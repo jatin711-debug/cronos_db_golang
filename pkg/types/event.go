@@ -200,6 +200,8 @@ type Config struct {
 	AuthJWTPublicKey string
 	// AuthPolicyFile is the path to the RBAC policy JSON file.
 	AuthPolicyFile string
+	// TenantLimitsFile holds per-subject, per-node publish rate limits.
+	TenantLimitsFile string
 
 	// NodeRack is the rack/AZ label for topology-aware replica placement.
 	NodeRack string

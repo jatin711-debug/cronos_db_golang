@@ -242,6 +242,8 @@ func LoadConfig() (*types.Config, error) {
 	flag.BoolVar(&config.EncryptionEnabled, "encryption-enabled", DefaultEncryptionEnabled, "Enable AES-256-GCM encryption at rest for WAL segments")
 	flag.StringVar(&config.EncryptionKeyFile, "encryption-key-file", DefaultEncryptionKeyFile, "Path to 32-byte encryption key file")
 
+	flag.StringVar(&config.TenantLimitsFile, "tenant-limits-file", "", "JSON file of per-subject per-node publish rate limits (restart to reload)")
+
 	// Topic rate limit flags
 	flag.Float64Var(&config.TopicRateLimitPerSecond, "topic-rate-limit", DefaultTopicRateLimitPerSecond, "Per-subject per-topic rate limit (events/sec, 0 = disabled)")
 	flag.Float64Var(&config.TopicRateLimitBurst, "topic-rate-burst", DefaultTopicRateLimitBurst, "Per-subject per-topic rate limit burst (0 = disabled)")

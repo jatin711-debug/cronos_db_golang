@@ -140,6 +140,7 @@ payloads held by the scheduler, not the whole process.
 | `--scheduler-memory` | `CRONOS_SCHEDULER_MEMORY` | `67108864` | Node-wide scheduler payload budget in bytes (64 MiB). Minimum 32 MiB; `0` uses the default. Overflow waits as log references. Leave headroom for other memory. |
 | `--max-ingest-rate` | `CRONOS_MAX_INGEST_RATE` | `0` | Sustained publish events per second per partition. Requires a positive ingest burst size too; `0` disables this limiter. |
 | `--ingest-burst-size` | `CRONOS_INGEST_BURST_SIZE` | `0` | Token-bucket capacity for ingest bursts. Both this and the rate must be positive to enable limiting. |
+| `--tenant-limits-file` | `CRONOS_TENANT_LIMITS_FILE` | empty | JSON file mapping JWT subjects to `max_events_per_second` (at least 1). Per-node token buckets with one second of burst; restart reloads configuration and resets buckets. Subjects omitted from the file remain unlimited. Storage/in-flight quotas are not supported. |
 | `--topic-rate-limit` | `CRONOS_TOPIC_RATE_LIMIT` | `0` | Events per second per JWT subject and topic, with authentication enabled. `0` disables this limit. Use with a positive burst size. |
 | `--topic-rate-burst` | `CRONOS_TOPIC_RATE_BURST` | `0` | Token-bucket capacity for that topic limit; nonpositive rate or burst disables the topic limiter. |
 

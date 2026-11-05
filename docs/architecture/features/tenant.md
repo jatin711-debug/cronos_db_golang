@@ -5,13 +5,14 @@
 The tenant module contains per-tenant accounting and quota code (publish rate,
 in-flight events, storage bytes).
 
-**Limits are not enforced.** `Accountant.SetLimits` has no caller outside
-tests, and no flag, environment variable or RPC sets a limit. Without a
-configured limit the publish path skips the accountant entirely
-(`HasConfiguredLimits` is false), so no publish is checked or counted, and
-`RecordDelivery` only adjusts usage entries that already exist, of which there
-are none. `AdminService.GetTenantUsage` therefore reports zero usage and
-`limits_configured: false`.
+**Per-subject publish rates are configurable.** `--tenant-limits-file` loads a
+persistent JSON map of JWT subjects to `max_events_per_second`. Authentication
+is required. Limits and burst buckets are per node; unlisted subjects are unlimited.
+Restart loads changes and resets buckets. See [operator configuration](../../PRODUCTION_VALIDATION.md).
+
+Storage and in-flight quotas are not exposed: usage counters are process-local,
+not recovered durable usage or cluster-wide totals. Admin usage values must not be
+used as a storage inventory. Without a limits file, accounting remains disabled.
 
 ## Key Files
 
@@ -23,13 +24,13 @@ are none. `AdminService.GetTenantUsage` therefore reports zero usage and
 
 1. Startup creates a tenant accountant and hands it to the event handler, the
    partition manager (delivery callbacks) and the admin handler.
-2. If any limit were configured, the publish handlers would take the tenant
+2. With a limits file configured, the publish handlers take the tenant
    from the JWT subject (`"default"` without claims), reserve quota with
    `ReservePublishBatch`, refuse with `ResourceExhausted` when it is exceeded,
    and tag the event with `tenant_id`.
 3. Delivery completion calls `RecordDelivery` for the event's tenant.
 
-As shipped, step 2 never runs; see Purpose.
+The configuration loader accepts only rate limits; unsupported quota fields fail startup.
 
 ## Design Notes
 

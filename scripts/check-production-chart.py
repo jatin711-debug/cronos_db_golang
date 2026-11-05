@@ -105,6 +105,17 @@ def check_extra_env():
         "secretKeyRef": {"name": "cronos-telemetry", "key": "endpoint"}}} in env
 
 
+def check_tenant_limits():
+    args = ["helm", "template", "cronos", str(CHART),
+            "-f", str(CHART / "values-production.yaml"),
+            "--set", "auth.tenantLimitsKey=tenant-limits.json"]
+    docs = list(yaml.safe_load_all(subprocess.check_output(args, text=True)))
+    sts = next(d for d in docs if d and d["kind"] == "StatefulSet")
+    pod = sts["spec"]["template"]["spec"]
+    assert {"name": "CRONOS_TENANT_LIMITS_FILE", "value": "/etc/cronos/auth/tenant-limits.json"} in pod["containers"][0]["env"]
+    assert any(v["name"] == "auth" and v["secret"]["secretName"] == "cronos-db-auth" for v in pod["volumes"])
+
+
 if __name__ == "__main__":
     subprocess.run(["helm", "lint", str(CHART), "-f", str(CHART / "values-production.yaml")], check=True)
     check()
@@ -113,4 +124,5 @@ if __name__ == "__main__":
     check(ephemeral=True, separate_backup=True)
     check_extra_env()
     check_disruption()
+    check_tenant_limits()
     print("Production chart assertions passed (persistent/ephemeral data, separate backup volumes, disruption budget and pod spread).")

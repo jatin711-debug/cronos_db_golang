@@ -136,6 +136,13 @@ spec:
               value: "true"
             - name: CRONOS_AUTH_POLICY_FILE
               value: "/etc/cronos/auth/{{ .Values.auth.policyKey }}"
+            {{- if .Values.auth.tenantLimitsKey }}
+            {{- if not .Values.auth.existingSecret }}
+            {{- fail "auth.tenantLimitsKey requires auth.existingSecret containing the limits JSON" }}
+            {{- end }}
+            - name: CRONOS_TENANT_LIMITS_FILE
+              value: "/etc/cronos/auth/{{ .Values.auth.tenantLimitsKey }}"
+            {{- end }}
             - name: CRONOS_AUTH_JWT_SECRET
               valueFrom:
                 secretKeyRef:
