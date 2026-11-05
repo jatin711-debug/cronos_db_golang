@@ -230,7 +230,7 @@ func TestChangeFeed_CoversPartitionsCreatedLater(t *testing.T) {
 
 // The feed's position survives a restart: nothing is skipped, and what was
 // handed over before the shutdown is not handed over again. Switching a feed
-// on for a partition that already has events does not replay them.
+// on for a partition that already has events replays retained history.
 func TestChangeFeed_ResumesAfterRestart(t *testing.T) {
 	cfg := unacceptedTestConfig(t)
 
@@ -247,7 +247,7 @@ func TestChangeFeed_ResumesAfterRestart(t *testing.T) {
 	pm.SetChangeFeed(first.take)
 	p := startedPartition(t, pm, 0)
 	publish(t, p, 4)
-	first.expect(t, 0, "[3 4 5 6]")
+	first.expect(t, 0, "[0 1 2 3 4 5 6]")
 	// The consumer goes down just before the shutdown, with events pending.
 	first.refuse.Store(true)
 	publish(t, p, 2)

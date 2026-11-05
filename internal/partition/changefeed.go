@@ -90,9 +90,9 @@ func (pm *PartitionManager) SetChangeFeed(deliver FeedFunc) {
 	pm.mu.Unlock()
 }
 
-// openChangeFeed attaches the feed to a partition that is not taking appends
-// yet. A partition without a stored position starts at the end of its log:
-// switching a feed on does not replay what was written before.
+// openChangeFeed resumes a valid cursor. Missing or damaged metadata replays
+// retained entries conservatively; enabling a feed on an existing log also
+// exports its retained history. Never infer successful export from the log end.
 func (p *Partition) openChangeFeed(deliver FeedFunc, clustered bool) error {
 	f := &changeFeed{
 		deliver:   deliver,
@@ -102,19 +102,19 @@ func (p *Partition) openChangeFeed(deliver FeedFunc, clustered bool) error {
 		open:      make(map[PublishToken]int64),
 	}
 	data, err := os.ReadFile(f.path)
-	var stored feedPosition
+	var stored struct {
+		Offset *int64 `json:"offset"`
+	}
 	switch {
-	case err == nil && json.Unmarshal(data, &stored) == nil && stored.Offset >= -1:
-		f.cursor.Store(stored.Offset)
-		f.saved = stored.Offset
-	case err == nil:
-		log.Printf("[Partition %d] Change feed position in %s is unreadable; continuing from the end of the log", p.ID, f.path)
-		fallthrough
-	case os.IsNotExist(err):
-		f.cursor.Store(p.Wal.GetLastOffset())
-		// Written now, not with the first events: a crash before the first
-		// save would otherwise look like a feed that was just switched on.
-		if err := f.write(f.cursor.Load()); err != nil {
+	case err == nil || os.IsNotExist(err):
+		offset := p.Wal.GetFirstOffset() - 1
+		if err == nil && json.Unmarshal(data, &stored) == nil && stored.Offset != nil && *stored.Offset >= -1 && *stored.Offset <= p.Wal.GetLastOffset() {
+			offset = max(offset, *stored.Offset)
+		} else {
+			log.Printf("[Partition %d] Change feed cursor missing or invalid; replaying retained history from offset %d", p.ID, offset+1)
+		}
+		f.cursor.Store(offset)
+		if err := f.write(offset); err != nil {
 			return fmt.Errorf("store change feed position: %w", err)
 		}
 	default:

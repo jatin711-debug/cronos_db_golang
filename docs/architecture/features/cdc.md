@@ -62,16 +62,16 @@ partitions retain legacy accounting until capability agreement.
   makes the feed lag; events stay in the log until they are handed over.
 - **Sinks do not get the same event once per retry.** The manager remembers,
   per sink and partition, the last offset that sink took.
-- **Switching the feed on does not replay history.** A partition without a
-  stored position starts at the end of its log.
+- **Missing or invalid position replays retained history.** This includes first
+  enabling the feed on existing data. Duplicate exports are possible; unavailable
+  history that retention already removed cannot be recovered this way.
 - **A backup keeps the position.** A partition backup includes
   `changefeed.json` (component `changefeed`), taken before the log is cut, so
   a restored partition exports again whatever the destination had not taken
   when the backup was made, and possibly a little more. Before 1.0 a backup
   left it out, and a restored partition started its feed at the end of the
   restored log: events the destination had not yet taken were never exported.
-  Restoring a backup taken before 1.0 still starts the feed at the end of the
-  log.
+  Restoring a backup without a cursor now exports all retained history.
 
 ## Limits
 
@@ -88,8 +88,9 @@ partitions retain legacy accounting until capability agreement.
   offsets missing from the log (for example after a failover to a replica
   whose stored position trails where the old leader's log starts), it logs
   "Change feed skips offsets" and continues after them.
-- A replica that takes over before it was told the feed's position starts at
-  the end of its log.
+- A replica with no stored cursor starts with retained history. A leader that
+  explicitly reports having no feed still advances its followers to the log end;
+  configure CDC consistently across the cluster.
 - Cross-region replication is experimental. It is refused unless the server
   runs with `--dev --experimental-features`; with `CRONOS_REGIONS` set
   otherwise, the server exits at start. It reads the same feed but stays
