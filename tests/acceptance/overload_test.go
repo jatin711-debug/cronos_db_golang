@@ -88,8 +88,11 @@ func TestOverloadIsRefusedAndSurvived(t *testing.T) {
 	defer producer.Close()
 
 	// Every event is due when the flood is over, and until then is held in
-	// memory by the node that leads its partition.
-	due := time.Now().Add(45 * time.Second)
+	// memory by the node that leads its partition. An event that falls due
+	// while the flood goes on leaves that memory, so the flood has to reach
+	// the limit first. It takes about 35 seconds when the nodes are quick and
+	// about 100 when they are not; 150 covers both.
+	due := time.Now().Add(150 * time.Second)
 	body := make([]byte, payload)
 	var sent, refused atomic.Int64
 	var failures sync.Map

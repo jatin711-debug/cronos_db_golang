@@ -147,7 +147,12 @@ stages a fresh build, a plain `go build` does not).
 
 Acceptance campaign on this host: every test passed except
 `TestOverloadIsRefusedAndSurvived`, which failed in 1 of 4 runs of this tree and in 3
-of 7 runs of an unmodified HEAD worktree. In failing runs the nodes took the whole
-624 MiB flood without refusing. On Windows the process memory gauge comes from Go
-runtime counters, not the Linux resident-memory read the test is designed around, so
-treat this test as Linux-only evidence; its Linux CI result is the one that counts.
+of 7 runs of an unmodified HEAD worktree, and in 2 of 2 runs of the cgo build in a
+Linux container. In failing runs the nodes took the whole 624 MiB flood without
+refusing. The evidence points at the test, not the nodes: its events fell due 45 seconds
+into the flood, and the failing runs were the slow ones (about 90 events/s instead of
+200), which outlast that window; the mechanism, that an event which is due no longer
+counts toward the memory the guard measures, is inferred, not observed. With the due
+time at 20 minutes the nodes refused as designed (one run). The test now schedules
+its events 150 seconds out. With that change it passed 4 of 4 runs in the Linux
+container and 4 of 4 on Windows (about 160 s each, up from about 55 s).
