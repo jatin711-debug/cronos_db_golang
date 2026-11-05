@@ -10,12 +10,13 @@ export function ErrorAlert({
   onRetry?: () => void;
   isAuth?: boolean;
 }) {
+  const isForbidden = message.startsWith("403 ");
   return (
     <div className="rounded-lg border border-[var(--color-destructive)]/30 bg-[var(--color-destructive)]/10 p-4">
       <div className="flex items-start gap-3">
         <AlertCircle className="mt-0.5 h-5 w-5 text-[var(--color-destructive)]" />
         <div className="flex-1">
-          <p className="text-sm font-medium text-[var(--color-destructive)]">{isAuth ? "Authentication required" : "Error"}</p>
+          <p className="text-sm font-medium text-[var(--color-destructive)]">{isForbidden ? "Admin access required" : isAuth ? "Authentication required" : "Error"}</p>
           <p className="text-sm text-[var(--color-destructive-foreground)]">{message}</p>
           {isAuth && (
             <Link

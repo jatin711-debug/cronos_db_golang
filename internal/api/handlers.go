@@ -445,46 +445,53 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 	// Validate event
 	if event.GetMessageId() == "" {
 		return &types.PublishResponse{
-			Success: false,
-			Error:   "message_id is required",
+			ErrorCode: int32(codes.InvalidArgument),
+			Success:   false,
+			Error:     "message_id is required",
 		}, nil
 	}
 	if len(event.GetMessageId()) > 128 {
 		return &types.PublishResponse{
-			Success: false,
-			Error:   "message_id exceeds 128 characters",
+			ErrorCode: int32(codes.InvalidArgument),
+			Success:   false,
+			Error:     "message_id exceeds 128 characters",
 		}, nil
 	}
 	if len(event.Topic) > 255 {
 		return &types.PublishResponse{
-			Success: false,
-			Error:   "topic exceeds 255 characters",
+			ErrorCode: int32(codes.InvalidArgument),
+			Success:   false,
+			Error:     "topic exceeds 255 characters",
 		}, nil
 	}
 	if len(event.Payload) > 4*1024*1024 {
 		return &types.PublishResponse{
-			Success: false,
-			Error:   "payload exceeds 4MB limit",
+			ErrorCode: int32(codes.InvalidArgument),
+			Success:   false,
+			Error:     "payload exceeds 4MB limit",
 		}, nil
 	}
 
 	if event.GetScheduleTs() <= 0 {
 		return &types.PublishResponse{
-			Success: false,
-			Error:   "schedule_ts is required",
+			ErrorCode: int32(codes.InvalidArgument),
+			Success:   false,
+			Error:     "schedule_ts is required",
 		}, nil
 	}
 
 	if len(event.Payload) == 0 {
 		return &types.PublishResponse{
-			Success: false,
-			Error:   "payload is required",
+			ErrorCode: int32(codes.InvalidArgument),
+			Success:   false,
+			Error:     "payload is required",
 		}, nil
 	}
 	if err := h.checkEventSize(ctx, event); err != nil {
 		return &types.PublishResponse{
-			Success: false,
-			Error:   err.Error(),
+			ErrorCode: int32(codes.InvalidArgument),
+			Success:   false,
+			Error:     err.Error(),
 		}, nil
 	}
 
@@ -497,8 +504,9 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 	if h.schemaRegistry != nil && event.Topic != "" {
 		if err := h.schemaRegistry.Validate(event.Topic, event.Payload); err != nil {
 			return &types.PublishResponse{
-				Success: false,
-				Error:   fmt.Sprintf("schema validation failed: %v", err),
+				ErrorCode: int32(codes.InvalidArgument),
+				Success:   false,
+				Error:     fmt.Sprintf("schema validation failed: %v", err),
 			}, nil
 		}
 	}
@@ -542,8 +550,9 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 		partitionInternal, err = h.partitionManager.GetOrCreateInternalPartition(topicPartitionID, event.Topic)
 		if err != nil {
 			return &types.PublishResponse{
-				Success: false,
-				Error:   fmt.Sprintf("get partition: %v", err),
+				ErrorCode: int32(codes.Internal),
+				Success:   false,
+				Error:     fmt.Sprintf("get partition: %v", err),
 			}, nil
 		}
 		partitionID = topicPartitionID
@@ -551,8 +560,9 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 
 	if !partitionInternal.IsKeyInBounds(partitionKey) {
 		return &types.PublishResponse{
-			Success: false,
-			Error:   fmt.Sprintf("key %s is out of partition bounds [%s, %s)", partitionKey, partitionInternal.MinKey, partitionInternal.MaxKey),
+			ErrorCode: int32(codes.InvalidArgument),
+			Success:   false,
+			Error:     fmt.Sprintf("key %s is out of partition bounds [%s, %s)", partitionKey, partitionInternal.MinKey, partitionInternal.MaxKey),
 		}, nil
 	}
 
@@ -576,8 +586,9 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 		isDuplicate, err := dedupMgr.IsDuplicate(dedup.EventKey(event), -1) // offset will be assigned
 		if err != nil {
 			return &types.PublishResponse{
-				Success: false,
-				Error:   fmt.Sprintf("check duplicate: %v", err),
+				ErrorCode: int32(codes.Internal),
+				Success:   false,
+				Error:     fmt.Sprintf("check duplicate: %v", err),
 			}, nil
 		}
 		if isDuplicate {
@@ -585,26 +596,30 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 			switch {
 			case err != nil:
 				return &types.PublishResponse{
-					Success: false,
-					Error:   fmt.Sprintf("check duplicate: %v", err),
+					ErrorCode: int32(codes.Internal),
+					Success:   false,
+					Error:     fmt.Sprintf("check duplicate: %v", err),
 				}, nil
 			case kind == duplicateAccepted:
 				return &types.PublishResponse{
-					Success: false,
-					Error:   "duplicate message_id",
+					ErrorCode: int32(codes.InvalidArgument),
+					Success:   false,
+					Error:     "duplicate message_id",
 				}, nil
 			case kind == duplicateInProgress:
 				return &types.PublishResponse{
-					Success: false,
-					Error:   "duplicate message_id: an earlier publish with this ID is still in progress",
+					ErrorCode: int32(codes.InvalidArgument),
+					Success:   false,
+					Error:     "duplicate message_id: an earlier publish with this ID is still in progress",
 				}, nil
 			case kind == duplicateAppended:
 				// The earlier attempt reached the log and then failed. Finish
 				// it; appending again would deliver the event twice.
 				if err := h.finishPriorPublishes(partitionInternal, []*types.Event{logged}, durableAckEnabled(event)); err != nil {
 					return &types.PublishResponse{
-						Success: false,
-						Error:   err.Error(),
+						ErrorCode: int32(codes.Internal),
+						Success:   false,
+						Error:     err.Error(),
 					}, nil
 				}
 				metrics.AddEventsAccepted(partitionInternal.ID, 1)
@@ -671,8 +686,9 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 			partitionInternal.ReplicateMu.Unlock()
 			rollbackDedup()
 			return &types.PublishResponse{
-				Success: false,
-				Error:   fmt.Sprintf("replication leader for partition %d is not ready", partitionID),
+				ErrorCode: int32(codes.Unavailable),
+				Success:   false,
+				Error:     fmt.Sprintf("replication leader for partition %d is not ready", partitionID),
 			}, nil
 		}
 		if err := partitionInternal.Wal.AppendEvent(event); err != nil {
@@ -683,8 +699,9 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 			}
 			partitionInternal.ReplicateMu.Unlock()
 			return &types.PublishResponse{
-				Success: false,
-				Error:   fmt.Sprintf("append to WAL: %v", err),
+				ErrorCode: int32(codes.Internal),
+				Success:   false,
+				Error:     fmt.Sprintf("append to WAL: %v", err),
 			}, nil
 		}
 		replErr := repl.Replicate([]*types.Event{event})
@@ -695,8 +712,9 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 		partitionInternal.ReplicateMu.Unlock()
 		if replErr != nil {
 			return &types.PublishResponse{
-				Success: false,
-				Error:   fmt.Sprintf("replication: %v", replErr),
+				ErrorCode: int32(codes.Internal),
+				Success:   false,
+				Error:     fmt.Sprintf("replication: %v", replErr),
 			}, nil
 		}
 	} else if err := partitionInternal.Wal.AppendEvent(event); err != nil {
@@ -706,16 +724,18 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 			rollbackDedup()
 		}
 		return &types.PublishResponse{
-			Success: false,
-			Error:   fmt.Sprintf("append to WAL: %v", err),
+			ErrorCode: int32(codes.Internal),
+			Success:   false,
+			Error:     fmt.Sprintf("append to WAL: %v", err),
 		}, nil
 	}
 	if durableAckEnabled(event) {
 		if err := partitionInternal.Wal.Flush(); err != nil {
 			partitionInternal.HoldUnaccepted([]*types.Event{event}, dedupMgr != nil)
 			return &types.PublishResponse{
-				Success: false,
-				Error:   fmt.Sprintf("durable fsync: %v", err),
+				ErrorCode: int32(codes.Internal),
+				Success:   false,
+				Error:     fmt.Sprintf("durable fsync: %v", err),
 			}, nil
 		}
 	}
@@ -725,8 +745,9 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 	if err := partitionInternal.Scheduler.Schedule(event); err != nil {
 		partitionInternal.HoldUnaccepted([]*types.Event{event}, dedupMgr != nil)
 		return &types.PublishResponse{
-			Success: false,
-			Error:   fmt.Sprintf("schedule event: %v", err),
+			ErrorCode: int32(codes.Internal),
+			Success:   false,
+			Error:     fmt.Sprintf("schedule event: %v", err),
 		}, nil
 	}
 

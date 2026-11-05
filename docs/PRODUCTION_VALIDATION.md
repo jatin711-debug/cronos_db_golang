@@ -1,5 +1,83 @@
 # Deployment validation and remaining release gates
 
+## Dedicated production candidate — closure criteria, 2026-11-05
+
+The first production deployment is dedicated to one application/operator.
+Schemas are managed as configuration. Shared-tenant storage/in-flight quotas,
+live schema registration and forced manual rebalance are excluded from this
+release scope; membership-driven reconciliation remains supported. This scope
+decision does not claim those excluded features were implemented.
+
+Schema files must be distributed identically to every node before startup.
+Malformed/unreadable files, unknown types and duplicate versions now stop startup
+instead of silently removing validation. A topic with no schema still accepts
+arbitrary payloads. Deployment preflight must compare the expected topic/version
+inventory on every node using `schema-list`/`schema-get`, and verify a known-invalid
+payload is refused. Use only the documented schema keyword subset.
+
+Product fixes in this candidate (not yet released):
+
+- Publish response failures include `error_code`. Updated SDKs report internal
+  failures as `ErrorKindInternal`, exhausted leadership refusals as
+  `ErrorKindLeaderChange`, and authentication/permission failures as
+  `ErrorKindAuth`. Old servers retain the legacy response fallback; an internal
+  error can occur after append, so retries must preserve message ID and payload.
+- A valid non-admin dashboard token receives HTTP 403 and "Admin access required";
+  missing/invalid credentials still receive HTTP 401.
+- Schema loading fails closed and a failed reload preserves the active registry.
+
+### Reference test profile
+
+These are acceptance targets to establish, not measured capacity or a hardware
+purchase recommendation. Use disposable staging instances on three separate Linux
+amd64 hosts/failure domains, initially 4 vCPUs, 8 GiB RAM and 100 GiB persistent SSD
+per node. Record actual disk model/storage service, filesystem and cache semantics.
+Use replication factor 3, minimum in-sync replicas 2, TLS, JWT/RBAC, encryption at
+rest and `every_event` fsync. Pin the exact commit and image digest throughout.
+
+- Run for 24 hours at 100 events/s; once per hour burst to 500 events/s for 60 s.
+  Use 1 KiB payloads normally and 64 KiB for 1% of events, unique message IDs,
+  dedup enabled, and a mix of immediate and delayed schedules. Seed 100,000
+  delayed events before injecting failures. Increase this envelope only after
+  it passes and disk/memory headroom is measured.
+- Require zero lost acknowledged events and zero early deliveries. Track every
+  acknowledged ID through delivery and, when enabled, CDC export. Record
+  duplicates separately under the at-least-once contract.
+- Under healthy steady load, target publish p99 <= 250 ms and scheduling
+  lateness p99 <= 1 s; no unexpected refusals. Report the same metrics separately
+  for bursts and disruptions instead of hiding them in whole-run averages.
+- After losing one host, target resumed publish/delivery service within 60 s.
+  After a full backup restore, target service recovery within 30 minutes and
+  zero loss of events acknowledged before the backup's recorded cut. Measure
+  actual backup age separately; later acknowledgements are outside that cut.
+- Include slow consumers, a failed CDC destination, disk pressure, 3-to-5 node
+  growth, drain/replacement and leader loss during catch-up. Do not proceed to
+  another disruption until the ledger and replica state reconcile. Record
+  memory, disk, pinned retention and DLQ journal growth; unexplained unbounded
+  growth or inability to recover within the envelope fails the gate.
+- Test the intended upgrade from v0.11.0 on copied data. Verify the documented
+  on-disk format boundary before rollback; never assume a downgrade is safe.
+  Test controlled host/power loss only on disposable infrastructure using the
+  intended storage. A process kill or VM reboot is not a physical power-cut test.
+
+### Current evidence and remaining work
+
+Local Windows amd64, CGO-disabled checks passed for the SDK/API and the schema/server
+packages. Regression coverage includes post-append replication failure followed by
+same-ID recovery, SDK failure classification and old-server fallback, HTTP 401/403,
+and corrupt/duplicate schema loading. Dashboard tests/build passed.
+`TestClusterRestoredFromBackups` passed in 142.121 s on this workstation during this
+change, before the subsequent schema-startup hardening. That test covers scheduled
+work and consumer progress; it does not close pending-CDC/DLQ recovery, upgrade,
+physical-host failure, or final-image gates. The raw local run is recorded under
+`build/production-contract-restore.log` (an ignored local artifact).
+
+The independent-host soak, target-storage power-loss campaign, complete
+CDC/DLQ/upgrade drills, bounded-operation measurements and final candidate
+CI/security/provenance evidence remain required. No separate staging hosts have
+been provided in this session. Local evidence and explicit scope exclusions do
+not close these environment gates.
+
 ## Local remediation validation — 2026-11-05
 
 Candidate: working-tree changes on `579fd79a15b84cf4bcc7bda878aee6fa9d665fc6`.

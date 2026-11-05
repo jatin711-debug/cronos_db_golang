@@ -225,8 +225,8 @@ func TestWebHandler_JSONProxy_AdminDenied(t *testing.T) {
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
 
-	if rr.Code != http.StatusUnauthorized {
-		t.Errorf("expected 401 Unauthorized for non-admin, got %d", rr.Code)
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden for non-admin, got %d", rr.Code)
 	}
 }
 

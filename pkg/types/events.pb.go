@@ -211,7 +211,11 @@ type PublishResponse struct {
 	// Actual schedule timestamp (may be adjusted by server)
 	ScheduleTs int64 `protobuf:"varint,5,opt,name=schedule_ts,json=scheduleTs,proto3" json:"schedule_ts,omitempty"`
 	// Together with offset, identifies this publish even after offset reuse.
-	Term          int64 `protobuf:"varint,6,opt,name=term,proto3" json:"term,omitempty"`
+	Term int64 `protobuf:"varint,6,opt,name=term,proto3" json:"term,omitempty"`
+	// gRPC status code for a failed publish (for example Internal or InvalidArgument).
+	// Zero denotes an older server with an unclassified response. Internal failures
+	// may occur after append; retry with the same message ID and payload.
+	ErrorCode     int32 `protobuf:"varint,7,opt,name=error_code,json=errorCode,proto3" json:"error_code,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -284,6 +288,13 @@ func (x *PublishResponse) GetScheduleTs() int64 {
 func (x *PublishResponse) GetTerm() int64 {
 	if x != nil {
 		return x.Term
+	}
+	return 0
+}
+
+func (x *PublishResponse) GetErrorCode() int32 {
+	if x != nil {
+		return x.ErrorCode
 	}
 	return 0
 }
@@ -5287,7 +5298,7 @@ const file_proto_events_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"a\n" +
 	"\x0ePublishRequest\x12&\n" +
 	"\x05event\x18\x01 \x01(\v2\x10.cronos_db.EventR\x05event\x12'\n" +
-	"\x0fallow_duplicate\x18\x02 \x01(\bR\x0eallowDuplicate\"\xb1\x01\n" +
+	"\x0fallow_duplicate\x18\x02 \x01(\bR\x0eallowDuplicate\"\xd0\x01\n" +
 	"\x0fPublishResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x14\n" +
 	"\x05error\x18\x02 \x01(\tR\x05error\x12\x16\n" +
@@ -5295,7 +5306,9 @@ const file_proto_events_proto_rawDesc = "" +
 	"\fpartition_id\x18\x04 \x01(\x05R\vpartitionId\x12\x1f\n" +
 	"\vschedule_ts\x18\x05 \x01(\x03R\n" +
 	"scheduleTs\x12\x12\n" +
-	"\x04term\x18\x06 \x01(\x03R\x04term\"\x94\x01\n" +
+	"\x04term\x18\x06 \x01(\x03R\x04term\x12\x1d\n" +
+	"\n" +
+	"error_code\x18\a \x01(\x05R\terrorCode\"\x94\x01\n" +
 	"\x0eEventReference\x12!\n" +
 	"\fpartition_id\x18\x01 \x01(\x05R\vpartitionId\x12\x16\n" +
 	"\x06offset\x18\x02 \x01(\x03R\x06offset\x12\x12\n" +
