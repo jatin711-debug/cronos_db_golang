@@ -394,38 +394,39 @@ func (h *AdminServiceHandler) GetReplicationLag(
 	ctx context.Context,
 	req *types.ReplicationLag,
 ) (*types.ReplicationLagResponse, error) {
+	// On the RPC, partition_id 0 means all partitions: the field cannot tell
+	// "partition 0" from "not set". The HTTP API can, and asks for one.
+	return h.replicationLag(ctx, req.GetPartitionId(), req.GetPartitionId() == 0)
+}
+
+// replicationLag answers GetReplicationLag. With all set it aggregates the
+// partitions this node leads; otherwise it reports partition pid alone, which
+// may be partition 0.
+func (h *AdminServiceHandler) replicationLag(ctx context.Context, pid int32, all bool) (*types.ReplicationLagResponse, error) {
 	if err := h.checkAdmin(ctx); err != nil {
 		return nil, err
 	}
+	if pid < 0 {
+		return nil, status.Errorf(codes.InvalidArgument, "partition_id must not be negative (got %d)", pid)
+	}
 
-	pid := req.GetPartitionId()
-	var parts []*partition.Partition
-	if pid != 0 {
+	if !all {
+		// Single-partition request: return only that one.
 		p, err := h.pm.GetInternalPartition(pid)
 		if err != nil {
 			return nil, fmt.Errorf("partition %d not found: %w", pid, err)
 		}
-		parts = []*partition.Partition{p}
-	} else {
-		parts = h.pm.ListPartitions()
-	}
-
-	if pid != 0 {
-		// Single-partition request: return only that one.
-		for _, p := range parts {
-			if p.ReplLeader == nil {
-				continue
-			}
-			return buildLagResponse(p.ID, p.ReplLeader), nil
+		if p.ReplLeader == nil {
+			return &types.ReplicationLagResponse{PartitionId: pid}, nil
 		}
-		return &types.ReplicationLagResponse{PartitionId: pid}, nil
+		return buildLagResponse(p.ID, p.ReplLeader), nil
 	}
 
 	// All-partition request: aggregate per-leader follower lists into a
-	// single response (per-partition_id=0 sentinel). The proto response
+	// single response (partition_id 0 is the sentinel). The proto response
 	// is a single ReplicationLagResponse; we flatten across leaders.
 	resp := &types.ReplicationLagResponse{PartitionId: 0}
-	for _, p := range parts {
+	for _, p := range h.pm.ListPartitions() {
 		if p.ReplLeader == nil {
 			continue
 		}
@@ -692,11 +693,7 @@ func (h *AdminServiceHandler) RunCompaction(
 // TriggerRebalance (RBAC-gated mutating)
 // ---------------------------------------------------------------------------
 
-// TriggerRebalance is a deferred stub. The router rebalances on
-// membership events (node join/leave) automatically; an on-demand
-// trigger is not exposed in cluster.Manager. Returning success with a
-// descriptive error message lets callers detect the gap explicitly
-// rather than via a generic Unimplemented.
+// TriggerRebalance is unsupported; membership-driven reconciliation remains automatic.
 func (h *AdminServiceHandler) TriggerRebalance(
 	ctx context.Context,
 	_ *types.RebalanceRequest,
@@ -704,11 +701,7 @@ func (h *AdminServiceHandler) TriggerRebalance(
 	if err := h.checkAdmin(ctx); err != nil {
 		return nil, err
 	}
-	return &types.RebalanceResponse{
-		Success:         true,
-		Error:           "explicit rebalance trigger not exposed; reconcileLocalLeadership runs every 5s and reacts to membership events",
-		PartitionsMoved: 0,
-	}, nil
+	return nil, status.Error(codes.Unimplemented, "manual rebalance is not supported; leadership reconciles automatically after membership changes")
 }
 
 // ---------------------------------------------------------------------------

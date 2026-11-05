@@ -78,13 +78,19 @@ function LagDetail({ partitionId }: { partitionId?: number }) {
       <Card>
         <CardHeader>
           <CardTitle>
-            {data.partition_id === 0 ? "All Partitions" : `Partition ${data.partition_id}`}
+            {partitionId === undefined ? "All Partitions" : `Partition ${partitionId}`}
           </CardTitle>
-          <CardDescription>Leader HWM: {data.leader_high_watermark}</CardDescription>
+          <CardDescription>
+            Leader HWM: {data.leader_high_watermark}
+            {partitionId === undefined && " (summed over the partitions this node leads)"}
+          </CardDescription>
         </CardHeader>
         <CardContent>
           {data.followers.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No follower offsets reported.</p>
+            <p className="text-sm text-muted-foreground">
+              No follower offsets reported by this node. Only a partition's leader reports them; the Cluster
+              view shows which node leads each partition.
+            </p>
           ) : (
             <div className="h-64 w-full">
               <ResponsiveContainer width="100%" height="100%">

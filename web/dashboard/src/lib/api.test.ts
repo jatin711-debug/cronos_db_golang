@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   apiFetch,
+  normalizeAdminResponse,
   getAdminToken,
   setAdminToken,
   useClusterTopology,
@@ -40,7 +41,7 @@ describe("apiFetch", () => {
     );
 
     const result = await apiFetch("/api/admin/topology");
-    expect(result).toEqual({ ok: true });
+    expect(result).toMatchObject({ ok: true, partitions: [], total_partitions: 0 });
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/admin/topology",
       expect.objectContaining({

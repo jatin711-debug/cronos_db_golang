@@ -62,7 +62,7 @@ describe("ClusterTopologyView", () => {
     const totalNodes = screen.getByText("Total Nodes").parentElement as HTMLElement;
     expect(within(totalNodes).getByText("3")).toBeInTheDocument();
 
-    const leaderParts = screen.getByText("Leader Partitions").parentElement as HTMLElement;
+    const leaderParts = screen.getByText("Led by this node").parentElement as HTMLElement;
     expect(within(leaderParts).getByText("3")).toBeInTheDocument();
 
     // Nodes table

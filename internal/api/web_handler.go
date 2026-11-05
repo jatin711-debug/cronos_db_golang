@@ -283,7 +283,9 @@ func (h *WebHandler) handleReplicationLag(w http.ResponseWriter, r *http.Request
 		h.writeGRPCError(w, status.Error(codes.InvalidArgument, err.Error()))
 		return
 	}
-	resp, err := h.adminHandler.GetReplicationLag(r.Context(), &types.ReplicationLag{PartitionId: pid})
+	// An explicit partition_id, including 0, asks for that partition; without
+	// one the answer covers every partition this node leads.
+	resp, err := h.adminHandler.replicationLag(r.Context(), pid, r.URL.Query().Get("partition_id") == "")
 	if err != nil {
 		h.writeGRPCError(w, err)
 		return
@@ -454,14 +456,14 @@ func spaFileServer(root fs.FS) http.Handler {
 // helpers
 // ---------------------------------------------------------------------------
 
-// parsePartitionID requires ?partition_id=N with N > 0.
+// parsePartitionID requires an explicit non-negative partition, including zero.
 func parsePartitionID(r *http.Request) (int32, error) {
+	if r.URL.Query().Get("partition_id") == "" {
+		return 0, errors.New("partition_id is required")
+	}
 	pid, err := parsePartitionIDOrZero(r)
 	if err != nil {
 		return 0, err
-	}
-	if pid == 0 {
-		return 0, errors.New("partition_id is required (got 0)")
 	}
 	return pid, nil
 }
@@ -473,8 +475,8 @@ func parsePartitionIDOrZero(r *http.Request) (int32, error) {
 		return 0, nil
 	}
 	n, err := strconv.ParseInt(v, 10, 32)
-	if err != nil {
-		return 0, errors.New("partition_id must be a 32-bit integer")
+	if err != nil || n < 0 {
+		return 0, errors.New("partition_id must be a non-negative 32-bit integer")
 	}
 	return int32(n), nil
 }

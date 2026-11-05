@@ -1861,12 +1861,12 @@ flowchart LR
     CatchUp -.->|threshold flag is a dead key| Snap
 ```
 
-### 2. Admin `TriggerRebalance` is a soft stub
+### 2. Admin `TriggerRebalance` is unsupported
 
 | | |
 |--|--|
 | **What works today** | Cluster **automatically** rebalances on membership join/leave via router + Raft assignment apply + `reconcileLocalLeadership` (≈5s). Partition promote/demote and `SyncPartitionFromLeader` run from those paths. Dashboard/CLI can call the RPC. |
-| **What is deferred** | `AdminService.TriggerRebalance` does **not** invoke an on-demand rebalance engine. It is RBAC-gated and returns `Success=true` with a **descriptive error string** explaining that reconcile is membership-driven (so clients can detect the gap without `Unimplemented`). |
+| **What is deferred** | `AdminService.TriggerRebalance` does **not** invoke an on-demand rebalance engine. It is RBAC-gated and returns gRPC `Unimplemented`. The dashboard action is disabled. |
 | **Why deferred** | Avoid unsafe operator-forced thrash before a controlled “drain + move N partitions” API exists. |
 | **Operator impact** | Do not depend on the UI/CLI “Rebalance” button to reshuffle a healthy cluster. Add/remove nodes (or wait for membership events) to trigger placement changes. |
 | **Code** | `internal/api/admin_handler.go` (`TriggerRebalance`), `internal/cluster/manager.go` / `router.go` |

@@ -69,14 +69,46 @@ export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise
   if (text === "") {
     return null as unknown as T;
   }
-  return JSON.parse(text) as T;
+  return normalizeAdminResponse(path, JSON.parse(text)) as T;
+}
+
+// encoding/json on the Go protobuf structs omits zero scalars and empty lists.
+// Expand those defaults at the boundary so every view sees the same contract.
+export function normalizeAdminResponse(path: string, value: Record<string, unknown>): unknown {
+  const endpoint = path.split("?")[0].split("/").slice(3).join("/");
+  const defaults: Record<string, Record<string, unknown>> = {
+    topology: { local_node_id: "", is_cluster_mode: false, total_nodes: 0, alive_nodes: 0, total_partitions: 0, leader_partitions: 0, nodes: [], partitions: [], captured_at_unix_ms: 0 },
+    "partition-health": { partition_id: 0, high_watermark: 0, first_offset: 0, segment_count: 0, disk_usage_bytes: 0, active_timers: 0, ready_events: 0, cold_store_entries: 0, replay_error: "", last_error: "" },
+    "replication-lag": { partition_id: 0, leader_high_watermark: 0, followers: [] },
+    "consumer-groups": { groups: [] },
+    "consumer-group-lag": { group_id: "", partition_id: 0, committed_offset: 0, partition_high_watermark: 0, lag: 0 },
+    schemas: { schemas: [] },
+    schema: { topic: "", version: 0, schema_type: "", definition: "" },
+    "tenant-usage": { tenant_id: "", in_flight: 0, storage_bytes: 0, limits_configured: false, publish_rate_per_sec: 0, max_in_flight: 0 },
+    "retention/run": { success: false, error: "", events_removed: 0 },
+    "compaction/run": { success: false, error: "", segments_compacted: 0 },
+  };
+  const result = { ...defaults[endpoint], ...value };
+  const nested: Record<string, Record<string, unknown>> = {
+    nodes: { address: "", is_local: false, is_alive: false, state: "", rack: "", zone: "", region: "" },
+    partitions: { partition_id: 0, replicas: [], isr: [], follower_offsets: {} },
+    followers: { follower_id: "", offset: 0, lag_events: 0, lag_seconds: 0, in_sync: false },
+    groups: { group_id: "", topic: "", partitions: [], member_count: 0 },
+  };
+  for (const [key, fallback] of Object.entries(defaults[endpoint] ?? {})) {
+    if (result[key] == null) result[key] = fallback;
+  }
+  for (const [key, fallback] of Object.entries(nested)) {
+    if (Array.isArray(result[key])) result[key] = result[key].map((item) => ({ ...fallback, ...item }));
+  }
+  return result;
 }
 
 // AuthError is raised when the server responds with HTTP 401. The UI can
 // detect this and prompt the user to log in.
 export class AuthError extends Error {
   constructor(message: string) {
-    super(message);
+    super(`401 ${message}`);
     this.name = "AuthError";
   }
 }
@@ -366,6 +398,7 @@ function useMutation<T, P>(execute: (params: P) => Promise<T>): MutatorState<T, 
     async (params: P) => {
       setLoading(true);
       setError(null);
+      setData(null);
       try {
         const result = await execute(params);
         setData(result);

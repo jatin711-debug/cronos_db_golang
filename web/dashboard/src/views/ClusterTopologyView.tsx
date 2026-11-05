@@ -33,7 +33,7 @@ export function ClusterTopologyView() {
             <Stat label="Total Nodes" value={data.total_nodes} />
             <Stat label="Alive Nodes" value={data.alive_nodes} />
             <Stat label="Total Partitions" value={data.total_partitions} />
-            <Stat label="Leader Partitions" value={data.leader_partitions} />
+            <Stat label="Led by this node" value={data.leader_partitions} />
           </div>
         </CardContent>
       </Card>

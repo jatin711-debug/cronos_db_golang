@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useClusterTopology, useRunRetention, useRunCompaction, useTriggerRebalance } from "@/lib/api";
+import { useClusterTopology, useRunRetention, useRunCompaction } from "@/lib/api";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Loading } from "@/components/Loading";
@@ -75,7 +75,7 @@ function RetentionPanel({ partitions }: { partitions: number[] }) {
             onChange={(e) => setPartitionId(parseInt(e.target.value, 10))}
           >
             {partitions.map((id) => (
-              <option key={id} value={id}>{id}</option>
+              <option key={id} value={id}>{id === 0 ? "All local partitions (0)" : id}</option>
             ))}
           </select>
         </label>
@@ -139,7 +139,7 @@ function CompactionPanel({ partitions }: { partitions: number[] }) {
             onChange={(e) => setPartitionId(parseInt(e.target.value, 10))}
           >
             {partitions.map((id) => (
-              <option key={id} value={id}>{id}</option>
+              <option key={id} value={id}>{id === 0 ? "All local partitions (0)" : id}</option>
             ))}
           </select>
         </label>
@@ -153,41 +153,13 @@ function CompactionPanel({ partitions }: { partitions: number[] }) {
 }
 
 function RebalancePanel() {
-  const rebalance = useTriggerRebalance();
-  const { addToast } = useToast();
-
-  useEffect(() => {
-    if (!rebalance.data && !rebalance.error) return;
-    if (rebalance.error) {
-      addToast({ title: "Rebalance failed", description: rebalance.error, variant: "error" });
-      return;
-    }
-    if (rebalance.data?.success) {
-      addToast({
-        title: "Rebalance triggered",
-        description: `Partitions moved: ${rebalance.data.partitions_moved}. ${rebalance.data.error || ""}`,
-        variant: rebalance.data.partitions_moved > 0 ? "success" : "default",
-      });
-    } else {
-      addToast({
-        title: "Rebalance completed with issues",
-        description: rebalance.data?.error || "No partitions moved.",
-        variant: "error",
-      });
-    }
-  }, [rebalance.data, rebalance.error, addToast]);
-
   return (
     <div className="rounded-lg border border-(--color-border) p-4">
       <h3 className="mb-3 text-sm font-medium">Cluster Rebalance</h3>
       <p className="mb-3 text-xs text-muted-foreground">
-        Trigger an explicit leadership rebalance. In the current implementation this is a
-        no-op notification; the control plane reconciles leadership every 5 seconds.
+        Leadership reconciles automatically after membership changes. Manual rebalance is not supported.
       </p>
-      <Button onClick={() => rebalance.mutate()} disabled={rebalance.loading}>
-        {rebalance.loading ? "Triggering..." : "Trigger Rebalance"}
-      </Button>
-      {rebalance.error && <ErrorAlert message={rebalance.error} onRetry={rebalance.reset} isAuth={rebalance.error.startsWith("401")} />}
+      <Button disabled>Manual rebalance unavailable</Button>
     </div>
   );
 }

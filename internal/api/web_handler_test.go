@@ -271,18 +271,17 @@ func TestWebHandler_JSONProxy_RunRetention_AuthGated(t *testing.T) {
 }
 
 func TestWebHandler_JSONProxy_GRPCErrorMapping(t *testing.T) {
-	// GetPartitionHealth with partition_id=0 returns a gRPC
-	// InvalidArgument error. The proxy should map that to HTTP 400.
+	// A negative partition is invalid and must map to HTTP 400.
 	h := newTestWebHandler(t, nil)
 	mux := http.NewServeMux()
 	h.Register(mux)
 
-	req := httptest.NewRequest("GET", "/api/admin/partition-health?partition_id=0", nil)
+	req := httptest.NewRequest("GET", "/api/admin/partition-health?partition_id=-1", nil)
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusBadRequest {
-		t.Errorf("expected 400 Bad Request for partition_id=0, got %d (body=%q)", rr.Code, rr.Body.String())
+		t.Errorf("expected 400 Bad Request for negative partition, got %d (body=%q)", rr.Code, rr.Body.String())
 	}
 	var resp map[string]any
 	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {

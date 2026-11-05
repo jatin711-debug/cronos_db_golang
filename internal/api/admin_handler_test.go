@@ -171,17 +171,12 @@ func TestAdminServiceHandler_StubRPCs_ReturnDeferred(t *testing.T) {
 		t.Errorf("expected TenantId=acme, got %q", tenant.TenantId)
 	}
 
-	// TriggerRebalance: success with descriptive error explaining gap.
-	rb, err := client.TriggerRebalance(ctx, &types.RebalanceRequest{})
-	if err != nil {
-		t.Fatalf("TriggerRebalance: %v", err)
+	// Unsupported operations must not report success to automation.
+	_, err = client.TriggerRebalance(ctx, &types.RebalanceRequest{})
+	if status.Code(err) != codes.Unimplemented {
+		t.Fatalf("TriggerRebalance: expected Unimplemented, got %v", err)
 	}
-	if !rb.Success {
-		t.Error("expected Success=true with descriptive error")
-	}
-	if rb.Error == "" {
-		t.Error("expected non-empty Error describing the rebalance gap")
-	}
+
 }
 
 // TestAdminServiceHandler_RunRetention_PermissionDenied verifies that
