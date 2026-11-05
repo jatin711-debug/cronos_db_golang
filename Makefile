@@ -360,10 +360,10 @@ proto:
 	@rm -rf cronos_db/pkg/types github.com
 	protoc --go_out=. --go_opt=module=github.com/jatin711-debug/cronos_db_golang --go-grpc_out=. --go-grpc_opt=module=github.com/jatin711-debug/cronos_db_golang proto/events.proto proto/admin.proto
 
-# Build the admin dashboard SPA at web/dashboard/. This target is
-# opt-in (not part of the default `make build` chain) so Go-only builds
-# don't pull in Node. Step 5 will copy the resulting dist/ into the Go
-# binary via //go:embed.
+# Build the admin dashboard SPA at web/dashboard/. `make build` runs this
+# target first (it needs Node and npm) and then copies dist/ into
+# internal/api/web/dist/, which the Go binary embeds via //go:embed. Use
+# build-api for a server binary without the dashboard rebuild.
 dashboard:
 	@echo "Building admin dashboard SPA..."
 	@cd web/dashboard && $(NPM_CMD) install --no-audit --no-fund

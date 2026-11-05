@@ -22,6 +22,8 @@ The scheduler controls when events become deliverable, using a hot timing wheel 
 
 - Hierarchical wheel gives near O(1) scheduling behavior.
 - Defaults: **`-tick-ms=10`**, **`-wheel-size=600`** (6s root span); hot window default 60 minutes.
+- **The wheel follows the clock.** Each ticker fire (`worker` in `scheduler.go`) calls `advanceWheel`, which moves the wheel to the tick the wall clock has reached, expiring a slot only once the clock has passed its end, so nothing fires early. Up to 1,000 ticks are taken per fire, so catching up after a stall does not hold `tickMu` for the whole distance. Before v0.10.0 the wheel advanced one tick per fire, and every stall (hydration pass, GC pause, CPU throttling) delayed every later event permanently.
+- `PartitionService.GetSchedulerStatus` reports a local partition's active timers, ready events, tick and wheel size; `avg_delay_ms` and `max_delay_ms` are always 0 (`partition_handler.go`). It needs only a valid token.
 - Adaptive hydrator interval (5s–5min) manages cold-store scan pressure.
 - `--scheduler-memory` defaults to 64 MiB across all partitions (minimum 32 MiB). Payloads, metadata and timer/accounting overhead count toward this budget. It excludes worker queues, Pebble caches and temporary WAL read buffers, so it is not an RSS limit.
 - Hydration scans at most 1,024 references per pass, with WAL payload reads serialized across partitions. Within a partition, earlier work can evict later timers back to disk. Draining ready events wakes hydration.

@@ -42,9 +42,10 @@ a physical WAL offset but does not represent a user publish or consumer ACK.
 A retried publish can concern an entry of an earlier term, before the marker:
 the earlier attempt reached this leader's log and then failed. Replication of
 an entry below the marker continues through the marker (`Leader.Replicate`),
-so the retry is acknowledged only once the entry is committed. Before 1.0 the
-retry replicated the entry alone and was acknowledged once a quorum held it,
-which proves nothing for an older-term entry.
+so the retry is acknowledged only once the entry is committed. Before
+[v0.10.0](RELEASE_V0.10.0.md) the retry replicated the entry alone and was
+acknowledged once a quorum held it, which proves nothing for an older-term
+entry.
 
 ## Rolling upgrades and durable format requirements
 

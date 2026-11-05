@@ -15,14 +15,14 @@ Prerequisites:
 - **Rust** / Cargo (optional: the bloom-filter library used through cgo; without cgo the server uses one written in Go)
 - **protoc** (only to regenerate the gRPC code with `make proto`)
 - **Docker** with `docker compose` (the container tests, and `make verify-env`)
-- **npm** (admin dashboard SPA build)
+- **Node.js 24 and npm** (admin dashboard SPA build; the CI job and the Dockerfile use Node 24)
 - **Make** (optional but recommended; Windows and Unix targets are supported)
 
 Build and local run:
 
 ```bash
 make verify-env   # checks go, cargo, protoc, docker and docker compose
-make build        # rust-dedup + dashboard stage + cronos-api
+make build        # dashboard build and stage, rust-dedup, cronos-api, cluster_loadtest
 ./bin/cronos-api --dev -node-id=node1 -data-dir=./data
 ```
 
@@ -94,7 +94,7 @@ Architecture and developer walkthrough:
 3. **Tests:** Add or update tests. Unit tests must pass; add integration/chaos coverage when changing cluster/replication paths.
 4. **Docs:** Update architecture or feature docs when behavior or defaults change.
 5. **Commits:** Use clear, conventional-style messages when possible (`fix:`, `docs:`, `feat:`).
-6. **Submit PR:** Describe the problem, the approach, and how you verified it. CI (`production-checks`) runs on every pull request: build, vet, the suite under the race detector and without cgo, the acceptance fault campaign, container partition tests and an image scan, the production Helm chart in Kubernetes, and `govulncheck`.
+6. **Submit PR:** Describe the problem, the approach, and how you verified it. CI (`production-checks`) runs on every pull request: build, vet, the suite under the race detector and without cgo, the acceptance fault campaign, container partition tests and an image scan, the production Helm chart in Kubernetes, the dashboard tests and build, and `govulncheck`.
 
 ## Code Review
 

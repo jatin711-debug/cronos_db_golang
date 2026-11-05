@@ -17,7 +17,13 @@ The audit module records important actions and security-relevant requests for co
    but only when authentication is on (`--auth-enabled`). Without it every
    subject is anonymous and the interceptors record nothing
    (`internal/api/grpc_server.go`).
-3. Records are appended to audit files with structured payloads.
+3. Records are appended as one NDJSON line each to `<data-dir>/audit/<UTC date at startup>.ndjson` (`audit.NewLogger`). The file is chosen once when the process starts; there is no rotation or retention.
+
+## What is recorded
+
+- One record per public-listener RPC when auth is on: `action` is the full gRPC method, `subject` the JWT subject (or `anonymous`), `outcome` `success` or `failure` from the call's returned error, and `detail` its duration. `resource` is empty. A refusal carried in a response body (`success: false`) is recorded as `success`.
+- The internal listener (replication, Raft) has no audit interceptor, and `EventServiceHandler` holds the logger but writes no records of its own.
+- Writing is best-effort: events go through a 4,096-entry channel to one worker, flushed and fsynced every 1,000 events or each second. When the channel is full the event is dropped and counted (`Logger.Dropped`) with a warning, so the audit trail can have gaps under load or after a crash.
 
 ## Production Decisions
 

@@ -42,7 +42,7 @@ The cluster module provides node membership, partition routing, leader assignmen
 
 ## Production Decisions
 
-- Production clusters require `--replication-factor>=3` and `--min-insync-replicas>=2`.
+- Production mode requires cluster mode (`--cluster`), `--replication-factor>=3` and `--min-insync-replicas>=2` (`Validate` in `internal/config/config.go`). Since v0.11.0 a production configuration without `--cluster` is refused at startup: a standalone node with RF >= 3 used to pass validation, refuse every publish and still report ready. `--dev` is unchanged. `/health/ready` is also down when replication is configured but no cluster manager exists (`internal/api/health.go`).
 - The coordinator activates `term-start/1` only after every assigned replica,
   handoff target and Raft voter is alive and capable. Lifecycle operations are
   separately opt-in with `--event-lifecycle`, require majority acknowledgements
@@ -79,25 +79,25 @@ The cluster module provides node membership, partition routing, leader assignmen
 - Under replication factor 1 a handoff copies the log to the target by snapshot; consumer progress does not move with it, so the target may redeliver.
 - Partition ID routing for keys uses **FNV-1a**; node placement on the ring uses **SHA-256 virtual nodes** (default 2048).
 
-## Known Limitation: Admin `TriggerRebalance` soft stub
+## Known Limitation: Admin `TriggerRebalance` is `Unimplemented`
 
 | | |
 |--|--|
 | **Automatic rebalance (works)** | Membership join/leave → router assignment → Raft apply → `reconcileLocalLeadership` (~5s) promotes/demotes and may `SyncPartitionFromLeader`. |
-| **On-demand RPC (stub)** | `AdminService.TriggerRebalance` / dashboard `POST /api/admin/cluster/rebalance` is **implemented as a soft stub**: RBAC still required; response is `Success=true` with an explanatory `Error` string and `PartitionsMoved=0`. It does **not** force a full ring reshuffle. |
+| **On-demand RPC (`Unimplemented`)** | `AdminService.TriggerRebalance` / dashboard `POST /api/admin/cluster/rebalance` checks admin RBAC and then returns gRPC `Unimplemented` (HTTP 501) with "manual rebalance is not supported; leadership reconciles automatically after membership changes". Until v0.10.0 it returned `Success=true` with an explanatory `Error` string and `PartitionsMoved=0`; automation that checked the success field must now handle the error. The dashboard button is disabled. |
 | **Why** | Prevents unsafe operator thrash until a controlled drain/move API exists. |
 | **Code** | [internal/api/admin_handler.go](../../../internal/api/admin_handler.go) (`TriggerRebalance`) |
 | **See also** | [ARCHITECTURE.md § Known Limitations](../../../ARCHITECTURE.md#known-limitations), [dashboard.md](dashboard.md) |
 
 **Operator guidance:** To change placement, change membership (add/remove nodes) or wait for
-failure detection; do not rely on the Rebalance button as a manual “reshuffle now” tool.
+failure detection; there is no manual “reshuffle now” operation.
 
 ## Debug Pointers
 
 - Ownership/routing confusion: [internal/cluster/router.go](../../../internal/cluster/router.go)
 - Metadata drift: [internal/cluster/manager.go](../../../internal/cluster/manager.go)
 - Raft status and peers: [internal/cluster/raft.go](../../../internal/cluster/raft.go)
-- Why UI rebalance did nothing: [internal/api/admin_handler.go](../../../internal/api/admin_handler.go)
+- Why manual rebalance is refused: [internal/api/admin_handler.go](../../../internal/api/admin_handler.go)
 
 ## Diagrams
 
@@ -115,7 +115,7 @@ flowchart LR
     Healthy[Cluster converged]
 
     AdminBtn[Admin TriggerRebalance / UI button]
-    SoftStub["Soft stub: no forced reshuffle<br/>Success + explanatory message"]
+    SoftStub["Unimplemented: no forced reshuffle<br/>gRPC error, dashboard action disabled"]
 
     NodeJoin --> Membership --> Router --> RaftSync --> Promote --> Follower --> Healthy
     NodeJoin -.-> Sync -.-> Follower

@@ -32,6 +32,10 @@ used as a storage inventory. Without a limits file, accounting remains disabled.
 
 The configuration loader accepts only rate limits; unsupported quota fields fail startup.
 
+## Admin usage view
+
+`AdminService.GetTenantUsage` (dashboard: `/api/admin/tenant-usage`) returns a tenant's `in_flight`, `storage_bytes` and, when limits exist for it, `limits_configured`, `publish_rate_per_sec` and `max_in_flight`. It needs global `"admin": true` when auth is on. An empty `tenant_id` sums usage over every tenant the accountant knows and reports `limits_configured: false`. A node without an accountant answers with `limits_configured: false` and zero usage. As above, the counters are process-local and cover only subjects that have a configured limit (`internal/api/admin_handler.go`).
+
 ## Design Notes
 
 - The accountant is built so that it costs nothing on the hot path when no

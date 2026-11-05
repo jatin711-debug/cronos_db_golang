@@ -19,8 +19,12 @@ Replay serves historical data from WAL by time or offset, enabling debugging, ba
 
 ## Production Decisions
 
+- A replay needs a `topic` (it filters the partition's log by it), topic `subscribe`
+  permission when auth is on, and names its partition explicitly (`partition_id`,
+  where 0 is partition 0); a node that does not own the partition answers
+  `Unavailable`, and a non-leader needs follower reads enabled.
 - `speed` paces a replay at 10 ms / `speed` between events: 0 sends as fast as
-  the client takes them, and other values must be at least 0.001 (10 s between
+  the client takes them (so does exactly 1.0, which the engine treats as unpaced), and other values must be at least 0.001 (10 s between
   events); anything else is refused with `INVALID_ARGUMENT`. Cancelling a
   replay ends its pause. Before 1.0 the pause was a plain sleep, and a tiny
   speed asked for months of it: a cancelled replay kept its handler and the

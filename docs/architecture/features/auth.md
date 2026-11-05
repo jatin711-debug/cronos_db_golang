@@ -36,11 +36,12 @@ With `--auth-enabled`, the handlers require:
 | RPCs | Requirement |
 |------|-------------|
 | Every `AdminService` RPC, and the dashboard's `/api/admin/*` | Global `"admin": true` (`CheckAdminPermission`) |
-| `PartitionService.Compact`, `RunRetention`, `SplitPartition` | Global `"admin": true` |
+| `PartitionService.Compact`, `RunRetention`, `SplitPartition` (the admin check comes first; a split is then `Unimplemented` unless `--dev --experimental-features`) | Global `"admin": true` |
 | `PartitionService.GetPartition`, `ListPartitions`, `GetWALStatus`, `GetSchedulerStatus` | A valid token only |
 | `ConsumerGroupService.CreateConsumerGroup`, `GetConsumerGroup`, `ListConsumerGroups`, `RebalanceConsumerGroup` | Global `"admin": true` |
 | `EventService.Publish`, `PublishBatch`, `GetEventState`, `CancelEvent`, `RescheduleEvent` | Topic `publish` |
 | `EventService.Subscribe`, `Ack`, `Replay` | Topic `subscribe` |
+| `TransactionService` (experimental; registered only with `--dev --experimental-features`) | A valid token only: `internal/tx/transaction_handler.go` checks no policy |
 
 The global `admin` flag grants no topic permission. Topic names match
 exactly. The per-topic `admin` flag is parsed but no RPC checks it. A subject

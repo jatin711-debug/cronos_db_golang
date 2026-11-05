@@ -39,7 +39,8 @@ Additional CDC, experimental region and reload variables are described in
 
 ## Production decisions and limitations
 
-- Production requires TLS, JWT auth with an explicit policy, WAL encryption, replication mTLS, at least three replicas, at least two write acknowledgements, durable fsync and seeds in cluster mode. `--dev` bypasses the requirements; it does not disable security that was explicitly enabled.
+- Production requires TLS, JWT auth with an explicit policy, WAL encryption, replication mTLS, at least three replicas, at least two write acknowledgements, durable fsync, cluster mode (`--cluster`, refused at startup without it since v0.11.0) and seeds on every node. `--dev` bypasses the requirements; it does not disable security that was explicitly enabled.
+- `--tenant-limits-file` (`CRONOS_TENANT_LIMITS_FILE`) is refused at startup unless `--auth-enabled` is set, and is read once at start (see [tenant.md](tenant.md)).
 - Event lifecycle mode requires supported persistent formats and, in a cluster, majority acknowledgements and capability agreement. CDC sinks and experimental features cannot be combined with it. Activation is one-way; see the [lifecycle contract](../../RETENTION_AND_EVENT_LIFECYCLE.md).
 - `--raft-join`, `--snapshot-catchup-threshold` and `--clock-skew-threshold-ms` are parsed but unused. Join uses seeds; connected followers use incremental catch-up; node clocks must be synchronized operationally.
 - Helm configures the binary through environment variables. Named chart values cover common settings; `extraEnv` accepts the rest, including secret references. Base values enable dev mode. Use `values-production.yaml` and the required secrets for production.
