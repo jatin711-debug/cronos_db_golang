@@ -31,14 +31,11 @@ import (
 // PartitionService (port :9000 by default), reusing the existing TLS /
 // mTLS configuration. There is no separate admin listener.
 //
-// Step 1 shipped the skeleton with GetClusterTopology implemented and the
-// remaining 10 RPCs returning Unimplemented via the embedded stub. Steps
-// 2+3 replace the stub with explicit methods on the handler so every
-// RPC has stable, code-traceable behavior. Where a real implementation
-// would require a new package export or substantial new business logic
-// (schema registry, tenant accountant, on-demand rebalance trigger), the
-// RPC returns a structured "deferred" response rather than fake data.
-// The doc-comment on each deferred RPC explains the exact gap.
+// Every current AdminService RPC has an explicit handler. TriggerRebalance
+// returns Unimplemented because leadership reconciles automatically after
+// membership changes. Other RPCs report the local state available from the
+// configured managers; their method comments describe standalone behavior
+// and optional dependencies.
 type AdminServiceHandler struct {
 	// Embed UnimplementedAdminServiceServer so the generated
 	// `mustEmbedUnimplementedAdminServiceServer()` requirement is
@@ -46,7 +43,7 @@ type AdminServiceHandler struct {
 	// implementation for every RPC; we override the ones we implement
 	// here (see explicit methods below) and delegate to the stub for
 	// any future RPCs that we add without an explicit implementation
-	// (none expected in step 2+3).
+	// in this handler.
 	types.UnimplementedAdminServiceServer
 
 	// pm is the partition manager. May be nil only in degenerate

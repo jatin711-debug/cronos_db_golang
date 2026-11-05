@@ -923,13 +923,18 @@ graph TB
 
     subgraph Global Lock-Free
         PI[partitionSubs map - partition to subscribers]
-        IFC[inFlightCount - atomic Int64 cap 100K]
+        IFC[inFlightCount - atomic Int64 default cap 100K]
     end
 
     HASH --> S0S
     HASH --> S1S
     HASH --> SNS
 ```
+
+The dispatcher's `MaxInFlightEvents` defaults to 100,000 deliveries. The
+separate `--max-in-flight` setting defaults to 500,000 and is checked by
+the partition manager during publish admission; it does not configure
+the dispatcher's delivery cap.
 
 ---
 
@@ -1984,9 +1989,9 @@ flowchart LR
   are still open: a multi-host soak, recovery and upgrade drills, and machine
   or power-loss testing. Deployment-specific capacity is unproven, and no new
   capacity claim is made.
-- Replication lag and per-partition health are reported by a partition's
-  leader only. Retention and compaction take partition 0 as "all local
-  partitions".
+- Replication lag is reported by a partition's leader only. Partition health
+  answers for any partition the node holds. Retention and compaction take
+  partition 0 as "all local partitions".
 - The dashboard assets in a binary are those compiled into it: a plain
   `go build` serves the files checked in under `internal/api/web/dist`, which
   the container build replaces with a fresh build.
@@ -1998,8 +2003,11 @@ flowchart LR
   without the flag, do not take part.
 - Transactions, online partition splitting and cross-region replication run
   only with `--dev --experimental-features` and are not verified.
-- The client unit test `TestSendAsyncContextCancellation` has failed
-  intermittently in full-suite runs.
+- The September 27 audit recorded a `TestSendAsyncContextCancellation`
+  failure in the full race suite: gRPC cancellation surfaced as a transport
+  error instead of a context error. See the [historical failure log](docs/audit-probes/evidence/full-race.txt).
+  This historical result alone does not establish whether the current code
+  still fails intermittently.
 
 ---
 

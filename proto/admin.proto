@@ -223,7 +223,8 @@ message TenantUsageResponse {
 // -----------------------------------------------------------------------------
 
 message RebalanceRequest {
-  // Empty: triggers a router rebalance based on current membership.
+  // Empty request. TriggerRebalance returns Unimplemented; leadership
+  // reconciles automatically after membership changes.
 }
 
 message RebalanceResponse {
