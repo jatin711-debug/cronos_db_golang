@@ -59,7 +59,9 @@ type CommitStrategy string
 const (
 	// CommitStrategyAsync batches acks and flushes in the background.
 	CommitStrategyAsync CommitStrategy = "async"
-	// CommitStrategySync waits for ack RPC completion before returning from Ack.
+	// CommitStrategySync makes Delivery.Ack, AckSuccess and AckFailure return
+	// the server's answer: nil once it recorded the acknowledgement, otherwise
+	// its refusal, or an error when the stream ended or the context expired.
 	CommitStrategySync CommitStrategy = "sync"
 )
 
@@ -77,11 +79,18 @@ type Assignment struct {
 	NodeAddress string
 }
 
-// OffsetCheckpointStore persists committed offsets for recovery/resume across process restarts.
+// OffsetCheckpointStore persists a consumer group's progress on a partition for
+// resume across process restarts. The consumer saves only the completion floor
+// that the server reports in its answer to a successful acknowledgement: every
+// offset below it is complete. It does not save the offset after the last
+// acknowledged delivery, because events are delivered in schedule order, not
+// offset order.
 type OffsetCheckpointStore interface {
-	// LoadOffset returns the last saved next-offset, or a store-defined sentinel when missing.
+	// LoadOffset returns the last saved floor, or a negative value (the
+	// consumer treats any negative value as "no checkpoint") when missing.
 	LoadOffset(ctx context.Context, consumerGroup string, topic string, partitionID int32) (int64, error)
-	// SaveOffset records nextOffset after a successful commit progress.
+	// SaveOffset records the completion floor. The parameter is named
+	// nextOffset for compatibility. The consumer calls it only with values >= 0.
 	SaveOffset(ctx context.Context, consumerGroup string, topic string, partitionID int32, nextOffset int64) error
 }
 
@@ -99,7 +108,9 @@ type Delivery struct {
 	acker *deliveryAcker // internal ack sender bound to this subscription stream
 }
 
-// LastOffset returns the highest event offset in this delivery payload.
+// LastOffset returns the offset of the last event in this delivery payload, or
+// -1 when it holds none. That is the highest offset unless the batch is out of
+// offset order, as servers up to v0.6.0 could send it.
 func (d Delivery) LastOffset() int64 {
 	if len(d.Batch) > 0 {
 		return d.Batch[len(d.Batch)-1].GetOffset()
@@ -120,7 +131,13 @@ func (d Delivery) AckFailure(ctx context.Context, processingErr error) error {
 	return d.Ack(ctx, false, d.LastOffset()+1, processingErr)
 }
 
-// Ack sends an acknowledgement for this delivery.
+// Ack sends an acknowledgement for this delivery. A delivery is acknowledged
+// once: later calls return the result of the first. For success, nextOffset
+// must be the highest offset of the delivered events plus one; the server
+// refuses any other value (AckSuccess passes it). A failure acknowledgement's
+// nextOffset is not checked. With the default asynchronous CommitStrategy the
+// call returns once the acknowledgement is queued and a refusal is reported
+// only to an ErrorHook; with CommitStrategySync it returns the server's answer.
 func (d Delivery) Ack(ctx context.Context, success bool, nextOffset int64, processingErr error) error {
 	if d.acker == nil {
 		return fmt.Errorf("delivery ack is unavailable")
@@ -174,7 +191,9 @@ type ConsumerConfig struct {
 	// again.
 	StartOffset int64
 
-	// MaxBufferSize is the max events the server may buffer for this subscription.
+	// MaxBufferSize is how many deliveries the server may have unacknowledged
+	// at once on this subscription (its credit limit; the server caps it at
+	// 50000). It must be positive.
 	MaxBufferSize int32
 	// WorkerConcurrency is how many handler goroutines process deliveries concurrently.
 	WorkerConcurrency int
@@ -192,9 +211,14 @@ type ConsumerConfig struct {
 	AckFlushInterval time.Duration
 	// CommitStrategy selects async batching vs sync ack RPCs.
 	CommitStrategy CommitStrategy
-	// CheckpointStore optionally persists local resume offsets (nil disables local checkpoints).
+	// CheckpointStore optionally persists the group's completion floor on each
+	// partition, as the server reports it in its answers to successful
+	// acknowledgements: every offset below it is complete (nil disables local
+	// checkpoints).
 	CheckpointStore OffsetCheckpointStore
-	// ResumeCheckpoint loads StartOffset from CheckpointStore when true and a checkpoint exists.
+	// ResumeCheckpoint loads StartOffset from CheckpointStore when true, a
+	// checkpoint exists, StartOffset is negative and PartitionID is pinned
+	// (not -1).
 	ResumeCheckpoint bool
 	// MaxPayloadBytes skips deliveries whose payload is larger than this
 	// without calling the handler; with AckModeAuto they are acknowledged as
@@ -215,7 +239,10 @@ type ConsumerConfig struct {
 	ReconnectJitter float64
 	// MaxReconnectAttempts limits how many rounds of reconnecting may fail in
 	// a row (0 = unlimited until context cancel). A subscription that has
-	// received a delivery starts counting again.
+	// received a delivery starts counting again. A subscription the server
+	// refuses (a group name longer than 255 bytes, or a partition that holds
+	// too many groups, for example) is retried like a lost connection, and the
+	// refusal reaches OnReconnect; without a limit, Subscribe does not return.
 	MaxReconnectAttempts int
 
 	// HeartbeatInterval is how often optional OnHeartbeat callbacks fire while connected.

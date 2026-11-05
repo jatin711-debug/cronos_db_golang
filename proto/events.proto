@@ -183,7 +183,8 @@ message AckResponse {
   bool success = 1;
   string error = 2;
 
-  // Committed offset for this consumer group
+  // The group's completion floor on the partition: every offset below it is
+  // complete. It is not the offset after the acknowledged delivery.
   int64 committed_offset = 3;
 }
 
@@ -195,19 +196,24 @@ message ReplayRequest {
   // Topic to replay
   string topic = 1;
 
-  // Partition ID (optional, replay all partitions if not specified)
+  // Partition ID. Required, and must not be negative; 0 is partition 0. A
+  // replay reads one partition.
   int32 partition_id = 2;
 
-  // Start timestamp (Unix ms, optional if using offset)
+  // Start schedule timestamp (Unix ms). A replay with start_ts or end_ts set
+  // is time-based and selects events whose schedule_ts falls in the window.
   int64 start_ts = 3;
 
-  // End timestamp (Unix ms, optional)
+  // End schedule timestamp (Unix ms, inclusive); the current time when only
+  // start_ts is set.
   int64 end_ts = 4;
 
-  // Start offset (alternative to start_ts)
+  // Start offset of an offset-based replay (used when neither start_ts nor
+  // end_ts is set)
   int64 start_offset = 5;
 
-  // Number of events to replay (optional)
+  // Number of events of an offset-based replay; 1000 when not positive.
+  // Ignored by a time-based replay.
   int64 count = 6;
 
   // Consumer group to replay for
@@ -216,7 +222,9 @@ message ReplayRequest {
   // Subscription ID for tracking
   string subscription_id = 8;
 
-  // Replay speed: 0=fast, 1=real-time
+  // Replay pacing: 0 and 1 send without a pause; any other value pauses
+  // 10 ms / speed after each event. Negative values and values below 0.001
+  // are refused.
   double speed = 9;
 }
 

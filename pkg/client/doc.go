@@ -13,8 +13,9 @@
 // # Core workflow
 //
 //  1. Dial the cluster with DefaultConfig + security settings.
-//  2. Create a Producer and publish Message values (Payload bytes or Value+Codec).
-//  3. Start a Consumer with Subscribe(topic, group, handler).
+//  2. Create a Producer with Client.NewProducer and publish Message values
+//     (Payload bytes or Value+Codec).
+//  3. Start a consumer with Client.Subscribe(ctx, ConsumerConfig, handler).
 //  4. Ack automatically (default) or manually for custom commit control.
 //  5. Use Replay/Seek APIs for backfill and replay-to-live scenarios.
 //  6. To cancel or move an event before it is due, keep the EventReference
@@ -25,13 +26,38 @@
 //
 // For deterministic routing, use Message.PartitionKey.
 // The server hashes partition_key to select the partition. If no partition_key is
-// provided, message_id is used. Consumer partition assignment can be explicit
-// (ConsumerConfig.PartitionID) or server-assigned.
+// provided, message_id is used. A consumer with ConsumerConfig.PartitionID -1
+// (the default) opens one stream for every partition of the cluster; a
+// non-negative PartitionID, including 0, consumes only that partition.
 //
 // # Security and operability
 //
 // Config supports plaintext (development) and TLS/mTLS (production), per-RPC
 // credentials, request deadlines, keepalive tuning, and hook-based observability.
+//
+// # Errors and refusals
+//
+// Errors returned by the SDK are *Error values whose Kind says what to do (see
+// ErrorKind). The server can refuse a publish for reasons that retrying at once
+// does not cure, and the producer reports them as follows:
+//   - A refusal the server reports in its answer, such as a schema validation
+//     failure (a payload missing a property that the topic's JSON schema
+//     requires, for example), a duplicate message ID, or an oversized
+//     payload (the server's limit is 4 MiB), comes back from Send as
+//     ErrorKindValidation and is not retried.
+//   - A node that is at capacity, or whose rate limit or quota for the caller
+//     is used up (gRPC ResourceExhausted), comes back from Send as
+//     ErrorKindOverloaded, immediately and without retries. The event was not
+//     stored; send less, or retry later.
+//   - SendBatch does not return an error for these; it counts them in
+//     BatchSendResult.ErrorCount and gives the first reason in
+//     BatchSendResult.Error.
+//
+// A consumer's acknowledgement of a successful delivery must carry the offset
+// after the highest offset delivered (AckRequest.next_offset); Delivery.AckSuccess
+// and the automatic mode do so, and the server refuses any other value.
+// With a CheckpointStore, only the completion floor the server reports (every
+// offset below it is complete) is saved.
 //
 // # Important defaults
 //

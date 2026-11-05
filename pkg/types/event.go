@@ -25,7 +25,10 @@ type Config struct {
 	ReplicationFactor int
 	// SegmentSizeBytes is the target max size of a WAL segment file before rotation.
 	SegmentSizeBytes int64
-	// EventLifecycle enables standalone future-event mutations. Requires RF=1.
+	// EventLifecycle enables future-event cancellation and rescheduling. Requires
+	// a standalone node with RF=1, or a replicated cluster (RF >= 2) whose
+	// MinInSyncReplicas includes a majority; it cannot be combined with
+	// ExperimentalFeatures.
 	EventLifecycle bool
 	// WALRelocationBytes bounds future-event bytes copied per retention pass; 0 disables it.
 	WALRelocationBytes int64

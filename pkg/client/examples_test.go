@@ -42,15 +42,48 @@ func ExampleDefaultConsumerConfig() {
 }
 
 func ExampleReplayRequest() {
+	// A replay reads one partition (0 is partition 0). With StartTime or
+	// EndTime set it is time-based: it returns the events whose schedule time
+	// falls in the window, and Count does not apply.
 	req := ReplayRequest{
 		Topic:       "orders",
 		PartitionID: 0,
 		StartTime:   time.Now().Add(-1 * time.Hour),
 		EndTime:     time.Now(),
-		Count:       1000,
 	}
 
 	_ = req
+}
+
+func ExampleProducer_Send() {
+	ctx := context.Background()
+	c, err := Dial(ctx, DefaultConfig("127.0.0.1:9000"))
+	if err != nil {
+		return
+	}
+	defer c.Close()
+	producer, err := c.NewProducer(DefaultProducerConfig())
+	if err != nil {
+		return
+	}
+	defer producer.Close()
+
+	_, err = producer.Send(ctx, Message{Topic: "orders", MessageID: "order-1003", Payload: []byte(`{"order_id":"ord-1003"}`), ScheduleAt: time.Now().Add(time.Hour)})
+	var ce *Error
+	if !errors.As(err, &ce) {
+		return // nil, or an error that is not typed
+	}
+	switch ce.Kind {
+	case ErrorKindOverloaded:
+		// The node is at capacity, or a quota or publish-rate limit is used up.
+		// The event was not stored, and the SDK did not retry: send less, or
+		// try again later.
+	case ErrorKindValidation:
+		// A refusal that retrying unchanged does not cure, for example a
+		// schema validation failure or a duplicate message ID.
+	case ErrorKindUnavailable:
+		// The retries ran out. Send again with the same MessageID.
+	}
 }
 
 func ExampleClient_RescheduleEvent() {

@@ -12,10 +12,8 @@ option go_package = "github.com/jatin711-debug/cronos_db_golang/pkg/types;types"
 // the RBAC policy file. Auth is enforced inside the handler via
 // auth.CheckAdminPermission; the interceptor chain only authenticates.
 //
-// RPCs marked [stub] in the comments below are placeholders that return
-// Unimplemented at this step. They are part of the proto so the wire
-// surface is stable; the corresponding implementations land in steps 2-4
-// of the Admin CLI & Dashboard project.
+// Every RPC below is implemented except TriggerRebalance, which returns
+// Unimplemented.
 
 // -----------------------------------------------------------------------------
 // Cluster topology
@@ -69,7 +67,7 @@ message GetClusterTopologyRequest {
 }
 
 // -----------------------------------------------------------------------------
-// Per-partition health  [stub]
+// Per-partition health
 // -----------------------------------------------------------------------------
 
 message PartitionHealth {
@@ -90,7 +88,7 @@ message PartitionHealthResponse {
 }
 
 // -----------------------------------------------------------------------------
-// Replication lag  [stub]
+// Replication lag
 // -----------------------------------------------------------------------------
 
 message ReplicationLag {
@@ -112,7 +110,7 @@ message FollowerLag {
 }
 
 // -----------------------------------------------------------------------------
-// Consumer groups  [stub]
+// Consumer groups
 // -----------------------------------------------------------------------------
 
 // Names in this section are prefixed with `Admin` to avoid collision
@@ -147,7 +145,7 @@ message AdminConsumerGroupLagResponse {
 }
 
 // -----------------------------------------------------------------------------
-// Retention & compaction  [stub]
+// Retention & compaction
 // -----------------------------------------------------------------------------
 
 message RunRetentionRequest {
@@ -176,7 +174,7 @@ message RunCompactionResponse {
 }
 
 // -----------------------------------------------------------------------------
-// Schema registry  [stub]
+// Schema registry
 // -----------------------------------------------------------------------------
 
 message SchemaSummary {
@@ -204,7 +202,7 @@ message GetSchemaResponse {
 }
 
 // -----------------------------------------------------------------------------
-// Tenant accounting  [stub]
+// Tenant accounting
 // -----------------------------------------------------------------------------
 
 message TenantUsage {
@@ -221,7 +219,7 @@ message TenantUsageResponse {
 }
 
 // -----------------------------------------------------------------------------
-// Cluster rebalance  [stub]
+// Cluster rebalance (not supported: Unimplemented)
 // -----------------------------------------------------------------------------
 
 message RebalanceRequest {
@@ -244,38 +242,38 @@ service AdminService {
   rpc GetClusterTopology(GetClusterTopologyRequest) returns (ClusterTopology);
 
   // GetPartitionHealth returns per-partition runtime stats (WAL, scheduler,
-  // dedup, replay status). [stub]
+  // dedup, replay status). partition_id 0 is partition 0.
   rpc GetPartitionHealth(PartitionHealth) returns (PartitionHealthResponse);
 
   // GetReplicationLag returns leader HWM and per-follower lag for one or all
-  // partitions. [stub]
+  // partitions. partition_id 0 means all partitions this node leads.
   rpc GetReplicationLag(ReplicationLag) returns (ReplicationLagResponse);
 
   // ListConsumerGroups returns every consumer group known to the cluster.
-  // [stub]
   rpc ListConsumerGroups(AdminListConsumerGroupsRequest) returns (AdminListConsumerGroupsResponse);
 
   // GetConsumerGroupLag returns the committed-vs-high-watermark lag for a
-  // single (group, partition). [stub]
+  // single (group, partition).
   rpc GetConsumerGroupLag(AdminConsumerGroupLag) returns (AdminConsumerGroupLagResponse);
 
-  // RunRetention runs age/size-based retention once. [stub]
+  // RunRetention runs age/size-based retention once. partition_id 0 means all
+  // local partitions.
   rpc RunRetention(RunRetentionRequest) returns (RunRetentionResponse);
 
-  // RunCompaction runs consumer-offset-bounded compaction once. [stub]
+  // RunCompaction runs consumer-offset-bounded compaction once. partition_id 0
+  // means all local partitions.
   rpc RunCompaction(RunCompactionRequest) returns (RunCompactionResponse);
 
-  // ListSchemas returns every registered topic schema. [stub]
+  // ListSchemas returns every registered topic schema.
   rpc ListSchemas(ListSchemasRequest) returns (ListSchemasResponse);
 
-  // GetSchema returns one schema version (or the latest if version=0). [stub]
+  // GetSchema returns one schema version (or the latest if version=0).
   rpc GetSchema(GetSchemaRequest) returns (GetSchemaResponse);
 
   // GetTenantUsage returns in-flight + storage usage for one or all tenants.
-  // [stub]
   rpc GetTenantUsage(TenantUsage) returns (TenantUsageResponse);
 
-  // TriggerRebalance forces a router rebalance based on current membership.
-  // [stub]
+  // TriggerRebalance is not supported: it returns Unimplemented. Leadership
+  // reconciles automatically after membership changes.
   rpc TriggerRebalance(RebalanceRequest) returns (RebalanceResponse);
 }
