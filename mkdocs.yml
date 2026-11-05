@@ -124,6 +124,7 @@ nav:
       - Configuration: CONFIGURATION.md
   - Release:
       - Release Requirements: PRODUCTION_RELEASE.md
+      - v0.11.0 Release Notes: RELEASE_V0.11.0.md
       - v0.10.0 Release Notes: RELEASE_V0.10.0.md
       - 1.0 Readiness Review: RELEASE_READINESS_1.0.0_2026-10-28.md
       - v0.9.0 Release Notes: RELEASE_V0.9.0.md
@@ -134,6 +135,8 @@ nav:
       - Closed WAL Segment Boundaries: STORAGE_SEGMENT_BOUNDARIES.md
       - Documentation Review (2026-10-21): DOCUMENTATION_AUDIT_2026-10-21.md
       - v0.7.0 Hardening: HARDENING_V0.7.0.md
+      - November Production Audit: PRODUCTION_AUDIT_2026-11-05.md
+      - Production Validation: PRODUCTION_VALIDATION.md
       - October Production Audit: PRODUCTION_AUDIT_2026-10-16.md
       - Production Audit: PRODUCTION_AUDIT_2026-09-27.md
   - Architecture:

@@ -1,5 +1,24 @@
 # Production release requirements
 
+**v0.11.0 closes the defects of the
+[2026-11-05 audit](PRODUCTION_AUDIT_2026-11-05.md)** and keeps v0.10.0 data
+directories. Production mode now requires cluster mode, JSON schemas enforce
+`required`, manual rebalance returns `Unimplemented`, and a missing or damaged
+change-feed cursor replays retained history; see the
+[v0.11.0 notes](RELEASE_V0.11.0.md) before upgrading. The release gates listed
+in the review (a multi-host soak, recovery and upgrade drills, machine or
+power-loss testing) are still open.
+
+## v0.11.0 release
+
+The [v0.11.0 notes](RELEASE_V0.11.0.md) describe the fixes, the new
+per-subject publish-rate limits (`--tenant-limits-file`) and the behaviour
+changes to read before upgrading. The chart and default image tag are `0.11.0`.
+Publication status, checksums and the exact deployment digest are on the
+[release page](https://github.com/jatin711-debug/cronos_db_golang/releases/tag/v0.11.0).
+Use its `IMAGE_DIGEST` and publication evidence to identify the tested image.
+This release makes no new capacity claim.
+
 **v0.10.0 fixes the thirteen defects of the
 [1.0 readiness review](RELEASE_READINESS_1.0.0_2026-10-28.md)** and keeps
 v0.9.0 data directories. Message IDs are unique per topic and v0.9.0
