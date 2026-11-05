@@ -458,6 +458,9 @@ func ValidateConfig(c *types.Config) error {
 		if !c.ReplicationTLSEnabled {
 			return fmt.Errorf("production mode requires replication TLS to be enabled (use --dev to bypass)")
 		}
+		if !c.ClusterEnabled {
+			return fmt.Errorf("production mode requires cluster mode; standalone cannot satisfy replication requirements")
+		}
 		if c.ClusterEnabled && len(c.ClusterSeeds) == 0 {
 			// A node without seeds creates a cluster whenever it has no
 			// state, which is right once and wrong after its disk was lost.

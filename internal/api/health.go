@@ -122,6 +122,12 @@ func (h *HealthChecker) handleReady(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Replication cannot be established without the cluster control plane.
+	if (h.Config.ClusterEnabled || h.Config.ReplicationFactor > 1 || h.Config.MinInSyncReplicas > 1) && h.ClusterMgr == nil {
+		checks["leadership"] = HealthCheck{Status: "down", Detail: "cluster manager required for replication is not initialized", Healthy: false}
+		healthy = false
+	}
+
 	// Check cluster state if enabled
 	if h.Config.ClusterEnabled && h.ClusterMgr != nil {
 		clusterStats := h.ClusterMgr.GetStats()
