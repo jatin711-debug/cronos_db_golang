@@ -10,9 +10,11 @@ import (
 // Schema definition. It supports the subset used by the registry:
 //   - type: object, array, string, number, integer, boolean, null
 //   - properties (for objects)
+//   - required (for objects: each named property must be present)
 //   - items (for arrays)
 //
-// Unknown schema keywords are ignored so the registry stays permissive by
+// Other schema keywords (enum, pattern, minimum, additionalProperties, ...) are
+// not enforced. Unknown schema keywords are ignored so the registry stays permissive by
 // default.
 func validateJSONSchema(schemaDef string, payload []byte) error {
 	var schema map[string]interface{}
@@ -45,6 +47,17 @@ func validateJSONValue(schema map[string]interface{}, value interface{}) error {
 		obj, ok := value.(map[string]interface{})
 		if !ok {
 			return fmt.Errorf("expected object, got %T", value)
+		}
+		if required, ok := schema["required"].([]interface{}); ok {
+			for _, entry := range required {
+				name, ok := entry.(string)
+				if !ok {
+					continue
+				}
+				if _, exists := obj[name]; !exists {
+					return fmt.Errorf("missing required property %q", name)
+				}
+			}
 		}
 		if props, ok := schema["properties"].(map[string]interface{}); ok {
 			for name, propSchema := range props {

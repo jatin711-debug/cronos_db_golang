@@ -604,3 +604,37 @@ func TestRegistry_ProtobufCompatibility_TagsAndTypes(t *testing.T) {
 		t.Error("expected protobuf registration to fail on field type change")
 	}
 }
+
+// A schema that lists required properties must refuse a payload without them;
+// before this was enforced, `{}` passed a schema requiring `order_id`.
+func TestRegistry_Validate_JSONRequired(t *testing.T) {
+	reg, err := NewRegistry(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	def := `{"type":"object","properties":{"order_id":{"type":"string"},"note":{"type":"string"}},"required":["order_id"]}`
+	if _, err := reg.Register("orders", TypeJSON, def); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	cases := []struct {
+		name    string
+		payload string
+		ok      bool
+	}{
+		{"all present", `{"order_id":"a"}`, true},
+		{"optional absent", `{"order_id":"a"}`, true},
+		{"required absent", `{}`, false},
+		{"only optional present", `{"note":"x"}`, false},
+		{"required present with wrong type", `{"order_id":1}`, false},
+		{"explicit null counts as present for required", `{"order_id":null}`, false}, // fails on type, not presence
+	}
+	for _, tc := range cases {
+		err := reg.Validate("orders", []byte(tc.payload))
+		if tc.ok && err != nil {
+			t.Errorf("%s: unexpected error %v", tc.name, err)
+		}
+		if !tc.ok && err == nil {
+			t.Errorf("%s: %s was accepted", tc.name, tc.payload)
+		}
+	}
+}
