@@ -55,6 +55,10 @@ soak, recovery and upgrade drills, machine or power-loss testing) are still open
 - **Release pipeline.** Image builds refresh the runtime stage every time and
   fail fast on apt retries, the Rust lockfile moves `rand` to 0.8.6, and a
   five-worker kind workflow runs the chart smoke test with hard anti-affinity.
+  The staged-release verifier accepts the image id of Docker's containerd image
+  store, which is the digest of the image's manifest or index, not of its config;
+  the runner's Docker moved to that store after v0.10.0 and the verifier would have
+  refused a correct image.
 - **Acceptance test.** `TestOverloadIsRefusedAndSurvived` scheduled its events 45
   seconds into the flood, so a slow flood never reached the memory limit and the
   test failed about half the time. Events are now due after 150 seconds.

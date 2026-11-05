@@ -72,8 +72,13 @@ def verify_staging_run(repo, proof, source):
 
 def verify_registry(docker, tag, source, pinned, config_digest):
     manifest = json.loads(subprocess.check_output([docker, "manifest", "inspect", pinned], text=True))
-    require(manifest.get("config", {}).get("digest") == config_digest,
-            "Registry manifest does not contain the scanned image config")
+    # The staged IMAGE_ID is the id Docker gave the image. The classic image
+    # store uses the digest of the image config. The containerd store uses the
+    # digest of the manifest or, with attestations, of the index; a registry
+    # keeps that digest as it is pushed, so the pinned digest must be the id.
+    same_config = manifest.get("config", {}).get("digest") == config_digest
+    same_id = pinned.rsplit("@", 1)[-1] == config_digest
+    require(same_config or same_id, "Registry manifest does not contain the scanned image config")
     reference = None
     for image in [pinned, f"{IMAGE}:{tag[1:]}", f"{IMAGE}:latest"]:
         subprocess.run([docker, "pull", image], check=True)

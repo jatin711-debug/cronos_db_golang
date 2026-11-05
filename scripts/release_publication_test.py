@@ -110,6 +110,24 @@ class PublicationChecks(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "scanned image config"):
             publication.verify_registry("docker", self.tag, self.source, self.pinned, self.config)
 
+    @patch.object(publication.subprocess, "check_output")
+    def test_index_with_a_different_digest_from_the_scanned_id_is_rejected(self, output):
+        # The containerd image store pushes an index, which has no config.
+        output.return_value = json.dumps({"manifests": [{"platform": {"os": "linux", "architecture": "amd64"}}]})
+        with self.assertRaisesRegex(ValueError, "scanned image config"):
+            publication.verify_registry("docker", self.tag, self.source, self.pinned, self.config)
+
+    @patch.object(publication.subprocess, "run")
+    @patch.object(publication.subprocess, "check_output")
+    def test_index_whose_digest_is_the_scanned_id_is_accepted(self, output, _run):
+        pinned = publication.IMAGE + "@" + self.config
+        image = {"Os": "linux", "Architecture": "amd64",
+                 "Config": {"Labels": {"org.opencontainers.image.revision": self.source,
+                                        "org.opencontainers.image.version": self.tag}},
+                 "RootFS": {"Type": "layers", "Layers": ["sha256:" + "4" * 64]}}
+        output.side_effect = [json.dumps({"manifests": []})] + [json.dumps([image])] * 3
+        publication.verify_registry("docker", self.tag, self.source, pinned, self.config)
+
     @patch.object(publication.subprocess, "run")
     @patch.object(publication.subprocess, "check_output")
     def test_matching_release_and_latest_are_accepted(self, output, _run):
