@@ -131,8 +131,10 @@ demo, see the [Go client guide](docs/CLIENT_GUIDE.md).
 
 Delivery is **at least once**. Consumer capacity, load, and failures can delay
 delivery beyond the scheduled timestamp; no latency bound is promised.
-Production mode requires replication, TLS, authentication and an authorization
-policy, encryption at rest, and mutual TLS between nodes.
+Production mode requires cluster mode with replication, TLS, authentication
+and an authorization policy, encryption at rest, and mutual TLS between nodes.
+Logs from v0.8.x or earlier are not readable; start from empty data
+directories.
 
 Future-event cancellation and rescheduling are opt-in and have upgrade
 constraints. Transactions, online partition splitting, cross-region

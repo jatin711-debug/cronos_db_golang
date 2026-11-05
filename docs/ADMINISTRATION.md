@@ -12,9 +12,10 @@ HTTP listener. With the quick-start node, open
 
 The dashboard shows topology, partition health, replication lag, consumer
 groups, schemas, and operations. Its retention and compaction actions use the
-same admin service as the CLI. Tenant usage currently shows zeros because
-tenant limits are not configured; the rebalance action reports that placement
-is driven by membership rather than initiating a rebalance itself.
+same admin service as the CLI. Tenant usage shows counters only for subjects
+named in `--tenant-limits-file`, and zeros without one. The rebalance action is
+disabled: manual rebalance is not supported, and leadership reconciles
+automatically after membership changes.
 
 When authentication is enabled, sign in with a JWT whose subject has
 `"admin": true` in the server's policy file (see [permissions](#permissions)).
@@ -60,7 +61,7 @@ Match the connection flags to how the server was started:
 | `--auth-enabled` (public port) | `--jwt-token` on every command that uses the public port. See [permissions](#permissions). |
 | `--replication-tls-enabled` (cluster port) | `--tls`, `--tls-ca`, `--tls-cert` and `--tls-key` with the cluster's certificates: the CA in `--replication-tls-ca-file` and a certificate it signed. The cluster port does not check `--jwt-token`. |
 
-Production mode requires `--tls-enabled`, `--auth-enabled` and
+Production mode requires `--cluster`, `--tls-enabled`, `--auth-enabled` and
 `--replication-tls-enabled`; `--tls-client-auth` is optional. Without `--tls`
 the CLI connects in plain text and sends any `--jwt-token` unencrypted.
 
@@ -116,7 +117,10 @@ cronos-admin --server=localhost:9000 admin compaction-run
 
 Partition 0 is a valid target for health and consumer-group lag. For
 retention, compaction and replication lag, `0` means every applicable
-partition on this node, including partition 0.
+partition on this node, including partition 0. On the dashboard's HTTP admin
+API (`/api/admin/...`), `partition_id=0` names partition 0 for
+`partition-health` and `replication-lag`; only the RPC and the CLI read `0` as
+"all partitions" for replication lag.
 
 ### Cluster membership
 
@@ -149,9 +153,13 @@ cronos-admin check-log --data-dir=/data --partition=3 --repair
 ```
 
 Restore checks every file against the backup's manifest and refuses a data
-directory that already holds any of the backup's partitions. `check-log`
-reports damage; `--repair` cuts out damaged log content and reports what was
-lost. Preserve backups before repair. Neither tool contacts a server or checks
+directory that already holds any of the backup's partitions, and a backup that
+holds version-1 log segments (made by v0.8.x or earlier) before it publishes
+anything. `check-log` reports damage, including a segment whose recorded
+boundary does not match the records it recovers; `--repair` cuts out damaged
+log content and reports what was lost, and refuses a segment whose recovered
+records extend past its recorded boundary (restore a backup or rebuild the
+replica from its leader instead). Preserve backups before repair. Neither tool contacts a server or checks
 that the node is stopped, so stop it first. See the
 [maintenance validation record](MAINTENANCE_VALIDATION_2026-09-29.md) and
 [backup and restore requirements](PRODUCTION_RELEASE.md#checks).
@@ -215,7 +223,7 @@ certificate signed by the cluster's CA when the server runs with
 | `admin tenant-usage [<tenant>]` | In-flight and storage usage of one tenant, or of all | public | `admin` |
 | `admin retention-run` | Applies age or size retention once. Free disk now, or apply a limit once, without changing `--retention-max-age-hours` or `--retention-max-size-gb` | public | `admin` |
 | `admin compaction-run [--partition-id <id>]` | Removes finished log segments without waiting for `--compaction-interval`; `0` or omitted means every partition on this node | public | `admin` |
-| `admin cluster-rebalance` | Changes nothing: reports that on-demand rebalance is not available, since placement follows membership | public | `admin` |
+| `admin cluster-rebalance` | Changes nothing and fails with `Unimplemented`: manual rebalance is not supported, since leadership reconciles automatically after membership changes | public | `admin` |
 | `partition list` | Partitions with their topic and leader | public | valid token |
 | `partition info <id>` | A partition's leader, replicas, high watermark, last offset, segment count and disk usage, as JSON | public | valid token |
 | `partition wal <id>` | Last offset, segment file count and total size of this node's log for a partition | public | valid token |
@@ -242,8 +250,8 @@ A command waits 5 seconds for an answer; `admin retention-run` and
 | `admin partition-health <id>` | Only partitions on this node; ID `0` is valid. `disk` always prints `0`; `partition info` shows disk usage |
 | `admin replication-lag [<id>]` | Omitted or `0`: every partition this node leads, with the follower lines merged and `hwm` summed. Only replicated partitions led here list followers; others print `hwm=0` |
 | `admin consumer-group-lag <group> <id>` | ID `0` is valid. `-1` means the partition is not on this node or the group has not committed there |
-| `admin schema-list`, `admin schema-get` | Schemas the node loaded from `<data-dir>/schemas` when it started. No RPC registers a schema, so the list is normally empty |
-| `admin tenant-usage [<tenant>]` | Omitted: the sum over all tenants. Tenant limits cannot be set in this release, so it reports `limits_configured=false` and zero usage |
+| `admin schema-list`, `admin schema-get` | Schemas the node loaded from `<data-dir>/schemas` when it started. No RPC registers a schema, so the list is normally empty. A publish to a topic with a JSON schema is refused when the payload lacks a property the schema lists as `required`; `enum`, `pattern`, ranges and `additionalProperties` are not enforced |
+| `admin tenant-usage [<tenant>]` | Omitted: the sum over all tenants, with `limits_configured=false`. A tenant is a JWT subject. Only subjects named in `--tenant-limits-file` have limits and usage counters; any other reports `limits_configured=false` and zero usage, as does every tenant on a node started without the file |
 | `partition list` | In a cluster, every partition in the cluster's metadata; standalone, the node's partitions. `watermark` always prints `0`; `partition info` shows the high watermark |
 | `partition info <id>` | Fields that are zero are left out of the JSON. In a cluster, a partition this node does not hold shows only its topic, leader and replicas |
 | `partition wal <id>` | Only partitions on this node |

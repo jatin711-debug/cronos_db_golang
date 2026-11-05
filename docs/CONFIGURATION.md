@@ -37,13 +37,15 @@ explicitly enable.
 
 For production, use the [deployment requirements](PRODUCTION_RELEASE.md)
 and [Docker guide](../DOCKER.md#production-considerations). Startup requires
-TLS, JWT authentication with a policy file, WAL encryption with a key file,
-mutual TLS between nodes, at least three replicas, at least two write
-acknowledgements, and `batch` or `every_event` fsync. Cluster nodes also need
-seeds. Experimental features, exactly-once commits, and a profiling listener
-outside loopback are refused. Passing validation alone does not create a
-working cluster: configure `--cluster`, reachable node addresses, certificates
-and persistent storage as described in the deployment guide.
+cluster mode (`--cluster`) with seeds, TLS, JWT authentication with a policy
+file, WAL encryption with a key file, mutual TLS between nodes, at least three
+replicas, at least two write acknowledgements, and `batch` or `every_event`
+fsync. A standalone node cannot satisfy the replication requirements, so a
+production configuration without `--cluster` is refused. Experimental
+features, exactly-once commits, and a profiling listener outside loopback are
+also refused. Passing validation alone does not create a working cluster:
+configure reachable node addresses, certificates and persistent storage as
+described in the deployment guide.
 
 Start with the defaults and change a setting for a measured need. For slow
 handlers, increase the acknowledgement timeout. For memory pressure, inspect
@@ -56,7 +58,7 @@ that refuse new work let clients retry; they do not delete accepted events.
 | Flag | Environment variable | Default | What it does and when to change it |
 |---|---|---|---|
 | `--node-id` | `CRONOS_NODE_ID` | required | Stable, unique identity of this node. Keep it with the node's persistent data; give each node a different ID. |
-| `--data-dir` | `CRONOS_DATA_DIR` | `./data` | Root for partition logs, offsets and other node data. Mount persistent storage here. |
+| `--data-dir` | `CRONOS_DATA_DIR` | `./data` | Root for partition logs, offsets and other node data. Mount persistent storage here. Logs written by v0.8.x or earlier use segment format 1, which this version refuses to open: start from an empty directory. |
 | `--grpc-addr` | `CRONOS_GRPC_ADDR` | `:9000` | Public gRPC listen address for applications and the admin CLI. `:9000` listens on all interfaces. |
 | `--http-addr` | `CRONOS_HTTP_ADDR` | `:8080` | Health, metrics, dashboard and HTTP admin API listen address. Use HTTP TLS below when this port needs TLS. |
 | `--partition-count` | `CRONOS_PARTITION_COUNT` | `1` | Number of logical partitions. Partitions let work run in parallel; more partitions also need more memory and files. Keep the cluster's nodes consistent. |
@@ -140,7 +142,7 @@ payloads held by the scheduler, not the whole process.
 | `--scheduler-memory` | `CRONOS_SCHEDULER_MEMORY` | `67108864` | Node-wide scheduler payload budget in bytes (64 MiB). Minimum 32 MiB; `0` uses the default. Overflow waits as log references. Leave headroom for other memory. |
 | `--max-ingest-rate` | `CRONOS_MAX_INGEST_RATE` | `0` | Sustained publish events per second per partition. Requires a positive ingest burst size too; `0` disables this limiter. |
 | `--ingest-burst-size` | `CRONOS_INGEST_BURST_SIZE` | `0` | Token-bucket capacity for ingest bursts. Both this and the rate must be positive to enable limiting. |
-| `--tenant-limits-file` | `CRONOS_TENANT_LIMITS_FILE` | empty | JSON file mapping JWT subjects to `max_events_per_second` (at least 1). Per-node token buckets with one second of burst; restart reloads configuration and resets buckets. Subjects omitted from the file remain unlimited. Storage/in-flight quotas are not supported. |
+| `--tenant-limits-file` | `CRONOS_TENANT_LIMITS_FILE` | empty | JSON file mapping JWT subjects to `max_events_per_second` (at least 1), for example `{"orders-app":{"max_events_per_second":500}}`. Requires `--auth-enabled`; startup fails without it, and on an empty, malformed or out-of-range file. Per-node token buckets with one second of burst, read at startup only: a restart reloads the file and resets the buckets. A publish over the limit is refused with `RESOURCE_EXHAUSTED`. Subjects omitted from the file remain unlimited. Storage, in-flight and cluster-wide quotas are not supported, so this is not tenant isolation. |
 | `--topic-rate-limit` | `CRONOS_TOPIC_RATE_LIMIT` | `0` | Events per second per JWT subject and topic, with authentication enabled. `0` disables this limit. Use with a positive burst size. |
 | `--topic-rate-burst` | `CRONOS_TOPIC_RATE_BURST` | `0` | Token-bucket capacity for that topic limit; nonpositive rate or burst disables the topic limiter. |
 
@@ -148,7 +150,7 @@ payloads held by the scheduler, not the whole process.
 
 | Flag | Environment variable | Default | What it does and when to change it |
 |---|---|---|---|
-| `--dedup-ttl` | `CRONOS_DEDUP_TTL_HOURS` | `168` | Hours to retain message-ID deduplication records. Cover your longest publish retry/backfill window. After expiration, a repeated ID can be accepted again. |
+| `--dedup-ttl` | `CRONOS_DEDUP_TTL_HOURS` | `168` | Hours to retain message-ID deduplication records. IDs are unique per topic: the same ID on two topics is two messages. Cover your longest publish retry/backfill window. After expiration, a repeated ID can be accepted again. |
 | `--bloom-capacity` | `CRONOS_BLOOM_CAPACITY` | `100000000` | Expected IDs per partition for the Bloom filter that avoids disk lookups. Larger capacity uses more memory; the durable dedup store remains authoritative. |
 | `--follower-reads` | `CRONOS_FOLLOWER_READS` | `false` | Allow followers to serve replay reads. Their view can lag the leader; leave off when replay must use the leader. |
 | `--exactly-once-commits` | `CRONOS_EXACTLY_ONCE_COMMITS` | `false` | Experimental commit-ID storage. Refused in production and unused by the normal Ack path; enabling it does not provide end-to-end exactly-once delivery. |
@@ -162,7 +164,7 @@ certificates. Changing the replication factor does not create missing nodes.
 
 | Flag | Environment variable | Default | What it does and when to change it |
 |---|---|---|---|
-| `--cluster` | `CRONOS_CLUSTER` | `false` | Enable cluster membership, placement and replication. Without it the server runs standalone. |
+| `--cluster` | `CRONOS_CLUSTER` | `false` | Enable cluster membership, placement and replication. Without it the server runs standalone. Production mode requires it. |
 | `--cluster-seeds` | `CRONOS_CLUSTER_SEEDS` | empty | Comma-separated membership addresses, for example `node1:7946,node2:7946,node3:7946`. Name all nodes on every node, including itself. Required in production cluster mode. |
 | `--cluster-bootstrap` | `CRONOS_CLUSTER_BOOTSTRAP` | `false` | Allow this node to create a new cluster if it has no state and no seed belongs to one. Give this to exactly one node. Existing state is reused on restart. |
 | `--cluster-expected-nodes` | `CRONOS_CLUSTER_EXPECTED_NODES` | `0` | Number of nodes expected at first formation. Assign first partition leaders once that many are up; `0` leaves the count unknown. |
@@ -207,7 +209,7 @@ node connections have separate TLS switches. See [permissions](ADMINISTRATION.md
 | `--replication-tls-key-file` | `CRONOS_REPLICATION_TLS_KEY_FILE` | empty | Private key matching the node certificate. |
 | `--auth-enabled` | `CRONOS_AUTH_ENABLED` | `false` | Require JWTs on public RPCs and protected HTTP endpoints. Requires a verification secret or public key. |
 | `--auth-jwt-secret` | `CRONOS_AUTH_JWT_SECRET` | empty | Shared HMAC verification secret. Use a secret-backed environment variable rather than a command-line argument visible in process listings. |
-| `--auth-jwt-public-key` | `CRONOS_AUTH_JWT_PUBLIC_KEY` | empty | PEM Ed25519, RSA or ECDSA public key for asymmetric JWT verification. |
+| `--auth-jwt-public-key` | `CRONOS_AUTH_JWT_PUBLIC_KEY` | empty | Path to a PEM file holding an Ed25519, RSA or ECDSA public key for asymmetric JWT verification. |
 | `--auth-policy-file` | `CRONOS_AUTH_POLICY_FILE` | empty | JSON permissions keyed by JWT subject. Required in production. Explicitly grant topic publish/subscribe or global admin as needed. |
 | `--encryption-enabled` | `CRONOS_ENCRYPTION_ENABLED` | `false` | Encrypt WAL segments with AES-256-GCM. Requires the key file; this is separate from TLS. |
 | `--encryption-key-file` | `CRONOS_ENCRYPTION_KEY_FILE` | empty | 32-byte master key file. Preserve it securely with the recovery plan; encrypted backups need the matching key. |
@@ -227,7 +229,11 @@ node connections have separate TLS switches. See [permissions](ADMINISTRATION.md
 
 These have no command-line flag. CDC captures accepted event changes; it is
 not a substitute for consumer delivery acknowledgements. CDC sinks cannot be
-combined with event lifecycle mode. See [CDC](architecture/features/cdc.md).
+combined with event lifecycle mode. A feed whose position file is missing,
+malformed or out of range exports the partition's retained history again, so
+a sink must tolerate duplicates; enabling a feed on a partition that already
+holds events does the same. History that retention already removed cannot be
+exported. See [CDC](architecture/features/cdc.md).
 
 | Variable | Default | Use |
 |---|---|---|
@@ -286,8 +292,9 @@ extraEnv:
 ```
 
 Apply changed environment values by rolling/restarting pods. Use
-`backupPersistence` for a separate backup PVC and `values-production.yaml`
-for the production security settings. The chart's base values enable dev
+`backupPersistence` for a separate backup PVC, `auth.tenantLimitsKey` to
+mount `--tenant-limits-file` from the existing auth Secret, and
+`values-production.yaml` for the production security settings. The chart's base values enable dev
 mode; they are intended for testing.
 
 ## Check the effective setup
