@@ -931,7 +931,7 @@ type AckRequest struct {
 	Success bool `protobuf:"varint,3,opt,name=success,proto3" json:"success,omitempty"`
 	// Optional error message if processing failed
 	Error string `protobuf:"bytes,4,opt,name=error,proto3" json:"error,omitempty"`
-	// Next offset to commit (optional, server can compute)
+	// Next offset to commit: the highest offset of the delivered records plus one. Required when success is true; the server rejects any other value
 	NextOffset    int64 `protobuf:"varint,5,opt,name=next_offset,json=nextOffset,proto3" json:"next_offset,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

@@ -175,7 +175,7 @@ message AckRequest {
   // Optional error message if processing failed
   string error = 4;
 
-  // Next offset to commit (optional, server can compute)
+  // Next offset to commit: the highest offset of the delivered records plus one. Required when success is true; the server rejects any other value
   int64 next_offset = 5;
 }
 
