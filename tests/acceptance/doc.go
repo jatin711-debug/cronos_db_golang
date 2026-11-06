@@ -20,6 +20,15 @@
 // CRONOS_BINARY names a server binary to use instead of building one, and
 // CRONOS_ACCEPTANCE_ARTIFACTS a directory the node logs are copied to.
 //
+// TestRollingUpgradeAndRollback additionally requires
+// CRONOS_UPGRADE_FROM_BINARY: an earlier release with a compatible storage
+// format. It replaces each node with the candidate, rolls each back, then
+// upgrades again under traffic, checking delivery and replica agreement after
+// each phase. Point CRONOS_BINARY at a candidate release artifact to test the
+// shipped binary. Verify both archives against their release checksums first.
+// This is a local development-mode compatibility drill (replication TLS,
+// RF=3/minISR=2, batch fsync), not a target-host durability or capacity test.
+//
 // Two tests need more than processes. TestNetworkPartitions cuts the links
 // between nodes while all of them keep running, which processes on one
 // machine cannot have done to them. It runs the nodes as three containers of
