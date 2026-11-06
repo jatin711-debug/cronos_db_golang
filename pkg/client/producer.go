@@ -22,7 +22,11 @@ import (
 // Message is a single producer payload submitted via Send / SendAsync / SendBatch.
 // Prefer Payload for raw bytes, or Value+Codec for structured encoding.
 type Message struct {
-	// MessageID is the idempotency key. When empty and AutoMessageID is true, the producer generates one.
+	// MessageID is the idempotency key; the server refuses a second publish of
+	// the same ID on the same topic within its dedup TTL. When empty and
+	// AutoMessageID is true, the producer derives one ("auto-" and a hash) from
+	// the topic, PartitionKey, schedule time and payload, so identical messages
+	// get the same ID. The server limits an ID to 128 bytes.
 	MessageID string
 	// Topic is the destination topic name (required).
 	Topic string
@@ -73,13 +77,20 @@ type SendResult struct {
 
 // BatchSendResult aggregates outcomes from a multi-message SendBatch call.
 type BatchSendResult struct {
-	// Results holds per-message results when the server returns them (may be partial on mixed outcomes).
+	// Results holds an entry for every message of a partition group that a node
+	// answered, whether or not the event was accepted, so it is not a list of
+	// successes: check ErrorCount and DuplicateCount. Offset is set only when
+	// every message of its group was accepted, or, with ReturnReferences, from
+	// the event's reference. Messages that failed client-side validation or
+	// routing have no entry.
 	Results []*SendResult
 	// PublishedCount is how many events the server accepted as new publishes.
 	PublishedCount int32
 	// DuplicateCount is how many events were detected as duplicates.
 	DuplicateCount int32
-	// ErrorCount is how many events failed validation or write on the server.
+	// ErrorCount is how many events failed on the client or the server:
+	// validation (including a schema validation failure), a node at capacity,
+	// a tenant quota or publish-rate limit, or a failed write.
 	ErrorCount int32
 	// Error is the first reason given for an event counted in ErrorCount,
 	// by the server or by the client; empty when ErrorCount is zero.
@@ -121,11 +132,15 @@ type ProducerConfig struct {
 	DefaultAllowDuplicate bool
 	// RetryPolicy governs retries on transient/leader-change errors.
 	RetryPolicy RetryPolicy
-	// AutoMessageID generates a MessageID when the message leaves it empty.
+	// AutoMessageID derives a MessageID when the message leaves it empty. The ID
+	// is a hash of the topic, PartitionKey, schedule time and payload, not a
+	// random value: publishing the same message twice yields the same ID, and the
+	// server refuses the second as a duplicate.
 	AutoMessageID bool
 	// Codec is the default encoder for Message.Value when Message.Codec is nil.
 	Codec Codec
 	// MaxPayloadBytes rejects messages whose encoded payload exceeds this size (0 → client MaxSendMsgSize).
+	// The server refuses payloads above 4 MiB whatever this is set to.
 	MaxPayloadBytes int
 
 	// AsyncQueueSize is the buffered channel capacity for SendAsync requests.
@@ -253,7 +268,15 @@ func (c *Client) NewProducer(cfg ProducerConfig) (*Producer, error) {
 	return NewProducer(c, cfg)
 }
 
-// Send publishes one message synchronously.
+// Send publishes one message synchronously. It retries leader changes and
+// unreachable nodes per RetryPolicy and then returns ErrorKindUnavailable. It
+// returns at once, without retrying, ErrorKindOverloaded when the node is at
+// capacity or a quota or publish-rate limit is used up (the event was not
+// stored), and ErrorKindValidation when the server refuses the event in its
+// answer: a schema validation failure, a duplicate message ID, an oversized
+// payload, or a failed write or replication, which is not necessarily invalid
+// input. After a failed write the server may hold the event; a retry with the
+// same MessageID finishes it rather than publishing it twice.
 func (p *Producer) Send(ctx context.Context, msg Message) (*SendResult, error) {
 	if err := p.acquireInFlight(ctx); err != nil {
 		return nil, p.wrapErr("producer.send", ErrorKindTimeout, err)
@@ -453,7 +476,10 @@ func (p *Producer) tryPublishWithBreaker(ctx context.Context, addr string, event
 	return resp, nil, false
 }
 
-// SendBatch publishes a set of messages.
+// SendBatch publishes a set of messages. Refusals of single events, including
+// a node at capacity and a quota or rate limit, are not returned as an error:
+// they are counted in BatchSendResult.ErrorCount, with the first reason in
+// BatchSendResult.Error.
 func (p *Producer) SendBatch(ctx context.Context, msgs []Message) (*BatchSendResult, error) {
 	if len(msgs) == 0 {
 		return &BatchSendResult{}, nil

@@ -45,8 +45,10 @@ podDisruptionBudget:
 # One pod per Kubernetes node: five nodes are needed for the five pods.
 podAntiAffinity: hard
 
-# Production requires TLS, auth, encryption at rest, and replication mTLS.
-# Create the referenced secrets (or use cert-manager) before installing.
+# Production requires cluster mode (the chart always enables it), TLS, auth
+# with a policy file, encryption at rest, and replication mTLS. Create the
+# referenced secrets (or use cert-manager) before installing; the auth secret
+# holds the keys jwt-secret and policy.json (auth.policyKey).
 tls:
   enabled: true
   existingSecret: cronos-db-tls

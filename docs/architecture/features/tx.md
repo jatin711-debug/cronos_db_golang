@@ -40,6 +40,8 @@ guarantees.
 - `tx.NewHandler(pm)` gives the coordinator the **PartitionManager**, so
   Begin/Prepare/Commit write to real partitions. `cmd/api/main.go` creates it
   only with `--experimental-features`.
+- With `--auth-enabled`, the handler applies no per-RPC authorization: any
+  authenticated subject can begin, prepare, commit or abort (`transaction_handler.go`).
 - A recovery loop (every 30 s) re-drives Commit for Prepared and Committing
   transactions and aborts Pending ones past their timeout. Whether this holds
   up across crashes, failovers and replicated partitions has not been

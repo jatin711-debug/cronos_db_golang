@@ -40,30 +40,30 @@ type AdminServiceClient interface {
 	// (nodes + partition assignments + ISR + per-follower offsets).
 	GetClusterTopology(ctx context.Context, in *GetClusterTopologyRequest, opts ...grpc.CallOption) (*ClusterTopology, error)
 	// GetPartitionHealth returns per-partition runtime stats (WAL, scheduler,
-	// dedup, replay status). [stub]
+	// dedup, replay status). partition_id 0 is partition 0.
 	GetPartitionHealth(ctx context.Context, in *PartitionHealth, opts ...grpc.CallOption) (*PartitionHealthResponse, error)
 	// GetReplicationLag returns leader HWM and per-follower lag for one or all
-	// partitions. [stub]
+	// partitions. partition_id 0 means all partitions this node leads.
 	GetReplicationLag(ctx context.Context, in *ReplicationLag, opts ...grpc.CallOption) (*ReplicationLagResponse, error)
 	// ListConsumerGroups returns every consumer group known to the cluster.
-	// [stub]
 	ListConsumerGroups(ctx context.Context, in *AdminListConsumerGroupsRequest, opts ...grpc.CallOption) (*AdminListConsumerGroupsResponse, error)
 	// GetConsumerGroupLag returns the committed-vs-high-watermark lag for a
-	// single (group, partition). [stub]
+	// single (group, partition).
 	GetConsumerGroupLag(ctx context.Context, in *AdminConsumerGroupLag, opts ...grpc.CallOption) (*AdminConsumerGroupLagResponse, error)
-	// RunRetention runs age/size-based retention once. [stub]
+	// RunRetention runs age/size-based retention once. partition_id 0 means all
+	// local partitions.
 	RunRetention(ctx context.Context, in *RunRetentionRequest, opts ...grpc.CallOption) (*RunRetentionResponse, error)
-	// RunCompaction runs consumer-offset-bounded compaction once. [stub]
+	// RunCompaction runs consumer-offset-bounded compaction once. partition_id 0
+	// means all local partitions.
 	RunCompaction(ctx context.Context, in *RunCompactionRequest, opts ...grpc.CallOption) (*RunCompactionResponse, error)
-	// ListSchemas returns every registered topic schema. [stub]
+	// ListSchemas returns every registered topic schema.
 	ListSchemas(ctx context.Context, in *ListSchemasRequest, opts ...grpc.CallOption) (*ListSchemasResponse, error)
-	// GetSchema returns one schema version (or the latest if version=0). [stub]
+	// GetSchema returns one schema version (or the latest if version=0).
 	GetSchema(ctx context.Context, in *GetSchemaRequest, opts ...grpc.CallOption) (*GetSchemaResponse, error)
 	// GetTenantUsage returns in-flight + storage usage for one or all tenants.
-	// [stub]
 	GetTenantUsage(ctx context.Context, in *TenantUsage, opts ...grpc.CallOption) (*TenantUsageResponse, error)
-	// TriggerRebalance forces a router rebalance based on current membership.
-	// [stub]
+	// TriggerRebalance is not supported: it returns Unimplemented. Leadership
+	// reconciles automatically after membership changes.
 	TriggerRebalance(ctx context.Context, in *RebalanceRequest, opts ...grpc.CallOption) (*RebalanceResponse, error)
 }
 
@@ -193,30 +193,30 @@ type AdminServiceServer interface {
 	// (nodes + partition assignments + ISR + per-follower offsets).
 	GetClusterTopology(context.Context, *GetClusterTopologyRequest) (*ClusterTopology, error)
 	// GetPartitionHealth returns per-partition runtime stats (WAL, scheduler,
-	// dedup, replay status). [stub]
+	// dedup, replay status). partition_id 0 is partition 0.
 	GetPartitionHealth(context.Context, *PartitionHealth) (*PartitionHealthResponse, error)
 	// GetReplicationLag returns leader HWM and per-follower lag for one or all
-	// partitions. [stub]
+	// partitions. partition_id 0 means all partitions this node leads.
 	GetReplicationLag(context.Context, *ReplicationLag) (*ReplicationLagResponse, error)
 	// ListConsumerGroups returns every consumer group known to the cluster.
-	// [stub]
 	ListConsumerGroups(context.Context, *AdminListConsumerGroupsRequest) (*AdminListConsumerGroupsResponse, error)
 	// GetConsumerGroupLag returns the committed-vs-high-watermark lag for a
-	// single (group, partition). [stub]
+	// single (group, partition).
 	GetConsumerGroupLag(context.Context, *AdminConsumerGroupLag) (*AdminConsumerGroupLagResponse, error)
-	// RunRetention runs age/size-based retention once. [stub]
+	// RunRetention runs age/size-based retention once. partition_id 0 means all
+	// local partitions.
 	RunRetention(context.Context, *RunRetentionRequest) (*RunRetentionResponse, error)
-	// RunCompaction runs consumer-offset-bounded compaction once. [stub]
+	// RunCompaction runs consumer-offset-bounded compaction once. partition_id 0
+	// means all local partitions.
 	RunCompaction(context.Context, *RunCompactionRequest) (*RunCompactionResponse, error)
-	// ListSchemas returns every registered topic schema. [stub]
+	// ListSchemas returns every registered topic schema.
 	ListSchemas(context.Context, *ListSchemasRequest) (*ListSchemasResponse, error)
-	// GetSchema returns one schema version (or the latest if version=0). [stub]
+	// GetSchema returns one schema version (or the latest if version=0).
 	GetSchema(context.Context, *GetSchemaRequest) (*GetSchemaResponse, error)
 	// GetTenantUsage returns in-flight + storage usage for one or all tenants.
-	// [stub]
 	GetTenantUsage(context.Context, *TenantUsage) (*TenantUsageResponse, error)
-	// TriggerRebalance forces a router rebalance based on current membership.
-	// [stub]
+	// TriggerRebalance is not supported: it returns Unimplemented. Leadership
+	// reconciles automatically after membership changes.
 	TriggerRebalance(context.Context, *RebalanceRequest) (*RebalanceResponse, error)
 	mustEmbedUnimplementedAdminServiceServer()
 }

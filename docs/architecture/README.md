@@ -3,24 +3,41 @@
 This folder contains the architecture split by feature so developers can read
 subsystem docs independently.
 
-## Production-Hardening Highlights (current code)
+## Production-Hardening Highlights (current code, v0.11.0)
 
 - **WAL v2 record format** with Raft term and payload checksum; pre-v2 layouts have no
   automatic migration. The v0.7.0 to v0.8.0 upgrade uses capability agreement.
+- **WAL segment format version 2** (v0.9.0; kept by v0.10.0 and v0.11.0): a new
+  segment's header records its closed predecessor's first offset, last offset and
+  byte end under the header CRC, and the log refuses to open when a closed
+  segment no longer matches, a zeroed tail with no index included. Version-1
+  logs and backups are rejected, not migrated
+  ([closed WAL segment boundaries](../STORAGE_SEGMENT_BOUNDARIES.md)). The sparse
+  index is written in whole entries and cut back to its last valid entry when
+  opened; an encrypted record left torn by a crash at the end of a log is cut off
+  like a plaintext one.
 - **Encryption at rest v2** uses a **random 12-byte GCM nonce per record**;
   legacy v1 counter nonces remain decrypt-only.
 - **Persistent consumer group metadata** in `OffsetStore`. Exactly-once commit
   IDs exist in `OffsetStore`, but `--exactly-once-commits` is refused in
   production and the Ack path does not read it.
 - **DLQ wired per partition** at create time (`NewDispatcherWithDLQ`).
-- **Dedup crash recovery** reseeds claims from the WAL tail on partition start.
+- **Dedup crash recovery** reseeds claims from the log on partition start
+  (from a saved recovery point when it matches, otherwise the retained log).
+  Message IDs are unique per topic (`dedup.Key`), and the bloom filter is rebuilt
+  from the store, at start and when it is too full, never merely emptied.
 - **Restart does not load the backlog**: timer replay schedules only events
   whose time has not come; events already due stay in the log and each
   subscription reads them at its consumers' pace (`redriveRetained`).
+- **Scheduler wheel follows the clock** (v0.10.0): on each tick fire the wheel
+  advances to the tick the wall clock has reached, never past it, so a pause of
+  its worker no longer delays later events for good.
 - **Change feed for CDC** (and experimental cross-region replication):
   accepted events only, in log order, from the partition's leader, with a
   position that survives restarts and failovers. A failing sink makes its feed
-  lag; nothing is dropped.
+  lag; nothing is dropped. A missing or damaged cursor, or a feed enabled on a
+  partition that already holds events, replays the retained history (sinks must
+  tolerate duplicates), and backups carry the cursor.
 - **Log-start pruning**: compaction and retention remove segments only through
   `Partition.PruneWAL`. Active events must be due, completed and exported;
   accepted terminal controls and superseded copies have no consumer obligation.
@@ -29,7 +46,8 @@ subsystem docs independently.
   never-due work only after the replacement is accepted.
 - **Backups and restore**: scheduled checkpoints of every partition at
   wall-clock multiples of `--backup-interval`; `cronos-admin restore`, and
-  `cronos-admin check-log` to report or cut a damaged segment.
+  `cronos-admin check-log` to report or cut a damaged segment. A partition stays
+  open until a running backup has finished with it.
 - **Memory guard**: publishes are refused while the process holds
   `--max-memory-percent` of its memory limit (cgroup limit by default).
 - **Listener split:**
@@ -47,7 +65,9 @@ subsystem docs independently.
 - **Fenced elections and staged handoff**: an election first commits that the
   partition has no leader, fences the replicas at that epoch, then picks the
   most complete one; a planned leader move waits until the target's log ends
-  at the same entry.
+  at the same entry. A replica that placement drops stays *retiring* (asked and
+  counted by elections, keeping its copy) until the leader has stopped
+  replicating to it and enough remaining replicas hold its log (v0.10.0).
 - **Current-term commitment**: after capability agreement, a new leader must
   replicate a durable term-start record before committing an older prefix.
   Mixed clusters retain legacy behavior until agreement; activation is one-way.
@@ -65,9 +85,14 @@ subsystem docs independently.
   cross-region replication run only with `--dev --experimental-features`.
 - **Production security gate** (unless `--dev`): TLS, JWT auth **and** policy
   file, encryption at rest, replication mTLS, RF≥3, minISR≥2, fsync mode
-  `batch` or `every_event`, `--cluster-seeds` in cluster mode; refuses
-  `--experimental-features`, `--exactly-once-commits` and a non-loopback
-  `--pprof-addr`.
+  `batch` or `every_event`, `--cluster` (standalone is refused since v0.11.0)
+  with `--cluster-seeds`; refuses `--experimental-features`,
+  `--exactly-once-commits` and a non-loopback `--pprof-addr`. Readiness is down
+  when replication is configured but no cluster manager exists.
+- **Per-subject publish-rate limits** (v0.11.0): `--tenant-limits-file` sets
+  `max_events_per_second` per JWT subject as a per-node token bucket (one second
+  of burst); it requires authentication and is read at startup. Other quotas are
+  unsupported.
 
 ## Known Limitations (documented gaps)
 
@@ -78,7 +103,7 @@ Details and mermaid: [ARCHITECTURE.md § Known Limitations](../../ARCHITECTURE.m
 | Gap | What works | What does not (yet) | Primary doc |
 |-----|------------|---------------------|-------------|
 | **Lag-driven snapshot** | Bulk `InstallSnapshot` on join / `SyncPartitionFromLeader` | Mid-flight auto-snapshot; `--snapshot-catchup-threshold` is parsed but unused | [replication.md](features/replication.md) |
-| **Admin TriggerRebalance** | Automatic rebalance on membership + Raft reconcile (~5s) | On-demand `TriggerRebalance` RPC/UI is a soft stub (descriptive response) | [cluster.md](features/cluster.md), [dashboard.md](features/dashboard.md) |
+| **Admin TriggerRebalance** | Automatic rebalance on membership + Raft reconcile (~5s) | On-demand `TriggerRebalance` is not implemented: the RPC returns `Unimplemented` (since v0.11.0) and the dashboard action is disabled | [cluster.md](features/cluster.md), [dashboard.md](features/dashboard.md) |
 | **Delivery redrive** | Credits, CB, DLQ, WAL redrive and replicated progress; lifecycle snapshots carry consistent recovery state | A disconnected group makes no progress; completions not yet transferred may be redelivered after failover; legacy RF=1 handoff has no atomic progress transfer | [delivery.md](features/delivery.md) |
 
 ## Start Here

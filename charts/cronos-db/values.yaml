@@ -89,7 +89,8 @@ headlessService:
 
 config:
   # Default to developer mode for easy local/CI installs. Production must set
-  # dev=false and provide TLS, auth, and encryption-at-rest configuration.
+  # dev=false and provide TLS, auth (with a policy file), encryption-at-rest and
+  # replication mTLS configuration; the chart always enables cluster mode.
   dev: true
   nodeIdPrefix: "cronos-node"
   dataDir: /data
@@ -143,7 +144,10 @@ tls:
 auth:
   enabled: false
   policyKey: policy.json
-  # Optional JSON rate limits key in the existing auth Secret; restart to reload.
+  # Optional key in the existing auth Secret (auth.existingSecret is required)
+  # holding the --tenant-limits-file JSON, {"<jwt subject>":
+  # {"max_events_per_second": N}}. Per-node limits, read at startup only: roll
+  # the pods to reload.
   tenantLimitsKey: ""
   # existingSecret: cronos-db-auth
   # secretKey: jwt-secret

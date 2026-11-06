@@ -11,7 +11,9 @@ The aim is that you can carry the reasoning to a different system.
 trees, bloom filters or timing wheels is assumed; each is introduced where it
 is used.
 
-This guide follows v0.8.0. The [lifecycle contract](../RETENTION_AND_EVENT_LIFECYCLE.md)
+This guide follows v0.11.0; the release notes for [v0.9.0](../RELEASE_V0.9.0.md),
+[v0.10.0](../RELEASE_V0.10.0.md) and [v0.11.0](../RELEASE_V0.11.0.md) list what
+changed after v0.8.0. The [lifecycle contract](../RETENTION_AND_EVENT_LIFECYCLE.md)
 and [term-start protocol](../REPLICATION_TERM_START.md) define the precise
 format and upgrade rules. Existing diagrams illustrate the ordinary publish
 path; internal controls and lifecycle successors also occupy physical offsets.
@@ -120,8 +122,9 @@ Three things to take from the picture:
    not, or there is no leader yet, the publish is refused with an error the
    client can retry.
 3. **Claim the ID.** The dedup store records that a publish with this
-   `message_id` is in flight. An ID that was already accepted is answered with
-   "duplicate" and nothing is written.
+   `message_id` on this topic is in flight (an ID is unique per topic). An ID
+   that was already accepted is answered with "duplicate" and nothing is
+   written.
 4. **Append.** The event is appended to the partition's log and gets its
    offset. Whether the bytes are on disk before the next step depends on the
    fsync mode.
@@ -179,7 +182,16 @@ position in that log.
   from the log alone.
 - **A sparse index** ([`index.go`](../../internal/storage/index.go)) maps every
   1,000th offset to a byte position. Reading by offset is a binary search in
-  memory followed by a short scan.
+  memory followed by a short scan. The index is only a hint to where reading
+  starts: it is written in whole entries, a partial entry left by a crash is cut
+  off when it is opened, and the segment is the authority.
+- **A closed segment is checked against its successor.** The header of each new
+  segment records the first offset, last offset and byte end of the segment
+  before it ([`segment.go`](../../internal/storage/segment.go)). Zero bytes
+  after the last readable record look the same whether they are unused space or
+  erased data, so startup and `cronos-admin check-log` compare what they recover
+  with that record and refuse a log that does not match
+  ([details](../STORAGE_SEGMENT_BOUNDARIES.md)).
 - **Reads use `mmap`**, so replaying a segment does not copy it through read
   buffers. The platform differences sit in two small files
   (`mmap_unix.go`, `mmap_windows.go`).
@@ -244,7 +256,11 @@ with millions of events pending, some due in a second and some next month.
 
 - **A timing wheel** ([`timing_wheel.go`](../../internal/scheduler/timing_wheel.go))
   is a clock face of buckets. A timer is put into the bucket for its tick;
-  every tick the hand moves on and the current bucket is emptied. Insertion
+  every tick the hand moves on and the current bucket is emptied. The hand
+  follows the clock, not the number of timer fires: after a pause of the worker
+  (a garbage collection, CPU throttling) it moves on to the tick the clock
+  shows, never past it, so a pause does not delay later events for good.
+  Insertion
   and removal within a level are constant work; overflow lookup traverses
   levels, and a tick costs work for the timers expired or cascaded. The default
   is 600 slots of 10 ms, not a delivery-latency guarantee.
@@ -302,7 +318,13 @@ become two events — and must never be silently swallowed either.
 - **Two tiers.** A bloom filter in memory answers "definitely new" without
   touching the disk. Only a "maybe seen" is looked up in the exact store
   (Pebble), because a bloom filter can be wrong in that direction and never in
-  the other. See [`bloom_store.go`](../../internal/dedup/bloom_store.go).
+  the other. The filter is derived data: it is rebuilt from the store at
+  startup and when it has really filled up, and until a rebuild finishes every
+  check goes to the store. See [`bloom_store.go`](../../internal/dedup/bloom_store.go).
+- **IDs are scoped to a topic.** The key that is stored is the topic and the
+  message ID together ([`key.go`](../../internal/dedup/key.go)), so the same ID
+  on two topics names two events, and a producer cannot block or probe IDs of
+  a topic it may not publish to.
 - **Three states, not two.** A known ID is *claimed* (a publish is in flight),
   *appended at offset N* (in the log, but nobody was promised delivery yet) or
   *accepted at offset N*. A retry is answered by state: "still in progress",
@@ -483,6 +505,16 @@ one loses nothing — without two machines ever accepting different histories.
   acknowledged write is on at least `min-insync` replicas, so any set that
   large contains one that has it. With fewer answers it waits rather than
   guess.
+- **A dropped replica keeps its place until it is no longer needed.** When
+  placement moves a partition to other nodes, the replica it drops is not
+  forgotten at once: its replacement starts empty, so the dropped replica may
+  hold the only copy besides the leader's of writes it helped acknowledge. It
+  is marked *retiring*: elections ask it and count it, and it keeps its log.
+  The leader stops replicating to it before it takes up the new assignment, and
+  the mark is cleared once the remaining replicas hold the leader's log
+  ([`leadership.go`](../../internal/cluster/leadership.go), `releaseRetired`).
+  If the leader and a retiring replica both fail first, the partition waits for
+  one of them rather than elect a replica that may lack acknowledged writes.
 - **Catching up.** A connected follower is sent the missing range from the
   leader's log. A joining/wiped replica receiving bulk state copies the
   leader's segment files as a *snapshot*: each file is checked against its
@@ -572,7 +604,8 @@ Short notes on the parts that surround the data path.
 - **Secure by default.** Without `--dev`, the server refuses to start unless
   TLS, JWT authentication with a policy file, encryption at rest, replication
   mTLS, replication factor ≥ 3, min-insync ≥ 2, `--fsync-mode` `batch` or
-  `every_event`, and (in a cluster) `--cluster-seeds` are configured, and it
+  `every_event`, and cluster mode with `--cluster-seeds` (a standalone node is
+  refused) are configured, and it
   refuses `--experimental-features` and `--exactly-once-commits`
   ([`config.go`](../../internal/config/config.go)). An unsafe production
   deployment has to be asked for; it cannot happen by omission.
@@ -582,7 +615,7 @@ Short notes on the parts that surround the data path.
   rollouts need the second.
 - **Backups** ([`backup.go`](../../internal/partition/backup.go)) copy every
   partition's log, consumer progress, dedup store, dead-letter queue and
-  epoch. The logs are cut at one instant; the other stores are captured just
+  epoch and change-feed position. The logs are cut at one instant; the other stores are captured just
   before, never after, so a restored node may redeliver but cannot skip. Every
   file is listed with its size and CRC, and `cronos-admin restore` verifies
   all of them before touching an empty data directory. A backup never contains
@@ -594,8 +627,11 @@ Short notes on the parts that surround the data path.
   [`backpressure.go`](../../internal/partition/backpressure.go)). Token buckets
   per topic, per-partition admission control and a process memory guard. An
   overloaded server answers `ResourceExhausted` early instead of queueing
-  until it falls over. Per-tenant quotas exist in code but no setting
-  configures them, so they are not enforced ([tenant.md](../architecture/features/tenant.md)).
+  until it falls over. One per-tenant limit is configurable:
+  `--tenant-limits-file` sets a publish rate per JWT subject, enforced per node
+  as a token bucket and read at startup. Storage, in-flight and cluster-wide
+  quotas are not enforced, so this is not tenant isolation
+  ([tenant.md](../architecture/features/tenant.md)).
 - **Change data capture and cross-region replication**
   ([`changefeed.go`](../../internal/partition/changefeed.go),
   [`internal/cdc`](../../internal/cdc/sink.go),
@@ -606,7 +642,10 @@ Short notes on the parts that surround the data path.
   per replica. A sink that fails makes the feed wait and retry; publishing
   never waits for it, and the log keeps entries until the feed has exported
   them. The feed's position is stored and sent to followers, so restarts and
-  failovers continue it. Cross-region replication is experimental: it needs
+  failovers continue it. A missing or damaged position makes the feed replay
+  the retained history instead of starting at the log's end, because starting
+  at the end would let pending exports look finished; sinks must tolerate
+  duplicates. Cross-region replication is experimental: it needs
   `--dev --experimental-features`, and its bounded buffer drops the oldest
   events when a region stays unreachable. The general pattern: *derive side
   outputs from the log, not from the write path*.
@@ -710,6 +749,8 @@ run on a laptop.
 ```bash
 # Build the server (see the README for prerequisites)
 make build-api
+# The admin CLI is not part of make build; build it for step 4
+go build -o bin/cronos-admin ./cmd/admin
 
 # One node, developer mode
 ./bin/cronos-api --dev --node-id=node1 --data-dir=./data
@@ -722,7 +763,7 @@ go run ./examples/pubsub_demo
    the ten seconds are over, and start it again. The event still arrives: the
    timer was rebuilt from the log (section 4.2).
 2. **Idempotent publish.** Publish the same `messageId` twice with `grpcurl`
-   (the commands are in the [README](../../README.md)). The second answer is
+   (the command is in the [client guide](../CLIENT_GUIDE.md)). The second answer is
    "duplicate message_id" and only one event is delivered (section 4.3).
 3. **Durability has a price.** Run the log benchmark in the three fsync modes
    and compare the time per append:
@@ -734,7 +775,7 @@ go run ./examples/pubsub_demo
 
 4. **Failover.** Start three nodes in three terminals (`make node1`,
    `make node2`, `make node3`), check `make health`, then look at who leads
-   what with `./bin/cronos-admin --server=localhost:9000 topology`. Stop a
+   what with `./bin/cronos-admin --server=localhost:9000 cluster status`. Stop a
    node that leads a partition and run it again: after a few seconds another
    replica leads it, at a higher epoch (sections 4.5 and 4.6).
 5. **Read a test instead of a diagram.** The tests named after a behaviour

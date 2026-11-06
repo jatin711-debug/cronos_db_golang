@@ -10,8 +10,9 @@
 > [docs/architecture/features/](docs/architecture/features/) and
 > [docs/PRODUCTION_RELEASE.md](docs/PRODUCTION_RELEASE.md).
 
-> The v0.8.0 [lifecycle contract](docs/RETENTION_AND_EVENT_LIFECYCLE.md) and
-> [current-term protocol](docs/REPLICATION_TERM_START.md) supersede the old
+> The [lifecycle contract](docs/RETENTION_AND_EVENT_LIFECYCLE.md) and
+> [current-term protocol](docs/REPLICATION_TERM_START.md), both introduced in
+> v0.8.0 and in force at v0.11.0, supersede the old
 > mutation, commitment and recovery sketches here. Code snippets in this
 > historical theory manual are illustrative, not current API examples or
 > release guarantees.
@@ -70,6 +71,7 @@
 - CRC32 covers the record after the length prefix; the payload checksum (written before Meta) covers the payload only; Raft term enables term-aware replication
 - Sparse index for O(log N) lookups
 - Upgrading from earlier builds requires a clean `--data-dir` (v2 is not backward-compatible)
+- Each segment starts with a 64-byte header (magic `CRNOS1`, segment format version 2, first offset, creation time, CRC32). Since v0.9.0 a new segment's header also records the closed predecessor's first offset, last offset and byte end, and the log refuses to open when a closed segment no longer matches that record, which catches an erased tail that record checksums alone cannot tell from unused space (see [closed WAL segment boundaries](docs/STORAGE_SEGMENT_BOUNDARIES.md))
 
 ### 1.3 Partitioning
 
@@ -129,7 +131,7 @@ Each file is named after its first offset, zero-padded to 20 digits
 
 **But** a full index for every event uses too much memory.
 
-**Sparse Index**: Only index every Nth event (e.g., every 1000 events).
+**Sparse Index**: Only index every Nth event (default 1000, `--index-interval`). An entry is 24 bytes (schedule timestamp, offset, file position) and lives in `index/<first offset>.index`. Entries are written whole; when the index is opened it is cut back to its last valid entry, and a read that an entry sends to the wrong place is repeated from the segment's start, because the index only says where to start looking.
 
 ```
 Index entries (every 1000 events):
@@ -169,7 +171,7 @@ mmap file → Access memory directly → OS handles paging behind the scenes
 - OS handles caching automatically
 - Multiple processes can share the same mapped memory
 
-**Trade-off**: Writes still need syscalls. So CronosDB uses mmap for reads, buffered writes for appends.
+**Trade-off**: Durability still needs an fsync. CronosDB appends to a plaintext active segment through its memory mapping; an encrypted segment, or one whose file cannot be mapped, is written through a 4 MiB buffered writer instead. Reads use the mapping when a segment has one.
 
 **In code**: `internal/storage/segment.go` (mmap on Linux/Windows, fallback to ReadAt)
 
@@ -279,7 +281,9 @@ slot = (current_tick + tick) % wheel_size
 
 When cascading, recalculate from the absolute `schedule_ts`, not relative position. No drift!
 
-**In code**: `internal/scheduler/scheduler.go`
+The wheel's own hand must not drift either. Moving it one tick per timer fire would let every pause of the worker (a hydration pass, a GC pause, CPU throttling) set it back for good, because a Go `time.Ticker` drops the fires its receiver is too late for. So on each fire the wheel advances to the tick the wall clock has reached, and never past it (at most 1000 ticks per fire while catching up). This is the behaviour since v0.10.0.
+
+**In code**: `internal/scheduler/scheduler.go` (`advanceWheel`)
 
 ### 3.5 Two-Tier Cold/Hot Storage
 
@@ -358,7 +362,7 @@ Check "order-123":
 **Math**:
 - 1% false positive rate needs about 10 bits per item: 100M items → ~120MB memory
 - 0.1% FPR needs about 15 bits per item → ~180MB
-- Check time: O(K) = ~7 hash operations = ~40 nanoseconds
+- Check time: O(K) = at most 7 hash operations (no per-check latency is measured in this repository)
 
 **Why this is perfect for dedup**:
 - 99% of checks: "definitely new" → skip disk entirely
@@ -381,6 +385,8 @@ Tier 2: PebbleDB (persistent, exact)
 - Bloom filter is lost on restart → need persistent store
 - Bloom has false positives → need exact confirmation
 - PebbleDB is fast enough for 1% of traffic
+
+**Keys and rebuilds** (v0.10.0): the key is the topic's length, `:`, the topic and the message ID (`internal/dedup/key.go`), so the same ID on two topics is two events. The bloom filter is refilled from PebbleDB when a partition starts, and again when hourly maintenance finds it too full (more than 5% false positives over at least 10,000 checks of absent IDs). While it is refilled every check goes to PebbleDB, because an emptied filter would answer "definitely new" for IDs that were accepted and let their retries through (`internal/dedup/bloom_store.go`).
 
 ### 4.4 Rust Bloom Filter (FFI)
 
@@ -441,7 +447,7 @@ States:
   HALF-OPEN → After timeout, allow one trial request
 
 Transitions:
-  CLOSED → OPEN:  failure_rate > 50% AND attempts > 10
+  CLOSED → OPEN:  failure_rate >= 50% AND attempts >= 10
   OPEN   → HALF-OPEN: after 30 seconds
   HALF-OPEN → CLOSED: trial succeeds
   HALF-OPEN → OPEN: trial fails
@@ -494,7 +500,7 @@ DLQ: Append-only binary segments in their own format (magic "CRNDLQ1", 64 MB per
 ```
 
 **Why binary segments?**
-- 10x smaller than JSON
+- No base64 or JSON overhead (the saving has not been measured)
 - CRC32 integrity
 - Easy to rotate and archive
 
@@ -564,7 +570,7 @@ Node A: "I'm alive, here's my info"
 
 **SWIM in general** (as in HashiCorp memberlist, used by Consul and Nomad): no central coordinator, tolerates lost messages, converges in O(log N) rounds.
 
-**What CronosDB actually uses**: not SWIM. The server runs its own membership protocol over TCP: every node sends heartbeats every 1 s, and a node not heard from for 5 s is marked failed. In production these connections, like Raft's, use mutual TLS with the replication certificates, which are re-read from disk without a restart. `--use-memberlist` is refused at start, in every mode, so the memberlist adapter in `internal/cluster/memberlist_adapter.go` is never reached.
+**What CronosDB actually uses**: not SWIM. The server runs its own membership protocol over TCP: every node sends heartbeats every 1 s (`--heartbeat-interval`), and a node not heard from for 5 intervals is suspected and for 10 is marked dead. A dead node is still probed, is taken back when it answers, and stays a member and a Raft voter until `cronos-admin cluster remove-node` removes it. In production these connections, like Raft's, use mutual TLS with the replication certificates, which are re-read from disk without a restart. `--use-memberlist` is refused at start, in every mode, so the memberlist adapter in `internal/cluster/memberlist_adapter.go` is never reached.
 
 **In code**: `internal/cluster/membership.go`, `internal/cluster/transport.go`, `internal/cluster/manager.go`
 
@@ -580,14 +586,16 @@ Leader (Node A):
 
 Follower (Node B):
   Receives replication stream
-  Writes to local WAL
-  Serves read requests (if configured)
+  Writes to local WAL (and syncs before it answers, in batch and every_event fsync modes)
+  Serves no client traffic: it answers Unavailable for the partition
 ```
 
 **Why leader-follower?**
 - Simple: all writes go to one place
 - Consistent: no conflicting writes
-- Available: if leader dies, promote follower
+- Available: if leader dies, the Raft leader fences the replicas, asks where their logs end and commits the most complete one as the new leader
+
+**Placement changes**: a replica that placement drops is *retiring* (since v0.10.0): elections still ask it and count it, and it keeps its copy, until the leader has stopped replicating to it and enough remaining replicas hold the log. Dropping it at once could elect a replica that lacks writes acknowledged with its help (`internal/cluster/leadership.go`, `releaseRetired`).
 
 **In code**: `internal/replication/leader.go`, `internal/replication/follower.go`
 
@@ -604,11 +612,13 @@ Follower2 catches up → ISR = [Leader, Follower1, Follower2]
 ```
 
 **Why ISR matters?**
-- Acknowledgment: Can ack write when ISR size ≥ min_isr
+- Acknowledgment: a write is acknowledged once min_isr replicas, the leader included, hold it; if too few followers are connected the publish fails
 - Durability: More ISR = more copies = safer
 - Availability: Can still operate if some followers are down
 
-**In code**: `internal/cluster/manager.go`
+Only a partition's leader knows which followers are in sync; the admin topology reads it from there (`ReplicationService.LeaderReport`).
+
+**In code**: `internal/replication/leader.go` (`Replicate`, the in-sync list)
 
 ---
 
@@ -786,6 +796,12 @@ Attempt 4: about 400ms (±20%)
 - With jitter: Retries are spread out
 
 **In code**: `pkg/client/internal/retry/`
+
+### 8.6 Checkpoints and Acknowledgements
+
+Events are delivered in schedule order, not offset order, so "the offset after the last acknowledged delivery" says nothing about unfinished events. With a `CheckpointStore`, the Go SDK saves only the completion floor the server reports: every offset below it is complete (since v0.10.0; checkpoint stores written by earlier SDKs should be cleared). With `CommitStrategySync`, `Ack` returns the server's answer, refusals included; it used to return once the acknowledgement was queued.
+
+**In code**: `pkg/client/consumer.go` (`persistCheckpoint`), `pkg/client/checkpoint.go`
 
 ---
 
@@ -983,7 +999,7 @@ An earlier version created the next segment in the background before the active 
 | Sparse index | Every 1000 events | O(log N) lookup without full index memory |
 | Timing wheel | Hierarchical circular buffers | O(1) timer ops for millions of events |
 | Cold store | PebbleDB LSM tree | Range scans + compaction + bounded memory |
-| Bloom filter | Rust FFI + AtomicU64 | 40ns checks, lock-free, ~120MB for 100M items |
+| Bloom filter | Atomic bit arrays (Go; Rust FFI in cgo builds) | O(k) lock-free checks, ~120MB for 100M items |
 | PebbleDB fallback | LSM tree with TTL | Exact dedup + automatic expiration |
 | 32-shard dispatcher | Sharded hash maps | Lock contention ÷ 32 |
 | Credit flow control | Atomic CAS counters | Lock-free backpressure |

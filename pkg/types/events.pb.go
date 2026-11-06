@@ -999,7 +999,8 @@ type AckResponse struct {
 	state   protoimpl.MessageState `protogen:"open.v1"`
 	Success bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
 	Error   string                 `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
-	// Committed offset for this consumer group
+	// The group's completion floor on the partition: every offset below it is
+	// complete. It is not the offset after the acknowledged delivery.
 	CommittedOffset int64 `protobuf:"varint,3,opt,name=committed_offset,json=committedOffset,proto3" json:"committed_offset,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
@@ -1060,21 +1061,28 @@ type ReplayRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Topic to replay
 	Topic string `protobuf:"bytes,1,opt,name=topic,proto3" json:"topic,omitempty"`
-	// Partition ID (optional, replay all partitions if not specified)
+	// Partition ID. Required, and must not be negative; 0 is partition 0. A
+	// replay reads one partition.
 	PartitionId int32 `protobuf:"varint,2,opt,name=partition_id,json=partitionId,proto3" json:"partition_id,omitempty"`
-	// Start timestamp (Unix ms, optional if using offset)
+	// Start schedule timestamp (Unix ms). A replay with start_ts or end_ts set
+	// is time-based and selects events whose schedule_ts falls in the window.
 	StartTs int64 `protobuf:"varint,3,opt,name=start_ts,json=startTs,proto3" json:"start_ts,omitempty"`
-	// End timestamp (Unix ms, optional)
+	// End schedule timestamp (Unix ms, inclusive); the current time when only
+	// start_ts is set.
 	EndTs int64 `protobuf:"varint,4,opt,name=end_ts,json=endTs,proto3" json:"end_ts,omitempty"`
-	// Start offset (alternative to start_ts)
+	// Start offset of an offset-based replay (used when neither start_ts nor
+	// end_ts is set)
 	StartOffset int64 `protobuf:"varint,5,opt,name=start_offset,json=startOffset,proto3" json:"start_offset,omitempty"`
-	// Number of events to replay (optional)
+	// Number of events of an offset-based replay; 1000 when not positive.
+	// Ignored by a time-based replay.
 	Count int64 `protobuf:"varint,6,opt,name=count,proto3" json:"count,omitempty"`
 	// Consumer group to replay for
 	ConsumerGroup string `protobuf:"bytes,7,opt,name=consumer_group,json=consumerGroup,proto3" json:"consumer_group,omitempty"`
 	// Subscription ID for tracking
 	SubscriptionId string `protobuf:"bytes,8,opt,name=subscription_id,json=subscriptionId,proto3" json:"subscription_id,omitempty"`
-	// Replay speed: 0=fast, 1=real-time
+	// Replay pacing: 0 and 1 send without a pause; any other value pauses
+	// 10 ms / speed after each event. Negative values and values below 0.001
+	// are refused.
 	Speed         float64 `protobuf:"fixed64,9,opt,name=speed,proto3" json:"speed,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

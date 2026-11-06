@@ -30,6 +30,7 @@ import (
 	"time"
 
 	client "github.com/jatin711-debug/cronos_db_golang/pkg/client"
+	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 )
 
 const (
@@ -143,18 +144,25 @@ func main() {
 	}
 }
 
-// handleDelivery decodes and logs every received message.
+// handleDelivery decodes and logs every event of a delivery. A delivery holds
+// either one event or a batch, and returning from the handler acknowledges all
+// of them.
 func handleDelivery(d client.Delivery) {
-	// Prefer the single-event form; fall back to the first item in a batch.
-	event := d.Event
-	if event == nil && len(d.Batch) > 0 {
-		event = d.Batch[0]
+	events := d.Batch
+	if d.Event != nil {
+		events = append([]*types.Event{d.Event}, events...)
 	}
-	if event == nil {
+	if len(events) == 0 {
 		fmt.Println("received empty delivery")
 		return
 	}
+	for _, event := range events {
+		printEvent(d, event)
+	}
+}
 
+// printEvent decodes and logs one received event.
+func printEvent(d client.Delivery, event *types.Event) {
 	var payload DemoPayload
 	codec := client.JSONCodec{}
 	if err := codec.Decode(event.GetPayload(), &payload); err == nil {

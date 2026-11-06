@@ -16,6 +16,8 @@ exist:
   `CrossRegionService` gRPC service. No ISR semantics; fire-and-forget.
   **Experimental**: a node with `CRONOS_REGIONS` set refuses to start without
   `--dev --experimental-features`, and the service is registered only there.
+  Production mode refuses `--experimental-features`, so production has no
+  cross-region replication.
 
 ## Key Files
 
@@ -214,6 +216,18 @@ paused only while it notes where each file ends.
   `minISR` confirmations any more. The leader is then committed at a higher
   epoch. The old leader learns of it from the first replica that refuses it,
   and stops.
+- **Retiring replicas.** A replica that placement drops is put on the
+  partition's `Retiring` list instead of being forgotten (`PartitionInfo.Retiring`,
+  `internal/cluster/types.go`). Elections ask it and count it, and it may be
+  elected; it keeps its copy of the log. A leader replicates only to the
+  replicas of the assignment it has taken up: `reconcileLocalLeadership` calls
+  `RetainFollowers` to stop sending to the dropped ones before the leader reports
+  the new assignment's epoch, so it no longer counts their acknowledgements.
+  `releaseRetired` clears the list once the leader has reported that epoch and
+  `--min-insync-replicas` - 1 of the remaining replicas hold the log the leader
+  held at that point. If the leader and a retiring replica both fail before then,
+  the partition waits for one of them rather than elect a replica that may lack
+  acknowledged writes. Before v0.10.0 a dropped replica was released at once.
 - **First assignment.** A partition's first leader is chosen the same way:
   the Raft leader asks the replicas what they hold. A restored cluster thereby
   continues from its backups, led by the most complete replica at an epoch
@@ -305,7 +319,12 @@ scheduled, and their message IDs are recorded as *appended at offset N*, not
 as accepted. They are accepted, and scheduled, when the log is known to be
 replicated that far:
 
-- by a retry of the publish, which is finished rather than appended again;
+- by a retry of the publish, which is finished rather than appended again. In
+  term-start mode the retry can concern an entry an earlier term wrote, and
+  copies of that entry alone do not commit it, so `Leader.Replicate` replicates
+  through the current term's start record instead (`termStartAfter` in
+  `leader.go`; followers hold a prefix of the log), and the retry
+  is acknowledged only once that is committed (v0.10.0);
 - by the next publish that reaches the required replicas, since a follower
   holds a prefix of the log;
 - by the leader's maintenance loop once catch-up has taken them to a quorum.
@@ -445,7 +464,7 @@ flowchart TB
     ALeader -->|"ReplicationService Append"| AFollower1
     ALeader -->|"ReplicationService Append"| AFollower2
 
-    Fetch["FetchEvents pull catch-up RPC also served on :7947"]
+    Fetch["FetchEvents pull catch-up RPC also served on :7947 (experimental only)"]
     BInternal -.-> Fetch
 
     EchoGuard["Echo guard: skip re-export when source_region meta set"]

@@ -28,8 +28,9 @@ business logic path.
 - [internal/api/web_handler.go](../../../internal/api/web_handler.go) —
   embeds SPA via `//go:embed web/dist/*`; serves `/ui/` with SPA fallback to
   `index.html`; exposes JWT-gated `/api/admin/*` JSON proxy.
-- [internal/api/web/dist/README.txt](../../../internal/api/web/dist/README.txt) —
-  embed placeholder until `make dashboard` / `make build` stages real assets.
+- [internal/api/web/dist/](../../../internal/api/web/dist/) — the embedded build:
+  checked-in assets that `make dashboard` / `make build` replace (the
+  `README.txt` there is a placeholder that is kept).
 - [cmd/api/main.go](../../../cmd/api/main.go) — mounts `WebHandler` on the
   HTTP mux next to health and metrics.
 - [pkg/types/admin.pb.go](../../../pkg/types/admin.pb.go) — protobuf JSON tags
@@ -54,19 +55,31 @@ Same handler code as gRPC AdminService
 
 ## Endpoints
 
+Every RPC below is an `AdminService` RPC on the public gRPC port as well, and needs global `"admin": true` when auth is on. The three actions marked `POST` refuse other methods; the views do not check the method.
+
 | HTTP path | Admin RPC / action |
 |-----------|--------------------|
-| `/api/admin/topology` | GetClusterTopology |
-| `/api/admin/partition-health` | GetPartitionHealth |
-| `/api/admin/replication-lag` | GetReplicationLag |
-| `/api/admin/consumer-groups` | ListConsumerGroups |
-| `/api/admin/consumer-group-lag` | GetConsumerGroupLag |
-| `/api/admin/schemas` | ListSchemas |
-| `/api/admin/schema` | GetSchema |
-| `/api/admin/tenant-usage` | GetTenantUsage |
-| `/api/admin/retention/run` | RunRetention |
-| `/api/admin/compaction/run` | RunCompaction |
-| `/api/admin/cluster/rebalance` | **TriggerRebalance soft-stub** — RPC exists, RBAC applies; returns success + message that rebalance is membership-driven (`PartitionsMoved=0`). See [cluster.md](cluster.md) and [ARCHITECTURE known limitations](../../../ARCHITECTURE.md#known-limitations). |
+| `/api/admin/topology` | `GetClusterTopology`: nodes, partition assignments and epochs, with in-sync replicas and offsets asked of each partition's leader. |
+| `/api/admin/partition-health?partition_id=N` | `GetPartitionHealth`: for a partition loaded on the node that answers, high watermark, segment count, active timers, ready events, cold-store entries and the last replay error. `partition_id` is required, and 0 is partition 0. `disk_usage_bytes` and the first-offset and segment timestamps are not filled in. |
+| `/api/admin/replication-lag[?partition_id=N]` | `GetReplicationLag`: leader high watermark and each follower's offset, lag in events and in-sync flag, for partitions **this node leads**; a partition it does not lead, or an RF=1 partition, has no followers listed. Without `partition_id` it aggregates every partition the node leads (its `leader_high_watermark` is then a sum). `lag_seconds` is always 0. |
+| `/api/admin/consumer-groups` | `ListConsumerGroups`: groups known to this node (see [consumer.md](consumer.md)). |
+| `/api/admin/consumer-group-lag?group_id=G&partition_id=N` | `GetConsumerGroupLag`: committed offset, high watermark and lag; `-1` values when the partition is not local or nothing was committed. |
+| `/api/admin/schemas` | `ListSchemas`: topic, latest version and compatibility mode. See [schema.md](schema.md). |
+| `/api/admin/schema?topic=T[&version=V]` | `GetSchema`: one version (0 or absent is the latest); `404` when missing. |
+| `/api/admin/tenant-usage[?tenant_id=T]` | `GetTenantUsage`: in-flight events, storage bytes, configured publish rate. An empty tenant aggregates usage over all known tenants and reports no limits. See [tenant.md](tenant.md). |
+| `POST /api/admin/retention/run` | `RunRetention` (`partition_id`, `max_age_hours`, `max_size_bytes`): `partition_id` 0 or absent means all local partitions. |
+| `POST /api/admin/compaction/run` | `RunCompaction`: `partition_id` is required; 0 means all local partitions. |
+| `POST /api/admin/cluster/rebalance` | `TriggerRebalance` returns gRPC `Unimplemented`, so HTTP `501` (since v0.11.0; it used to return success and move nothing). The Operations view shows the action disabled. See [cluster.md](cluster.md) and [ARCHITECTURE known limitations](../../../ARCHITECTURE.md#known-limitations). |
+
+`partition_id=0` names partition 0 on the HTTP API for `partition-health`,
+`replication-lag` and `consumer-group-lag` (`parsePartitionID` and
+`replicationLag` in `web_handler.go` / `admin_handler.go`). The gRPC
+`GetReplicationLag` keeps 0 as "all partitions", because the field cannot tell
+0 from unset, and retention and compaction take 0 as "all local partitions" on
+both surfaces. The Replication view therefore no longer titles partition 0
+"All Partitions", and says that only a
+partition's leader reports follower offsets. The per-node leader count is
+labelled "Led by this node".
 
 ## Production Decisions
 
@@ -79,10 +92,13 @@ Same handler code as gRPC AdminService
 - **Auth mirrors gRPC.** Bearer JWT, same secret/keys/policy; admin requires
   `Subject.Admin=true`. In `--dev` (auth off) middleware is a pass-through.
 - **gRPC status → HTTP.** NotFound→404, PermissionDenied→403, etc.
-- **Schemas are live; tenant limits are not configured by the shipped server.**
-  The accountant is initialized, but no runtime configuration calls `SetLimits`.
-  The tenant usage view therefore reports zero with `limits_configured: false`;
-  initialization alone does not enable quotas. See [tenant.md](tenant.md).
+- **Schemas are read-only here; tenant limits come from a file.** The schema
+  views list what the node loaded from `<data-dir>/schemas` at start, normally
+  nothing ([schema.md](schema.md)). Without `--tenant-limits-file` nothing calls
+  `SetLimits`, so the tenant view reports zero with `limits_configured: false`;
+  with it, listed subjects show their `max_events_per_second` as
+  `publish_rate_per_sec`. In-flight and storage limits cannot be configured.
+  See [tenant.md](tenant.md).
 - **The topology asks the leaders.** Which replicas of a partition are in
   sync, and their offsets, are known to the node that leads it alone.
   `GetClusterTopology` asks every node that is alive for the partitions it
@@ -100,7 +116,10 @@ Same handler code as gRPC AdminService
 
 ## Debug Pointers
 
-- **404 on `/ui/`:** embed empty — run `make dashboard && make build` and restart.
+- **404 on `/ui/`:** embed empty. The repository checks in a build under
+  `internal/api/web/dist`, which a plain `go build` embeds as it is; it can
+  trail the sources. `make dashboard && make build` stages a fresh one, as does
+  the container build.
 - **401 on JSON:** missing/invalid JWT or subject lacks `admin: true`.
 - **CORS in vite dev:** SPA and API must be same origin for production embed;
   proxy or point fetch base URL when developing SPA against a remote node.

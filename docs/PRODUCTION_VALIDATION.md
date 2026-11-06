@@ -138,8 +138,9 @@ Defects found and fixed:
   value other than the highest delivered offset plus one is rejected. The comment now
   says so; the client library already sends it.
 
-Limits left as they are: replication lag and per-partition health are only reported
-by a partition's leader (the cluster view has the same information from any node);
+Limits left as they are: replication lag is only reported by a partition's leader
+(the cluster view has the same information from any node), while partition health is
+local to each node and answers for any partition the node holds;
 retention and compaction take 0 as "all local partitions", so partition 0 cannot be
 targeted alone; a node serves the dashboard assets compiled into it, and the files
 checked in under `internal/api/web/dist` are older than the source (the Docker build

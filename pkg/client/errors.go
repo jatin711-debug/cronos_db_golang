@@ -9,23 +9,34 @@ import (
 type ErrorKind string
 
 const (
-	// ErrorKindValidation indicates invalid client configuration or arguments.
+	// ErrorKindValidation indicates invalid client configuration or arguments,
+	// or a refusal the server reported in its answer to a publish (a schema
+	// validation failure, a duplicate message ID, an oversized payload), or an
+	// acknowledgement it refused.
 	ErrorKindValidation ErrorKind = "validation"
 	// ErrorKindTimeout indicates a deadline was exceeded.
 	ErrorKindTimeout ErrorKind = "timeout"
-	// ErrorKindAuth indicates authentication or authorization failure.
+	// ErrorKindAuth indicates authentication or authorization failure, as
+	// event lifecycle calls report it. A publish that the server refuses for
+	// authentication comes back as ErrorKindTransport.
 	ErrorKindAuth ErrorKind = "auth"
 	// ErrorKindUnavailable indicates the target is temporarily unreachable.
 	ErrorKindUnavailable ErrorKind = "unavailable"
 	// ErrorKindLeaderChange indicates partition leadership moved; refresh metadata and retry.
+	// The SDK does not currently return it: it retries leader changes itself
+	// and reports what remains as ErrorKindUnavailable.
 	ErrorKindLeaderChange ErrorKind = "leader_change"
 	// ErrorKindMetadataStale indicates cached routing metadata is out of date.
 	ErrorKindMetadataStale ErrorKind = "metadata_stale"
 	// ErrorKindOverloaded indicates the server refused the request because it
-	// is at capacity or a quota is used up. Send less; the request was not
-	// stored.
+	// is at capacity or a quota or publish-rate limit is used up (gRPC
+	// ResourceExhausted). Send less; the request was not stored. The SDK does
+	// not retry it.
 	ErrorKindOverloaded ErrorKind = "overloaded"
-	// ErrorKindTransport indicates a low-level gRPC/network failure.
+	// ErrorKindTransport indicates a low-level gRPC/network failure, or a
+	// publish that failed with a gRPC status the SDK does not retry (an
+	// authentication or permission failure, for example); the status is in the
+	// wrapped error.
 	ErrorKindTransport ErrorKind = "transport"
 	// ErrorKindInternal indicates an unexpected client or server internal error.
 	ErrorKindInternal ErrorKind = "internal"

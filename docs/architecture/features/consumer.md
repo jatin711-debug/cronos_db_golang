@@ -51,6 +51,21 @@ a restart or a failover. Delivery is at least once.
   metadata, floors and sparse progress with the matching WAL generation after
   clearing stale state. See [consistent recovery](../../RETENTION_AND_EVENT_LIFECYCLE.md#consistent-recovery-snapshots-and-backups).
 
+- **Limits on what clients create** (v0.10.0). A group name and a subscription (member) ID are at most 255 bytes (`consumer.MaxGroupIDLength`, `MaxMemberIDLength`), and a partition holds at most `--max-consumer-groups` groups, default 10,000, negative for no limit (`GroupManager.admitGroupLocked`). A group persists with its progress after its subscriptions end, and Subscribe creates one for any name it is given, hence the limit. No RPC deletes a group.
+
+## Consumer-group RPCs
+
+`ConsumerGroupService` (`internal/api/consumer_handler.go`) is an operator API over the group state of the first partition this node loaded (partition 0 in cluster mode, which pins it), not of every partition. With auth on, all four RPCs need global `"admin": true`; they grant no topic permission.
+
+| RPC | Behavior |
+|-----|----------|
+| `CreateConsumerGroup` | Creates a group for a topic and partition list; a refusal (for example the limits above) is `success=false` with `error`, not a gRPC error. |
+| `GetConsumerGroup` | Returns the group's topic, partitions, committed offsets, member offsets and last update time, or `types.ErrConsumerGroupNotFound`. |
+| `ListConsumerGroups` | Every group on that state, with the same metadata. |
+| `RebalanceConsumerGroup` | Reassigns the group's partitions among its members and returns the assignment (`GroupManager.TriggerRebalance`); failures are `success=false`. |
+
+`AdminService` has its own, read-only views for the dashboard (admin as well; see [dashboard.md](dashboard.md)). `AdminService.ListConsumerGroups` lists `(group, topic)` pairs de-duplicated over every local partition, with partitions and member count. `AdminService.GetConsumerGroupLag` takes a group and an explicit partition and returns the committed offset, the partition's high watermark and `lag` (never negative); all three are `-1` when the partition is not local or the group has not committed there.
+
 ## Debug Pointers
 
 - Offset anomalies: [internal/consumer/group.go](../../../internal/consumer/group.go)

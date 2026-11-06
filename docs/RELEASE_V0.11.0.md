@@ -78,7 +78,8 @@ and was not exercised.
 Unchanged from v0.10.0, and still open: multi-host soak, recovery and upgrade
 drills and power-loss testing; automatic lag-triggered snapshot selection; unfinished
 work can pin WAL retention; the dead-letter journal is not compacted. Replication
-lag and per-partition health are reported by a partition's leader only; retention
+lag is reported by a partition's leader only (partition health answers for any
+partition the node holds); retention
 and compaction take partition 0 as "all local partitions". The dashboard assets in
 a binary are those compiled into it: a plain `go build` serves the files checked in
 under `internal/api/web/dist`, which the container build replaces with a fresh build.

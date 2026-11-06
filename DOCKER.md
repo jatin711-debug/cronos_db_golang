@@ -26,8 +26,8 @@ The image holds the server at `/app/cronos-api`, built with cgo and the Rust blo
 
 ### Run single node
 
-> **Note:** Without `--dev`, the server enforces production validation (TLS, auth + policy
-> file, encryption, RF≥3, minISR≥2, replication mTLS) and refuses to boot. Use `--dev` for
+> **Note:** Without `--dev`, the server enforces production validation (cluster mode, TLS, auth +
+> policy file, encryption, RF≥3, minISR≥2, replication mTLS) and refuses to boot. Use `--dev` for
 > local runs; see the production example below for a hardened configuration.
 
 ```bash
@@ -190,7 +190,7 @@ go build -tags clustertest -o bin/cluster_loadtest cluster_loadtest.go
 ### Production deployment example
 
 Production mode refuses to boot unless all of the following are configured:
-`--replication-factor >= 3`, `--min-insync-replicas >= 2`, TLS, auth with a policy file,
+`--cluster`, `--replication-factor >= 3`, `--min-insync-replicas >= 2`, TLS, auth with a policy file,
 encryption at rest, mutual TLS between nodes, `--fsync-mode` `batch` or `every_event`, and
 `--cluster-seeds` naming every node, with `--cluster-bootstrap` on exactly one of them (see
 `internal/config/config.go` `ValidateConfig`).
@@ -245,12 +245,16 @@ over HTTPS, so health checks and Prometheus have to use `https://`.
 > environment (an env file or an orchestrator secret) keeps it out of process listings,
 > where a `--auth-jwt-secret` flag would show.
 
-### v0.8.0 upgrade and lifecycle options
+### Upgrade and lifecycle options
 
-Upgrade every assigned replica, handoff target and Raft voter before relying
-on current-term commitment. Mixed clusters keep legacy accounting until the
-coordinator commits capability agreement. Activation is one-way; downgrade
-to a build that ignores the required formats is unsupported.
+Logs and backups written by v0.8.x or earlier use WAL segment format 1, which
+v0.9.0 and later refuse: start those versions with new, empty data directories
+on every node. From v0.9.0 on the format is unchanged and data directories are
+kept, but stop every node, upgrade and start them again; rolling upgrades and
+mixed-version clusters are unsupported. Current-term commitment (v0.8.0)
+activates once the coordinator commits capability agreement. Activation is
+one-way; downgrade to a build that ignores the required formats is
+unsupported.
 
 `CRONOS_EVENT_LIFECYCLE=true` (or `--event-lifecycle`) separately enables future
 event cancellation/rescheduling. Standalone development use requires RF=1 and

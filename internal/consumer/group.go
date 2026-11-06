@@ -131,7 +131,7 @@ func (g *GroupManager) admitGroupLocked(groupID string) error {
 		limit = DefaultMaxGroups
 	}
 	if limit > 0 && len(g.groups) >= limit {
-		return fmt.Errorf("%w: the partition holds %d, the most it may; delete groups that are no longer used, or raise --max-consumer-groups", ErrTooManyGroups, len(g.groups))
+		return fmt.Errorf("%w: the partition holds %d, the most it may; reuse an existing group or raise --max-consumer-groups", ErrTooManyGroups, len(g.groups))
 	}
 	return nil
 }
