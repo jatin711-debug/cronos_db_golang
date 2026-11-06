@@ -64,6 +64,10 @@ message PublishResponse {
   int64 schedule_ts = 5;
   // Together with offset, identifies this publish even after offset reuse.
   int64 term = 6;
+  // gRPC status code for a failed publish (for example Internal or InvalidArgument).
+  // Zero denotes an older server with an unclassified response. Internal failures
+  // may occur after append; retry with the same message ID and payload.
+  int32 error_code = 7;
 }
 
 // Stable logical identity, preserved across rescheduling and WAL relocation.

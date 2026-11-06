@@ -162,9 +162,15 @@ refuses publishes that retrying at once does not cure:
 | The message ID was already accepted on this topic within `--dedup-ttl` (`duplicate message_id`) | `ErrorKindValidation`, not retried | The event is already stored; do not publish it again. If the message says an earlier publish with this ID is still in progress, retry later |
 | The payload is over 4 MiB, the message ID over 128 bytes, or the topic name over 255 bytes | `ErrorKindValidation`, not retried | Shrink it. `MaxPayloadBytes` and `MaxSendMsgSize` default to 16 MiB, but the server's limit is lower |
 | The node is at capacity (`partition N is at capacity`: its memory, ingest-rate or queue limits; or its disk limit), or the caller's publish rate or quota is used up (`tenant quota exceeded`: the `--tenant-limits-file` limit of `max_events_per_second` per JWT subject, enforced per node) | `ErrorKindOverloaded`, at once and not retried | The event was not stored. Send less, or retry later with backoff; a retry with the same message ID is safe |
-| The write or replication failed after the event reached the log | `ErrorKindValidation` with the server's reason | Retry with the same message ID: the server finishes the earlier publish instead of appending the event again |
-| The leader changed or no node answered, and the retries ran out | `ErrorKindUnavailable` | Retry with the same message ID |
-| Authentication or permission failure | `ErrorKindTransport`; the gRPC status is in the wrapped error | Fix the credentials or the authorization policy |
+| The write or replication failed after the event reached the log | `ErrorKindInternal` with the server's reason | Retry with the same message ID and payload: the server finishes the earlier publish instead of appending the event again |
+| Retries ran out on a leadership/routing refusal | `ErrorKindLeaderChange` | Refresh routing and retry with the same message ID |
+| No node answered and retries ran out | `ErrorKindUnavailable` | Retry with the same message ID |
+| Authentication or permission failure | `ErrorKindAuth`; the gRPC status is in the wrapped error | Fix the credentials or the authorization policy |
+
+These classifications require the updated SDK. Server response failures now carry
+`PublishResponse.error_code`; when talking to older servers (including v0.11.0),
+unclassified response failures retain the legacy `ErrorKindValidation` fallback.
+An internal failure does not prove that an event was never stored.
 
 `SendBatch` does not return these refusals as errors. It returns a
 `BatchSendResult`: `PublishedCount`, `DuplicateCount` and `ErrorCount`, with the

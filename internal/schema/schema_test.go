@@ -280,10 +280,10 @@ func TestRegistry_Validate_UnknownType(t *testing.T) {
 	r.schemas["unknown"] = []Schema{{Topic: "unknown", Type: Type("xml"), Version: 1, Definition: "<xml/>"}}
 	r.mu.Unlock()
 
-	// Unknown types should be allowed by default
+	// Unknown types must fail closed.
 	err := r.Validate("unknown", []byte(`<xml/>`))
-	if err != nil {
-		t.Errorf("unexpected error for unknown type: %v", err)
+	if err == nil {
+		t.Error("unknown schema type must fail closed")
 	}
 }
 

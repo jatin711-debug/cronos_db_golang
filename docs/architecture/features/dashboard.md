@@ -120,7 +120,8 @@ labelled "Led by this node".
   `internal/api/web/dist`, which a plain `go build` embeds as it is; it can
   trail the sources. `make dashboard && make build` stages a fresh one, as does
   the container build.
-- **401 on JSON:** missing/invalid JWT or subject lacks `admin: true`.
+- **401 on JSON:** missing/invalid JWT. **403:** the authenticated subject lacks
+  `admin: true`; the dashboard shows "Admin access required".
 - **CORS in vite dev:** SPA and API must be same origin for production embed;
   proxy or point fetch base URL when developing SPA against a remote node.
 - **Stale UI after rebuild:** re-stage dist and restart the binary (embed is

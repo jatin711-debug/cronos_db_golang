@@ -127,7 +127,11 @@ func (h *WebHandler) authMiddleware(next http.Handler) http.Handler {
 		r, err := h.authorize(r)
 		if err != nil {
 			h.logger.Debug("admin API auth denied", "path", r.URL.Path, "err", err)
-			http.Error(w, err.Error(), http.StatusUnauthorized)
+			code := http.StatusUnauthorized
+			if status.Code(err) == codes.PermissionDenied {
+				code = http.StatusForbidden
+			}
+			h.writeJSON(w, code, map[string]string{"error": err.Error()})
 			return
 		}
 		next.ServeHTTP(w, r)

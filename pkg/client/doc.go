@@ -45,6 +45,11 @@
 //     requires, for example), a duplicate message ID, or an oversized
 //     payload (the server's limit is 4 MiB), comes back from Send as
 //     ErrorKindValidation and is not retried.
+//   - A classified server write or replication failure returns ErrorKindInternal.
+//     The event may already be in the log; retry with the same ID and payload.
+//     Older servers without error_code retain the legacy validation classification.
+//   - Exhausted leadership retries return ErrorKindLeaderChange; publish
+//     authentication and authorization failures return ErrorKindAuth.
 //   - A node that is at capacity, or whose rate limit or quota for the caller
 //     is used up (gRPC ResourceExhausted), comes back from Send as
 //     ErrorKindOverloaded, immediately and without retries. The event was not

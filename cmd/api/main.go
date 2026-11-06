@@ -137,9 +137,9 @@ func run() int {
 	// Initialize schema registry
 	schemaRegistry, err := schema.NewRegistry(cfg.DataDir)
 	if err != nil {
-		slog.Warn("Failed to initialize schema registry", "error", err)
+		slog.Error("Failed to initialize schema registry", "error", err)
+		os.Exit(1)
 	}
-	_ = schemaRegistry
 
 	// Initialize tenant accountant
 	tenantAccountant := tenant.NewAccountant()

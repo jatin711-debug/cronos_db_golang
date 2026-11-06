@@ -17,14 +17,12 @@ const (
 	// ErrorKindTimeout indicates a deadline was exceeded.
 	ErrorKindTimeout ErrorKind = "timeout"
 	// ErrorKindAuth indicates authentication or authorization failure, as
-	// event lifecycle calls report it. A publish that the server refuses for
-	// authentication comes back as ErrorKindTransport.
+	// event lifecycle and publish calls report it.
 	ErrorKindAuth ErrorKind = "auth"
 	// ErrorKindUnavailable indicates the target is temporarily unreachable.
 	ErrorKindUnavailable ErrorKind = "unavailable"
 	// ErrorKindLeaderChange indicates partition leadership moved; refresh metadata and retry.
-	// The SDK does not currently return it: it retries leader changes itself
-	// and reports what remains as ErrorKindUnavailable.
+	// Returned when publish retries end on a leadership/routing refusal.
 	ErrorKindLeaderChange ErrorKind = "leader_change"
 	// ErrorKindMetadataStale indicates cached routing metadata is out of date.
 	ErrorKindMetadataStale ErrorKind = "metadata_stale"
@@ -33,10 +31,8 @@ const (
 	// ResourceExhausted). Send less; the request was not stored. The SDK does
 	// not retry it.
 	ErrorKindOverloaded ErrorKind = "overloaded"
-	// ErrorKindTransport indicates a low-level gRPC/network failure, or a
-	// publish that failed with a gRPC status the SDK does not retry (an
-	// authentication or permission failure, for example); the status is in the
-	// wrapped error.
+	// ErrorKindTransport indicates a low-level gRPC/network failure or an
+	// unclassified non-retryable status; the status is in the wrapped error.
 	ErrorKindTransport ErrorKind = "transport"
 	// ErrorKindInternal indicates an unexpected client or server internal error.
 	ErrorKindInternal ErrorKind = "internal"

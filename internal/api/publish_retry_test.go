@@ -178,6 +178,9 @@ func TestPublishRetry_SingleEvent(t *testing.T) {
 	if err != nil || first.GetSuccess() {
 		t.Fatalf("publish without a follower: %+v %v", first, err)
 	}
+	if first.GetErrorCode() != int32(codes.Internal) {
+		t.Fatalf("post-append replication failure must be internal, got %+v", first)
+	}
 	if err := leader.pm.AddFollower(0, "node-b", follower.serveReplication()); err != nil {
 		t.Fatal(err)
 	}
@@ -191,6 +194,9 @@ func TestPublishRetry_SingleEvent(t *testing.T) {
 	again, err := leader.h.Publish(context.Background(), req)
 	if err != nil || again.GetSuccess() || again.GetError() != "duplicate message_id" {
 		t.Fatalf("publish of an accepted ID: %+v %v", again, err)
+	}
+	if again.GetErrorCode() != int32(codes.InvalidArgument) {
+		t.Fatalf("accepted duplicate must remain a validation refusal, got %+v", again)
 	}
 }
 

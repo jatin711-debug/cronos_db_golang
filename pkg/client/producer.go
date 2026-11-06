@@ -17,6 +17,8 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/pkg/client/internal/retry"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // Message is a single producer payload submitted via Send / SendAsync / SendBatch.
@@ -269,13 +271,15 @@ func (c *Client) NewProducer(cfg ProducerConfig) (*Producer, error) {
 }
 
 // Send publishes one message synchronously. It retries leader changes and
-// unreachable nodes per RetryPolicy and then returns ErrorKindUnavailable. It
+// unreachable nodes per RetryPolicy and then returns ErrorKindLeaderChange or
+// ErrorKindUnavailable, according to the last failure. It
 // returns at once, without retrying, ErrorKindOverloaded when the node is at
 // capacity or a quota or publish-rate limit is used up (the event was not
 // stored), and ErrorKindValidation when the server refuses the event in its
 // answer: a schema validation failure, a duplicate message ID, an oversized
-// payload, or a failed write or replication, which is not necessarily invalid
-// input. After a failed write the server may hold the event; a retry with the
+// payload. Classified server write/replication failures return ErrorKindInternal.
+// Older servers without error_code retain the legacy ErrorKindValidation fallback.
+// After a failed write the server may hold the event; a retry with the
 // same MessageID finishes it rather than publishing it twice.
 func (p *Producer) Send(ctx context.Context, msg Message) (*SendResult, error) {
 	if err := p.acquireInFlight(ctx); err != nil {
@@ -345,6 +349,8 @@ func (p *Producer) Send(ctx context.Context, msg Message) (*SendResult, error) {
 				if isLeaderRelatedMessage(hedgeRes.resp.GetError()) {
 					p.client.MarkMetadataStale()
 					shouldRetry = true
+				} else {
+					return nil, p.wrapErr("producer.send", publishResponseKind(hedgeRes.resp), lastErr)
 				}
 			} else if hedgeErr != nil {
 				lastErr = hedgeErr
@@ -385,7 +391,7 @@ func (p *Producer) Send(ctx context.Context, msg Message) (*SendResult, error) {
 					shouldRetry = true
 					continue
 				}
-				return nil, p.wrapErr("producer.send", ErrorKindTransport, err)
+				return nil, p.wrapErr("producer.send", publishRPCErrorKind(err), err)
 			}
 			if resp == nil {
 				lastErr = fmt.Errorf("nil publish response from %s", addr)
@@ -413,7 +419,7 @@ func (p *Producer) Send(ctx context.Context, msg Message) (*SendResult, error) {
 				shouldRetry = true
 				continue
 			}
-			return nil, p.wrapErr("producer.send", ErrorKindValidation, lastErr)
+			return nil, p.wrapErr("producer.send", publishResponseKind(resp), lastErr)
 		}
 
 		if !shouldRetry {
@@ -424,7 +430,37 @@ func (p *Producer) Send(ctx context.Context, msg Message) (*SendResult, error) {
 	if lastErr == nil {
 		lastErr = fmt.Errorf("publish failed after %d attempts", p.cfg.RetryPolicy.MaxAttempts)
 	}
-	return nil, p.wrapErr("producer.send", ErrorKindUnavailable, lastErr)
+	kind := ErrorKindUnavailable
+	if errs.IsLeaderRelated(lastErr) {
+		kind = ErrorKindLeaderChange
+	}
+	return nil, p.wrapErr("producer.send", kind, lastErr)
+}
+
+func publishRPCErrorKind(err error) ErrorKind {
+	switch status.Code(err) {
+	case codes.Internal, codes.DataLoss:
+		return ErrorKindInternal
+	case codes.Unauthenticated, codes.PermissionDenied:
+		return ErrorKindAuth
+	case codes.InvalidArgument, codes.OutOfRange:
+		return ErrorKindValidation
+	default:
+		return ErrorKindTransport
+	}
+}
+
+func publishResponseKind(resp *types.PublishResponse) ErrorKind {
+	switch codes.Code(resp.GetErrorCode()) {
+	case codes.OK: // Older servers do not send a classification.
+		return ErrorKindValidation
+	case codes.Unavailable:
+		return ErrorKindUnavailable
+	case codes.ResourceExhausted:
+		return ErrorKindOverloaded
+	default:
+		return publishRPCErrorKind(status.Error(codes.Code(resp.GetErrorCode()), resp.GetError()))
+	}
 }
 
 // tryPublish sends a single publish request to the given address.

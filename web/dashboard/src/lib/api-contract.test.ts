@@ -17,4 +17,8 @@ describe("actual Go JSON defaults", () => {
     vi.spyOn(globalThis,"fetch").mockResolvedValue(new Response("missing token",{status:401,statusText:"Unauthorized"}));
     await expect(apiFetch("/api/admin/topology")).rejects.toThrow("401");
   });
+  it("preserves permission denial separately from authentication failure", async () => {
+    vi.spyOn(globalThis,"fetch").mockResolvedValue(new Response(JSON.stringify({error:"admin access required"}),{status:403,statusText:"Forbidden"}));
+    await expect(apiFetch("/api/admin/topology")).rejects.toThrow("403 admin access required");
+  });
 });

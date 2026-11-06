@@ -79,8 +79,7 @@ func NewRegistry(dataDir string) (*Registry, error) {
 		dir:         dir,
 	}
 	if err := r.Load(); err != nil {
-		// Non-fatal: registry starts empty if load fails
-		_ = err
+		return nil, err
 	}
 	return r, nil
 }
@@ -191,7 +190,7 @@ func (r *Registry) Validate(topic string, payload []byte) error {
 	case TypeProtobuf:
 		return validateProtobuf(schema.Definition, payload, schema.Descriptor)
 	default:
-		return nil // Unknown schema type — allow by default
+		return fmt.Errorf("unsupported schema type %q", schema.Type)
 	}
 }
 
@@ -240,8 +239,12 @@ func (r *Registry) List() []SchemaSummary {
 }
 
 // Load reads all schema JSON files from the registry directory into memory.
-// Invalid files are skipped; versions for each topic are sorted ascending.
+// Invalid or unreadable files fail the load without replacing the active registry.
+// Versions for each topic are sorted ascending.
 func (r *Registry) Load() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	loaded := make(map[string][]Schema)
 	entries, err := os.ReadDir(r.dir)
 	if err != nil {
 		return fmt.Errorf("read schema dir: %w", err)
@@ -252,21 +255,44 @@ func (r *Registry) Load() error {
 		}
 		data, err := os.ReadFile(filepath.Join(r.dir, entry.Name()))
 		if err != nil {
-			continue
+			return fmt.Errorf("read schema %s: %w", entry.Name(), err)
 		}
 		var s Schema
 		if err := json.Unmarshal(data, &s); err != nil {
-			continue
+			return fmt.Errorf("decode schema %s: %w", entry.Name(), err)
 		}
-		r.schemas[s.Topic] = append(r.schemas[s.Topic], s)
+		if s.Topic == "" || s.Version < 1 || strings.TrimSpace(s.Definition) == "" {
+			return fmt.Errorf("schema %s requires topic, positive version and definition", entry.Name())
+		}
+		switch s.Type {
+		case TypeJSON:
+			var definition map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(s.Definition), &definition); err != nil || definition == nil {
+				return fmt.Errorf("schema %s has an invalid JSON definition", entry.Name())
+			}
+		case TypeAvro:
+			if !json.Valid([]byte(s.Definition)) {
+				return fmt.Errorf("schema %s has an invalid Avro definition", entry.Name())
+			}
+		case TypeProtobuf:
+		default:
+			return fmt.Errorf("schema %s has unsupported type %q", entry.Name(), s.Type)
+		}
+		loaded[s.Topic] = append(loaded[s.Topic], s)
 	}
 	// Sort versions ascending for each topic
-	for topic, versions := range r.schemas {
+	for topic, versions := range loaded {
 		sort.Slice(versions, func(i, j int) bool {
 			return versions[i].Version < versions[j].Version
 		})
-		r.schemas[topic] = versions
+		for i := 1; i < len(versions); i++ {
+			if versions[i-1].Version == versions[i].Version {
+				return fmt.Errorf("duplicate schema version %d for topic %q", versions[i].Version, topic)
+			}
+		}
+		loaded[topic] = versions
 	}
+	r.schemas = loaded
 	return nil
 }
 

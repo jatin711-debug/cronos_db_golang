@@ -17,11 +17,15 @@ Schema module provides topic schema registration and compatibility checks to red
 
 1. Schemas are registered per topic and version (library call `Registry.Register`; see "What the server exposes").
 2. Compatibility mode validates proposed changes. The default mode is `BACKWARD`; `NONE`, `FORWARD` and `FULL` also exist.
-3. `Publish` and `PublishBatch` call `Registry.Validate` on the latest schema of the event's topic. A topic with no schema accepts every payload, and so does a schema of an unknown type. A refused payload fails with `schema validation failed: ...`.
+3. `Publish` and `PublishBatch` call `Registry.Validate` on the latest schema of the event's topic. A topic with no schema accepts every payload. Unknown schema types are refused. A refused payload fails with `schema validation failed: ...`.
 
 ## What the server exposes
 
 - The shipped server only reads the registry. It loads `<data-dir>/schemas/<topic>_v<N>.json` once at startup, and no RPC, flag or command registers a schema, so the registry is normally empty and every payload is accepted. Register through the Go package or place the version files before starting the node.
+- Unreadable or malformed schema files, unknown types, missing required envelope
+  fields and duplicate topic versions fail startup. A failed reload preserves
+  the previous in-memory registry. Keep the same schema files on every node;
+  configuration distribution is the operator's responsibility.
 - `AdminService.ListSchemas` (topic, latest version, compatibility mode) and `GetSchema` (one version of a topic; version 0 is the latest, `NotFound` when absent) are read-only and require global `"admin": true` when auth is enabled. The dashboard and `cronos-admin admin schema-list` / `schema-get` call them.
 - Compatibility modes are held in memory only and nothing in the server sets one, so `ListSchemas` reports `BACKWARD` for every topic.
 
