@@ -1,0 +1,11 @@
+npm notice run cronos-dashboard@0.1.0 test
+npm notice run vitest run --reporter=dot
+
+ RUN  v4.1.10 <REPO>/web/dashboard
+
+·····················
+
+ Test Files  6 passed (6)
+      Tests  21 passed (21)
+   Start at  16:29:13
+   Duration  43.42s (transform 2.61s, setup 31.32s, import 23.86s, tests 1.75s, environment 189.66s)

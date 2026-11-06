@@ -1,0 +1,396 @@
+#0 building with "desktop-linux" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 4.66kB 0.0s done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/golang:1.26.10-bookworm
+#2 ...
+
+#3 [auth] library/rust:pull token for registry-1.docker.io
+#3 DONE 0.0s
+
+#4 [auth] library/debian:pull token for registry-1.docker.io
+#4 DONE 0.0s
+
+#5 [auth] library/node:pull token for registry-1.docker.io
+#5 DONE 0.0s
+
+#6 [auth] library/golang:pull token for registry-1.docker.io
+#6 DONE 0.0s
+
+#7 [internal] load metadata for docker.io/library/rust:1.86
+#7 ...
+
+#8 [internal] load metadata for docker.io/library/debian:bookworm-slim
+#8 DONE 2.3s
+
+#7 [internal] load metadata for docker.io/library/rust:1.86
+#7 DONE 2.4s
+
+#9 [internal] load metadata for docker.io/library/node:24-bookworm-slim
+#9 ...
+
+#2 [internal] load metadata for docker.io/library/golang:1.26.10-bookworm
+#2 DONE 3.0s
+
+#9 [internal] load metadata for docker.io/library/node:24-bookworm-slim
+#9 DONE 3.0s
+
+#10 [internal] load .dockerignore
+#10 transferring context: 1.07kB 0.0s done
+#10 DONE 0.1s
+
+#11 [internal] load build context
+#11 DONE 0.0s
+
+#12 [dashboard-builder 1/6] FROM docker.io/library/node:24-bookworm-slim@sha256:6042915a8b58012e6699f998ed96bca43ec9d8582447bdb68bc2445d0fafeb79
+#12 resolve docker.io/library/node:24-bookworm-slim@sha256:6042915a8b58012e6699f998ed96bca43ec9d8582447bdb68bc2445d0fafeb79
+#12 ...
+
+#13 [go-builder  1/10] FROM docker.io/library/golang:1.26.10-bookworm@sha256:23ce71337b726608afb1bc00986e630a05034a87a87ea1fc2cd1ae5cf33387eb
+#13 resolve docker.io/library/golang:1.26.10-bookworm@sha256:23ce71337b726608afb1bc00986e630a05034a87a87ea1fc2cd1ae5cf33387eb 0.2s done
+#13 DONE 0.2s
+
+#14 [rust-builder 1/8] FROM docker.io/library/rust:1.86@sha256:300ec56abce8cc9448ddea2172747d048ed902a3090e6b57babb2bf19f754081
+#14 resolve docker.io/library/rust:1.86@sha256:300ec56abce8cc9448ddea2172747d048ed902a3090e6b57babb2bf19f754081 0.2s done
+#14 DONE 0.2s
+
+#15 [runtime 1/9] FROM docker.io/library/debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc
+#15 resolve docker.io/library/debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc 0.2s done
+#15 CACHED
+
+#12 [dashboard-builder 1/6] FROM docker.io/library/node:24-bookworm-slim@sha256:6042915a8b58012e6699f998ed96bca43ec9d8582447bdb68bc2445d0fafeb79
+#12 resolve docker.io/library/node:24-bookworm-slim@sha256:6042915a8b58012e6699f998ed96bca43ec9d8582447bdb68bc2445d0fafeb79 0.2s done
+#12 DONE 0.2s
+
+#11 [internal] load build context
+#11 transferring context: 22.45kB 0.1s done
+#11 DONE 0.1s
+
+#16 [runtime 2/9] RUN apt-get -o Acquire::Retries=0 update && apt-get -o Acquire::Retries=0 upgrade -y && apt-get -o Acquire::Retries=0 install -y --no-install-recommends     ca-certificates     tzdata     curl     && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' apt)" ge 2.6.2     && rm -rf /var/lib/apt/lists/*
+#16 ...
+
+#17 [rust-builder 5/8] COPY internal/dedup/rust/Cargo.toml ./
+#17 CACHED
+
+#18 [rust-builder 4/8] COPY internal/dedup/rust/src ./src
+#18 CACHED
+
+#19 [rust-builder 2/8] WORKDIR /build/rust-dedup
+#19 CACHED
+
+#20 [rust-builder 3/8] RUN apt-get -o Acquire::Retries=0 update && apt-get -o Acquire::Retries=0 install -y --no-install-recommends     gcc     libc6-dev     && rm -rf /var/lib/apt/lists/*
+#20 CACHED
+
+#21 [dashboard-builder 5/6] COPY web/dashboard/ ./
+#21 CACHED
+
+#22 [go-builder  5/10] RUN go mod download
+#22 CACHED
+
+#23 [dashboard-builder 4/6] RUN npm ci
+#23 CACHED
+
+#24 [go-builder  3/10] WORKDIR /build/go-app
+#24 CACHED
+
+#25 [go-builder  4/10] COPY go.mod go.sum ./
+#25 CACHED
+
+#26 [go-builder  2/10] RUN apt-get -o Acquire::Retries=0 update && apt-get -o Acquire::Retries=0 install -y --no-install-recommends     gcc     libc6-dev     && rm -rf /var/lib/apt/lists/*
+#26 CACHED
+
+#27 [go-builder  6/10] COPY . .
+#27 CACHED
+
+#28 [dashboard-builder 2/6] WORKDIR /build/dashboard
+#28 CACHED
+
+#29 [dashboard-builder 6/6] RUN npm run build
+#29 CACHED
+
+#30 [dashboard-builder 3/6] COPY web/dashboard/package.json web/dashboard/package-lock.json ./
+#30 CACHED
+
+#31 [rust-builder 6/8] COPY internal/dedup/rust/Cargo.lock ./
+#31 CACHED
+
+#32 [go-builder  7/10] COPY --from=dashboard-builder /build/dashboard/dist/ ./internal/api/web/dist/
+#32 CACHED
+
+#33 [rust-builder 7/8] RUN cargo build --release --locked
+#33 1.296     Updating crates.io index
+#33 5.976  Downloading crates ...
+#33 ...
+
+#16 [runtime 2/9] RUN apt-get -o Acquire::Retries=0 update && apt-get -o Acquire::Retries=0 upgrade -y && apt-get -o Acquire::Retries=0 install -y --no-install-recommends     ca-certificates     tzdata     curl     && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' apt)" ge 2.6.2     && rm -rf /var/lib/apt/lists/*
+#16 1.243 Get:1 http://deb.debian.org/debian bookworm InRelease [151 kB]
+#16 1.405 Get:2 http://deb.debian.org/debian bookworm-updates InRelease [55.4 kB]
+#16 1.478 Get:3 http://deb.debian.org/debian-security bookworm-security InRelease [34.8 kB]
+#16 1.540 Get:4 http://deb.debian.org/debian bookworm/main amd64 Packages [8790 kB]
+#16 4.144 Get:5 http://deb.debian.org/debian bookworm-updates/main amd64 Packages [6924 B]
+#16 4.201 Get:6 http://deb.debian.org/debian-security bookworm-security/main amd64 Packages [361 kB]
+#16 5.506 Fetched 9399 kB in 4s (2115 kB/s)
+#16 5.506 Reading package lists...
+#16 6.454 Reading package lists...
+#16 ...
+
+#33 [rust-builder 7/8] RUN cargo build --release --locked
+#33 6.710   Downloaded cfg-if v1.0.4
+#33 6.760   Downloaded ppv-lite86 v0.2.21
+#33 6.846   Downloaded rand_core v0.6.4
+#33 6.874   Downloaded rand_chacha v0.3.1
+#33 6.914   Downloaded twox-hash v1.6.3
+#33 6.923   Downloaded either v1.15.0
+#33 6.931   Downloaded getrandom v0.2.16
+#33 6.951   Downloaded crossbeam-epoch v0.9.20
+#33 6.980   Downloaded static_assertions v1.1.0
+#33 6.985   Downloaded crossbeam-deque v0.8.6
+#33 7.027   Downloaded crossbeam-utils v0.8.21
+#33 7.063   Downloaded rayon-core v1.13.0
+#33 7.124   Downloaded rand v0.8.6
+#33 7.328   Downloaded rayon v1.11.0
+#33 7.376   Downloaded zerocopy v0.8.31
+#33 7.856   Downloaded libc v0.2.178
+#33 8.181    Compiling libc v0.2.178
+#33 8.181    Compiling zerocopy v0.8.31
+#33 8.181    Compiling crossbeam-utils v0.8.21
+#33 8.182    Compiling cfg-if v1.0.4
+#33 8.183    Compiling crossbeam-epoch v0.9.20
+#33 8.184    Compiling rayon-core v1.13.0
+#33 8.192    Compiling either v1.15.0
+#33 8.192    Compiling static_assertions v1.1.0
+#33 10.35    Compiling crossbeam-deque v0.8.6
+#33 10.80    Compiling getrandom v0.2.16
+#33 10.94    Compiling rand_core v0.6.4
+#33 11.28    Compiling rayon v1.11.0
+#33 12.51    Compiling ppv-lite86 v0.2.21
+#33 13.01    Compiling rand_chacha v0.3.1
+#33 13.30    Compiling rand v0.8.6
+#33 14.10    Compiling twox-hash v1.6.3
+#33 15.14    Compiling cronos_dedup v0.1.0 (/build/rust-dedup)
+#33 ...
+
+#16 [runtime 2/9] RUN apt-get -o Acquire::Retries=0 update && apt-get -o Acquire::Retries=0 upgrade -y && apt-get -o Acquire::Retries=0 install -y --no-install-recommends     ca-certificates     tzdata     curl     && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' apt)" ge 2.6.2     && rm -rf /var/lib/apt/lists/*
+#16 6.454 Reading package lists...
+#16 7.528 Building dependency tree...
+#16 7.982 Reading state information...
+#16 8.063 Calculating upgrade...
+#16 8.843 0 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.
+#16 8.862 Reading package lists...
+#16 10.23 Building dependency tree...
+#16 10.67 Reading state information...
+#16 11.04 tzdata is already the newest version (2026f-0+deb12u1).
+#16 11.04 tzdata set to manually installed.
+#16 11.04 The following additional packages will be installed:
+#16 11.04   libbrotli1 libcurl4 libgssapi-krb5-2 libk5crypto3 libkeyutils1 libkrb5-3
+#16 11.04   libkrb5support0 libldap-2.5-0 libnghttp2-14 libpsl5 librtmp1 libsasl2-2
+#16 11.04   libsasl2-modules-db libssh2-1 libssl3 openssl
+#16 11.04 Suggested packages:
+#16 11.04   krb5-doc krb5-user
+#16 11.04 Recommended packages:
+#16 11.04   krb5-locales libldap-common publicsuffix libsasl2-modules
+#16 11.18 The following NEW packages will be installed:
+#16 11.18   ca-certificates curl libbrotli1 libcurl4 libgssapi-krb5-2 libk5crypto3
+#16 11.18   libkeyutils1 libkrb5-3 libkrb5support0 libldap-2.5-0 libnghttp2-14 libpsl5
+#16 11.19   librtmp1 libsasl2-2 libsasl2-modules-db libssh2-1 libssl3 openssl
+#16 11.78 0 upgraded, 18 newly installed, 0 to remove and 0 not upgraded.
+#16 11.78 Need to get 5846 kB of archives.
+#16 11.78 After this operation, 14.8 MB of additional disk space will be used.
+#16 11.78 Get:1 http://deb.debian.org/debian-security bookworm-security/main amd64 libssl3 amd64 3.0.22-1~deb12u2 [2040 kB]
+#16 13.16 Get:2 http://deb.debian.org/debian-security bookworm-security/main amd64 openssl amd64 3.0.22-1~deb12u2 [1442 kB]
+#16 13.70 Get:3 http://deb.debian.org/debian-security bookworm-security/main amd64 ca-certificates all 20250419~deb12u2 [161 kB]
+#16 15.04 Get:4 http://deb.debian.org/debian-security bookworm-security/main amd64 libbrotli1 amd64 1.0.9-2+deb12u1 [275 kB]
+#16 15.08 Get:5 http://deb.debian.org/debian bookworm/main amd64 libkrb5support0 amd64 1.20.1-2+deb12u5 [33.2 kB]
+#16 15.09 Get:6 http://deb.debian.org/debian bookworm/main amd64 libk5crypto3 amd64 1.20.1-2+deb12u5 [79.7 kB]
+#16 15.09 Get:7 http://deb.debian.org/debian bookworm/main amd64 libkeyutils1 amd64 1.6.3-2 [8808 B]
+#16 15.09 Get:8 http://deb.debian.org/debian bookworm/main amd64 libkrb5-3 amd64 1.20.1-2+deb12u5 [332 kB]
+#16 15.12 Get:9 http://deb.debian.org/debian bookworm/main amd64 libgssapi-krb5-2 amd64 1.20.1-2+deb12u5 [135 kB]
+#16 15.13 Get:10 http://deb.debian.org/debian-security bookworm-security/main amd64 libsasl2-modules-db amd64 2.1.28+dfsg-10+deb12u1 [20.5 kB]
+#16 15.13 Get:11 http://deb.debian.org/debian-security bookworm-security/main amd64 libsasl2-2 amd64 2.1.28+dfsg-10+deb12u1 [59.9 kB]
+#16 15.15 Get:12 http://deb.debian.org/debian bookworm/main amd64 libldap-2.5-0 amd64 2.5.13+dfsg-5 [183 kB]
+#16 15.27 Get:13 http://deb.debian.org/debian bookworm/main amd64 libnghttp2-14 amd64 1.52.0-1+deb12u3 [72.4 kB]
+#16 15.30 Get:14 http://deb.debian.org/debian bookworm/main amd64 libpsl5 amd64 0.21.2-1 [58.7 kB]
+#16 15.32 Get:15 http://deb.debian.org/debian bookworm/main amd64 librtmp1 amd64 2.4+20151223.gitfa8646d.1-2+b2 [60.8 kB]
+#16 15.35 Get:16 http://deb.debian.org/debian-security bookworm-security/main amd64 libssh2-1 amd64 1.10.0-3+deb12u1 [176 kB]
+#16 15.38 Get:17 http://deb.debian.org/debian bookworm/main amd64 libcurl4 amd64 7.88.1-10+deb12u15 [392 kB]
+#16 15.50 Get:18 http://deb.debian.org/debian bookworm/main amd64 curl amd64 7.88.1-10+deb12u15 [316 kB]
+#16 ...
+
+#33 [rust-builder 7/8] RUN cargo build --release --locked
+#33 15.56     Finished `release` profile [optimized] target(s) in 14.56s
+#33 DONE 15.8s
+
+#16 [runtime 2/9] RUN apt-get -o Acquire::Retries=0 update && apt-get -o Acquire::Retries=0 upgrade -y && apt-get -o Acquire::Retries=0 install -y --no-install-recommends     ca-certificates     tzdata     curl     && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' apt)" ge 2.6.2     && rm -rf /var/lib/apt/lists/*
+#16 15.93 debconf: delaying package configuration, since apt-utils is not installed
+#16 15.98 Fetched 5846 kB in 4s (1345 kB/s)
+#16 16.03 Selecting previously unselected package libssl3:amd64.
+#16 16.03 (Reading database ... 
+(Reading database ... 5%
+(Reading database ... 10%
+(Reading database ... 15%
+(Reading database ... 20%
+(Reading database ... 25%
+(Reading database ... 30%
+(Reading database ... 35%
+(Reading database ... 40%
+(Reading database ... 45%
+(Reading database ... 50%
+(Reading database ... 55%
+(Reading database ... 60%
+(Reading database ... 65%
+(Reading database ... 70%
+(Reading database ... 75%
+(Reading database ... 80%
+(Reading database ... 85%
+(Reading database ... 90%
+(Reading database ... 95%
+(Reading database ... 100%
+(Reading database ... 6096 files and directories currently installed.)
+#16 16.07 Preparing to unpack .../00-libssl3_3.0.22-1~deb12u2_amd64.deb ...
+#16 16.09 Unpacking libssl3:amd64 (3.0.22-1~deb12u2) ...
+#16 16.31 Selecting previously unselected package openssl.
+#16 ...
+
+#34 [rust-builder 8/8] RUN cp target/release/libcronos_dedup.so /build/libcronos_dedup.so
+#34 DONE 0.5s
+
+#16 [runtime 2/9] RUN apt-get -o Acquire::Retries=0 update && apt-get -o Acquire::Retries=0 upgrade -y && apt-get -o Acquire::Retries=0 install -y --no-install-recommends     ca-certificates     tzdata     curl     && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' apt)" ge 2.6.2     && rm -rf /var/lib/apt/lists/*
+#16 16.31 Preparing to unpack .../01-openssl_3.0.22-1~deb12u2_amd64.deb ...
+#16 16.32 Unpacking openssl (3.0.22-1~deb12u2) ...
+#16 16.52 Selecting previously unselected package ca-certificates.
+#16 16.52 Preparing to unpack .../02-ca-certificates_20250419~deb12u2_all.deb ...
+#16 16.53 Unpacking ca-certificates (20250419~deb12u2) ...
+#16 ...
+
+#35 [go-builder  8/10] COPY --from=rust-builder /build/libcronos_dedup.so /build/go-app/libcronos_dedup.so
+#35 DONE 0.2s
+
+#16 [runtime 2/9] RUN apt-get -o Acquire::Retries=0 update && apt-get -o Acquire::Retries=0 upgrade -y && apt-get -o Acquire::Retries=0 install -y --no-install-recommends     ca-certificates     tzdata     curl     && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' apt)" ge 2.6.2     && rm -rf /var/lib/apt/lists/*
+#16 16.67 Selecting previously unselected package libbrotli1:amd64.
+#16 16.67 Preparing to unpack .../03-libbrotli1_1.0.9-2+deb12u1_amd64.deb ...
+#16 16.68 Unpacking libbrotli1:amd64 (1.0.9-2+deb12u1) ...
+#16 16.78 Selecting previously unselected package libkrb5support0:amd64.
+#16 16.78 Preparing to unpack .../04-libkrb5support0_1.20.1-2+deb12u5_amd64.deb ...
+#16 16.79 Unpacking libkrb5support0:amd64 (1.20.1-2+deb12u5) ...
+#16 16.86 Selecting previously unselected package libk5crypto3:amd64.
+#16 16.86 Preparing to unpack .../05-libk5crypto3_1.20.1-2+deb12u5_amd64.deb ...
+#16 16.87 Unpacking libk5crypto3:amd64 (1.20.1-2+deb12u5) ...
+#16 16.94 Selecting previously unselected package libkeyutils1:amd64.
+#16 16.94 Preparing to unpack .../06-libkeyutils1_1.6.3-2_amd64.deb ...
+#16 16.95 Unpacking libkeyutils1:amd64 (1.6.3-2) ...
+#16 17.01 Selecting previously unselected package libkrb5-3:amd64.
+#16 17.01 Preparing to unpack .../07-libkrb5-3_1.20.1-2+deb12u5_amd64.deb ...
+#16 17.02 Unpacking libkrb5-3:amd64 (1.20.1-2+deb12u5) ...
+#16 17.11 Selecting previously unselected package libgssapi-krb5-2:amd64.
+#16 17.11 Preparing to unpack .../08-libgssapi-krb5-2_1.20.1-2+deb12u5_amd64.deb ...
+#16 17.12 Unpacking libgssapi-krb5-2:amd64 (1.20.1-2+deb12u5) ...
+#16 17.18 Selecting previously unselected package libsasl2-modules-db:amd64.
+#16 17.18 Preparing to unpack .../09-libsasl2-modules-db_2.1.28+dfsg-10+deb12u1_amd64.deb ...
+#16 17.19 Unpacking libsasl2-modules-db:amd64 (2.1.28+dfsg-10+deb12u1) ...
+#16 17.25 Selecting previously unselected package libsasl2-2:amd64.
+#16 17.25 Preparing to unpack .../10-libsasl2-2_2.1.28+dfsg-10+deb12u1_amd64.deb ...
+#16 17.26 Unpacking libsasl2-2:amd64 (2.1.28+dfsg-10+deb12u1) ...
+#16 17.34 Selecting previously unselected package libldap-2.5-0:amd64.
+#16 17.34 Preparing to unpack .../11-libldap-2.5-0_2.5.13+dfsg-5_amd64.deb ...
+#16 17.35 Unpacking libldap-2.5-0:amd64 (2.5.13+dfsg-5) ...
+#16 17.44 Selecting previously unselected package libnghttp2-14:amd64.
+#16 17.45 Preparing to unpack .../12-libnghttp2-14_1.52.0-1+deb12u3_amd64.deb ...
+#16 17.46 Unpacking libnghttp2-14:amd64 (1.52.0-1+deb12u3) ...
+#16 17.53 Selecting previously unselected package libpsl5:amd64.
+#16 17.53 Preparing to unpack .../13-libpsl5_0.21.2-1_amd64.deb ...
+#16 17.54 Unpacking libpsl5:amd64 (0.21.2-1) ...
+#16 17.60 Selecting previously unselected package librtmp1:amd64.
+#16 17.60 Preparing to unpack .../14-librtmp1_2.4+20151223.gitfa8646d.1-2+b2_amd64.deb ...
+#16 17.61 Unpacking librtmp1:amd64 (2.4+20151223.gitfa8646d.1-2+b2) ...
+#16 17.67 Selecting previously unselected package libssh2-1:amd64.
+#16 17.67 Preparing to unpack .../15-libssh2-1_1.10.0-3+deb12u1_amd64.deb ...
+#16 17.68 Unpacking libssh2-1:amd64 (1.10.0-3+deb12u1) ...
+#16 17.77 Selecting previously unselected package libcurl4:amd64.
+#16 17.77 Preparing to unpack .../16-libcurl4_7.88.1-10+deb12u15_amd64.deb ...
+#16 17.78 Unpacking libcurl4:amd64 (7.88.1-10+deb12u15) ...
+#16 17.88 Selecting previously unselected package curl.
+#16 17.88 Preparing to unpack .../17-curl_7.88.1-10+deb12u15_amd64.deb ...
+#16 17.89 Unpacking curl (7.88.1-10+deb12u15) ...
+#16 18.00 Setting up libkeyutils1:amd64 (1.6.3-2) ...
+#16 18.03 Setting up libpsl5:amd64 (0.21.2-1) ...
+#16 18.06 Setting up libbrotli1:amd64 (1.0.9-2+deb12u1) ...
+#16 18.08 Setting up libssl3:amd64 (3.0.22-1~deb12u2) ...
+#16 18.10 Setting up libnghttp2-14:amd64 (1.52.0-1+deb12u3) ...
+#16 18.12 Setting up libkrb5support0:amd64 (1.20.1-2+deb12u5) ...
+#16 18.13 Setting up libsasl2-modules-db:amd64 (2.1.28+dfsg-10+deb12u1) ...
+#16 18.15 Setting up librtmp1:amd64 (2.4+20151223.gitfa8646d.1-2+b2) ...
+#16 18.17 Setting up libk5crypto3:amd64 (1.20.1-2+deb12u5) ...
+#16 18.19 Setting up libsasl2-2:amd64 (2.1.28+dfsg-10+deb12u1) ...
+#16 18.21 Setting up libssh2-1:amd64 (1.10.0-3+deb12u1) ...
+#16 18.22 Setting up libkrb5-3:amd64 (1.20.1-2+deb12u5) ...
+#16 18.24 Setting up openssl (3.0.22-1~deb12u2) ...
+#16 18.27 Setting up libldap-2.5-0:amd64 (2.5.13+dfsg-5) ...
+#16 18.29 Setting up ca-certificates (20250419~deb12u2) ...
+#16 18.43 debconf: unable to initialize frontend: Dialog
+#16 18.43 debconf: (TERM is not set, so the dialog frontend is not usable.)
+#16 18.43 debconf: falling back to frontend: Readline
+#16 18.43 debconf: unable to initialize frontend: Readline
+#16 18.43 debconf: (Can't locate Term/ReadLine.pm in @INC (you may need to install the Term::ReadLine module) (@INC contains: /etc/perl /usr/local/lib/x86_64-linux-gnu/perl/5.36.0 /usr/local/share/perl/5.36.0 /usr/lib/x86_64-linux-gnu/perl5/5.36 /usr/share/perl5 /usr/lib/x86_64-linux-gnu/perl-base /usr/lib/x86_64-linux-gnu/perl/5.36 /usr/share/perl/5.36 /usr/local/lib/site_perl) at /usr/share/perl5/Debconf/FrontEnd/Readline.pm line 7.)
+#16 18.43 debconf: falling back to frontend: Teletype
+#16 19.46 Updating certificates in /etc/ssl/certs...
+#16 20.47 148 added, 0 removed; done.
+#16 20.53 Setting up libgssapi-krb5-2:amd64 (1.20.1-2+deb12u5) ...
+#16 20.55 Setting up libcurl4:amd64 (7.88.1-10+deb12u15) ...
+#16 20.57 Setting up curl (7.88.1-10+deb12u15) ...
+#16 20.59 Processing triggers for libc-bin (2.36-9+deb12u14) ...
+#16 20.65 Processing triggers for ca-certificates (20250419~deb12u2) ...
+#16 20.66 Updating certificates in /etc/ssl/certs...
+#16 21.39 0 added, 0 removed; done.
+#16 21.39 Running hooks in /etc/ca-certificates/update.d...
+#16 21.39 done.
+#16 DONE 21.6s
+
+#36 [go-builder  9/10] RUN go build -trimpath -ldflags="-linkmode=external" -o /cronos-api ./cmd/api
+#36 ...
+
+#37 [runtime 3/9] RUN groupadd -g 1000 cronos &&     useradd -u 1000 -g cronos -s /bin/sh -m cronos
+#37 DONE 0.8s
+
+#36 [go-builder  9/10] RUN go build -trimpath -ldflags="-linkmode=external" -o /cronos-api ./cmd/api
+#36 ...
+
+#38 [runtime 4/9] WORKDIR /app
+#38 DONE 0.1s
+
+#36 [go-builder  9/10] RUN go build -trimpath -ldflags="-linkmode=external" -o /cronos-api ./cmd/api
+#36 DONE 57.4s
+
+#39 [go-builder 10/10] RUN CGO_ENABLED=0 go build -trimpath -o /cronos-admin ./cmd/admin
+#39 DONE 10.3s
+
+#40 [runtime 5/9] COPY --from=go-builder /cronos-api /app/cronos-api
+#40 DONE 0.5s
+
+#41 [runtime 6/9] COPY --from=go-builder /cronos-admin /app/cronos-admin
+#41 DONE 0.3s
+
+#42 [runtime 7/9] COPY --from=rust-builder /build/libcronos_dedup.so /app/libcronos_dedup.so
+#42 DONE 0.1s
+
+#43 [runtime 8/9] COPY --from=rust-builder /build/libcronos_dedup.so /usr/lib/x86_64-linux-gnu/libcronos_dedup.so
+#43 DONE 0.1s
+
+#44 [runtime 9/9] RUN mkdir -p /data/partitions && chown -R cronos:cronos /data
+#44 DONE 0.6s
+
+#45 exporting to image
+#45 exporting layers
+#45 exporting layers 5.0s done
+#45 exporting manifest sha256:6a661585d17ce18838d92b54f520cd51c55f5d401db904ca27c7dc5c326455cf 0.0s done
+#45 exporting config sha256:aeef82bb32a7d6c11f1e56ad4cd40c50599048c4cc35212f76a974a457c9ca33 0.0s done
+#45 exporting attestation manifest sha256:a4573b1534ec6291340967ccc63c3443757729e7a2411611ea7420b600a89e42
+#45 exporting attestation manifest sha256:a4573b1534ec6291340967ccc63c3443757729e7a2411611ea7420b600a89e42 0.1s done
+#45 exporting manifest list sha256:22ee76ee3f088cf433bcd4628081f2538856d105a9aa56d22290ca67053c4632 0.0s done
+#45 naming to docker.io/library/cronos-db:audit-fixes-final done
+#45 unpacking to docker.io/library/cronos-db:audit-fixes-final
+#45 unpacking to docker.io/library/cronos-db:audit-fixes-final 0.8s done
+#45 DONE 6.0s
+
+View build details: docker-desktop://dashboard/build/desktop-linux/desktop-linux/i33rkps821hcx0f3pxpwa2ktd

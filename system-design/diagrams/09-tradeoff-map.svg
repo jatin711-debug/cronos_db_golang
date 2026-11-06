@@ -1,0 +1,99 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 748" width="1000" height="748" role="img" aria-labelledby="title desc" font-family="'Segoe UI', system-ui, -apple-system, BlinkMacSystemFont, Roboto, 'Helvetica Neue', Arial, sans-serif">
+  <title id="title">Where CronosDB sits on the classic trade-offs</title>
+  <desc id="desc">Nine design trade-offs as sliders: log durability versus append speed (configurable by fsync mode), consistency versus availability for event data (configurable by min-insync-replicas) and for cluster metadata (always consistent, via Raft), timer exactness versus cost, dedup exactness versus memory, delivery guarantee (at-least-once), ordering versus parallelism, elastic versus simple partitioning, and reuse versus build.</desc>
+  <defs>
+  </defs>
+
+  <!-- card: the diagram brings its own background so it reads on light and dark pages -->
+  <rect x="0.5" y="0.5" width="999" height="747" rx="14" fill="#ffffff" stroke="#d0d7de"/>
+  <text x="28" y="37" font-size="20" font-weight="700" fill="#1f2328">Where CronosDB sits on the classic trade-offs</text>
+  <text x="28" y="58" font-size="12.5" fill="#57606a">Nothing here is free. Each row is one decision: the two things it trades, where this system landed, and why.</text>
+  <rect x="28" y="86" width="138" height="26" rx="13" fill="#e7f6ed" stroke="#2e8b57" stroke-width="1.2"/>
+  <text x="97" y="103.2" font-size="11.3" fill="#145232" text-anchor="middle" font-weight="700">Log durability</text>
+  <text x="358" y="103.2" font-size="11.8" fill="#1f2328" text-anchor="end" font-weight="600">survive power loss</text>
+  <text x="666" y="103.2" font-size="11.8" fill="#1f2328" font-weight="600">fastest appends</text>
+  <rect x="372" y="96" width="280" height="6" rx="3" fill="#d8dee4"/>
+  <rect x="372" y="92" width="280" height="14" rx="7" fill="#2e8b57" fill-opacity="0.45"/>
+  <circle cx="428" cy="99" r="7.5" fill="#2e8b57" stroke="#ffffff" stroke-width="2.2"/>
+  <text x="972" y="103" font-size="10" fill="#57606a" text-anchor="end" font-family="ui-monospace, 'Cascadia Mono', 'SF Mono', Consolas, Menlo, monospace">--fsync-mode</text>
+  <text x="180" y="126" font-size="10.9" fill="#57606a">every_event and batch (default) sync to disk before answering. periodic syncs once a second and can lose that second.</text>
+  <line x1="28" y1="143" x2="972" y2="143" stroke="#eaeef2" stroke-width="1"/>
+  <rect x="28" y="156" width="138" height="26" rx="13" fill="#eaf2fe" stroke="#3b78d8" stroke-width="1.2"/>
+  <text x="97" y="173.2" font-size="11.3" fill="#0b3a7e" text-anchor="middle" font-weight="700">Event data</text>
+  <text x="358" y="173.2" font-size="11.8" fill="#1f2328" text-anchor="end" font-weight="600">consistent: refuse writes</text>
+  <text x="666" y="173.2" font-size="11.8" fill="#1f2328" font-weight="600">available: always accept</text>
+  <rect x="372" y="166" width="280" height="6" rx="3" fill="#d8dee4"/>
+  <rect x="388.8" y="162" width="263.2" height="14" rx="7" fill="#3b78d8" fill-opacity="0.45"/>
+  <circle cx="411.2" cy="169" r="7.5" fill="#3b78d8" stroke="#ffffff" stroke-width="2.2"/>
+  <text x="972" y="173" font-size="10" fill="#57606a" text-anchor="end" font-family="ui-monospace, 'Cascadia Mono', 'SF Mono', Consolas, Menlo, monospace">--min-insync-replicas</text>
+  <text x="180" y="196" font-size="10.9" fill="#57606a">min-insync 2 of 3 (required outside --dev): no quorum, no write. min-insync 1 (the default): always writable, but a leader crash can lose acknowledged</text>
+  <text x="180" y="210.8" font-size="10.9" fill="#57606a">events.</text>
+  <line x1="28" y1="213" x2="972" y2="213" stroke="#eaeef2" stroke-width="1"/>
+  <rect x="28" y="226" width="138" height="26" rx="13" fill="#f2ecfd" stroke="#7c4ddb" stroke-width="1.2"/>
+  <text x="97" y="243.2" font-size="11.3" fill="#3d1f85" text-anchor="middle" font-weight="700">Cluster metadata</text>
+  <text x="358" y="243.2" font-size="11.8" fill="#1f2328" text-anchor="end" font-weight="600">consistent</text>
+  <text x="666" y="243.2" font-size="11.8" fill="#1f2328" font-weight="600">available</text>
+  <rect x="372" y="236" width="280" height="6" rx="3" fill="#d8dee4"/>
+  <circle cx="383.2" cy="239" r="7.5" fill="#7c4ddb" stroke="#ffffff" stroke-width="2.2"/>
+  <text x="972" y="243" font-size="10" fill="#57606a" text-anchor="end" font-family="ui-monospace, 'Cascadia Mono', 'SF Mono', Consolas, Menlo, monospace">Raft</text>
+  <text x="180" y="266" font-size="10.9" fill="#57606a">Leadership only changes with a Raft majority. Without one, healthy leaders keep serving but no failover can happen.</text>
+  <line x1="28" y1="283" x2="972" y2="283" stroke="#eaeef2" stroke-width="1"/>
+  <rect x="28" y="296" width="138" height="26" rx="13" fill="#fff4d9" stroke="#c98a00" stroke-width="1.2"/>
+  <text x="97" y="313.2" font-size="11.3" fill="#6b4700" text-anchor="middle" font-weight="700">Timers</text>
+  <text x="358" y="313.2" font-size="11.8" fill="#1f2328" text-anchor="end" font-weight="600">exact firing time</text>
+  <text x="666" y="313.2" font-size="11.8" fill="#1f2328" font-weight="600">constant work per timer</text>
+  <rect x="372" y="306" width="280" height="6" rx="3" fill="#d8dee4"/>
+  <circle cx="596" cy="309" r="7.5" fill="#c98a00" stroke="#ffffff" stroke-width="2.2"/>
+  <text x="972" y="313" font-size="10" fill="#57606a" text-anchor="end" font-family="ui-monospace, 'Cascadia Mono', 'SF Mono', Consolas, Menlo, monospace">--tick-ms</text>
+  <text x="180" y="336" font-size="10.9" fill="#57606a">Timing wheel: O(1) insert and expiry, precise to one tick (10 ms). A priority queue would be exact, at O(log n) per timer.</text>
+  <line x1="28" y1="353" x2="972" y2="353" stroke="#eaeef2" stroke-width="1"/>
+  <rect x="28" y="366" width="138" height="26" rx="13" fill="#eaf2fe" stroke="#3b78d8" stroke-width="1.2"/>
+  <text x="97" y="383.2" font-size="11.3" fill="#0b3a7e" text-anchor="middle" font-weight="700">Dedup</text>
+  <text x="358" y="383.2" font-size="11.8" fill="#1f2328" text-anchor="end" font-weight="600">exact, remembered forever</text>
+  <text x="666" y="383.2" font-size="11.8" fill="#1f2328" font-weight="600">fast, bounded memory</text>
+  <rect x="372" y="376" width="280" height="6" rx="3" fill="#d8dee4"/>
+  <circle cx="562.4" cy="379" r="7.5" fill="#3b78d8" stroke="#ffffff" stroke-width="2.2"/>
+  <text x="972" y="383" font-size="10" fill="#57606a" text-anchor="end" font-family="ui-monospace, 'Cascadia Mono', 'SF Mono', Consolas, Menlo, monospace">bloom + TTL</text>
+  <text x="180" y="406" font-size="10.9" fill="#57606a">A bloom filter answers most checks from RAM and an exact store confirms the rest. IDs are forgotten after 7 days.</text>
+  <line x1="28" y1="423" x2="972" y2="423" stroke="#eaeef2" stroke-width="1"/>
+  <rect x="28" y="436" width="138" height="26" rx="13" fill="#e4f6f4" stroke="#1f9d94" stroke-width="1.2"/>
+  <text x="97" y="453.2" font-size="11.3" fill="#0d524d" text-anchor="middle" font-weight="700">Delivery</text>
+  <text x="358" y="453.2" font-size="11.8" fill="#1f2328" text-anchor="end" font-weight="600">at-most-once</text>
+  <text x="666" y="453.2" font-size="11.8" fill="#1f2328" font-weight="600">exactly-once</text>
+  <rect x="372" y="446" width="280" height="6" rx="3" fill="#d8dee4"/>
+  <circle cx="512" cy="449" r="7.5" fill="#1f9d94" stroke="#ffffff" stroke-width="2.2"/>
+  <text x="512" y="438" font-size="10.3" fill="#0d524d" text-anchor="middle" font-weight="700">at-least-once</text>
+  <text x="180" y="476" font-size="10.9" fill="#57606a">Redeliver until acknowledged. Exactly-once would need the consumer’s side effects inside the same transaction, so consumers must be idempotent.</text>
+  <line x1="28" y1="493" x2="972" y2="493" stroke="#eaeef2" stroke-width="1"/>
+  <rect x="28" y="506" width="138" height="26" rx="13" fill="#f4f5f7" stroke="#8b949e" stroke-width="1.2"/>
+  <text x="97" y="523.2" font-size="11.3" fill="#24292f" text-anchor="middle" font-weight="700">Ordering</text>
+  <text x="358" y="523.2" font-size="11.8" fill="#1f2328" text-anchor="end" font-weight="600">one strict order</text>
+  <text x="666" y="523.2" font-size="11.8" fill="#1f2328" font-weight="600">parallelism</text>
+  <rect x="372" y="516" width="280" height="6" rx="3" fill="#d8dee4"/>
+  <circle cx="556.8" cy="519" r="7.5" fill="#8b949e" stroke="#ffffff" stroke-width="2.2"/>
+  <text x="972" y="523" font-size="10" fill="#57606a" text-anchor="end" font-family="ui-monospace, 'Cascadia Mono', 'SF Mono', Consolas, Menlo, monospace">--partition-count</text>
+  <text x="180" y="546" font-size="10.9" fill="#57606a">Offsets are ordered within a partition, but events fire by schedule time and retries can overtake. More partitions: more parallelism, no order across them.</text>
+  <line x1="28" y1="563" x2="972" y2="563" stroke="#eaeef2" stroke-width="1"/>
+  <rect x="28" y="576" width="138" height="26" rx="13" fill="#f4f5f7" stroke="#8b949e" stroke-width="1.2"/>
+  <text x="97" y="593.2" font-size="11.3" fill="#24292f" text-anchor="middle" font-weight="700">Re-sharding</text>
+  <text x="358" y="593.2" font-size="11.8" fill="#1f2328" text-anchor="end" font-weight="600">elastic</text>
+  <text x="666" y="593.2" font-size="11.8" fill="#1f2328" font-weight="600">simple</text>
+  <rect x="372" y="586" width="280" height="6" rx="3" fill="#d8dee4"/>
+  <circle cx="632.4" cy="589" r="7.5" fill="#8b949e" stroke="#ffffff" stroke-width="2.2"/>
+  <text x="972" y="593" font-size="10" fill="#57606a" text-anchor="end" font-family="ui-monospace, 'Cascadia Mono', 'SF Mono', Consolas, Menlo, monospace">hash mod N</text>
+  <text x="180" y="616" font-size="10.9" fill="#57606a">A key’s partition is FNV-1a(key) mod N: stateless and fast, but N is fixed when the cluster is created. Online split is experimental.</text>
+  <line x1="28" y1="633" x2="972" y2="633" stroke="#eaeef2" stroke-width="1"/>
+  <rect x="28" y="646" width="138" height="26" rx="13" fill="#f4f5f7" stroke="#8b949e" stroke-width="1.2"/>
+  <text x="97" y="663.2" font-size="11.3" fill="#24292f" text-anchor="middle" font-weight="700">Build or reuse</text>
+  <text x="358" y="663.2" font-size="11.8" fill="#1f2328" text-anchor="end" font-weight="600">reuse proven parts</text>
+  <text x="666" y="663.2" font-size="11.8" fill="#1f2328" font-weight="600">build it yourself</text>
+  <rect x="372" y="656" width="280" height="6" rx="3" fill="#d8dee4"/>
+  <circle cx="540" cy="659" r="7.5" fill="#8b949e" stroke="#ffffff" stroke-width="2.2"/>
+  <text x="180" y="686" font-size="10.9" fill="#57606a">Consensus, the LSM store and RPC are libraries (hashicorp/raft, Pebble, gRPC). The log, replication and timers are custom, and that is where the production</text>
+  <text x="180" y="700.8" font-size="10.9" fill="#57606a">audit found most of its findings.</text>
+  <line x1="28" y1="711" x2="972" y2="711" stroke="#eaeef2" stroke-width="1"/>
+  <rect x="180" y="722" width="40" height="12" rx="6" fill="#3b78d8" fill-opacity="0.45"/>
+  <text x="228" y="732" font-size="10.5" fill="#57606a">a knob: the range it can be set to</text>
+  <circle cx="436" cy="728" r="6" fill="#3b78d8" stroke="#ffffff" stroke-width="2"/>
+  <text x="448" y="732" font-size="10.5" fill="#57606a">where the system sits (for a knob: the production setting)</text>
+</svg>

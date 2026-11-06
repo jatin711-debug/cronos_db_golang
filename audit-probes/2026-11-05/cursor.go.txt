@@ -1,0 +1,16 @@
+package partition
+import ("os"; "path/filepath"; "testing")
+func TestAuditCorruptFeedCursor(t *testing.T) {
+ cfg := unacceptedTestConfig(t); cfg.FsyncMode = "every_event"
+ sink := &feedSink{}; sink.refuse.Store(true)
+ pm := NewPartitionManager("node-1", cfg); pm.SetChangeFeed(sink.take)
+ p := startedPartition(t, pm, 0); publish(t, p, 3)
+ cursorPath := filepath.Join(p.DataDir, feedCursorFile)
+ if err := pm.Close(); err != nil { t.Fatal(err) }
+ if err := os.WriteFile(cursorPath, []byte("{broken"), 0600); err != nil { t.Fatal(err) }
+ restored := feedManager(t, cfg, sink)
+ if err := restored.CreatePartition(0, "orders"); err != nil { t.Logf("safe refusal: %v", err); return }
+ rp, err := restored.GetInternalPartition(0); if err != nil { t.Fatal(err) }
+ position, _ := rp.ChangeFeedPosition()
+ if position != -1 { t.Fatalf("CDC cursor advanced to %d with 3 unexported WAL records and sink still down", position) }
+}
