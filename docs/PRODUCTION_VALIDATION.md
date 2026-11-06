@@ -1,5 +1,59 @@
 # Deployment validation and remaining release gates
 
+## Release candidate v0.12.0-rc.1 — 2026-11-06
+
+PRs #25 and #26 are merged. The candidate is pinned to
+`08be93b61f8e4f510c61ed2708c7ebf665335143`. It remains a **draft prerelease**;
+passing these checks does not close the target-environment gates below.
+
+- [Merged-source CI](https://github.com/jatin711-debug/cronos_db_golang/actions/runs/42214183750)
+  passed Go/race/pure-Go checks, dependency security, the fault campaign,
+  dashboard/chart checks and production chart startup.
+- [Release workflow](https://github.com/jatin711-debug/cronos_db_golang/actions/runs/42214272737)
+  built all five binary targets and staged the tested Linux amd64 image archive.
+  Trivy passed the fixable HIGH/CRITICAL threshold. Network partitions passed
+  in 135.90 s: all 2,682 acknowledged events were delivered. The memory-limited
+  restart passed in 60.86 s: all 16,331 acknowledged events were delivered;
+  another 53 publish attempts failed and were not counted as acknowledged.
+- Candidate-source recovery tests passed on Windows amd64 without cgo:
+  partition recovery contracts (18.708 s), storage recovery contracts (1.222 s),
+  and the three-process backup-restore acceptance drill (169.117 s). These
+  include pending CDC exports, DLQ records, consumer progress, deduplication,
+  scheduled work and refusal of invalid backup/format inputs. CDC/DLQ coverage
+  here is component-level, not a production-sized external-sink drill.
+- Checksum-verified Windows release binaries for v0.11.0 and v0.12.0-rc.1
+  passed a rolling upgrade, rollback and second upgrade under traffic. The
+  finalized harness passed in 125.570 s (test body 124.53 s), acknowledging
+  628, 625 and 654 events in its three phases. Every acknowledged event was
+  delivered, none early, and replica logs agreed after each phase. There were
+  8, 4 and 103 events delivered more than once respectively, permitted by the
+  at-least-once contract. This small local drill uses development mode,
+  replication TLS, RF=3/minISR=2 and batch fsync. It establishes compatibility
+  for that binary pair and exercised data, not arbitrary downgrade safety.
+
+The staged image's recorded `IMAGE_ID` is
+`sha256:aadd7babcb58ee04a302a34ed5babf6883cd19279ab76e587251bcde02d4b457`.
+Its compressed archive SHA-256 is
+`cdf2260577ba76b4adcd13bdc2002573542c6532e7460d05e3041734d0b94f6e`.
+This identifies the staged artifact; no registry digest or signed publication
+provenance is claimed. Release assets contain checksums and the image scan.
+Local recovery/upgrade logs and an evidence manifest are attached to the draft.
+
+The reusable drill is `TestRollingUpgradeAndRollback` in `tests/acceptance`.
+Set `CRONOS_BINARY` to the candidate executable and
+`CRONOS_UPGRADE_FROM_BINARY` to the compatible prior executable, then run:
+
+```sh
+go test -tags acceptance -run '^TestRollingUpgradeAndRollback$' -count=1 -v -timeout 15m ./tests/acceptance/
+```
+
+The drill skips when the prior binary is unspecified. The candidate tag is
+unchanged: this test and evidence record are a follow-up to its source.
+Still open: the independent-host 24-hour soak, production-sized CDC/DLQ/upgrade
+drills, disk/backlog operating bounds, target-storage power-loss evidence and
+signed publication. The next environment step is three disposable hosts with
+the intended storage; none has been connected in this session.
+
 ## Dedicated production candidate — closure criteria, 2026-11-05
 
 The first production deployment is dedicated to one application/operator.
