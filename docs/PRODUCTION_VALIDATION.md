@@ -1,5 +1,18 @@
 # Deployment validation and remaining release gates
 
+## v0.12.0 — 2026-11-09
+
+Released from `1704f5a` (the v0.12.0-rc.2 source plus release documentation). The
+candidate's fixes listed below as "not yet released" shipped in it. Checks on the
+release itself: pull-request and `main` CI; the release workflow's image scan (no
+fixable HIGH or CRITICAL findings) and its network-partition and memory-limited
+restart tests on the exact image; a local smoke test of that image under a 512 MiB
+limit; and `TestRollingUpgradeAndRollback` with the checksum-verified Windows
+binaries of v0.11.0 and v0.12.0, which passed in 125.41 s with 679, 624 and 586
+acknowledged events in its three phases, all delivered, none early, and replica
+logs in agreement after each phase (20, 1 and 9 delivered more than once). The
+environment gates below are unchanged by this release.
+
 ## Release candidate v0.12.0-rc.1 — 2026-11-06
 
 **Release hold, 2026-11-09:** the subsequent

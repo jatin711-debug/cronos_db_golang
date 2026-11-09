@@ -15,6 +15,13 @@ error contract, fail-closed schema loading and the replay fix. The chart and
 default image tag are `0.12.0`. Publication status, checksums and the exact
 deployment digest are on the
 [release page](https://github.com/jatin711-debug/cronos_db_golang/releases/tag/v0.12.0).
+v0.12.0 was published on 2026-11-09; its image is `sha256:6a097c803929ba91526582a4e60f1b4ca97055c072353bfb65c0bda3c92a3cea`,
+published as `johnny711dock/cronos-db:0.12.0` and `:latest`, and the release is
+marked latest. The release workflow scanned this exact image (no fixable HIGH or
+CRITICAL findings) and ran the network-partition and memory-limited restart tests
+on it. The checksum-verified Windows release binaries passed a rolling upgrade from
+v0.11.0, a rollback and a second upgrade under traffic; the release page carries
+the log and `LOCAL_PUBLICATION_EVIDENCE.json`.
 This release makes no new capacity claim.
 
 **v0.11.0 closes the defects of the
