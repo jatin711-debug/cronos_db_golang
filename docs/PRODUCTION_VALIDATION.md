@@ -2,6 +2,13 @@
 
 ## Release candidate v0.12.0-rc.1 — 2026-11-06
 
+**Release hold, 2026-11-09:** the subsequent
+[main image scan](https://github.com/jatin711-debug/cronos_db_golang/actions/runs/42603851217)
+flags `golang.org/x/net` v0.60.0 for CVE-2026-78661, fixed in v0.62.0.
+The passed scans below describe November 6 evidence, not current clearance.
+The dependency is being updated; a newly built and scanned candidate is required
+before promotion. The rc.1 tag and artifacts remain unchanged for traceability.
+
 PRs #25 and #26 are merged. The candidate is pinned to
 `08be93b61f8e4f510c61ed2708c7ebf665335143`. It remains a **draft prerelease**;
 passing these checks does not close the target-environment gates below.
