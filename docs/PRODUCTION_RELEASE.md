@@ -1,5 +1,22 @@
 # Production release requirements
 
+**v0.12.0 fixes two dependency vulnerabilities in the v0.11.0 image** and keeps
+v0.11.0 data directories. Invalid schema files now stop startup, the Go SDK
+classifies publish failures (`ErrorKindInternal`, `ErrorKindLeaderChange`,
+`ErrorKindAuth`), and the HTTP admin API answers a non-admin token with 403; see
+the [v0.12.0 notes](RELEASE_V0.12.0.md) before upgrading. The release gates
+(a multi-host soak, production-sized recovery and upgrade drills, power-loss
+testing) are still open.
+
+## v0.12.0 release
+
+The [v0.12.0 notes](RELEASE_V0.12.0.md) describe the security fixes, the publish
+error contract, fail-closed schema loading and the replay fix. The chart and
+default image tag are `0.12.0`. Publication status, checksums and the exact
+deployment digest are on the
+[release page](https://github.com/jatin711-debug/cronos_db_golang/releases/tag/v0.12.0).
+This release makes no new capacity claim.
+
 **v0.11.0 closes the defects of the
 [2026-11-05 audit](PRODUCTION_AUDIT_2026-11-05.md)** and keeps v0.10.0 data
 directories. Production mode now requires cluster mode, JSON schemas enforce

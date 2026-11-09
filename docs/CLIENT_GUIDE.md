@@ -14,7 +14,7 @@ For source builds, see [Contributing](../CONTRIBUTING.md#setup-environment).
 Use Go 1.26.10 or later:
 
 ```bash
-go get github.com/jatin711-debug/cronos_db_golang@v0.11.0
+go get github.com/jatin711-debug/cronos_db_golang@v0.12.0
 ```
 
 Import `github.com/jatin711-debug/cronos_db_golang/pkg/client`. The
@@ -341,8 +341,7 @@ consumer group's progress.
   1000 when it is not positive). When `EndOffset` is at or above a non-negative
   `StartOffset` the range wins and `Count` is ignored; a zero `EndOffset` counts
   as unset while `Count` is positive. A request with every offset and `Count` at
-  zero asks for one event, at offset 0. Before this was fixed (the release after
-  v0.11.0), a request that set only `Count` asked for one event.
+  zero asks for one event, at offset 0. Before this was fixed (v0.12.0), a request that set only `Count` asked for one event.
 - `ReplayByTimeRange`, or `Replay` with `StartTime` or `EndTime`, selects events
   by their schedule time, not by when they were published. `Count` does not
   apply, and without an `EndTime` the server uses the current time.
