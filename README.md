@@ -2,7 +2,7 @@
 
 **A distributed event database with scheduling, pub/sub, and replay.**
 
-[![Go](https://img.shields.io/badge/Go-1.26.10-blue.svg)](https://go.dev/)
+[![Go](https://img.shields.io/badge/Go-1.26.11-blue.svg)](https://go.dev/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/jatin711-debug/cronos_db_golang)](https://github.com/jatin711-debug/cronos_db_golang/releases/latest)
 
@@ -74,7 +74,7 @@ and admin binaries for Linux, macOS, and Windows are on the
 
 ## Go client
 
-With Go 1.26.10 or later, add the SDK to your application:
+With Go 1.26.11 or later, add the SDK to your application:
 
 ```bash
 go get github.com/jatin711-debug/cronos_db_golang@v0.12.1

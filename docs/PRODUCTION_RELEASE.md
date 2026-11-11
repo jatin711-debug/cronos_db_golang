@@ -3,7 +3,8 @@
 **v0.12.1 fixes two ways to lose acknowledged events**: a leader that came back
 with an empty disk could have its followers delete their logs (since v0.6.0),
 and change data capture could skip events after a failover (since v0.7.0). It
-also removes a disk read from every replicated append. It keeps v0.12.0 data
+also removes a disk read from every replicated append, and builds with Go
+1.26.11 for `GO-2026-6859` in `net/http`. It keeps v0.12.0 data
 directories and changes no API or flag; see the
 [v0.12.1 notes](RELEASE_V0.12.1.md). The release gates (a multi-host soak,
 production-sized recovery and upgrade drills, power-loss testing) are still

@@ -3,7 +3,8 @@
 This release fixes three defects found by a local soak test of v0.12.0. A node
 that came back with an empty disk while it led a partition could have the other
 replicas delete their logs; change data capture (CDC) could skip events after a
-failover; and every replicated publish read the log back from disk. It keeps the
+failover; and every replicated publish read the log back from disk. It also moves
+to Go 1.26.11 for a `net/http` fix. It keeps the
 version-2 WAL format and changes no API, flag or metadata format: v0.12.0 data
 directories and cluster state are used as they are. It is not 1.0: the release gates
 of the [1.0 readiness review](RELEASE_READINESS_1.0.0_2026-10-28.md) and the
@@ -70,6 +71,10 @@ binary or image, and start them again; data directories are kept.
   of 100 publishes per second with a median publish latency of 37 ms, against
   about 65 per second at 400 to 650 ms before. The gain on Linux has not been
   measured.
+- **Go 1.26.11 replaces 1.26.10** in the module and the image builder, fixing
+  `GO-2026-6859`, an HTTP/1 server crash from a header race in `net/http`'s
+  `MaxBytesReader`. `govulncheck` reports it reachable from the server's HTTP
+  listeners on v0.12.0.
 
 ## Tests
 
