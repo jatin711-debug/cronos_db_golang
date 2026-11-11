@@ -13,16 +13,19 @@ import (
 // Partition leadership has one authority: the assignment committed through
 // Raft. The hash ring only says where replicas should live and which node
 // would ideally lead; it never makes a node the leader by itself. Leadership
-// moves in exactly two ways, both committed by the Raft leader:
+// moves in these ways, all committed by the Raft leader:
 //
 //   - failover, when the committed leader is dead: the reachable replica with
 //     the most complete log is elected;
+//   - the same election when the committed leader is alive but came back
+//     without the log it had, and another replica holds more of it;
 //   - handoff, when the ring prefers another live replica: the current leader
 //     first stops accepting publishes, and the target takes over only once its
 //     log is shown to equal the leader's.
 //
 // Every node then follows the committed assignment: it promotes itself when it
-// is named leader and steps down when another node is.
+// is named leader, unless another replica holds more of the log than it does
+// (see mayTakeUp), and steps down when another node is.
 
 // ReplicaPosition describes where one replica's log ends.
 type ReplicaPosition struct {
@@ -590,10 +593,12 @@ func (m *Manager) reconcileLocalLeadership() {
 		if isCommitted {
 			leader, epoch, followers, transferTo = committed.LeaderID, committed.Epoch, committed.Replicas, committed.TransferTo
 		} else if committedOnly {
+			m.forgetTakeUp(partitionID)
 			continue // nothing committed for it yet: the ring alone makes no leader
 		}
 
 		if leader != nodeID {
+			m.forgetTakeUp(partitionID)
 			if isCommitted {
 				// Another node is the committed leader: this one must not lead.
 				// (An error only means the partition is not held here.)
@@ -620,6 +625,15 @@ func (m *Manager) reconcileLocalLeadership() {
 			log.Printf("[CLUSTER] reconcile: skip partition %d with no positive leadership epoch", partitionID)
 			continue
 		}
+		if replicated && isCommitted {
+			members := electionMembers(committed)
+			if transferTo != "" {
+				members = append(members, transferTo)
+			}
+			if !m.mayTakeUp(partitionID, epoch, members, alive) {
+				continue
+			}
+		}
 		// A leader replicates to the replicas of its assignment and to no
 		// other node. The followers placement has dropped go before the
 		// assignment's epoch is taken up: a leader that reports the epoch
@@ -642,6 +656,7 @@ func (m *Manager) reconcileLocalLeadership() {
 			log.Printf("[CLUSTER] reconcile: promote partition %d failed: %v", partitionID, err)
 			continue
 		}
+		m.noteTakenUp(partitionID, epoch)
 		if !replicated {
 			continue
 		}
@@ -660,6 +675,122 @@ func (m *Manager) reconcileLocalLeadership() {
 			}
 		}
 	}
+}
+
+// mayTakeUp reports whether this node may take up the leadership of a
+// partition that the cluster has committed to it at epoch. members are the
+// partition's replicas, retiring ones and a handoff target included.
+//
+// What the cluster committed can be older than this node's log. A node that
+// lost its disk and was started again under its name before the others had
+// seen it go is still the committed leader of what it led. Leading with an
+// empty log, it had its followers, which make their logs match the leader's,
+// remove everything they held, acknowledged events not yet delivered among
+// them. So before it takes a leadership up, a node asks the other replicas
+// where their logs end. While one holds more than it does, it does not lead:
+// the node that coordinates the cluster then finds a leader that does not
+// lead while another replica holds more of the log, and elects another
+// (replaceLeadersThatDoNotLead).
+//
+// A node that has never accepted a leader of the partition (its epoch is 0)
+// has nothing to show that it held the partition at all, and also waits until
+// another replica has answered: it must not take silence for an empty
+// partition. A node that holds the partition goes on what it hears, as
+// before, so that a failover does not wait for a replica that is down.
+//
+// The check is made when this process takes a partition up, not on every
+// round while it leads it.
+func (m *Manager) mayTakeUp(partitionID int32, epoch int64, members []string, alive map[string]string) bool {
+	nodeID := m.config.NodeID
+	m.takeUpMu.Lock()
+	_, leading := m.takenUp[partitionID]
+	m.takeUpMu.Unlock()
+	m.mu.RLock()
+	hasPositions := m.positions != nil
+	m.mu.RUnlock()
+	if leading || !hasPositions {
+		return true
+	}
+
+	nodes := map[string]string{nodeID: ""}
+	seen := map[string]bool{nodeID: true}
+	others := 0
+	for _, id := range members {
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		others++
+		if addr, ok := alive[id]; ok && addr != "" {
+			nodes[id] = addr
+		}
+	}
+	positions := m.replicaPositions(partitionID, nodes)
+	own, ok := positions[nodeID]
+	if !ok {
+		m.holdBack(partitionID, epoch, "unreadable", "the end of its own log could not be read")
+		return false
+	}
+	answered, ahead := 0, ""
+	for id, position := range positions {
+		if id == nodeID {
+			continue
+		}
+		answered++
+		if moreComplete(position, own) && (ahead == "" || moreComplete(position, positions[ahead])) {
+			ahead = id
+		}
+	}
+	switch {
+	case ahead != "":
+		m.holdBack(partitionID, epoch, "behind", fmt.Sprintf(
+			"%s holds more of the log (through offset %d, term %d) than this node (through offset %d, term %d); another leader has to be elected",
+			ahead, positions[ahead].LastOffset, positions[ahead].LastTerm, own.LastOffset, own.LastTerm))
+		return false
+	case own.Epoch == 0 && others > 0 && answered == 0:
+		m.holdBack(partitionID, epoch, "unconfirmed", "this node has never held the partition, and no other replica has said yet where its log ends")
+		return false
+	}
+	return true
+}
+
+// holdBack logs, once for each epoch and reason, that this node does not take
+// up the leadership of a partition.
+func (m *Manager) holdBack(partitionID int32, epoch int64, reason, detail string) {
+	key := fmt.Sprintf("%d/%s", epoch, reason)
+	m.takeUpMu.Lock()
+	defer m.takeUpMu.Unlock()
+	if m.heldBack[partitionID] == key {
+		return
+	}
+	if m.heldBack == nil {
+		m.heldBack = make(map[int32]string)
+	}
+	m.heldBack[partitionID] = key
+	log.Printf("[CLUSTER] Partition %d: not taking up the leadership committed to this node at epoch %d: %s", partitionID, epoch, detail)
+}
+
+// noteTakenUp records that this process leads a partition at epoch.
+func (m *Manager) noteTakenUp(partitionID int32, epoch int64) {
+	m.takeUpMu.Lock()
+	defer m.takeUpMu.Unlock()
+	if m.takenUp == nil {
+		m.takenUp = make(map[int32]int64)
+	}
+	if _, held := m.heldBack[partitionID]; held {
+		log.Printf("[CLUSTER] Partition %d: taking up the leadership at epoch %d", partitionID, epoch)
+		delete(m.heldBack, partitionID)
+	}
+	m.takenUp[partitionID] = epoch
+}
+
+// forgetTakeUp records that this node does not lead a partition, so that it
+// checks again before it next takes it up.
+func (m *Manager) forgetTakeUp(partitionID int32) {
+	m.takeUpMu.Lock()
+	defer m.takeUpMu.Unlock()
+	delete(m.takenUp, partitionID)
+	delete(m.heldBack, partitionID)
 }
 
 // partitionReleaser is implemented by a partition accessor that can unload a
@@ -762,6 +893,82 @@ func (m *Manager) checkPartitionHealth() {
 		// Under-replication is logged by each partition's leader, which
 		// knows its in-sync replicas (see updateReplicaOffsets); the ISR in
 		// the committed assignment is what it was when placement last changed.
+	}
+}
+
+// replaceLeadersThatDoNotLead elects another leader for every partition whose
+// committed leader is alive but does not lead it, while another replica holds
+// more of the log than it does. That is a leader that came back without the
+// log it had: it does not take the leadership up (see mayTakeUp), and nothing
+// else would move it on, since checkPartitionHealth elects only in place of a
+// leader that is dead. A leader that is still taking a partition up is left
+// alone: no replica holds more than it does, which is why it was chosen.
+func (m *Manager) replaceLeadersThatDoNotLead() {
+	m.mu.RLock()
+	store, hasPositions := m.assignments, m.positions != nil
+	m.mu.RUnlock()
+	if store == nil || !hasPositions || m.config.ReplicationFactor <= 1 {
+		return
+	}
+	alive := m.aliveNodes()
+
+	type stuck struct {
+		leader string
+		epoch  int64
+		detail string
+	}
+	var (
+		mu    sync.Mutex
+		wg    sync.WaitGroup
+		found = make(map[int32]stuck)
+	)
+	for partitionID, info := range store.Partitions() {
+		leaderAddr, leaderAlive := alive[info.LeaderID]
+		if info.LeaderID == "" || !leaderAlive || info.TransferTo != "" || info.Epoch <= 0 {
+			continue
+		}
+		others := make(map[string]string)
+		for _, id := range electionMembers(info) {
+			if addr, ok := alive[id]; ok && id != info.LeaderID {
+				others[id] = addr
+			}
+		}
+		if len(others) == 0 {
+			continue
+		}
+		wg.Add(1)
+		go func(partitionID int32, info PartitionInfo, leaderAddr string, others map[string]string) {
+			defer wg.Done()
+			leader, ok := m.replicaPositions(partitionID, map[string]string{info.LeaderID: leaderAddr})[info.LeaderID]
+			if !ok || leader.AcceptingWrites {
+				return
+			}
+			for id, position := range m.replicaPositions(partitionID, others) {
+				if moreComplete(position, leader) {
+					mu.Lock()
+					found[partitionID] = stuck{leader: info.LeaderID, epoch: info.Epoch, detail: fmt.Sprintf(
+						"%s holds more of the log (through offset %d, term %d) than leader %s (through offset %d, term %d), which does not lead it",
+						id, position.LastOffset, position.LastTerm, info.LeaderID, leader.LastOffset, leader.LastTerm)}
+					mu.Unlock()
+					return
+				}
+			}
+		}(partitionID, info, leaderAddr, others)
+	}
+	wg.Wait()
+	if len(found) == 0 {
+		return
+	}
+
+	m.leadershipMu.Lock()
+	defer m.leadershipMu.Unlock()
+	for partitionID, s := range found {
+		info, ok := store.Partition(partitionID)
+		if !ok || info.LeaderID != s.leader || info.Epoch != s.epoch || info.TransferTo != "" {
+			continue // the assignment changed meanwhile
+		}
+		log.Printf("[CLUSTER] Partition %d: %s; electing another leader", partitionID, s.detail)
+		m.electNewLeader(partitionID, &info)
 	}
 }
 

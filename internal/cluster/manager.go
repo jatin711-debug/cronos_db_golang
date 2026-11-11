@@ -51,6 +51,13 @@ type Manager struct {
 	// inSyncSeen is how many replicas were last seen in sync for each
 	// partition this node leads. Only updateReplicaOffsets uses it.
 	inSyncSeen map[int32]int
+	// takenUp is, per partition this process has taken the leadership of,
+	// the epoch it did so at; heldBack is, per partition whose committed
+	// leadership it has not taken up, what it last logged about that, so
+	// that it is logged once. See mayTakeUp. Both are guarded by takeUpMu.
+	takeUpMu sync.Mutex
+	takenUp  map[int32]int64
+	heldBack map[int32]string
 
 	started bool
 	stopCh  chan struct{}
@@ -370,6 +377,8 @@ func (m *Manager) performLeaderTasks() {
 	m.enableLifecycleRequirements()
 	// Elect a leader for partitions whose leader is dead
 	m.checkPartitionHealth()
+	// and for those whose leader came back without its log
+	m.replaceLeadersThatDoNotLead()
 
 	// Update cluster state in Raft
 	m.syncClusterState()
