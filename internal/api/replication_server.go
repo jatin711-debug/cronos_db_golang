@@ -460,7 +460,14 @@ func (h *ReplicationServiceHandler) SyncConsumerProgress(ctx context.Context, re
 	if err := p.ConsumerGroup.ApplyReplicatedProgress(req.GetPartitionId(), p.Wal.GetNextOffset(), req.GetGroups()); err != nil {
 		return &types.ReplicationProgressResponse{Error: err.Error()}, nil
 	}
-	p.NoteLeaderFeedPosition(req.GetChangeFeedOffset(), req.GetHasChangeFeedOffset())
+	// Dead letters are shipped in a request of their own, which carries no
+	// feed position. Taken for word from a leader without a feed, it moved this
+	// replica's position to the end of its log, past events the leader had not
+	// exported yet; a takeover then skipped them. Only a progress request, or a
+	// dead-letter request that names a position, says where the feed is.
+	if !req.GetRequireDeadLetterAck() || req.GetHasChangeFeedOffset() {
+		p.NoteLeaderFeedPosition(req.GetChangeFeedOffset(), req.GetHasChangeFeedOffset())
+	}
 	return &types.ReplicationProgressResponse{Success: true, DeadLettersDurable: req.GetRequireDeadLetterAck()}, nil
 }
 

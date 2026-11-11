@@ -195,3 +195,78 @@ func TestChangeFeed_ContinuesOnTheNewLeader(t *testing.T) {
 	}
 	sinkA.expect(t, ids("early", 0, 5))
 }
+
+// Dead letters reach followers in a request of their own, which says nothing
+// about the change feed. A follower used to take it for word from a leader
+// without a feed and move its feed position to the end of its log. Taking
+// over, it then skipped every event the leader had accepted and not yet
+// exported.
+func TestChangeFeed_DeadLettersDoNotMoveTheFeedPosition(t *testing.T) {
+	sinkA, sinkB := &exported{}, &exported{}
+	a := newFeedReplica(t, "node-a", sinkA)
+	b := newFeedReplica(t, "node-b", sinkB)
+	if err := a.pm.PromoteToLeader(0, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.pm.AddFollower(0, "node-b", b.serveReplication()); err != nil {
+		t.Fatal(err)
+	}
+	handler := NewEventServiceHandler(a.pm, a.p.DedupStore, a.p.ConsumerGroup)
+	publish := func(events []*types.Event) {
+		t.Helper()
+		resp, err := handler.PublishBatch(context.Background(), &types.PublishBatchRequest{Events: events})
+		if err != nil || !resp.GetSuccess() {
+			t.Fatalf("publish: %+v (err=%v)", resp, err)
+		}
+	}
+	feedPosition := func(want int64) {
+		t.Helper()
+		deadline := time.Now().Add(15 * time.Second)
+		for {
+			if position, known := b.p.ChangeFeedPosition(); known && position == want {
+				return
+			}
+			if time.Now().After(deadline) {
+				position, known := b.p.ChangeFeedPosition()
+				t.Fatalf("follower has feed position %d (known=%v), want %d", position, known, want)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	publish(orders("early", 5))
+	sinkA.expect(t, ids("early", 0, 5))
+	feedPosition(4)
+
+	// The leader's sink goes down; three more publishes are accepted and not
+	// exported. Then a delivery fails for good and is dead-lettered.
+	sinkA.refuse.Store(true)
+	publish(orders("late", 3))
+	event, err := a.p.Wal.ReadEvent(5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.p.DLQ.Add(event, "failed-delivery", 5, "exhausted retries", "subscriber"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for !a.p.ReplLeader.DeadLettersReplicated(a.p.DLQ.Version()) {
+		if time.Now().After(deadline) {
+			t.Fatal("the dead letter did not reach the follower")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := b.p.DLQ.Get(); len(got) != 1 {
+		t.Fatalf("the follower holds %d dead letters, want 1", len(got))
+	}
+	feedPosition(4)
+
+	// node-b takes over and exports what the old leader could not.
+	if err := b.pm.PromoteToLeader(0, 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.pm.AddFollower(0, "node-a", a.serveReplication()); err != nil {
+		t.Fatal(err)
+	}
+	sinkB.expect(t, ids("late", 0, 3))
+}
