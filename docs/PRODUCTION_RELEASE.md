@@ -16,6 +16,13 @@ The [v0.12.1 notes](RELEASE_V0.12.1.md) describe the three fixes and the soak
 test that found them. The chart and default image tag are `0.12.1`. Publication
 status, checksums and the exact deployment digest are on the
 [release page](https://github.com/jatin711-debug/cronos_db_golang/releases/tag/v0.12.1).
+v0.12.1 was published on 2026-11-11; its image is `sha256:6312d4811841036c5a324848add054f7f7c892dcb3a7796d092bae293a8c6159`,
+published as `johnny711dock/cronos-db:0.12.1` and `:latest`, and the release is
+marked latest. The release workflow scanned this exact image (no fixable HIGH or
+CRITICAL findings) and ran the network-partition and memory-limited restart tests
+on it. The checksum-verified Windows release binaries passed a rolling upgrade from
+v0.12.0, a rollback and a second upgrade under traffic; the release page carries
+the log and `LOCAL_PUBLICATION_EVIDENCE.json`.
 This release makes no new capacity claim.
 
 **v0.12.0 fixes two dependency vulnerabilities in the v0.11.0 image** and keeps

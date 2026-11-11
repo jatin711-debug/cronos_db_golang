@@ -29,6 +29,28 @@ not on separate hosts or Kubernetes; power loss was not tested; and the
 latencies are those of a shared desktop machine. A 24-hour run of `TestSoak` on
 one machine is the next step, before the separate-host run.
 
+## v0.12.1 — 2026-11-11
+
+Released from `2e8a8d7`: the three fixes of the campaign above, Go 1.26.11 for
+`GO-2026-6859`, and release documentation. Checks on the release itself:
+pull-request and `main` CI; the release workflow's image scan (no fixable HIGH or
+CRITICAL findings) and its network-partition and memory-limited restart tests on
+the exact image; a local smoke test of that image under a 512 MiB limit; and
+`TestRollingUpgradeAndRollback` with the checksum-verified Windows binaries of
+v0.12.0 and v0.12.1, which passed in 124.34 s with 612, 651 and 631 acknowledged
+events in its three phases, all delivered, none early, and replica logs in
+agreement after each phase.
+
+Two observations from that drill are open. First, 99 events of the last phase were
+delivered more than once (0 in the others); an earlier drill of the same fixes had
+0, 0 and 137, and v0.12.0's drill 20, 1 and 9. At-least-once delivery allows this,
+but the cause has not been established. Second, in both drills a node that came
+back from an ordinary restart behind another replica declined a leadership the
+committed assignment still gave it, which is the v0.12.1 guard working: the
+committed leader can lag the replica that actually led after a failover, not only
+after a lost disk. Whether v0.12.0 could lose events on such a restart has not
+been tested. The environment gates below are unchanged by this release.
+
 ## v0.12.0 — 2026-11-09
 
 Released from `1704f5a` (the v0.12.0-rc.2 source plus release documentation). The
