@@ -48,7 +48,54 @@ func TestFirstNodeReplaced(t *testing.T) {
 	w.stopPublishers()
 	checkDelivery(t, w)
 	w.stopConsumers()
-	for partition := int32(0); partition < partitionCount; partition++ {
-		agreedLog(t, c, partition, w.topic)
-	}
+	// Every acknowledged event is where its producer was told, not only the
+	// same on every replica: replicas that all removed their logs agree too.
+	checkLogs(t, c, w.topic, w.ledger, false)
+}
+
+// A node that leads a partition loses its disk and comes back under its name
+// at once, before the cluster has seen it go. The committed assignment still
+// names it leader. It must not lead with an empty log: the other replicas
+// would take its log for the leader's and remove everything they hold to match
+// it, events acknowledged and not yet delivered among them.
+//
+// In the production chart this is a pod whose volume is replaced and that is
+// started again within the failure detector's timeout.
+func TestLeaderReplacedByAnEmptyNode(t *testing.T) {
+	c := newCluster(t)
+	c.startAll()
+	observer := c.dial()
+	w := startWorkload(t, c, "wiped", "wiped-workers", 2, 20, 1)
+	accepted := func() int64 { return w.ledger.accepted.Load() }
+	delivered := func() int64 { return w.ledger.delivered.Load() }
+	w.waitProgress(accepted, 200, 60*time.Second, "publishes accepted by the healthy cluster")
+	w.waitProgress(delivered, 100, 60*time.Second, "events delivered by the healthy cluster")
+
+	// A failover first, so that the log starts with entries of an earlier
+	// term than the leader's. An empty leader's first entry then differs in
+	// term from the followers' first entry, and they used to remove their
+	// whole logs to match it, rather than refuse it as a conflict within one
+	// term (which stopped the partition instead).
+	first := c.leaderOf(observer, 0)
+	step(t, "killing %s, which leads partition 0, for a failover", first.id)
+	c.kill(first)
+	w.waitProgress(accepted, 100, 90*time.Second, "publishes accepted after the failover")
+	c.start(first)
+	c.waitReady(c.nodes...)
+	w.waitProgress(accepted, 100, 90*time.Second, "publishes accepted once "+first.id+" is back")
+
+	leader := c.leaderOf(observer, 0)
+	step(t, "replacing %s, which leads partition 0, with an empty node", leader.id)
+	c.kill(leader)
+	c.wipe(leader)
+	c.start(leader)
+	c.waitReady(c.nodes...)
+	w.waitProgress(accepted, 100, 90*time.Second, "publishes accepted after "+leader.id+" was replaced")
+	w.waitProgress(delivered, 100, 90*time.Second, "events delivered after "+leader.id+" was replaced")
+
+	step(t, "waiting for the remaining deliveries")
+	w.stopPublishers()
+	checkDelivery(t, w)
+	w.stopConsumers()
+	checkLogs(t, c, w.topic, w.ledger, false)
 }

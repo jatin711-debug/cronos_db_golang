@@ -98,6 +98,13 @@ func (c *cluster) topology(n *node) (*types.ClusterTopology, error) {
 // returns the leader of each partition.
 func (c *cluster) waitTopology(running []*node, what string) map[int32]string {
 	c.t.Helper()
+	return c.waitTopologyWithin(running, what, readyTimeout)
+}
+
+// waitTopologyWithin is waitTopology with a deadline of its own, for a node
+// that has a large log to catch up on.
+func (c *cluster) waitTopologyWithin(running []*node, what string, timeout time.Duration) map[int32]string {
+	c.t.Helper()
 	ids := make([]string, 0, len(running))
 	for _, n := range running {
 		ids = append(ids, n.id)
@@ -140,7 +147,7 @@ func (c *cluster) waitTopology(running []*node, what string) map[int32]string {
 		return leaders, ""
 	}
 
-	deadline := time.Now().Add(readyTimeout)
+	deadline := time.Now().Add(timeout)
 	for {
 		leaders, problem := check()
 		if problem == "" {

@@ -182,7 +182,7 @@ func checkLogs(t *testing.T, c *cluster, topic string, sent *ledger, pruned bool
 	logs := make([][]*types.Event, partitionCount)
 	starts := make([]int64, partitionCount)
 	for partition := int32(0); partition < partitionCount; partition++ {
-		logs[partition], starts[partition] = agreedLog(t, c, partition, topic)
+		logs[partition], starts[partition] = agreedLog(t, c.holders(partition), partition, topic)
 	}
 
 	type place struct {

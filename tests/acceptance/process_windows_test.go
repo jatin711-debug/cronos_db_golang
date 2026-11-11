@@ -5,8 +5,21 @@ package acceptance
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"syscall"
 )
+
+// belowNormalPriorityClass is the BELOW_NORMAL_PRIORITY_CLASS creation flag.
+const belowNormalPriorityClass = 0x00004000
+
+// startLowPriority starts the command below normal scheduling priority.
+func startLowPriority(cmd *exec.Cmd) error {
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.CreationFlags |= belowNormalPriorityClass
+	return cmd.Start()
+}
 
 const processSuspendResume = 0x0800
 

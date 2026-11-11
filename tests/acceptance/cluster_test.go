@@ -158,6 +158,15 @@ type cluster struct {
 	image, network, certDir string
 	// runOptions are given to docker when a node's container is created.
 	runOptions []string
+
+	// env is added to the environment of every node process.
+	env []string
+	// lowPriority starts node processes below normal scheduling priority, so
+	// that a run of hours leaves the machine to whatever else it is doing.
+	lowPriority bool
+	// encryptionKey is the key the nodes encrypt their logs with, when they
+	// do. readLog is sent the nodes' segment files and needs it to read them.
+	encryptionKey []byte
 }
 
 // newCluster prepares three nodes without starting them. Whatever is still
@@ -347,10 +356,16 @@ func (c *cluster) start(n *node) {
 			cmd.Env = append(cmd.Env, entry)
 		}
 	}
+	cmd.Env = append(cmd.Env, c.env...)
 	cmd.Dir = c.dir
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
-	if err := cmd.Start(); err != nil {
+	if c.lowPriority {
+		err = startLowPriority(cmd)
+	} else {
+		err = cmd.Start()
+	}
+	if err != nil {
 		_ = logFile.Close()
 		c.t.Fatalf("start %s: %v", n.id, err)
 	}
@@ -561,9 +576,16 @@ func (c *cluster) leaderOf(observer *client.Client, partitionID int32) *node {
 // on leaders and followers. Public replay intentionally omits internal records
 // and cannot prove that every physical offset agrees between replicas.
 func (c *cluster) readLog(n *node, partitionID int32) ([]*types.Event, error) {
+	var cipher *storage.SegmentCipher
+	if c.encryptionKey != nil {
+		var err error
+		if cipher, err = storage.NewSegmentCipher(c.encryptionKey, partitionID); err != nil {
+			return nil, err
+		}
+	}
 	wal, err := storage.NewWAL(c.t.TempDir(), partitionID, &storage.WALConfig{
 		SegmentSizeBytes: 1 << 20, IndexInterval: 100, FsyncMode: "every_event",
-	}, nil)
+	}, cipher)
 	if err != nil {
 		return nil, err
 	}
