@@ -166,6 +166,7 @@ func (w *WAL) ResetTo(offset int64) error {
 		w.segments = slices.Delete(w.segments, 0, 1)
 	}
 	w.activeSegment = nil
+	w.resetTermsLocked()
 	active, err := NewSegmentWithSize(w.dataDir, offset, true, w.cipher, w.config.SegmentSizeBytes)
 	if err != nil {
 		return fmt.Errorf("create segment at offset %d: %w", offset, err)

@@ -103,6 +103,12 @@ type WAL struct {
 	currentTerm    int64           // Raft term stamped on newly produced records
 	coalescer      *FsyncCoalescer // optional global fsync coalescer
 
+	// terms holds, as runs, the term of every entry from termsFrom through
+	// termsTo, entries appended since the log was opened (see wal_terms.go).
+	// Guarded by mu.
+	terms              []termRun
+	termsFrom, termsTo int64
+
 	// Group-commit coordinator for FsyncBatch mode: writers that finish
 	// appending while a sync is in flight share the next one. See groupCommitSync.
 	gcMu      sync.Mutex
@@ -242,6 +248,7 @@ func newWAL(dataDir string, partitionID int32, config *WALConfig, cipher *Segmen
 		quit:           make(chan struct{}),
 		cipher:         cipher,
 		coalescer:      coalescer,
+		termsTo:        -1,
 	}
 	wal.appendSeqCond = sync.NewCond(&wal.appendSeqMu)
 
@@ -293,6 +300,9 @@ func (w *WAL) SnapshotCipher() *SegmentCipher { return w.cipher }
 
 // loadSegments loads existing segments and verifies their integrity on startup.
 func (w *WAL) loadSegments() error {
+	// The log is read from disk again: whatever was remembered about it may
+	// no longer be so.
+	w.resetTermsLocked()
 	segmentsDir := filepath.Join(w.dataDir, "segments")
 	if _, err := os.Stat(segmentsDir); os.IsNotExist(err) {
 		// No segments exist, start fresh
@@ -742,6 +752,7 @@ func (w *WAL) AppendBatch(events []*types.Event) error {
 		w.advanceAppendTurn(endOffset)
 		return err
 	}
+	w.noteTermsLocked(prepared)
 
 	if lastOffset := events[len(events)-1].Offset; lastOffset > w.highWatermark {
 		w.highWatermark = lastOffset
@@ -862,6 +873,7 @@ func (w *WAL) AppendReplicatedBatch(events []*types.Event) error {
 		w.mu.Unlock()
 		return err
 	}
+	w.noteTermsLocked(prepared)
 
 	endOffset := events[len(events)-1].Offset + 1
 	w.nextOffset.Store(endOffset)
@@ -1440,6 +1452,8 @@ func (w *WAL) TruncateToOffset(offset int64) (int, error) {
 	}
 	// The number of events removed is exactly oldNext - offset (offsets are dense).
 	removed := int(oldNext - offset)
+	// Entries appended at these offsets from now on may be of other terms.
+	w.dropTermsFromLocked(offset)
 	// A successor's old boundary remains in place until that successor is
 	// deleted. A crash while truncating its predecessor can therefore require
 	// replica repair on restart, but cannot silently accept a shortened prefix.
@@ -1609,6 +1623,9 @@ func (w *WAL) LastOffsetOfTerm(term int64) int64 {
 
 // GetTermForOffset returns the Raft term stored for the entry at the given offset.
 func (w *WAL) GetTermForOffset(offset int64) (int64, error) {
+	if term, ok := w.rememberedTerm(offset); ok {
+		return term, nil
+	}
 	event, err := w.ReadEvent(offset)
 	if err != nil {
 		return 0, err
