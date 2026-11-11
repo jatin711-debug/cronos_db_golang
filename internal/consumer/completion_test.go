@@ -92,6 +92,65 @@ func TestCompletionSurvivesRestart(t *testing.T) {
 	}
 }
 
+// A group whose first event comes after another topic's entries cannot move
+// its floor over them, so its progress is all in per-event records. A
+// partition that starts raises the floor to the start of its log before
+// anything has read those records; the raise used to become the cached highest
+// completion, and every recorded event read as new and was delivered again.
+// So did the events of a restart's first ack, which set the cache to its own
+// offset.
+func TestCompletionsAboveTheFloorSurviveRestart(t *testing.T) {
+	acked := []int64{312, 319, 313, 320, 327, 314, 321, 328, 335, 315, 322, 329}
+	for name, firstAfterRestart := range map[string]func(*testing.T, *GroupManager){
+		"partition starts": func(t *testing.T, m *GroupManager) {
+			if err := m.SetLogStart(0, 184); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"ack comes first": func(t *testing.T, m *GroupManager) {
+			if err := m.CommitDelivery("late", 0, completionEvents("later", 316)); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			m := newStoreBackedManager(t, dir)
+			if err := m.SetLogStart(0, 184); err != nil {
+				t.Fatal(err)
+			}
+			if err := m.CreateGroup("earlier", "before", []int32{0}); err != nil {
+				t.Fatal(err)
+			}
+			if err := m.CreateGroup("late", "later", []int32{0}); err != nil {
+				t.Fatal(err)
+			}
+			for _, offset := range acked {
+				if err := m.CommitDelivery("late", 0, completionEvents("later", offset)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := m.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			m = newStoreBackedManager(t, dir)
+			defer m.Close()
+			firstAfterRestart(t, m)
+			for _, offset := range acked {
+				if !m.IsCompleted("late", 0, offset) {
+					t.Errorf("after restart IsCompleted(%d) = false; it was acknowledged", offset)
+				}
+			}
+			for _, offset := range []int64{184, 311, 317, 336} {
+				if m.IsCompleted("late", 0, offset) {
+					t.Errorf("after restart IsCompleted(%d) = true; it was never acknowledged", offset)
+				}
+			}
+		})
+	}
+}
+
 // An ack or redelivery scan still in flight at shutdown must get an error or a
 // negative answer, not a panic from the closed store.
 func TestCompletionAfterCloseDoesNotPanic(t *testing.T) {

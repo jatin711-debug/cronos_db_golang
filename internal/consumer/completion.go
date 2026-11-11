@@ -183,32 +183,68 @@ func (g *GroupManager) highestCompleted(group string, partition int32) int64 {
 	}
 
 	// First question for this group since startup: derive it from the stored
-	// state. A completion committed meanwhile only raises the cached value.
+	// state, and take any raise made while it was being read.
 	g.mu.RLock()
 	belowFloor := g.floorLocked(group, partition) - 1
 	g.mu.RUnlock()
-	return g.raiseHighestCompleted(prefix, max(belowFloor, g.loadHighestCompleted(prefix)))
-}
+	loaded := max(belowFloor, g.loadHighestCompleted(prefix))
 
-func (g *GroupManager) raiseHighestCompleted(prefix string, offset int64) int64 {
 	g.completedMaxMu.Lock()
 	defer g.completedMaxMu.Unlock()
+	if current, known := g.completedMax[prefix]; known {
+		highest = max(current, loaded)
+	} else {
+		highest = loaded
+		if raised, ok := g.completedRaised[prefix]; ok {
+			highest = max(highest, raised)
+		}
+	}
+	delete(g.completedRaised, prefix)
 	if g.completedMax == nil {
 		g.completedMax = make(map[string]int64)
 	}
-	if current, known := g.completedMax[prefix]; known && current >= offset {
-		return current
+	g.completedMax[prefix] = highest
+	return highest
+}
+
+// raiseHighestCompleted notes that offset is complete. The caller has already
+// recorded it, in the store or in memory.
+//
+// Until the cached value has been read from the stored state it is not set
+// here. It used to be: a partition that started raised its groups' floors to
+// the start of its log, and the floor became the cached value before anything
+// had read the completions recorded above it. Every event completed above the
+// floor then read as not complete and was delivered again; a group whose
+// floor cannot pass another topic's entries keeps all its progress there.
+// The raise is kept until the first read, which takes it into account.
+func (g *GroupManager) raiseHighestCompleted(prefix string, offset int64) {
+	g.completedMaxMu.Lock()
+	defer g.completedMaxMu.Unlock()
+	if current, known := g.completedMax[prefix]; known {
+		if offset > current {
+			g.completedMax[prefix] = offset
+		}
+		return
 	}
-	g.completedMax[prefix] = offset
-	return offset
+	if raised, ok := g.completedRaised[prefix]; ok && raised >= offset {
+		return
+	}
+	if g.completedRaised == nil {
+		g.completedRaised = make(map[string]int64)
+	}
+	g.completedRaised[prefix] = offset
 }
 
 // lowerHighestCompleted brings the cached value down to offset. A value that
-// is too low only costs a lookup of the stored state.
+// is too high only costs a lookup of the stored state; one that is too low
+// makes completed events look new.
 func (g *GroupManager) lowerHighestCompleted(prefix string, offset int64) {
 	g.completedMaxMu.Lock()
 	if current, known := g.completedMax[prefix]; known && current > offset {
 		g.completedMax[prefix] = offset
+	}
+	if raised, ok := g.completedRaised[prefix]; ok && raised > offset {
+		g.completedRaised[prefix] = offset
 	}
 	g.completedMaxMu.Unlock()
 }

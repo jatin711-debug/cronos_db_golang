@@ -92,9 +92,12 @@ type GroupManager struct {
 
 	// completedMax caches, per group and partition, the highest offset known
 	// complete. Guarded by completedMaxMu, which is never held while waiting
-	// for mu.
-	completedMaxMu sync.Mutex
-	completedMax   map[string]int64
+	// for mu. A key is absent until it is first read from the stored state;
+	// raises that come before then wait in completedRaised (see
+	// raiseHighestCompleted).
+	completedMaxMu  sync.Mutex
+	completedMax    map[string]int64
+	completedRaised map[string]int64
 
 	// commitMu serializes progress writes (acks and replicated progress): each
 	// derives a group's new cursor from the one before it.
