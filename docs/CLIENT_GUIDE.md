@@ -14,7 +14,7 @@ For source builds, see [Contributing](../CONTRIBUTING.md#setup-environment).
 Use Go 1.26.11 or later:
 
 ```bash
-go get github.com/jatin711-debug/cronos_db_golang@v0.12.1
+go get github.com/jatin711-debug/cronos_db_golang@v0.12.2
 ```
 
 Import `github.com/jatin711-debug/cronos_db_golang/pkg/client`. The

@@ -1,5 +1,20 @@
 # Production release requirements
 
+**v0.12.2 stops a restarted node from delivering again what its consumer groups
+had completed** (since v0.9.0). Nothing was lost; delivery is at-least-once. It
+keeps v0.12.1 data directories and changes no API or flag; see the
+[v0.12.2 notes](RELEASE_V0.12.2.md). The release gates (a multi-host soak,
+production-sized recovery and upgrade drills, power-loss testing) are still
+open.
+
+## v0.12.2 release
+
+The [v0.12.2 notes](RELEASE_V0.12.2.md) describe the fix and the upgrade drill
+that showed the defect. The chart and default image tag are `0.12.2`. Publication
+status, checksums and the exact deployment digest are on the
+[release page](https://github.com/jatin711-debug/cronos_db_golang/releases/tag/v0.12.2).
+This release makes no new capacity claim.
+
 **v0.12.1 fixes two ways to lose acknowledged events**: a leader that came back
 with an empty disk could have its followers delete their logs (since v0.6.0),
 and change data capture could skip events after a failover (since v0.7.0). It

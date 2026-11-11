@@ -29,6 +29,36 @@ not on separate hosts or Kubernetes; power loss was not tested; and the
 latencies are those of a shared desktop machine. A 24-hour run of `TestSoak` on
 one machine is the next step, before the separate-host run.
 
+## v0.12.2 — 2026-11-11
+
+The v0.12.1 upgrade drill left two observations open. Both were examined with
+the drill rerun under a trace of every redelivered event.
+
+**Redeliveries.** The last phase redelivered 74 to 137 events across four runs,
+the first two phases at most 10. Each burst was one leader, restarted and back
+before the others saw it go, delivering again every event its consumer group had
+completed on that partition in the phase. The cause was a defect in how a
+restarted node reads a group's progress, present since v0.9.0 and fixed in
+[v0.12.2](RELEASE_V0.12.2.md): the floor raised when a partition starts was
+taken as the group's highest completed offset before the completions recorded
+above it had been read. The last phase was the one hit because its group's floor
+could not pass the previous phase's entries of another topic, so all its
+progress was in those records. With the fix the last phase redelivered 3 and 5
+events in two runs. Nothing was lost in any run.
+
+**The take-up guard on ordinary restarts.** The committed assignment did not
+lag. A node that starts replays the cluster's metadata log from the beginning,
+having no snapshot of it yet, and its leadership loop ran during that replay and
+saw the first assignments, which named it leader at epoch 1. v0.12.1's guard
+declined them. v0.12.0 has no guard, but for a restarted process with its disk
+two older checks hold: a partition refuses an epoch below the one it has durably
+accepted (its logs show `epoch regression: 1 < 3` on such restarts), and a
+follower refuses log entries and consumer progress from a leader whose epoch is
+below its own. A node can take back the exact epoch it held, when it is still the
+committed leader; with its log intact that is correct. After a power loss with
+`batch` or `periodic` fsync its log could end before its followers' at that
+epoch; v0.12.1 declines that, and v0.12.0 has not been tested in it.
+
 ## v0.12.1 — 2026-11-11
 
 Released from `2e8a8d7`: the three fixes of the campaign above, Go 1.26.11 for
@@ -41,15 +71,10 @@ v0.12.0 and v0.12.1, which passed in 124.34 s with 612, 651 and 631 acknowledged
 events in its three phases, all delivered, none early, and replica logs in
 agreement after each phase.
 
-Two observations from that drill are open. First, 99 events of the last phase were
-delivered more than once (0 in the others); an earlier drill of the same fixes had
-0, 0 and 137, and v0.12.0's drill 20, 1 and 9. At-least-once delivery allows this,
-but the cause has not been established. Second, in both drills a node that came
-back from an ordinary restart behind another replica declined a leadership the
-committed assignment still gave it, which is the v0.12.1 guard working: the
-committed leader can lag the replica that actually led after a failover, not only
-after a lost disk. Whether v0.12.0 could lose events on such a restart has not
-been tested. The environment gates below are unchanged by this release.
+Two observations from that drill, the redeliveries of its last phase and the
+take-up guard firing on ordinary restarts, were examined the same day; the
+v0.12.2 section above has the results. The environment gates below are unchanged
+by this release.
 
 ## v0.12.0 — 2026-11-09
 
