@@ -1,5 +1,34 @@
 # Deployment validation and remaining release gates
 
+## Local single-host campaign — 2026-11-11
+
+The gates at the end of this record need separate hosts. To find software
+defects before that, the acceptance suite gained a soak (`TestSoak`), a growth
+test (`TestClusterGrowsFromThreeToFive`) and a CDC failover test, run on one
+Windows machine with the nodes as processes: three nodes of 384 MiB and 2 CPUs
+each, encrypted WAL, `every_event` fsync, RF=3/minISR=2, replication TLS, a CDC
+webhook, a slow consumer group and a dead-lettering topic, at 100 publishes per
+second with bursts of 500.
+
+It found three defects in v0.12.0, fixed in [v0.12.1](RELEASE_V0.12.1.md): a
+leader that came back with an empty disk had its followers delete their logs; CDC
+skipped events after a failover once anything had been dead-lettered; and every
+replicated append read the log back from disk, which held the cluster to about 50
+publishes per second. With the fixes, a 25-minute soak passed all seven of its
+disruptions (leader lost, leader frozen, leader lost during catch-up, CDC
+destination down, consumer group behind, a leader replaced by an empty node,
+whole cluster lost) and ended with every acknowledged event delivered to both
+consumer groups and exported. The growth test (three to five nodes, a leader lost
+during the handoff, rolling restarts, an empty replacement, a removal) and the
+rolling upgrade drill from v0.12.0 also passed. The v0.12.1 notes give the
+figures.
+
+This does not close the gates below. The soak ran for 25 minutes on one host, not
+24 to 72 hours on separate ones; growth, drain and replacement ran as processes,
+not on separate hosts or Kubernetes; power loss was not tested; and the
+latencies are those of a shared desktop machine. A 24-hour run of `TestSoak` on
+one machine is the next step, before the separate-host run.
+
 ## v0.12.0 — 2026-11-09
 
 Released from `1704f5a` (the v0.12.0-rc.2 source plus release documentation). The
@@ -20,7 +49,8 @@ environment gates below are unchanged by this release.
 flags `golang.org/x/net` v0.60.0 for CVE-2026-78661, fixed in v0.62.0.
 The passed scans below describe November 6 evidence, not current clearance.
 The dependency is being updated; a newly built and scanned candidate is required
-before promotion. The rc.1 tag and artifacts remain unchanged for traceability.
+before promotion. The rc.1 and rc.2 draft releases and their artifacts were
+removed on 2026-11-11, after v0.12.0 shipped.
 
 PRs #25 and #26 are merged. The candidate is pinned to
 `08be93b61f8e4f510c61ed2708c7ebf665335143`. It remains a **draft prerelease**;
@@ -56,8 +86,8 @@ The staged image's recorded `IMAGE_ID` is
 Its compressed archive SHA-256 is
 `cdf2260577ba76b4adcd13bdc2002573542c6532e7460d05e3041734d0b94f6e`.
 This identifies the staged artifact; no registry digest or signed publication
-provenance is claimed. Release assets contain checksums and the image scan.
-Local recovery/upgrade logs and an evidence manifest are attached to the draft.
+provenance is claimed. The draft's assets held checksums, the image scan, the
+local recovery/upgrade logs and an evidence manifest until it was removed.
 
 The reusable drill is `TestRollingUpgradeAndRollback` in `tests/acceptance`.
 Set `CRONOS_BINARY` to the candidate executable and

@@ -124,6 +124,7 @@ nav:
       - Configuration: CONFIGURATION.md
   - Release:
       - Release Requirements: PRODUCTION_RELEASE.md
+      - v0.12.1 Release Notes: RELEASE_V0.12.1.md
       - v0.12.0 Release Notes: RELEASE_V0.12.0.md
       - v0.11.0 Release Notes: RELEASE_V0.11.0.md
       - v0.10.0 Release Notes: RELEASE_V0.10.0.md
