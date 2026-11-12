@@ -46,6 +46,21 @@ could not pass the previous phase's entries of another topic, so all its
 progress was in those records. With the fix the last phase redelivered 3 and 5
 events in two runs. Nothing was lost in any run.
 
+**A second cause.** The drill of the first v0.12.2 build, run with its release
+binaries before publication, still redelivered 38 events in its last phase.
+Further runs, traced per event and then with the dispatcher's decisions logged,
+found bursts of 5 to 13 redeliveries a few milliseconds apart at a leader, of
+events acknowledged up to seconds before, in 6 of 10 traced runs and in every
+phase. Each burst was a redelivery scan that came in while an acknowledgement
+raised its group's floor: the new floor was stored, and the records below it
+removed, before the floor was raised in memory, and the scan found neither.
+Raising the log start on compaction had the same order, which is why groups
+waiting behind another topic's entries were hit hardest. The fix, also in
+v0.12.2, removes the records only after the floor is raised in memory. In six
+runs with both fixes every redelivery was of an event delivered just before
+its node was killed, at most 4 in a phase. The first build was not published;
+its tag and draft release were replaced.
+
 **The take-up guard on ordinary restarts.** The committed assignment did not
 lag. A node that starts replays the cluster's metadata log from the beginning,
 having no snapshot of it yet, and its leadership loop ran during that replay and
