@@ -14,6 +14,13 @@ The [v0.12.2 notes](RELEASE_V0.12.2.md) describe the two fixes and the upgrade
 drills that showed them. The chart and default image tag are `0.12.2`. Publication
 status, checksums and the exact deployment digest are on the
 [release page](https://github.com/jatin711-debug/cronos_db_golang/releases/tag/v0.12.2).
+v0.12.2 was published on 2026-11-12; its image is `sha256:c5792a433cb23ad22796606ccbcf3269c6e03bf6176d29bced7f979ed8602595`,
+published as `johnny711dock/cronos-db:0.12.2` and `:latest`, and the release is
+marked latest. The release workflow scanned this exact image (no fixable HIGH or
+CRITICAL findings) and ran the network-partition and memory-limited restart tests
+on it. The checksum-verified Windows release binaries passed a rolling upgrade from
+v0.12.1, a rollback and a second upgrade under traffic; the release page carries
+the log and `LOCAL_PUBLICATION_EVIDENCE.json`.
 This release makes no new capacity claim.
 
 **v0.12.1 fixes two ways to lose acknowledged events**: a leader that came back

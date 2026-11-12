@@ -29,7 +29,7 @@ not on separate hosts or Kubernetes; power loss was not tested; and the
 latencies are those of a shared desktop machine. A 24-hour run of `TestSoak` on
 one machine is the next step, before the separate-host run.
 
-## v0.12.2 — 2026-11-11
+## v0.12.2 — 2026-11-12
 
 The v0.12.1 upgrade drill left two observations open. Both were examined with
 the drill rerun under a trace of every redelivered event.
@@ -73,6 +73,17 @@ below its own. A node can take back the exact epoch it held, when it is still th
 committed leader; with its log intact that is correct. After a power loss with
 `batch` or `periodic` fsync its log could end before its followers' at that
 epoch; v0.12.1 declines that, and v0.12.0 has not been tested in it.
+
+**The release.** Released from `0632aa8`. Checks on the release itself:
+pull-request and `main` CI; the release workflow's image scan (no fixable HIGH or
+CRITICAL findings) and its network-partition and memory-limited restart tests on
+the exact image; a local smoke test of that image under a 512 MiB limit; and
+`TestRollingUpgradeAndRollback` with the checksum-verified Windows binaries of
+v0.12.1 and v0.12.2, which passed in 131.39 s with 631, 662 and 622 acknowledged
+events in its three phases, all delivered, none early, and replica logs in
+agreement after each phase. 1, 32 and 1 events were delivered more than once;
+the rollback phase runs v0.12.1 nodes, which still have both defects. The
+environment gates below are unchanged by this release.
 
 ## v0.12.1 — 2026-11-11
 
