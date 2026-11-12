@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,6 +27,9 @@ import (
 func TestClientsFindTheOtherNodesThroughPartitionMetadata(t *testing.T) {
 	c := newCluster(t)
 	c.startAll()
+	// Node health can turn green before startup placement has connected the
+	// followers. Discovery needs a writable cluster, including its replicas.
+	c.waitPlacement(c.running(), "before client discovery", readyTimeout)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -63,7 +67,7 @@ func TestClientsFindTheOtherNodesThroughPartitionMetadata(t *testing.T) {
 		for suffix := 0; utils.HashToPartitionID(messageID, partitionCount) != p; suffix++ {
 			messageID = fmt.Sprintf("discovery-%d-%d", p, suffix)
 		}
-		res, err := sendWhileLeadershipSettles(ctx, t, producer, client.Message{
+		res, err := sendWhileLeadershipSettles(ctx, t, producer.Send, client.Message{
 			Topic:      "discovery",
 			MessageID:  messageID,
 			Payload:    []byte("x"),
@@ -89,18 +93,67 @@ func TestClientsFindTheOtherNodesThroughPartitionMetadata(t *testing.T) {
 	t.Logf("published through %v; the partitions are led at %v", servedBy, leaders)
 }
 
+func TestSendWhileLeadershipSettles(t *testing.T) {
+	for _, tc := range []struct {
+		kind   client.ErrorKind
+		reason string
+		retry  bool
+	}{
+		{client.ErrorKindUnavailable, "unreachable", true},
+		{client.ErrorKindLeaderChange, "not leader", true},
+		{client.ErrorKindInternal, "replication: not enough replicas: min-insync-replicas=2", true},
+		{client.ErrorKindInternal, "replication: replication quorum not met: 1 of 2 required in-sync replicas acked", true},
+		{client.ErrorKindAuth, "denied", false},
+		{client.ErrorKindValidation, "invalid", false},
+		{client.ErrorKindInternal, "disk write failed", false},
+	} {
+		t.Run(string(tc.kind)+"/"+tc.reason, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			refusal := &client.Error{Kind: tc.kind, Err: errors.New(tc.reason)}
+			want := &client.SendResult{MessageID: "same-id"}
+			calls := 0
+			res, err := sendWhileLeadershipSettles(ctx, t, func(_ context.Context, msg client.Message) (*client.SendResult, error) {
+				calls++
+				if msg.MessageID != want.MessageID {
+					t.Fatal("retry changed the message ID")
+				}
+				if calls == 1 {
+					return nil, fmt.Errorf("wrapped: %w", refusal)
+				}
+				return want, nil
+			}, client.Message{MessageID: want.MessageID})
+			if tc.retry {
+				if err != nil || res != want || calls != 2 {
+					t.Fatalf("transient refusal: result=%v err=%v calls=%d", res, err, calls)
+				}
+			} else if !errors.Is(err, refusal) || calls != 1 {
+				t.Fatalf("permanent refusal: err=%v calls=%d", err, calls)
+			}
+		})
+	}
+}
+
 // sendWhileLeadershipSettles publishes msg, and publishes it again while the
-// cluster refuses it as unavailable. Right after start-up the leadership of a
-// partition can still be moving to the node the ring prefers, and the node
+// cluster refuses it as unavailable or changing leaders. Right after start-up
+// the leadership can still be moving to the node the ring prefers, and the node
 // giving it up refuses publishes meanwhile ("partition 1 is local but this node
 // is not the leader"). The producer's own retries could run out before that
-// ended, and the test failed now and then in CI.
-func sendWhileLeadershipSettles(ctx context.Context, t *testing.T, producer *client.Producer, msg client.Message) (*client.SendResult, error) {
+// ended, and the test failed now and then in CI. Startup format upgrades can
+// also temporarily refuse replication quorum. Retry those specific refusals
+// with the same ID; all other internal errors still fail the test immediately.
+func sendWhileLeadershipSettles(ctx context.Context, t *testing.T, send func(context.Context, client.Message) (*client.SendResult, error), msg client.Message) (*client.SendResult, error) {
 	t.Helper()
 	for {
-		res, err := producer.Send(ctx, msg)
+		res, err := send(ctx, msg)
 		var refused *client.Error
-		if err == nil || !errors.As(err, &refused) || refused.Kind != client.ErrorKindUnavailable {
+		if err == nil || !errors.As(err, &refused) {
+			return res, err
+		}
+		quorumRefused := refused.Kind == client.ErrorKindInternal && refused.Err != nil &&
+			(strings.HasPrefix(refused.Err.Error(), "replication: not enough replicas:") ||
+				strings.HasPrefix(refused.Err.Error(), "replication: replication quorum not met:"))
+		if refused.Kind != client.ErrorKindUnavailable && refused.Kind != client.ErrorKindLeaderChange && !quorumRefused {
 			return res, err
 		}
 		t.Logf("publish of %s refused while leadership settles; trying again: %v", msg.MessageID, err)
