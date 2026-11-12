@@ -64,22 +64,18 @@ func (g *GroupManager) SetLogStart(partitionID int32, offset int64) error {
 	g.commitMu.Lock()
 	defer g.commitMu.Unlock()
 
-	type raise struct {
-		group string
-		from  int64
-	}
 	g.mu.RLock()
 	if g.logStart[partitionID] >= offset {
 		g.mu.RUnlock()
 		return nil
 	}
-	var raises []raise
+	var raises []string // groups whose floor is below the new start
 	for id, group := range g.groups {
 		if _, tracked := group.CommittedOffsets[partitionID]; !tracked {
 			continue
 		}
-		if floor := g.floors[completionPrefix(id, partitionID)]; floor < offset {
-			raises = append(raises, raise{id, floor})
+		if g.floors[completionPrefix(id, partitionID)] < offset {
+			raises = append(raises, id)
 		}
 	}
 	store := g.offsetStore
@@ -90,8 +86,8 @@ func (g *GroupManager) SetLogStart(partitionID int32, offset int64) error {
 		err := store.withDB(func(db *pebble.DB) error {
 			batch := db.NewBatch()
 			defer batch.Close()
-			for _, r := range raises {
-				if err := setFloorInBatch(batch, r.group, partitionID, r.from, offset); err != nil {
+			for _, id := range raises {
+				if err := setFloorInBatch(batch, id, partitionID, offset); err != nil {
 					return err
 				}
 			}
@@ -100,20 +96,23 @@ func (g *GroupManager) SetLogStart(partitionID int32, offset int64) error {
 		if err != nil {
 			return fmt.Errorf("raise completion floors to log start %d: %w", offset, err)
 		}
+		if progressWritten != nil {
+			progressWritten()
+		}
 	}
 
+	raised := make(map[string]int64, len(raises))
 	g.mu.Lock()
-	defer g.mu.Unlock()
 	if g.logStart == nil {
 		g.logStart = make(map[int32]int64)
 	}
 	g.logStart[partitionID] = offset
-	for _, r := range raises {
-		group := g.groups[r.group]
+	for _, id := range raises {
+		group := g.groups[id]
 		if group == nil {
 			continue
 		}
-		prefix := completionPrefix(r.group, partitionID)
+		prefix := completionPrefix(id, partitionID)
 		if store == nil {
 			for key := range g.completed {
 				if strings.HasPrefix(key, prefix) {
@@ -123,16 +122,19 @@ func (g *GroupManager) SetLogStart(partitionID int32, offset int64) error {
 				}
 			}
 		}
-		g.setFloorLocked(r.group, partitionID, offset)
+		g.setFloorLocked(id, partitionID, offset)
+		raised[id] = offset
 		if offset > group.CommittedOffsets[partitionID] {
 			group.CommittedOffsets[partitionID] = offset
 			if store != nil {
-				_ = store.CommitOffset(r.group, partitionID, offset)
+				_ = store.CommitOffset(id, partitionID, offset)
 			}
 		}
 		g.raiseHighestCompleted(prefix, offset-1)
 	}
 	g.progressVersion.Add(1)
+	g.mu.Unlock()
+	g.dropCompletionsBelow(store, partitionID, raised)
 	return nil
 }
 
@@ -435,8 +437,9 @@ func (g *GroupManager) CommitDelivery(groupID string, partitionID int32, events 
 // CommitDeliveries records completion for several deliveries of one partition
 // with a single durable write, so acks that arrive together share one fsync.
 // The same write advances each group's completion floor over its completed
-// prefix and drops the records the floor has passed. It returns one error slot
-// per commit, in order.
+// prefix; the records the floor has passed are dropped once it is raised in
+// memory as well (see setFloorInBatch). It returns one error slot per commit,
+// in order.
 func (g *GroupManager) CommitDeliveries(partitionID int32, commits []DeliveryCommit) []error {
 	errs := make([]error, len(commits))
 
@@ -508,7 +511,7 @@ func (g *GroupManager) CommitDeliveries(partitionID int32, commits []DeliveryCom
 				cursor := advanceCursor(cursors[group], offsets, recorded)
 				advanced[group] = cursor
 				if cursor > cursors[group] {
-					if err := setFloorInBatch(batch, group, partitionID, cursors[group], cursor); err != nil {
+					if err := setFloorInBatch(batch, group, partitionID, cursor); err != nil {
 						return err
 					}
 				}
@@ -527,10 +530,13 @@ func (g *GroupManager) CommitDeliveries(partitionID int32, commits []DeliveryCom
 			}
 			return errs
 		}
+		if progressWritten != nil {
+			progressWritten()
+		}
 	}
 
+	raised := make(map[string]int64, len(added))
 	g.mu.Lock()
-	defer g.mu.Unlock()
 	for groupID, offsets := range added {
 		group, ok := g.groups[groupID]
 		if !ok {
@@ -559,6 +565,7 @@ func (g *GroupManager) CommitDeliveries(partitionID int32, commits []DeliveryCom
 		floor := advanced[groupID]
 		if floor > cursors[groupID] {
 			g.setFloorLocked(groupID, partitionID, floor)
+			raised[groupID] = floor
 		}
 		if floor > group.CommittedOffsets[partitionID] {
 			group.CommittedOffsets[partitionID] = floor
@@ -576,21 +583,53 @@ func (g *GroupManager) CommitDeliveries(partitionID int32, commits []DeliveryCom
 		}
 	}
 	g.progressVersion.Add(1)
+	g.mu.Unlock()
+	g.dropCompletionsBelow(store, partitionID, raised)
 	return errs
 }
+
+// progressWritten, when a test sets it, runs between a durable progress write
+// and the update of the in-memory state that follows it: where a concurrent
+// reader finds the store ahead of memory.
+var progressWritten func()
 
 // floorKeyPrefix prefixes the stored completion floor of a group on a partition.
 const floorKeyPrefix = "floor:"
 
-// setFloorInBatch raises a group's stored completion floor from old to floor
-// and removes the completion records it now covers, in the caller's batch.
-func setFloorInBatch(batch *pebble.Batch, group string, partition int32, old, floor int64) error {
+// setFloorInBatch stores a group's raised completion floor in the caller's
+// batch. The completion records the floor now covers stay: until the floor is
+// raised in memory too, a reader still answers from them, and one that found
+// neither would take completed events for unfinished ones and have them
+// delivered again. dropCompletionsBelow removes them afterwards.
+func setFloorInBatch(batch *pebble.Batch, group string, partition int32, floor int64) error {
 	value := make([]byte, 8)
 	binary.BigEndian.PutUint64(value, uint64(floor))
-	if err := batch.Set([]byte(floorKey(group, partition)), value, nil); err != nil {
-		return err
+	return batch.Set([]byte(floorKey(group, partition)), value, nil)
+}
+
+// dropCompletionsBelow removes the completion records that the floors just
+// raised in memory now cover; floors maps a group to its new floor on the
+// partition. A reader answers from the floor from then on, so the records are
+// redundant. The caller holds commitMu, so no ack records anything below a
+// floor meanwhile.
+//
+// The write is not synced, and a failure is not reported: records a crash or a
+// failed write leaves behind are redundant too, and the next raise removes
+// them with its own, since it starts from the lowest record of the group.
+func (g *GroupManager) dropCompletionsBelow(store *OffsetStore, partition int32, floors map[string]int64) {
+	if store == nil || len(floors) == 0 {
+		return
 	}
-	return batch.DeleteRange([]byte(completionKey(group, partition, old)), []byte(completionKey(group, partition, floor)), nil)
+	_ = store.withDB(func(db *pebble.DB) error {
+		batch := db.NewBatch()
+		defer batch.Close()
+		for group, floor := range floors {
+			if err := batch.DeleteRange([]byte(completionPrefix(group, partition)), []byte(completionKey(group, partition, floor)), nil); err != nil {
+				return err
+			}
+		}
+		return batch.Commit(pebble.NoSync)
+	})
 }
 
 // loadFloors reads every stored completion floor, keyed by completion prefix.
@@ -735,7 +774,7 @@ func (g *GroupManager) ApplyReplicatedProgress(partitionID int32, logEnd int64, 
 					}
 				}
 				if cursor > cursors[group] {
-					if err := setFloorInBatch(batch, group, partitionID, cursors[group], cursor); err != nil {
+					if err := setFloorInBatch(batch, group, partitionID, cursor); err != nil {
 						return err
 					}
 				}
@@ -748,10 +787,13 @@ func (g *GroupManager) ApplyReplicatedProgress(partitionID int32, logEnd int64, 
 		if err != nil {
 			return fmt.Errorf("persist replicated consumer progress: %w", err)
 		}
+		if progressWritten != nil {
+			progressWritten()
+		}
 	}
 
+	raised := make(map[string]int64, len(groups))
 	g.mu.Lock()
-	defer g.mu.Unlock()
 	now := time.Now().UnixMilli()
 	for _, progress := range groups {
 		groupID := progress.GetGroupId()
@@ -795,6 +837,7 @@ func (g *GroupManager) ApplyReplicatedProgress(partitionID int32, logEnd int64, 
 				}
 			}
 			g.setFloorLocked(groupID, partitionID, cursor)
+			raised[groupID] = cursor
 		}
 		if cursor > group.CommittedOffsets[partitionID] {
 			if store != nil {
@@ -809,5 +852,7 @@ func (g *GroupManager) ApplyReplicatedProgress(partitionID int32, logEnd int64, 
 			g.persistGroup(group)
 		}
 	}
+	g.mu.Unlock()
+	g.dropCompletionsBelow(store, partitionID, raised)
 	return nil
 }

@@ -151,6 +151,103 @@ func TestCompletionsAboveTheFloorSurviveRestart(t *testing.T) {
 	}
 }
 
+// A floor that rises over completion records must not make them look
+// unfinished to a reader that comes in while it rises. The records used to be
+// removed in the same durable write that stored the new floor, before the
+// floor was raised in memory, and a reader in between found neither: the
+// redelivery scan then sent completed events again, all at once.
+func TestCompletionsStayCompleteWhileTheFloorRises(t *testing.T) {
+	for name, tc := range map[string]struct {
+		setup, raise func(*testing.T, *GroupManager)
+		complete     []int64
+		left         int // completion records above the risen floor
+	}{
+		"an ack closes the gap": {
+			setup: func(t *testing.T, m *GroupManager) {
+				if err := m.CommitDelivery("g", 0, completionEvents("orders", 1, 2, 3, 4, 5)); err != nil {
+					t.Fatal(err)
+				}
+			},
+			raise: func(t *testing.T, m *GroupManager) {
+				if err := m.CommitDelivery("g", 0, completionEvents("orders", 0)); err != nil {
+					t.Fatal(err)
+				}
+			},
+			complete: []int64{1, 2, 3, 4, 5},
+			left:     0,
+		},
+		"the log start moves up": {
+			setup: func(t *testing.T, m *GroupManager) {
+				if err := m.CommitDelivery("g", 0, completionEvents("orders", 3, 4, 5, 6)); err != nil {
+					t.Fatal(err)
+				}
+			},
+			raise: func(t *testing.T, m *GroupManager) {
+				if err := m.SetLogStart(0, 5); err != nil {
+					t.Fatal(err)
+				}
+			},
+			complete: []int64{3, 4, 5, 6},
+			left:     2,
+		},
+		"the leader's floor is replicated": {
+			setup: func(t *testing.T, m *GroupManager) {
+				progress := []*types.ConsumerGroupProgress{{GroupId: "g", Topic: "orders", CompletedOffsets: []int64{1, 2, 3, 4, 5}}}
+				if err := m.ApplyReplicatedProgress(0, 10, progress); err != nil {
+					t.Fatal(err)
+				}
+			},
+			raise: func(t *testing.T, m *GroupManager) {
+				progress := []*types.ConsumerGroupProgress{{GroupId: "g", Topic: "orders", CommittedOffset: 6}}
+				if err := m.ApplyReplicatedProgress(0, 10, progress); err != nil {
+					t.Fatal(err)
+				}
+			},
+			complete: []int64{1, 2, 3, 4, 5},
+			left:     0,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			m := newStoreBackedManager(t, t.TempDir())
+			defer m.Close()
+			if err := m.CreateGroup("g", "orders", []int32{0}); err != nil {
+				t.Fatal(err)
+			}
+			tc.setup(t, m)
+			for _, offset := range tc.complete {
+				if !m.IsCompleted("g", 0, offset) {
+					t.Fatalf("IsCompleted(%d) = false before the floor rises", offset)
+				}
+			}
+
+			var seen []int64
+			progressWritten = func() {
+				for _, offset := range tc.complete {
+					if !m.IsCompleted("g", 0, offset) {
+						seen = append(seen, offset)
+					}
+				}
+			}
+			defer func() { progressWritten = nil }()
+			tc.raise(t, m)
+			progressWritten = nil
+
+			if len(seen) > 0 {
+				t.Errorf("completed offsets %v read as unfinished while the floor rose", seen)
+			}
+			for _, offset := range tc.complete {
+				if !m.IsCompleted("g", 0, offset) {
+					t.Errorf("IsCompleted(%d) = false after the floor rose", offset)
+				}
+			}
+			// The records the floor has passed are still removed.
+			if got := completionRecordCount(t, m, "g"); got != tc.left {
+				t.Errorf("%d completion records left, want %d", got, tc.left)
+			}
+		})
+	}
+}
+
 // An ack or redelivery scan still in flight at shutdown must get an error or a
 // negative answer, not a panic from the closed store.
 func TestCompletionAfterCloseDoesNotPanic(t *testing.T) {
