@@ -6,12 +6,11 @@
 
 ### Get the image
 
-The v0.12.2 container targets Linux amd64. Check the [release page](https://github.com/jatin711-debug/cronos_db_golang/releases/tag/v0.12.2) for publication status and image evidence:
+The v0.13.0 container targets Linux amd64. Check the [release page](https://github.com/jatin711-debug/cronos_db_golang/releases/tag/v0.13.0) for publication status and image evidence:
 
 ```bash
-docker pull johnny711dock/cronos-db:0.12.2    # :latest selects the current stable release
-# The tested v0.12.2 Linux amd64 image, pinned for immutable deployments:
-docker pull johnny711dock/cronos-db@sha256:c5792a433cb23ad22796606ccbcf3269c6e03bf6176d29bced7f979ed8602595
+docker pull johnny711dock/cronos-db:0.13.0    # :latest selects the current stable release
+# For immutable deployments, pin the digest in the release's IMAGE_DIGEST asset.
 ```
 
 For another release, take its pin from the `IMAGE_DIGEST` release asset.
@@ -36,7 +35,7 @@ docker run -d \
   -p 9000:9000 \
   -p 8080:8080 \
   -v cronos-data:/data \
-  johnny711dock/cronos-db:0.12.2 \
+  johnny711dock/cronos-db:0.13.0 \
   --node-id=my-node \
   --data-dir=/data \
   --dev
@@ -80,7 +79,7 @@ docker run -d \
   -p 9000:9000 \
   -p 8080:8080 \
   -v /path/on/host:/data \
-  johnny711dock/cronos-db:0.12.2 \
+  johnny711dock/cronos-db:0.13.0 \
   --node-id=my-node \
   --data-dir=/data \
   --dev
@@ -210,7 +209,7 @@ docker run -d \
   -v cronos-node1-data:/data \
   -v /etc/cronos/certs:/certs:ro \
   --env-file /etc/cronos/secrets.env \
-  johnny711dock/cronos-db:0.12.2 \
+  johnny711dock/cronos-db:0.13.0 \
   --node-id=node1 \
   --data-dir=/data \
   --cluster \

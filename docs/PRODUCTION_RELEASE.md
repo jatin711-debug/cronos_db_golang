@@ -1,5 +1,21 @@
 # Production release requirements
 
+**v0.13.0 stops a consumer group's progress records and the cluster's metadata
+log from growing for the life of a cluster**, and a node that starts acts on
+the cluster metadata only once its copy has caught up; until then it reports
+not ready. It keeps v0.12.2 data directories and changes no API or flag; see
+the [v0.13.0 notes](RELEASE_V0.13.0.md). The release gates (a multi-host soak,
+production-sized recovery and upgrade drills, power-loss testing) are still
+open.
+
+## v0.13.0 release
+
+The [v0.13.0 notes](RELEASE_V0.13.0.md) describe the three changes and how they
+were tested. The chart and default image tag are `0.13.0`. Publication status,
+checksums and the exact deployment digest are on the
+[release page](https://github.com/jatin711-debug/cronos_db_golang/releases/tag/v0.13.0).
+This release makes no new capacity claim.
+
 **v0.12.2 stops CronosDB from delivering again what its consumer groups had
 completed**, after a node restarted and while a group's progress advanced (both
 since v0.9.0). Nothing was lost; delivery is at-least-once. It keeps v0.12.1

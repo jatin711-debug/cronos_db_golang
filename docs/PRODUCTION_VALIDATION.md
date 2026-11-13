@@ -29,6 +29,44 @@ not on separate hosts or Kubernetes; power loss was not tested; and the
 latencies are those of a shared desktop machine. A 24-hour run of `TestSoak` on
 one machine is the next step, before the separate-host run.
 
+## v0.13.0 — 2026-11-13
+
+Two growths found after v0.12.2 are stopped, and the take-up guard's firing on
+ordinary restarts (see v0.12.2 below) is removed at its cause.
+
+**Consumer progress.** A group's completion floor stopped at the first entry it
+does not take: another topic's event in the same partition, or the term-start
+record each new leader writes. So after the first failover every group kept
+its progress as per-event records until the entry left the log. The redelivery
+sweep now raises the floor over such entries and the group's completed events.
+An in-process test with two topics interleaved on one partition ends with the
+group's floor at the end of the log and no records left; without the change
+the floor stays at offset 0 with 10 records above it.
+
+**Metadata log.** Raft's default snapshot threshold (8,192 entries) meant the
+metadata log was never snapshotted and every start replayed all of it. It is
+now snapshotted every 128 entries and at a clean stop, and a starting node
+acts on the committed assignments only once its copy is current. In the
+acceptance suite's node logs, restarted nodes of the build before the
+readiness condition was complete declined 3 stale epoch-1 assignments met
+during the replay; the release build declined none. Its 3 remaining declines
+were at current epochs, where another replica held more of the log, which is
+what the guard is for. The suite kills its nodes, and none reached 128
+entries, so it did not start a node from a snapshot; unit tests cover that.
+
+**Tests thought flaky.** `TestIsolation_AcknowledgementsBelongToTheirRecipient`
+failed twice in CI (2026-10-13 and 2026-10-21), both before the per-IP rate
+limiter's out-of-order timestamp stall was fixed on 2026-10-21; it then passed
+600 local runs, 300 of them under `-race` with `GOMAXPROCS` 1 and 2, and every
+CI run since. `TestClusterRestoredFromBackups`, whose log comparison race was
+fixed on 2026-10-27, passed 5 of 5 runs. Neither needed a change.
+
+**What was run.** The unit suites, and the acceptance suite on processes on one
+Windows machine, passed with the changes; the container tests, the soak and the
+upgrade drill were skipped there, the container tests running in CI. The
+release's own checks are recorded on its release page. The environment gates
+below are unchanged by this release.
+
 ## v0.12.2 — 2026-11-12
 
 The v0.12.1 upgrade drill left two observations open. Both were examined with
