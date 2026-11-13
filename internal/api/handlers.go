@@ -1454,6 +1454,10 @@ func (h *EventServiceHandler) redriveRetained(ctx context.Context, p *partition.
 	cachedFrom, cachedTo, cachedNext := int64(-1), int64(-1), int64(-1)
 	offer := func(from, to int64) (next int64, blocked bool, err error) {
 		if from != cachedFrom || to != cachedTo {
+			cuts := uint64(0)
+			if p.ConsumerGroup != nil {
+				cuts = p.ConsumerGroup.LogCuts(p.ID)
+			}
 			events, err := p.Wal.ReadEventsWithin(from, to, redriveBatchBytes)
 			if err != nil {
 				return from, false, status.Errorf(codes.Internal, "replay retained events: %v", err)
@@ -1462,6 +1466,7 @@ func (h *EventServiceHandler) redriveRetained(ctx context.Context, p *partition.
 			if len(events) > 0 {
 				cachedNext = events[len(events)-1].Offset + 1
 			}
+			passOtherEntries(p, group, topic, events, cuts)
 		}
 		now := time.Now().UnixMilli()
 		due := make([]*types.Event, 0, len(cached))
@@ -1571,6 +1576,48 @@ func (h *EventServiceHandler) redriveRetained(ctx context.Context, p *partition.
 			timer.Stop()
 		case <-timer.C:
 		}
+	}
+}
+
+// passOtherEntries raises a group's completion floor over what a read of the
+// log from it found the group has nothing left to do with: entries of other
+// topics, the log's own records, and the group's events it has completed (see
+// consumer.GroupManager.PassOtherEntries). events are what the read returned,
+// in order; cuts is the partition's LogCuts as noted before the read. A read
+// that does not reach the floor, or starts above it, changes nothing.
+//
+// The read never goes beyond what may be delivered, so the floor does not pass
+// an entry that is not on enough replicas yet and could still be replaced.
+func passOtherEntries(p *partition.Partition, group, topic string, events []*types.Event, cuts uint64) {
+	if p.ConsumerGroup == nil || len(events) == 0 {
+		return
+	}
+	floor := p.ConsumerGroup.CompletionFloor(group, p.ID)
+	if floor < events[0].Offset || floor > events[len(events)-1].Offset {
+		return
+	}
+	next := floor
+	var own []int64
+	for _, event := range events {
+		if event.Offset < floor {
+			continue
+		}
+		if event.Offset != next {
+			break // the read returned a gap; nothing is known about it
+		}
+		if event.Topic == topic {
+			if !p.ConsumerGroup.IsCompleted(group, p.ID, event.Offset) {
+				break
+			}
+			own = append(own, event.Offset)
+		}
+		next++
+	}
+	if next == floor {
+		return
+	}
+	if _, err := p.ConsumerGroup.PassOtherEntries(group, p.ID, floor, next, own, cuts); err != nil {
+		slog.Warn("Raising a completion floor over other entries failed", "group", group, "partition", p.ID, "from", floor, "to", next, "error", err)
 	}
 }
 

@@ -89,6 +89,9 @@ type GroupManager struct {
 	// logStart holds, per partition, where its log starts (see SetLogStart).
 	// Guarded by mu.
 	logStart map[int32]int64
+	// cuts counts, per partition, how often the end of its log was cut away
+	// (see LogCuts). Guarded by mu.
+	cuts map[int32]uint64
 
 	// completedMax caches, per group and partition, the highest offset known
 	// complete. Guarded by completedMaxMu, which is never held while waiting

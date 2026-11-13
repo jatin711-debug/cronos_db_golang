@@ -261,6 +261,9 @@ func (g *GroupManager) ForgetCompletionsFrom(partitionID int32, offset int64) (i
 	g.commitMu.Lock()
 	defer g.commitMu.Unlock()
 
+	// Whatever was read of the log before now may be replaced.
+	g.NoteLogCut(partitionID)
+
 	g.mu.RLock()
 	var tracked []string
 	for id, group := range g.groups {

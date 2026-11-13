@@ -397,10 +397,12 @@ This section is organized by feature area and tells you where to read first, wha
 - Key files:
   - `internal/consumer/group.go`
   - `internal/consumer/completion.go` (completion floor and per-event completions)
+  - `internal/consumer/pass.go` (raising the floor over entries a group does not take)
   - `internal/consumer/offset_store.go`
 - Main flow:
   - Subscribe/ack APIs feed into group manager. Group names and subscription IDs are at most 255 bytes, and a partition holds at most `--max-consumer-groups` groups (default 10000).
   - Offsets, group metadata/assignments and per-event completions are persisted in the PebbleDB `OffsetStore`.
+  - A group's completion floor moves over completed offsets as acknowledgements arrive. Entries the group does not take (other topics in the partition, and the log's own records such as a term start) are passed by the redelivery sweep (`passOtherEntries` in `internal/api/handlers.go`, `GroupManager.PassOtherEntries`): reading from the floor anyway, it raises the floor over every offset that holds such an entry or one of the group's completed events, up to what may be delivered. A per-partition count of log cuts (`LogCuts`) makes a raise based on a read from before a cut fail. Up to v0.12.2 the floor stayed at the first such entry until retention removed it, and every completion above was kept as a record of its own.
 - Reliability decisions:
   - Delivery ID parsing routes ack to correct partition path.
   - `OffsetStore.CommitOffsetExactlyOnce` (commit IDs) exists but is not called by the Ack path; `--exactly-once-commits` is refused in production.

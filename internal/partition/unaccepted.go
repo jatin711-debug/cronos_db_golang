@@ -262,6 +262,11 @@ func (p *Partition) CutLog(offset int64) (int, error) {
 		return 0, err
 	}
 	removed, err := p.Wal.TruncateToOffset(offset)
+	if p.ConsumerGroup != nil {
+		// A read of the log made between the forgetting above and the cut
+		// saw the entries that went.
+		p.ConsumerGroup.NoteLogCut(p.ID)
+	}
 	if p.eventIndex() != nil {
 		// A suffix cut can reuse offsets for another term or identity. No
 		// lifecycle reader may observe heads from the previous WAL generation.
