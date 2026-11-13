@@ -67,6 +67,15 @@ upgrade drill were skipped there, the container tests running in CI. The
 release's own checks are recorded on its release page. The environment gates
 below are unchanged by this release.
 
+**The release.** Released from `193d788`. Checks on the release itself:
+pull-request and `main` CI; the release workflow's image scan (no fixable HIGH or
+CRITICAL findings) and its network-partition and memory-limited restart tests on
+the exact image; a local smoke test of that image under a 512 MiB limit; and
+`TestRollingUpgradeAndRollback` with the checksum-verified Windows binaries of
+v0.12.2 and v0.13.0, which passed in 131.69 s with 679, 621 and 718 acknowledged
+events in its three phases, all delivered, none early, and replica logs in
+agreement after each phase. 2, 2 and 1 events were delivered more than once.
+
 ## v0.12.2 — 2026-11-12
 
 The v0.12.1 upgrade drill left two observations open. Both were examined with

@@ -14,6 +14,13 @@ The [v0.13.0 notes](RELEASE_V0.13.0.md) describe the three changes and how they
 were tested. The chart and default image tag are `0.13.0`. Publication status,
 checksums and the exact deployment digest are on the
 [release page](https://github.com/jatin711-debug/cronos_db_golang/releases/tag/v0.13.0).
+v0.13.0 was published on 2026-11-13; its image is `sha256:ca4037c488b1ffeccaf88b37bbf9ff14faae531ac6c3ffb72fd478a826ab38e2`,
+published as `johnny711dock/cronos-db:0.13.0` and `:latest`, and the release is
+marked latest. The release workflow scanned this exact image (no fixable HIGH or
+CRITICAL findings) and ran the network-partition and memory-limited restart tests
+on it. The checksum-verified Windows release binaries passed a rolling upgrade from
+v0.12.2, a rollback and a second upgrade under traffic; the release page carries
+the log and `LOCAL_PUBLICATION_EVIDENCE.json`.
 This release makes no new capacity claim.
 
 **v0.12.2 stops CronosDB from delivering again what its consumer groups had
