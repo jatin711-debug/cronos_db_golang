@@ -9,11 +9,38 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/hashicorp/raft"
 	raftboltdb "github.com/hashicorp/raft-boltdb/v2"
 	"go.etcd.io/bbolt"
+)
+
+// The cluster's metadata log grows by an entry for each change of placement
+// or leadership, which is few: Raft's default of a snapshot every 8,192
+// entries meant a cluster never had one. Every start replayed the whole log,
+// which only grew, and the node acted on each assignment it went through on
+// the way (see MetadataCurrent). The state is small (the nodes and one record
+// per partition), so a snapshot is cheap and is taken after a few changes,
+// and once more when the node stops.
+const (
+	// metadataSnapshotThreshold is how many entries since the last snapshot
+	// make the next check (every metadataSnapshotInterval) take one.
+	metadataSnapshotThreshold = 128
+	metadataSnapshotInterval  = 60 * time.Second
+	// metadataTrailingLogs is how many entries a snapshot leaves in the log, for
+	// followers that are briefly behind; one further behind is sent the
+	// snapshot.
+	metadataTrailingLogs = 1024
+	// metadataSettle is how long a follower's commit index has to stay where it
+	// is, with everything up to it applied, before the follower counts its copy
+	// as caught up after a start. Entries sent to catch it up come in batches
+	// one after another, and between two of them it has applied all it holds.
+	metadataSettle = time.Second
+	// metadataBarrierTimeout bounds the wait of a new leader for the entries
+	// committed before its term to be applied.
+	metadataBarrierTimeout = 10 * time.Second
 )
 
 // RaftNode manages HashiCorp Raft consensus for durable cluster metadata
@@ -26,6 +53,23 @@ type RaftNode struct {
 	logStore      raft.LogStore
 	stableStore   raft.StableStore
 	snapshotStore raft.SnapshotStore
+
+	// contactWithin is how recently a follower must have heard from the leader
+	// for its copy to count as caught up: the election timeout.
+	contactWithin time.Duration
+	// caughtUp is set once this process's copy of the metadata has caught up
+	// with the cluster's; see MetadataCurrent.
+	caughtUp atomic.Bool
+	// currentMu guards the rest, which MetadataCurrent keeps.
+	currentMu sync.Mutex
+	// settleIndex is the commit index a follower last saw change, at
+	// settleSince.
+	settleIndex uint64
+	settleSince time.Time
+	// barrierTerm is the last term in which this node, as leader, has seen
+	// every earlier entry applied; barrierRunning is set while it waits for that.
+	barrierTerm    uint64
+	barrierRunning bool
 }
 
 // NewRaftNode creates a RaftNode with Bolt-backed log/stable stores and a file snapshot store.
@@ -83,8 +127,9 @@ func NewRaftNode(config *ClusterConfig) (*RaftNode, error) {
 	raftConfig.HeartbeatTimeout = heartbeatTimeout
 	raftConfig.ElectionTimeout = electionTimeout
 	raftConfig.CommitTimeout = 500 * time.Millisecond
-	raftConfig.SnapshotInterval = 60 * time.Second
-	raftConfig.SnapshotThreshold = 8192
+	raftConfig.SnapshotInterval = metadataSnapshotInterval
+	raftConfig.SnapshotThreshold = metadataSnapshotThreshold
+	raftConfig.TrailingLogs = metadataTrailingLogs
 
 	// Create Raft instance
 	r, err := raft.NewRaft(raftConfig, fsm, boltDB, boltDB, snapshotStore, transport)
@@ -100,7 +145,101 @@ func NewRaftNode(config *ClusterConfig) (*RaftNode, error) {
 		logStore:      boltDB,
 		stableStore:   boltDB,
 		snapshotStore: snapshotStore,
+		contactWithin: electionTimeout,
 	}, nil
+}
+
+// MetadataCurrent reports whether this node's copy of the committed cluster
+// metadata may be acted on.
+//
+// A node that starts restores its last snapshot and then applies the entries
+// after it as it learns they are committed; one with no snapshot replays the
+// log from the start. On the way its copy names, one after another, every
+// leader each partition has had, and the node used to act on each: it took up
+// partitions it had led long before, let go of others and loaded them again.
+// So the node waits until it has caught up: as a follower, until it has heard
+// from the leader, the commit index has reached the end of its log and
+// everything up to it has been applied, with the commit index settled for
+// metadataSettle; as the leader, until a barrier has seen
+// every entry of earlier terms applied. Once caught up, a follower stays so for
+// the life of the process, as it lags only briefly; a leader waits again at
+// the start of each term, since a node can win an election before it has
+// applied everything it holds.
+func (n *RaftNode) MetadataCurrent() bool {
+	if n.raft.State() == raft.Leader {
+		return n.leaderCurrent()
+	}
+	return n.followerCurrent(n.raft)
+}
+
+// raftProgress is what a follower reads of Raft to tell whether it has caught
+// up; *raft.Raft has it.
+type raftProgress interface {
+	State() raft.RaftState
+	LastContact() time.Time
+	CommitIndex() uint64
+	AppliedIndex() uint64
+	LastIndex() uint64
+}
+
+func (n *RaftNode) followerCurrent(r raftProgress) bool {
+	if n.caughtUp.Load() {
+		return true
+	}
+	if r.State() != raft.Follower {
+		return false
+	}
+	contact := r.LastContact()
+	if contact.IsZero() || time.Since(contact) > n.contactWithin {
+		return false // no leader heard from yet, or not lately
+	}
+	// Heartbeats tell a follower that the leader is there, not how far it has
+	// committed: that comes with the entries, which after a restart can trail
+	// the heartbeats by seconds. Until then the commit index is 0, everything
+	// up to it is applied, and nothing of the log the node holds has been. So
+	// the commit index has to reach the end of that log too.
+	commit, applied, last := r.CommitIndex(), r.AppliedIndex(), r.LastIndex()
+	n.currentMu.Lock()
+	defer n.currentMu.Unlock()
+	if commit == 0 || commit < last || applied < commit || commit != n.settleIndex || n.settleSince.IsZero() {
+		n.settleIndex, n.settleSince = commit, time.Now()
+		return false
+	}
+	if time.Since(n.settleSince) < metadataSettle {
+		return false
+	}
+	n.caughtUp.Store(true)
+	log.Printf("[RAFT] The cluster metadata is caught up (applied through index %d)", applied)
+	return true
+}
+
+// leaderCurrent reports whether, as leader, this node has seen every entry
+// committed before its term applied. The first call in a term starts a
+// barrier and reports false until it has completed.
+func (n *RaftNode) leaderCurrent() bool {
+	term := n.raft.CurrentTerm()
+	n.currentMu.Lock()
+	defer n.currentMu.Unlock()
+	if n.barrierTerm == term {
+		return true
+	}
+	if !n.barrierRunning {
+		n.barrierRunning = true
+		go func() {
+			err := n.raft.Barrier(metadataBarrierTimeout).Error()
+			n.currentMu.Lock()
+			n.barrierRunning = false
+			if err == nil {
+				n.barrierTerm = term
+				n.caughtUp.Store(true)
+			}
+			n.currentMu.Unlock()
+			if err != nil {
+				log.Printf("[RAFT] Waiting for the metadata of earlier terms to be applied failed: %v", err)
+			}
+		}()
+	}
+	return false
 }
 
 // Bootstrap bootstraps a single-server Raft cluster. Only the first node should call this.
@@ -350,6 +489,13 @@ func (n *RaftNode) WaitForLeader(timeout time.Duration) error {
 // Shutdown cleanly shuts down the Raft instance, and closes its port and its
 // store, which Raft leaves to their owner.
 func (n *RaftNode) Shutdown() error {
+	// A snapshot of what this node has applied, so that its next start
+	// replays only what was committed after it stopped.
+	if n.raft.AppliedIndex() > 0 {
+		if err := n.raft.Snapshot().Error(); err != nil && err != raft.ErrNothingNewToSnapshot {
+			log.Printf("[RAFT] Snapshot of the cluster metadata at shutdown failed: %v", err)
+		}
+	}
 	err := n.raft.Shutdown().Error()
 	if closeErr := n.transport.Close(); err == nil {
 		err = closeErr
@@ -647,14 +793,38 @@ func (f *ClusterFSM) Restore(rc io.ReadCloser) error {
 	if err := json.Unmarshal(data, &state); err != nil {
 		return err
 	}
+	if state.Nodes == nil {
+		state.Nodes = make(map[string]*Node)
+	}
+	if state.Partitions == nil {
+		state.Partitions = make(map[int32]*PartitionInfo)
+	}
 
+	// A snapshot replaces the entries it covers, and with them what applying
+	// them would have set off on this node: a running node that fell behind
+	// and is sent one learns of new assignments and of nodes removed meanwhile
+	// only here.
 	f.mu.Lock()
+	var removed []string
+	for id := range f.state.Nodes {
+		if _, kept := state.Nodes[id]; !kept {
+			removed = append(removed, id)
+		}
+	}
 	f.state = &state
+	onPartitionChange, onNodeRemoved := f.onPartitionChange, f.onNodeRemoved
+	nodes, partitions := len(state.Nodes), len(state.Partitions)
 	f.mu.Unlock()
 
-	log.Printf("[FSM] Restored from snapshot: %d nodes, %d partitions",
-		len(f.state.Nodes), len(f.state.Partitions))
-
+	log.Printf("[FSM] Restored from snapshot: %d nodes, %d partitions", nodes, partitions)
+	if onNodeRemoved != nil {
+		for _, id := range removed {
+			go onNodeRemoved(id)
+		}
+	}
+	if onPartitionChange != nil {
+		onPartitionChange()
+	}
 	return nil
 }
 

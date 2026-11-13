@@ -23,8 +23,11 @@ type Manager struct {
 	partitionAccessor PartitionAccessor
 	// assignments is the committed partition metadata (Raft); positions reads
 	// replica log positions. Either may be nil.
-	assignments        assignmentStore
-	positions          ReplicaPositioner
+	assignments assignmentStore
+	positions   ReplicaPositioner
+	// metadata says whether the committed assignments may be acted on yet
+	// (see RaftNode.MetadataCurrent); nil means always.
+	metadata           metadataProgress
 	lifecycleRequested bool
 	// reconcileCh wakes the background loop when an assignment is committed.
 	reconcileCh chan struct{}
@@ -162,6 +165,7 @@ func (m *Manager) Start() error {
 		} else {
 			m.raft = raft
 			m.assignments = raft
+			m.metadata = raft
 			// React to committed assignments as they are applied instead of
 			// waiting for the next tick: a deposed leader steps down and a newly
 			// named one takes over within moments of the commit.
@@ -344,6 +348,7 @@ func (m *Manager) leaderTasks() {
 	// shorter tick than the rest.
 	fast := time.NewTicker(500 * time.Millisecond)
 	defer fast.Stop()
+	current := false // whether the metadata was current at the last fast tick
 
 	for {
 		select {
@@ -354,6 +359,12 @@ func (m *Manager) leaderTasks() {
 		case <-m.reconcileCh:
 			m.reconcileLocalLeadership()
 		case <-fast.C:
+			// Nothing is done on the committed assignments until they are
+			// current; the moment they are, this node takes up what they say.
+			wasCurrent := current
+			if current = m.metadataCurrent(); current && !wasCurrent {
+				m.reconcileLocalLeadership()
+			}
 			if m.IsLeader() {
 				m.syncClusterState()
 				m.advanceTransfers()
@@ -371,8 +382,28 @@ func (m *Manager) leaderTasks() {
 	}
 }
 
+// metadataProgress says whether the committed cluster metadata may be acted
+// on; RaftNode implements it.
+type metadataProgress interface {
+	MetadataCurrent() bool
+}
+
+// metadataCurrent reports whether this node's copy of the committed
+// assignments is current enough to act on (see RaftNode.MetadataCurrent).
+// Until it is, the node neither takes up nor gives up partitions, and as the
+// Raft leader makes no decision about them.
+func (m *Manager) metadataCurrent() bool {
+	m.mu.RLock()
+	metadata := m.metadata
+	m.mu.RUnlock()
+	return metadata == nil || metadata.MetadataCurrent()
+}
+
 // performLeaderTasks performs leader-only tasks
 func (m *Manager) performLeaderTasks() {
+	if !m.metadataCurrent() {
+		return
+	}
 	m.enableTermStartRequirements()
 	m.enableLifecycleRequirements()
 	// Elect a leader for partitions whose leader is dead

@@ -183,14 +183,18 @@ type localEpochs interface {
 // ones committed to this node have been taken up here and are not being handed
 // over. While it is false, publishes for the partitions named in the detail
 // are refused with a retryable error; that is the case while a cluster forms,
-// after a failover until the new leader has loaded the partition, and during
-// a handoff.
+// after a failover until the new leader has loaded the partition, during a
+// handoff, and while this node's copy of the committed assignments is still
+// catching up after a start.
 func (m *Manager) LeadershipReady() (bool, string) {
 	m.mu.RLock()
 	pa, rt, nodeID := m.partitionAccessor, m.router, m.config.NodeID
 	m.mu.RUnlock()
 	if rt == nil || !m.leadershipIsCommitted() {
 		return true, "leadership follows the hash ring"
+	}
+	if !m.metadataCurrent() {
+		return false, "this node's copy of the cluster metadata is still catching up"
 	}
 	epochs, _ := pa.(localEpochs)
 
@@ -574,6 +578,9 @@ func (m *Manager) electNewLeader(partitionID int32, info *PartitionInfo) {
 // their other replicas, and stops leading every other partition. Until an
 // assignment is committed (cluster bootstrap) the ring's view is used.
 func (m *Manager) reconcileLocalLeadership() {
+	if !m.metadataCurrent() {
+		return // see metadataCurrent
+	}
 	m.mu.RLock()
 	pa := m.partitionAccessor
 	rt := m.router
@@ -977,6 +984,9 @@ func (m *Manager) replaceLeadersThatDoNotLead() {
 // partition directly: a dead leader is replaced by election, and a live one is
 // replaced only through a completed handoff.
 func (m *Manager) syncClusterState() {
+	if !m.metadataCurrent() {
+		return
+	}
 	m.leadershipMu.Lock()
 	defer m.leadershipMu.Unlock()
 	m.mu.RLock()
@@ -1215,6 +1225,9 @@ func (m *Manager) handoffMayStart(partitionID int32, leader, target string, aliv
 // in place, when the target disappears, the ring no longer wants it, or it
 // takes too long.
 func (m *Manager) advanceTransfers() {
+	if !m.metadataCurrent() {
+		return
+	}
 	m.leadershipMu.Lock()
 	defer m.leadershipMu.Unlock()
 	m.mu.RLock()
