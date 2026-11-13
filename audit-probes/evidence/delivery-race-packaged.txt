@@ -1,0 +1,90 @@
+These probes assert desired production behavior. Failures are expected at the audited commit.
+==================
+WARNING: DATA RACE
+Read at 0x00c000102020 by goroutine 37:
+  github.com/jatin711-debug/cronos_db_golang/internal/delivery.(*Dispatcher).DispatchBatch()
+      <REPO>/internal/delivery/dispatcher.go:637 +0x19e
+  github.com/jatin711-debug/cronos_db_golang/internal/delivery.(*Worker).processBatch()
+      <REPO>/internal/delivery/worker.go:114 +0x238
+  github.com/jatin711-debug/cronos_db_golang/internal/delivery.TestAuditWorkerOwnsDispatchSlice()
+      <REPO>/internal/delivery/production_audit_test.go:22 +0x30b
+  testing.tRunner()
+      C:/Program Files (x86)/Go/src/testing/testing.go:2036 +0x1ca
+  testing.(*T).Run.gowrap1()
+      C:/Program Files (x86)/Go/src/testing/testing.go:2101 +0x38
+
+Previous write at 0x00c000102020 by goroutine 39:
+  github.com/jatin711-debug/cronos_db_golang/internal/delivery.(*Worker).AddReadyEvent()
+      <REPO>/internal/delivery/worker.go:52 +0x9e
+  github.com/jatin711-debug/cronos_db_golang/internal/delivery.TestAuditWorkerOwnsDispatchSlice.func1()
+      <REPO>/internal/delivery/production_audit_test.go:18 +0xcb
+
+Goroutine 37 (running) created at:
+  testing.(*T).Run()
+      C:/Program Files (x86)/Go/src/testing/testing.go:2101 +0xb2a
+  testing.runTests.func1()
+      C:/Program Files (x86)/Go/src/testing/testing.go:2585 +0x84
+  testing.tRunner()
+      C:/Program Files (x86)/Go/src/testing/testing.go:2036 +0x1ca
+  testing.runTests()
+      C:/Program Files (x86)/Go/src/testing/testing.go:2583 +0x9f7
+  testing.(*M).Run()
+      C:/Program Files (x86)/Go/src/testing/testing.go:2443 +0xf4b
+  main.main()
+      _testmain.go:174 +0x164
+
+Goroutine 39 (running) created at:
+  github.com/jatin711-debug/cronos_db_golang/internal/delivery.TestAuditWorkerOwnsDispatchSlice()
+      <REPO>/internal/delivery/production_audit_test.go:15 +0x2e5
+  testing.tRunner()
+      C:/Program Files (x86)/Go/src/testing/testing.go:2036 +0x1ca
+  testing.(*T).Run.gowrap1()
+      C:/Program Files (x86)/Go/src/testing/testing.go:2101 +0x38
+==================
+==================
+WARNING: DATA RACE
+Read at 0x00c000128180 by goroutine 37:
+  github.com/jatin711-debug/cronos_db_golang/pkg/types.(*Event).GetPartitionId()
+      <REPO>/pkg/types/events.pb.go:131 +0x1cc
+  github.com/jatin711-debug/cronos_db_golang/internal/delivery.(*Dispatcher).DispatchBatch()
+      <REPO>/internal/delivery/dispatcher.go:638 +0x168
+  github.com/jatin711-debug/cronos_db_golang/internal/delivery.(*Worker).processBatch()
+      <REPO>/internal/delivery/worker.go:114 +0x238
+  github.com/jatin711-debug/cronos_db_golang/internal/delivery.TestAuditWorkerOwnsDispatchSlice()
+      <REPO>/internal/delivery/production_audit_test.go:22 +0x30b
+  testing.tRunner()
+      C:/Program Files (x86)/Go/src/testing/testing.go:2036 +0x1ca
+  testing.(*T).Run.gowrap1()
+      C:/Program Files (x86)/Go/src/testing/testing.go:2101 +0x38
+
+Previous write at 0x00c000128180 by goroutine 39:
+  github.com/jatin711-debug/cronos_db_golang/internal/delivery.TestAuditWorkerOwnsDispatchSlice.func1()
+      <REPO>/internal/delivery/production_audit_test.go:18 +0x10b
+
+Goroutine 37 (running) created at:
+  testing.(*T).Run()
+      C:/Program Files (x86)/Go/src/testing/testing.go:2101 +0xb2a
+  testing.runTests.func1()
+      C:/Program Files (x86)/Go/src/testing/testing.go:2585 +0x84
+  testing.tRunner()
+      C:/Program Files (x86)/Go/src/testing/testing.go:2036 +0x1ca
+  testing.runTests()
+      C:/Program Files (x86)/Go/src/testing/testing.go:2583 +0x9f7
+  testing.(*M).Run()
+      C:/Program Files (x86)/Go/src/testing/testing.go:2443 +0xf4b
+  main.main()
+      _testmain.go:174 +0x164
+
+Goroutine 39 (running) created at:
+  github.com/jatin711-debug/cronos_db_golang/internal/delivery.TestAuditWorkerOwnsDispatchSlice()
+      <REPO>/internal/delivery/production_audit_test.go:15 +0x2e5
+  testing.tRunner()
+      C:/Program Files (x86)/Go/src/testing/testing.go:2036 +0x1ca
+  testing.(*T).Run.gowrap1()
+      C:/Program Files (x86)/Go/src/testing/testing.go:2101 +0x38
+==================
+--- FAIL: TestAuditWorkerOwnsDispatchSlice (0.38s)
+    testing.go:1712: race detected during execution of test
+FAIL
+FAIL	github.com/jatin711-debug/cronos_db_golang/internal/delivery	4.461s
+FAIL

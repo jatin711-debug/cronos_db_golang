@@ -1,0 +1,38 @@
+ok  	github.com/jatin711-debug/cronos_db_golang/internal/api	111.000s
+ok  	github.com/jatin711-debug/cronos_db_golang/internal/audit	1.071s
+ok  	github.com/jatin711-debug/cronos_db_golang/internal/auth	1.252s
+ok  	github.com/jatin711-debug/cronos_db_golang/internal/cdc	1.066s
+ok  	github.com/jatin711-debug/cronos_db_golang/internal/cluster	9.283s
+ok  	github.com/jatin711-debug/cronos_db_golang/internal/compliance	1.094s
+ok  	github.com/jatin711-debug/cronos_db_golang/internal/config	1.526s
+ok  	github.com/jatin711-debug/cronos_db_golang/internal/consumer	6.425s
+ok  	github.com/jatin711-debug/cronos_db_golang/internal/dedup	15.511s
+ok  	github.com/jatin711-debug/cronos_db_golang/internal/delivery	9.762s
+ok  	github.com/jatin711-debug/cronos_db_golang/internal/lifecycle	2.435s
+?   	github.com/jatin711-debug/cronos_db_golang/internal/logcontrol	[no test files]
+?   	github.com/jatin711-debug/cronos_db_golang/internal/metrics	[no test files]
+ok  	github.com/jatin711-debug/cronos_db_golang/internal/partition	91.476s
+ok  	github.com/jatin711-debug/cronos_db_golang/internal/recoverystate	1.092s
+ok  	github.com/jatin711-debug/cronos_db_golang/internal/replay	4.109s
+ok  	github.com/jatin711-debug/cronos_db_golang/internal/replication	9.747s
+ok  	github.com/jatin711-debug/cronos_db_golang/internal/scheduler	7.827s
+ok  	github.com/jatin711-debug/cronos_db_golang/internal/schema	1.075s
+ok  	github.com/jatin711-debug/cronos_db_golang/internal/slo	1.272s
+ok  	github.com/jatin711-debug/cronos_db_golang/internal/storage	97.265s
+ok  	github.com/jatin711-debug/cronos_db_golang/internal/sysmem	1.062s
+ok  	github.com/jatin711-debug/cronos_db_golang/internal/tenant	4.196s
+ok  	github.com/jatin711-debug/cronos_db_golang/internal/tlsfiles	1.231s
+ok  	github.com/jatin711-debug/cronos_db_golang/internal/tracing	1.042s
+ok  	github.com/jatin711-debug/cronos_db_golang/internal/tx	3.029s
+ok  	github.com/jatin711-debug/cronos_db_golang/pkg/client	2.180s
+ok  	github.com/jatin711-debug/cronos_db_golang/pkg/client/internal/circuitbreaker	1.259s
+ok  	github.com/jatin711-debug/cronos_db_golang/pkg/client/internal/codec	1.026s
+ok  	github.com/jatin711-debug/cronos_db_golang/pkg/client/internal/connpool	1.356s
+ok  	github.com/jatin711-debug/cronos_db_golang/pkg/client/internal/errs	1.029s
+ok  	github.com/jatin711-debug/cronos_db_golang/pkg/client/internal/hedging	1.089s
+ok  	github.com/jatin711-debug/cronos_db_golang/pkg/client/internal/metadata	1.039s
+ok  	github.com/jatin711-debug/cronos_db_golang/pkg/client/internal/retry	1.033s
+ok  	github.com/jatin711-debug/cronos_db_golang/pkg/types	1.034s
+ok  	github.com/jatin711-debug/cronos_db_golang/pkg/utils	1.137s
+?   	github.com/jatin711-debug/cronos_db_golang/cmd/admin	[no test files]
+ok  	github.com/jatin711-debug/cronos_db_golang/cmd/api	1.389s

@@ -1,0 +1,93 @@
+2026/09/27 16:32:27 WARN admin handler constructed without cluster manager; running in standalone mode local_node_id=test-node
+2026/09/27 16:32:27 WARN admin handler constructed without cluster manager; running in standalone mode local_node_id=test-node
+2026/09/27 16:32:27 WARN admin handler constructed without cluster manager; running in standalone mode local_node_id=test-node
+2026/09/27 16:32:27 WARN admin handler constructed without cluster manager; running in standalone mode local_node_id=test-node
+2026/09/27 16:32:27 WARN admin handler constructed without cluster manager; running in standalone mode local_node_id=test-node
+2026/09/27 16:32:27 WARN admin handler constructed without cluster manager; running in standalone mode local_node_id=test-node
+2026/09/27 16:32:27 WARN admin handler constructed without cluster manager; running in standalone mode local_node_id=test-node
+2026/09/27 16:32:27 INFO Cross-region LWW: replacing duplicate with newer event message_id=event-123 incoming_ts=1969-12-31T19:00:02.000-05:00 stored_ts=1969-12-31T19:00:01.000-05:00
+2026/09/27 16:32:28 [SCHEDULER-WORKER] Started for partition 0
+2026/09/27 16:32:28 [SCHEDULER-WORKER] Started for partition 4
+2026/09/27 16:32:28 [Partition 0] Snapshot created: HWM=0, offsets=0, time=2026-09-27T16:32:28-04:00
+2026/09/27 16:32:28 [Partition 4] Snapshot created: HWM=0, offsets=0, time=2026-09-27T16:32:28-04:00
+2026/09/27 16:32:28 [SCHEDULER-WORKER] Started for partition 0
+2026/09/27 16:32:29 [SCHEDULER-WORKER] Started for partition 2
+2026/09/27 16:32:29 [Partition 0] Snapshot created: HWM=0, offsets=0, time=2026-09-27T16:32:29-04:00
+2026/09/27 16:32:29 [Partition 2] Snapshot created: HWM=0, offsets=0, time=2026-09-27T16:32:29-04:00
+2026/09/27 16:32:29 [SCHEDULER-WORKER] Started for partition 0
+2026/09/27 16:32:30 [SCHEDULER-WORKER] Started for partition 6
+2026/09/27 16:32:30 [SCHEDULER-WORKER] Started for partition 3
+2026/09/27 16:32:30 [Partition 6] Snapshot created: HWM=0, offsets=0, time=2026-09-27T16:32:30-04:00
+2026/09/27 16:32:30 [Partition 3] Snapshot created: HWM=0, offsets=0, time=2026-09-27T16:32:30-04:00
+2026/09/27 16:32:30 [Partition 0] Snapshot created: HWM=0, offsets=0, time=2026-09-27T16:32:30-04:00
+2026/09/27 16:32:30 [SCHEDULER-WORKER] Started for partition 0
+2026/09/27 16:32:30 [Partition 0] Snapshot created: HWM=0, offsets=0, time=2026-09-27T16:32:30-04:00
+2026/09/27 16:32:31 [SCHEDULER-WORKER] Started for partition 0
+2026/09/27 16:32:31 [SCHEDULER-WORKER] Started for partition 7
+2026/09/27 16:32:31 [SCHEDULER-WORKER] Started for partition 6
+2026/09/27 16:32:32 [Partition 7] Snapshot created: HWM=0, offsets=0, time=2026-09-27T16:32:32-04:00
+2026/09/27 16:32:32 [Partition 6] Snapshot created: HWM=0, offsets=0, time=2026-09-27T16:32:32-04:00
+2026/09/27 16:32:32 [Partition 0] Snapshot created: HWM=0, offsets=0, time=2026-09-27T16:32:32-04:00
+2026/09/27 16:32:32 [SCHEDULER-WORKER] Started for partition 0
+2026/09/27 16:32:32 [Partition 0] Snapshot created: HWM=0, offsets=0, time=2026-09-27T16:32:32-04:00
+2026/09/27 16:32:33 [SCHEDULER-WORKER] Started for partition 0
+2026/09/27 16:32:33 [Partition 0] Snapshot created: HWM=0, offsets=0, time=2026-09-27T16:32:33-04:00
+--- FAIL: TestHealthChecker_Deep_ReadOnlyWALCheck (1.04s)
+    testing.go:1464: TempDir RemoveAll cleanup: unlinkat <USERPROFILE>\AppData\Local\Temp\TestHealthChecker_Deep_ReadOnlyWALCheck2354391\001\partitions\0: The directory is not empty.
+2026/09/27 16:32:34 [SCHEDULER-WORKER] Started for partition 0
+2026/09/27 16:32:34 [Partition 0] Snapshot created: HWM=0, offsets=0, time=2026-09-27T16:32:34-04:00
+2026/09/27 16:32:36 [WAL-0] Truncated to offset 3, removed 2 events
+2026/09/27 16:32:37 [FOLLOWER] Updated leader info to leader-0 (epoch: 0)
+2026/09/27 16:32:37 [FOLLOWER] Requesting bulk snapshot from leader 127.0.0.1:52619 for partition 0
+2026/09/27 16:32:37 [FOLLOWER] Receiving snapshot file 00000000000000000000.log (1024 bytes)
+2026/09/27 16:32:37 [FOLLOWER] Receiving snapshot file 00000000000000000000.index (0 bytes)
+2026/09/27 16:32:37 [SEGMENT] Invalid record length 0 at position 261, treating as corrupt tail
+2026/09/27 16:32:37 [WAL-0] Loaded 1 segments, nextOffset=3
+2026/09/27 16:32:37 [FOLLOWER] Snapshot installed for partition 0 up to offset 2 (epoch 0)
+2026/09/27 16:32:37 [PARTITION] Partition 0 synced from leader 127.0.0.1:52619
+2026/09/27 16:32:39 WARN admin handler constructed without cluster manager; running in standalone mode local_node_id=test-node
+2026/09/27 16:32:39 WARN admin handler constructed without cluster manager; running in standalone mode local_node_id=test-node
+2026/09/27 16:32:39 WARN admin handler constructed without cluster manager; running in standalone mode local_node_id=test-node
+2026/09/27 16:32:39 WARN admin handler constructed without cluster manager; running in standalone mode local_node_id=test-node
+2026/09/27 16:32:39 WARN admin handler constructed without cluster manager; running in standalone mode local_node_id=test-node
+2026/09/27 16:32:39 WARN admin handler constructed without cluster manager; running in standalone mode local_node_id=test-node
+2026/09/27 16:32:39 WARN admin handler constructed without cluster manager; running in standalone mode local_node_id=test-node
+2026/09/27 16:32:39 WARN admin handler constructed without cluster manager; running in standalone mode local_node_id=test-node
+2026/09/27 16:32:39 WARN admin handler constructed without cluster manager; running in standalone mode local_node_id=test-node
+2026/09/27 16:32:39 WARN admin handler constructed without cluster manager; running in standalone mode local_node_id=test-node
+FAIL
+FAIL	github.com/jatin711-debug/cronos_db_golang/internal/api	15.988s
+ok  	github.com/jatin711-debug/cronos_db_golang/internal/audit	5.223s
+ok  	github.com/jatin711-debug/cronos_db_golang/internal/auth	6.961s
+ok  	github.com/jatin711-debug/cronos_db_golang/internal/cdc	4.447s
+ok  	github.com/jatin711-debug/cronos_db_golang/internal/cluster	6.493s
+ok  	github.com/jatin711-debug/cronos_db_golang/internal/compliance	4.440s
+ok  	github.com/jatin711-debug/cronos_db_golang/internal/config	7.495s
+ok  	github.com/jatin711-debug/cronos_db_golang/internal/consumer	2.973s
+ok  	github.com/jatin711-debug/cronos_db_golang/internal/dedup	14.896s
+ok  	github.com/jatin711-debug/cronos_db_golang/internal/delivery	9.843s
+?   	github.com/jatin711-debug/cronos_db_golang/internal/metrics	[no test files]
+ok  	github.com/jatin711-debug/cronos_db_golang/internal/partition	18.849s
+ok  	github.com/jatin711-debug/cronos_db_golang/internal/replay	10.851s
+ok  	github.com/jatin711-debug/cronos_db_golang/internal/replication	12.337s
+ok  	github.com/jatin711-debug/cronos_db_golang/internal/scheduler	4.152s
+ok  	github.com/jatin711-debug/cronos_db_golang/internal/schema	4.605s
+ok  	github.com/jatin711-debug/cronos_db_golang/internal/slo	5.228s
+ok  	github.com/jatin711-debug/cronos_db_golang/internal/storage	27.274s
+ok  	github.com/jatin711-debug/cronos_db_golang/internal/tenant	8.050s
+ok  	github.com/jatin711-debug/cronos_db_golang/internal/tracing	4.780s
+ok  	github.com/jatin711-debug/cronos_db_golang/internal/tx	8.491s
+--- FAIL: TestSendAsyncContextCancellation (0.04s)
+    producer_batch_test.go:233: expected context error, got producer.send (transport): rpc error: code = Canceled desc = context canceled
+FAIL
+FAIL	github.com/jatin711-debug/cronos_db_golang/pkg/client	3.881s
+ok  	github.com/jatin711-debug/cronos_db_golang/pkg/client/internal/circuitbreaker	3.473s
+ok  	github.com/jatin711-debug/cronos_db_golang/pkg/client/internal/codec	3.441s
+ok  	github.com/jatin711-debug/cronos_db_golang/pkg/client/internal/connpool	4.296s
+ok  	github.com/jatin711-debug/cronos_db_golang/pkg/client/internal/errs	3.439s
+ok  	github.com/jatin711-debug/cronos_db_golang/pkg/client/internal/hedging	2.976s
+ok  	github.com/jatin711-debug/cronos_db_golang/pkg/client/internal/metadata	4.087s
+ok  	github.com/jatin711-debug/cronos_db_golang/pkg/client/internal/retry	1.886s
+ok  	github.com/jatin711-debug/cronos_db_golang/pkg/types	4.646s
+ok  	github.com/jatin711-debug/cronos_db_golang/pkg/utils	2.644s
+FAIL

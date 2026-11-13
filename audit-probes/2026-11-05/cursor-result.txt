@@ -1,0 +1,13 @@
+2026/11/05 03:26:00 [SCHEDULER-WORKER] Started for partition 0
+2026/11/05 03:26:00 [Partition 0] Change feed is waiting at offset -1 and will keep retrying: sink is down
+2026/11/05 03:26:00 [Partition 0] Snapshot created: HWM=2, offsets=0, time=2026-11-05T03:26:00-05:00
+2026/11/05 03:26:01 [WAL-0] Loaded 1 segments, nextOffset=3
+2026/11/05 03:26:01 [JOB 1] WAL file C:\Users\User\AppData\Local\Temp\TestAuditCorruptFeedCursor3246493276\001\partitions\0\cold_schedule\000002.log with log number 000002 stopped reading at offset: 0; replayed 0 keys in 0 batches
+2026/11/05 03:26:01 [JOB 1] WAL file C:\Users\User\AppData\Local\Temp\TestAuditCorruptFeedCursor3246493276\001\partitions\0\dedup_0\000002.log with log number 000002 stopped reading at offset: 0; replayed 0 keys in 0 batches
+2026/11/05 03:26:02 [JOB 1] WAL file C:\Users\User\AppData\Local\Temp\TestAuditCorruptFeedCursor3246493276\001\partitions\0\consumer_offsets\000002.log with log number 000002 stopped reading at offset: 0; replayed 0 keys in 0 batches
+2026/11/05 03:26:02 [Partition 0] Change feed position in C:\Users\User\AppData\Local\Temp\TestAuditCorruptFeedCursor3246493276\001\partitions\0\changefeed.json is unreadable; continuing from the end of the log
+--- FAIL: TestAuditCorruptFeedCursor (5.82s)
+    zz_current_audit_test.go:15: CDC cursor advanced to 2 with 3 unexported WAL records and sink still down
+FAIL
+FAIL	github.com/jatin711-debug/cronos_db_golang/internal/partition	7.089s
+FAIL

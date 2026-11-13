@@ -1,0 +1,25 @@
+npm notice run cronos-dashboard@0.1.0 build
+npm notice run tsc --noEmit && vite build
+vite v7.3.6 building client environment for production...
+transforming...
+✓ 2288 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                                0.68 kB │ gzip:   0.42 kB
+dist/assets/index-BQZz_Vie.css                21.17 kB │ gzip:   4.66 kB
+dist/assets/card-2MzqhYqJ.js                   0.75 kB │ gzip:   0.33 kB
+dist/assets/badge-RMq7Qdbp.js                  0.95 kB │ gzip:   0.43 kB
+dist/assets/ErrorAlert-D8VsWB0g.js             1.29 kB │ gzip:   0.53 kB
+dist/assets/LoginView-CCJNiNmW.js              1.35 kB │ gzip:   0.72 kB
+dist/assets/DashboardHome-DWY2LSZL.js          1.59 kB │ gzip:   0.75 kB
+dist/assets/TenantUsageView-DN39n1oW.js        2.00 kB │ gzip:   0.94 kB
+dist/assets/SchemasView-CGy2SEuR.js            2.11 kB │ gzip:   0.86 kB
+dist/assets/PartitionHealthView-Cm7J-kZ3.js    2.60 kB │ gzip:   1.06 kB
+dist/assets/ClusterTopologyView-CVyMwLB9.js    3.83 kB │ gzip:   1.11 kB
+dist/assets/ReplicationLagView-1_v9T-wK.js     4.15 kB │ gzip:   1.38 kB
+dist/assets/ConsumerGroupsView-CLN1tXef.js     4.56 kB │ gzip:   1.46 kB
+dist/assets/OperationsView-BopYGuo0.js         5.26 kB │ gzip:   1.53 kB
+dist/assets/index-CMleL-r4.js                 16.49 kB │ gzip:   5.53 kB
+dist/assets/recharts-BU5eMwEf.js             241.34 kB │ gzip:  61.47 kB
+dist/assets/vendor-BOlE5Bze.js               389.67 kB │ gzip: 128.84 kB
+✓ built in 17.78s

@@ -1,0 +1,5 @@
+ok  	github.com/jatin711-debug/cronos_db_golang/internal/config	1.017s
+ok  	github.com/jatin711-debug/cronos_db_golang/internal/tenant	4.192s
+ok  	github.com/jatin711-debug/cronos_db_golang/internal/partition	55.349s
+ok  	github.com/jatin711-debug/cronos_db_golang/internal/api	97.250s
+ok  	github.com/jatin711-debug/cronos_db_golang/cmd/api	2.981s

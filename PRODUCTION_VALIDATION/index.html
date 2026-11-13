@@ -1,0 +1,3359 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Documentation for CronosDB — a distributed, timestamp-triggered event database">
+      
+      
+      
+        <link rel="canonical" href="https://jatin711-debug.github.io/cronos_db_golang/PRODUCTION_VALIDATION/">
+      
+      
+        <link rel="prev" href="../PRODUCTION_AUDIT_2026-11-05/">
+      
+      
+        <link rel="next" href="../PRODUCTION_AUDIT_2026-10-16/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.1">
+    
+    
+      
+        <title>Production Validation - CronosDB Docs</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.57a0d79d.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.fb2fffe2.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="blue-grey" data-md-color-accent="deep-orange">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#deployment-validation-and-remaining-release-gates" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="CronosDB Docs" class="md-header__button md-logo" aria-label="CronosDB Docs" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m16.5 16.25 2.86 1.69-.75 1.22L15 17v-5h1.5zM23 16c0 3.87-3.13 7-7 7a7 7 0 0 1-5.75-3C6.18 19.79 3 18.08 3 16v-3c0 1.88 2.58 3.44 6.06 3.88C9.03 16.59 9 16.3 9 16c0-.38.04-.75.1-1.12-3.5-.43-6.1-2-6.1-3.88V8c0 2.09 3.2 3.8 7.27 4 .6-.86 1.37-1.56 2.26-2.07-.49.04-1.03.07-1.53.07-4.42 0-8-1.79-8-4s3.58-4 8-4 8 1.79 8 4c0 1.2-1.07 2.28-2.75 3 .75.04 1.5.19 2.19.45C18.79 9 19 8.5 19 8v1.68c2.36 1.13 4 3.53 4 6.32m-2 0c0-2.76-2.24-5-5-5s-5 2.24-5 5 2.24 5 5 5 5-2.24 5-5"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            CronosDB Docs
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Production Validation
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="blue-grey" data-md-color-accent="deep-orange"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="blue-grey" data-md-color-accent="deep-orange"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+          <a href="javascript:void(0)" class="md-search__icon md-icon" title="Share" aria-label="Share" data-clipboard data-clipboard-text="" data-md-component="search-share" tabindex="-1">
+            
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9a3 3 0 0 0-3 3 3 3 0 0 0 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.15c-.05.21-.08.43-.08.66 0 1.61 1.31 2.91 2.92 2.91s2.92-1.3 2.92-2.91A2.92 2.92 0 0 0 18 16.08"/></svg>
+          </a>
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/jatin711-debug/cronos_db_golang" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    jatin711-debug/cronos_db_golang
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="CronosDB Docs" class="md-nav__button md-logo" aria-label="CronosDB Docs" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m16.5 16.25 2.86 1.69-.75 1.22L15 17v-5h1.5zM23 16c0 3.87-3.13 7-7 7a7 7 0 0 1-5.75-3C6.18 19.79 3 18.08 3 16v-3c0 1.88 2.58 3.44 6.06 3.88C9.03 16.59 9 16.3 9 16c0-.38.04-.75.1-1.12-3.5-.43-6.1-2-6.1-3.88V8c0 2.09 3.2 3.8 7.27 4 .6-.86 1.37-1.56 2.26-2.07-.49.04-1.03.07-1.53.07-4.42 0-8-1.79-8-4s3.58-4 8-4 8 1.79 8 4c0 1.2-1.07 2.28-2.75 3 .75.04 1.5.19 2.19.45C18.79 9 19 8.5 19 8v1.68c2.36 1.13 4 3.53 4 6.32m-2 0c0-2.76-2.24-5-5-5s-5 2.24-5 5 2.24 5 5 5 5-2.24 5-5"/></svg>
+
+    </a>
+    CronosDB Docs
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/jatin711-debug/cronos_db_golang" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    jatin711-debug/cronos_db_golang
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Using CronosDB
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Using CronosDB
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../CLIENT_GUIDE/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Go Client
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ADMINISTRATION/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Dashboard and CLI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../CONFIGURATION/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Release
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Release
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../PRODUCTION_RELEASE/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Release Requirements
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../RELEASE_V0.13.0/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    v0.13.0 Release Notes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../RELEASE_V0.12.2/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    v0.12.2 Release Notes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../RELEASE_V0.12.1/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    v0.12.1 Release Notes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../RELEASE_V0.12.0/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    v0.12.0 Release Notes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../RELEASE_V0.11.0/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    v0.11.0 Release Notes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../RELEASE_V0.10.0/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    v0.10.0 Release Notes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../RELEASE_READINESS_1.0.0_2026-10-28/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    1.0 Readiness Review
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../RELEASE_V0.9.0/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    v0.9.0 Release Notes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../RELEASE_V0.8.1/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    v0.8.1 Patch Notes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../RELEASE_V0.8.0/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    v0.8.0 Release Notes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../RETENTION_AND_EVENT_LIFECYCLE/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Event Lifecycle and Retention
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../REPLICATION_TERM_START/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Current-Term Commitment
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../STORAGE_SEGMENT_BOUNDARIES/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Closed WAL Segment Boundaries
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../DOCUMENTATION_AUDIT_2026-10-21/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Documentation Review (2026-10-21)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../HARDENING_V0.7.0/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    v0.7.0 Hardening
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../PRODUCTION_AUDIT_2026-11-05/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    November Production Audit
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Production Validation
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Production Validation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#local-single-host-campaign-2026-11-11" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Local single-host campaign — 2026-11-11
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0130-2026-11-13" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.13.0 — 2026-11-13
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0122-2026-11-12" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.12.2 — 2026-11-12
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0121-2026-11-11" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.12.1 — 2026-11-11
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0120-2026-11-09" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.12.0 — 2026-11-09
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#release-candidate-v0120-rc1-2026-11-06" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Release candidate v0.12.0-rc.1 — 2026-11-06
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#dedicated-production-candidate-closure-criteria-2026-11-05" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Dedicated production candidate — closure criteria, 2026-11-05
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Dedicated production candidate — closure criteria, 2026-11-05">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#reference-test-profile" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reference test profile
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#current-evidence-and-remaining-work" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Current evidence and remaining work
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#local-remediation-validation-2026-11-05" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Local remediation validation — 2026-11-05
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#configured-tenant-rates" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configured tenant rates
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cdc-recovery-contract-change" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CDC recovery contract change
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#executable-topology-coverage" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Executable topology coverage
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#gates-requiring-the-target-environment" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Gates requiring the target environment
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#dashboard-and-feature-journey-2026-11-05" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Dashboard and feature journey, 2026-11-05
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../PRODUCTION_AUDIT_2026-10-16/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    October Production Audit
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../PRODUCTION_AUDIT_2026-09-27/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Production Audit
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+          
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../system-design/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_4" id="__nav_4_label" tabindex="">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Architecture
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ARCHITECTURE/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../DEVELOPER_ARCHITECTURE_GUIDE/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Developer Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4_4" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../architecture/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    By Feature
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_4_4" id="__nav_4_4_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_4_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    By Feature
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Layer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/audit/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Audit
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/auth/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Auth
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/cdc/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CDC
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/cluster/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cluster Control Plane
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/compliance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Compliance & Retention
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/consumer/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Consumer Groups
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/dashboard/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Dashboard
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/dedup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deduplication
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/delivery/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Delivery Pipeline
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/partition/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Partition Runtime
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/replay/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Replay Engine
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/replication/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Replication
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/scheduler/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Scheduler & Timing Wheel
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/schema/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Schema Registry
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/slo/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SLO & Metrics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/storage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Storage & WAL
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/tenant/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tenant Accounting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tracing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/features/tx/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Transactions (2PC)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Operations
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Operations
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../DOCKER/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Docker
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../CLUSTER_PERFORMANCE_VALIDATION_2026-10-16/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Three-node throughput validation (2026-10-16)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../CLUSTER_PERFORMANCE_VALIDATION_2026-09-29/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Three-node publish validation (2026-09-29)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../MAINTENANCE_VALIDATION_2026-09-29/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Maintenance validation (2026-09-29)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Project
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Project
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../CONTRIBUTING/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../CODE_OF_CONDUCT/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Code of Conduct
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+          
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../audit-probes/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    History
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_7" id="__nav_7_label" tabindex="">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    History
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../TECHNICAL_DEEP_DIVE/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Technical Deep Dive (July 2026)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../PERFORMANCE/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Performance Baseline (July 2026)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../audit-probes/2026-11-05/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    November Audit Probes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../audit-probes/2026-10-16/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    October Audit Probes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#local-single-host-campaign-2026-11-11" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Local single-host campaign — 2026-11-11
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0130-2026-11-13" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.13.0 — 2026-11-13
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0122-2026-11-12" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.12.2 — 2026-11-12
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0121-2026-11-11" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.12.1 — 2026-11-11
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0120-2026-11-09" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.12.0 — 2026-11-09
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#release-candidate-v0120-rc1-2026-11-06" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Release candidate v0.12.0-rc.1 — 2026-11-06
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#dedicated-production-candidate-closure-criteria-2026-11-05" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Dedicated production candidate — closure criteria, 2026-11-05
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Dedicated production candidate — closure criteria, 2026-11-05">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#reference-test-profile" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reference test profile
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#current-evidence-and-remaining-work" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Current evidence and remaining work
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#local-remediation-validation-2026-11-05" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Local remediation validation — 2026-11-05
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#configured-tenant-rates" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configured tenant rates
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cdc-recovery-contract-change" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CDC recovery contract change
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#executable-topology-coverage" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Executable topology coverage
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#gates-requiring-the-target-environment" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Gates requiring the target environment
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#dashboard-and-feature-journey-2026-11-05" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Dashboard and feature journey, 2026-11-05
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="deployment-validation-and-remaining-release-gates">Deployment validation and remaining release gates<a class="headerlink" href="#deployment-validation-and-remaining-release-gates" title="Permanent link">&para;</a></h1>
+<h2 id="local-single-host-campaign-2026-11-11">Local single-host campaign — 2026-11-11<a class="headerlink" href="#local-single-host-campaign-2026-11-11" title="Permanent link">&para;</a></h2>
+<p>The gates at the end of this record need separate hosts. To find software
+defects before that, the acceptance suite gained a soak (<code>TestSoak</code>), a growth
+test (<code>TestClusterGrowsFromThreeToFive</code>) and a CDC failover test, run on one
+Windows machine with the nodes as processes: three nodes of 384 MiB and 2 CPUs
+each, encrypted WAL, <code>every_event</code> fsync, RF=3/minISR=2, replication TLS, a CDC
+webhook, a slow consumer group and a dead-lettering topic, at 100 publishes per
+second with bursts of 500.</p>
+<p>It found three defects in v0.12.0, fixed in <a href="../RELEASE_V0.12.1/">v0.12.1</a>: a
+leader that came back with an empty disk had its followers delete their logs; CDC
+skipped events after a failover once anything had been dead-lettered; and every
+replicated append read the log back from disk, which held the cluster to about 50
+publishes per second. With the fixes, a 25-minute soak passed all seven of its
+disruptions (leader lost, leader frozen, leader lost during catch-up, CDC
+destination down, consumer group behind, a leader replaced by an empty node,
+whole cluster lost) and ended with every acknowledged event delivered to both
+consumer groups and exported. The growth test (three to five nodes, a leader lost
+during the handoff, rolling restarts, an empty replacement, a removal) and the
+rolling upgrade drill from v0.12.0 also passed. The v0.12.1 notes give the
+figures.</p>
+<p>This does not close the gates below. The soak ran for 25 minutes on one host, not
+24 to 72 hours on separate ones; growth, drain and replacement ran as processes,
+not on separate hosts or Kubernetes; power loss was not tested; and the
+latencies are those of a shared desktop machine. A 24-hour run of <code>TestSoak</code> on
+one machine is the next step, before the separate-host run.</p>
+<h2 id="v0130-2026-11-13">v0.13.0 — 2026-11-13<a class="headerlink" href="#v0130-2026-11-13" title="Permanent link">&para;</a></h2>
+<p>Two growths found after v0.12.2 are stopped, and the take-up guard's firing on
+ordinary restarts (see v0.12.2 below) is removed at its cause.</p>
+<p><strong>Consumer progress.</strong> A group's completion floor stopped at the first entry it
+does not take: another topic's event in the same partition, or the term-start
+record each new leader writes. So after the first failover every group kept
+its progress as per-event records until the entry left the log. The redelivery
+sweep now raises the floor over such entries and the group's completed events.
+An in-process test with two topics interleaved on one partition ends with the
+group's floor at the end of the log and no records left; without the change
+the floor stays at offset 0 with 10 records above it.</p>
+<p><strong>Metadata log.</strong> Raft's default snapshot threshold (8,192 entries) meant the
+metadata log was never snapshotted and every start replayed all of it. It is
+now snapshotted every 128 entries and at a clean stop, and a starting node
+acts on the committed assignments only once its copy is current. In the
+acceptance suite's node logs, restarted nodes of the build before the
+readiness condition was complete declined 3 stale epoch-1 assignments met
+during the replay; the release build declined none. Its 3 remaining declines
+were at current epochs, where another replica held more of the log, which is
+what the guard is for. The suite kills its nodes, and none reached 128
+entries, so it did not start a node from a snapshot; unit tests cover that.</p>
+<p><strong>Tests thought flaky.</strong> <code>TestIsolation_AcknowledgementsBelongToTheirRecipient</code>
+failed twice in CI (2026-10-13 and 2026-10-21), both before the per-IP rate
+limiter's out-of-order timestamp stall was fixed on 2026-10-21; it then passed
+600 local runs, 300 of them under <code>-race</code> with <code>GOMAXPROCS</code> 1 and 2, and every
+CI run since. <code>TestClusterRestoredFromBackups</code>, whose log comparison race was
+fixed on 2026-10-27, passed 5 of 5 runs. Neither needed a change.</p>
+<p><strong>What was run.</strong> The unit suites, and the acceptance suite on processes on one
+Windows machine, passed with the changes; the container tests, the soak and the
+upgrade drill were skipped there, the container tests running in CI. The
+release's own checks are recorded on its release page. The environment gates
+below are unchanged by this release.</p>
+<p><strong>The release.</strong> Released from <code>193d788</code>. Checks on the release itself:
+pull-request and <code>main</code> CI; the release workflow's image scan (no fixable HIGH or
+CRITICAL findings) and its network-partition and memory-limited restart tests on
+the exact image; a local smoke test of that image under a 512 MiB limit; and
+<code>TestRollingUpgradeAndRollback</code> with the checksum-verified Windows binaries of
+v0.12.2 and v0.13.0, which passed in 131.69 s with 679, 621 and 718 acknowledged
+events in its three phases, all delivered, none early, and replica logs in
+agreement after each phase. 2, 2 and 1 events were delivered more than once.</p>
+<h2 id="v0122-2026-11-12">v0.12.2 — 2026-11-12<a class="headerlink" href="#v0122-2026-11-12" title="Permanent link">&para;</a></h2>
+<p>The v0.12.1 upgrade drill left two observations open. Both were examined with
+the drill rerun under a trace of every redelivered event.</p>
+<p><strong>Redeliveries.</strong> The last phase redelivered 74 to 137 events across four runs,
+the first two phases at most 10. Each burst was one leader, restarted and back
+before the others saw it go, delivering again every event its consumer group had
+completed on that partition in the phase. The cause was a defect in how a
+restarted node reads a group's progress, present since v0.9.0 and fixed in
+<a href="../RELEASE_V0.12.2/">v0.12.2</a>: the floor raised when a partition starts was
+taken as the group's highest completed offset before the completions recorded
+above it had been read. The last phase was the one hit because its group's floor
+could not pass the previous phase's entries of another topic, so all its
+progress was in those records. With the fix the last phase redelivered 3 and 5
+events in two runs. Nothing was lost in any run.</p>
+<p><strong>A second cause.</strong> The drill of the first v0.12.2 build, run with its release
+binaries before publication, still redelivered 38 events in its last phase.
+Further runs, traced per event and then with the dispatcher's decisions logged,
+found bursts of 5 to 13 redeliveries a few milliseconds apart at a leader, of
+events acknowledged up to seconds before, in 6 of 10 traced runs and in every
+phase. Each burst was a redelivery scan that came in while an acknowledgement
+raised its group's floor: the new floor was stored, and the records below it
+removed, before the floor was raised in memory, and the scan found neither.
+Raising the log start on compaction had the same order, which is why groups
+waiting behind another topic's entries were hit hardest. The fix, also in
+v0.12.2, removes the records only after the floor is raised in memory. In six
+runs with both fixes every redelivery was of an event delivered just before
+its node was killed, at most 4 in a phase. The first build was not published;
+its tag and draft release were replaced.</p>
+<p><strong>The take-up guard on ordinary restarts.</strong> The committed assignment did not
+lag. A node that starts replays the cluster's metadata log from the beginning,
+having no snapshot of it yet, and its leadership loop ran during that replay and
+saw the first assignments, which named it leader at epoch 1. v0.12.1's guard
+declined them. v0.12.0 has no guard, but for a restarted process with its disk
+two older checks hold: a partition refuses an epoch below the one it has durably
+accepted (its logs show <code>epoch regression: 1 &lt; 3</code> on such restarts), and a
+follower refuses log entries and consumer progress from a leader whose epoch is
+below its own. A node can take back the exact epoch it held, when it is still the
+committed leader; with its log intact that is correct. After a power loss with
+<code>batch</code> or <code>periodic</code> fsync its log could end before its followers' at that
+epoch; v0.12.1 declines that, and v0.12.0 has not been tested in it.</p>
+<p><strong>The release.</strong> Released from <code>0632aa8</code>. Checks on the release itself:
+pull-request and <code>main</code> CI; the release workflow's image scan (no fixable HIGH or
+CRITICAL findings) and its network-partition and memory-limited restart tests on
+the exact image; a local smoke test of that image under a 512 MiB limit; and
+<code>TestRollingUpgradeAndRollback</code> with the checksum-verified Windows binaries of
+v0.12.1 and v0.12.2, which passed in 131.39 s with 631, 662 and 622 acknowledged
+events in its three phases, all delivered, none early, and replica logs in
+agreement after each phase. 1, 32 and 1 events were delivered more than once;
+the rollback phase runs v0.12.1 nodes, which still have both defects. The
+environment gates below are unchanged by this release.</p>
+<h2 id="v0121-2026-11-11">v0.12.1 — 2026-11-11<a class="headerlink" href="#v0121-2026-11-11" title="Permanent link">&para;</a></h2>
+<p>Released from <code>2e8a8d7</code>: the three fixes of the campaign above, Go 1.26.11 for
+<code>GO-2026-6859</code>, and release documentation. Checks on the release itself:
+pull-request and <code>main</code> CI; the release workflow's image scan (no fixable HIGH or
+CRITICAL findings) and its network-partition and memory-limited restart tests on
+the exact image; a local smoke test of that image under a 512 MiB limit; and
+<code>TestRollingUpgradeAndRollback</code> with the checksum-verified Windows binaries of
+v0.12.0 and v0.12.1, which passed in 124.34 s with 612, 651 and 631 acknowledged
+events in its three phases, all delivered, none early, and replica logs in
+agreement after each phase.</p>
+<p>Two observations from that drill, the redeliveries of its last phase and the
+take-up guard firing on ordinary restarts, were examined the same day; the
+v0.12.2 section above has the results. The environment gates below are unchanged
+by this release.</p>
+<h2 id="v0120-2026-11-09">v0.12.0 — 2026-11-09<a class="headerlink" href="#v0120-2026-11-09" title="Permanent link">&para;</a></h2>
+<p>Released from <code>1704f5a</code> (the v0.12.0-rc.2 source plus release documentation). The
+candidate's fixes listed below as "not yet released" shipped in it. Checks on the
+release itself: pull-request and <code>main</code> CI; the release workflow's image scan (no
+fixable HIGH or CRITICAL findings) and its network-partition and memory-limited
+restart tests on the exact image; a local smoke test of that image under a 512 MiB
+limit; and <code>TestRollingUpgradeAndRollback</code> with the checksum-verified Windows
+binaries of v0.11.0 and v0.12.0, which passed in 125.41 s with 679, 624 and 586
+acknowledged events in its three phases, all delivered, none early, and replica
+logs in agreement after each phase (20, 1 and 9 delivered more than once). The
+environment gates below are unchanged by this release.</p>
+<h2 id="release-candidate-v0120-rc1-2026-11-06">Release candidate v0.12.0-rc.1 — 2026-11-06<a class="headerlink" href="#release-candidate-v0120-rc1-2026-11-06" title="Permanent link">&para;</a></h2>
+<p><strong>Release hold, 2026-11-09:</strong> the subsequent
+<a href="https://github.com/jatin711-debug/cronos_db_golang/actions/runs/42603851217">main image scan</a>
+flags <code>golang.org/x/net</code> v0.60.0 for CVE-2026-78661, fixed in v0.62.0.
+The passed scans below describe November 6 evidence, not current clearance.
+The dependency is being updated; a newly built and scanned candidate is required
+before promotion. The rc.1 and rc.2 draft releases and their artifacts were
+removed on 2026-11-11, after v0.12.0 shipped.</p>
+<p>PRs #25 and #26 are merged. The candidate is pinned to
+<code>08be93b61f8e4f510c61ed2708c7ebf665335143</code>. It remains a <strong>draft prerelease</strong>;
+passing these checks does not close the target-environment gates below.</p>
+<ul>
+<li><a href="https://github.com/jatin711-debug/cronos_db_golang/actions/runs/42214183750">Merged-source CI</a>
+  passed Go/race/pure-Go checks, dependency security, the fault campaign,
+  dashboard/chart checks and production chart startup.</li>
+<li><a href="https://github.com/jatin711-debug/cronos_db_golang/actions/runs/42214272737">Release workflow</a>
+  built all five binary targets and staged the tested Linux amd64 image archive.
+  Trivy passed the fixable HIGH/CRITICAL threshold. Network partitions passed
+  in 135.90 s: all 2,682 acknowledged events were delivered. The memory-limited
+  restart passed in 60.86 s: all 16,331 acknowledged events were delivered;
+  another 53 publish attempts failed and were not counted as acknowledged.</li>
+<li>Candidate-source recovery tests passed on Windows amd64 without cgo:
+  partition recovery contracts (18.708 s), storage recovery contracts (1.222 s),
+  and the three-process backup-restore acceptance drill (169.117 s). These
+  include pending CDC exports, DLQ records, consumer progress, deduplication,
+  scheduled work and refusal of invalid backup/format inputs. CDC/DLQ coverage
+  here is component-level, not a production-sized external-sink drill.</li>
+<li>Checksum-verified Windows release binaries for v0.11.0 and v0.12.0-rc.1
+  passed a rolling upgrade, rollback and second upgrade under traffic. The
+  finalized harness passed in 125.570 s (test body 124.53 s), acknowledging
+  628, 625 and 654 events in its three phases. Every acknowledged event was
+  delivered, none early, and replica logs agreed after each phase. There were
+  8, 4 and 103 events delivered more than once respectively, permitted by the
+  at-least-once contract. This small local drill uses development mode,
+  replication TLS, RF=3/minISR=2 and batch fsync. It establishes compatibility
+  for that binary pair and exercised data, not arbitrary downgrade safety.</li>
+</ul>
+<p>The staged image's recorded <code>IMAGE_ID</code> is
+<code>sha256:aadd7babcb58ee04a302a34ed5babf6883cd19279ab76e587251bcde02d4b457</code>.
+Its compressed archive SHA-256 is
+<code>cdf2260577ba76b4adcd13bdc2002573542c6532e7460d05e3041734d0b94f6e</code>.
+This identifies the staged artifact; no registry digest or signed publication
+provenance is claimed. The draft's assets held checksums, the image scan, the
+local recovery/upgrade logs and an evidence manifest until it was removed.</p>
+<p>The reusable drill is <code>TestRollingUpgradeAndRollback</code> in <code>tests/acceptance</code>.
+Set <code>CRONOS_BINARY</code> to the candidate executable and
+<code>CRONOS_UPGRADE_FROM_BINARY</code> to the compatible prior executable, then run:</p>
+<div class="language-sh highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>go<span class="w"> </span><span class="nb">test</span><span class="w"> </span>-tags<span class="w"> </span>acceptance<span class="w"> </span>-run<span class="w"> </span><span class="s1">'^TestRollingUpgradeAndRollback$'</span><span class="w"> </span>-count<span class="o">=</span><span class="m">1</span><span class="w"> </span>-v<span class="w"> </span>-timeout<span class="w"> </span>15m<span class="w"> </span>./tests/acceptance/
+</span></code></pre></div>
+<p>The drill skips when the prior binary is unspecified. The candidate tag is
+unchanged: this test and evidence record are a follow-up to its source.
+Still open: the independent-host 24-hour soak, production-sized CDC/DLQ/upgrade
+drills, disk/backlog operating bounds, target-storage power-loss evidence and
+signed publication. The next environment step is three disposable hosts with
+the intended storage; none has been connected in this session.</p>
+<h2 id="dedicated-production-candidate-closure-criteria-2026-11-05">Dedicated production candidate — closure criteria, 2026-11-05<a class="headerlink" href="#dedicated-production-candidate-closure-criteria-2026-11-05" title="Permanent link">&para;</a></h2>
+<p>The first production deployment is dedicated to one application/operator.
+Schemas are managed as configuration. Shared-tenant storage/in-flight quotas,
+live schema registration and forced manual rebalance are excluded from this
+release scope; membership-driven reconciliation remains supported. This scope
+decision does not claim those excluded features were implemented.</p>
+<p>Schema files must be distributed identically to every node before startup.
+Malformed/unreadable files, unknown types and duplicate versions now stop startup
+instead of silently removing validation. A topic with no schema still accepts
+arbitrary payloads. Deployment preflight must compare the expected topic/version
+inventory on every node using <code>schema-list</code>/<code>schema-get</code>, and verify a known-invalid
+payload is refused. Use only the documented schema keyword subset.</p>
+<p>Product fixes in this candidate (not yet released):</p>
+<ul>
+<li>Publish response failures include <code>error_code</code>. Updated SDKs report internal
+  failures as <code>ErrorKindInternal</code>, exhausted leadership refusals as
+  <code>ErrorKindLeaderChange</code>, and authentication/permission failures as
+  <code>ErrorKindAuth</code>. Old servers retain the legacy response fallback; an internal
+  error can occur after append, so retries must preserve message ID and payload.</li>
+<li>A valid non-admin dashboard token receives HTTP 403 and "Admin access required";
+  missing/invalid credentials still receive HTTP 401.</li>
+<li>Schema loading fails closed and a failed reload preserves the active registry.</li>
+</ul>
+<h3 id="reference-test-profile">Reference test profile<a class="headerlink" href="#reference-test-profile" title="Permanent link">&para;</a></h3>
+<p>These are acceptance targets to establish, not measured capacity or a hardware
+purchase recommendation. Use disposable staging instances on three separate Linux
+amd64 hosts/failure domains, initially 4 vCPUs, 8 GiB RAM and 100 GiB persistent SSD
+per node. Record actual disk model/storage service, filesystem and cache semantics.
+Use replication factor 3, minimum in-sync replicas 2, TLS, JWT/RBAC, encryption at
+rest and <code>every_event</code> fsync. Pin the exact commit and image digest throughout.</p>
+<ul>
+<li>Run for 24 hours at 100 events/s; once per hour burst to 500 events/s for 60 s.
+  Use 1 KiB payloads normally and 64 KiB for 1% of events, unique message IDs,
+  dedup enabled, and a mix of immediate and delayed schedules. Seed 100,000
+  delayed events before injecting failures. Increase this envelope only after
+  it passes and disk/memory headroom is measured.</li>
+<li>Require zero lost acknowledged events and zero early deliveries. Track every
+  acknowledged ID through delivery and, when enabled, CDC export. Record
+  duplicates separately under the at-least-once contract.</li>
+<li>Under healthy steady load, target publish p99 &lt;= 250 ms and scheduling
+  lateness p99 &lt;= 1 s; no unexpected refusals. Report the same metrics separately
+  for bursts and disruptions instead of hiding them in whole-run averages.</li>
+<li>After losing one host, target resumed publish/delivery service within 60 s.
+  After a full backup restore, target service recovery within 30 minutes and
+  zero loss of events acknowledged before the backup's recorded cut. Measure
+  actual backup age separately; later acknowledgements are outside that cut.</li>
+<li>Include slow consumers, a failed CDC destination, disk pressure, 3-to-5 node
+  growth, drain/replacement and leader loss during catch-up. Do not proceed to
+  another disruption until the ledger and replica state reconcile. Record
+  memory, disk, pinned retention and DLQ journal growth; unexplained unbounded
+  growth or inability to recover within the envelope fails the gate.</li>
+<li>Test the intended upgrade from v0.11.0 on copied data. Verify the documented
+  on-disk format boundary before rollback; never assume a downgrade is safe.
+  Test controlled host/power loss only on disposable infrastructure using the
+  intended storage. A process kill or VM reboot is not a physical power-cut test.</li>
+</ul>
+<h3 id="current-evidence-and-remaining-work">Current evidence and remaining work<a class="headerlink" href="#current-evidence-and-remaining-work" title="Permanent link">&para;</a></h3>
+<p>Local Windows amd64, CGO-disabled checks passed for the SDK/API and the schema/server
+packages. Regression coverage includes post-append replication failure followed by
+same-ID recovery, SDK failure classification and old-server fallback, HTTP 401/403,
+and corrupt/duplicate schema loading. Dashboard tests/build passed.
+<code>TestClusterRestoredFromBackups</code> passed in 142.121 s on this workstation during this
+change, before the subsequent schema-startup hardening. That test covers scheduled
+work and consumer progress; it does not close pending-CDC/DLQ recovery, upgrade,
+physical-host failure, or final-image gates. The raw local run is recorded under
+<code>build/production-contract-restore.log</code> (an ignored local artifact).</p>
+<p>The independent-host soak, target-storage power-loss campaign, complete
+CDC/DLQ/upgrade drills, bounded-operation measurements and final candidate
+CI/security/provenance evidence remain required. No separate staging hosts have
+been provided in this session. Local evidence and explicit scope exclusions do
+not close these environment gates.</p>
+<h2 id="local-remediation-validation-2026-11-05">Local remediation validation — 2026-11-05<a class="headerlink" href="#local-remediation-validation-2026-11-05" title="Permanent link">&para;</a></h2>
+<p>Candidate: working-tree changes on <code>579fd79a15b84cf4bcc7bda878aee6fa9d665fc6</code>.
+Local image <code>cronos-db:audit-fixes-final</code> (also tagged <code>cronos-db:ci</code>):
+<code>sha256:22ee76ee3f088cf433bcd4628081f2538856d105a9aa56d22290ca67053c4632</code>.
+This image was not published. Evidence is in
+<a href="https://github.com/jatin711-debug/cronos_db_golang/blob/developement/docs/audit-probes/2026-11-05/remediation"><code>audit-probes/2026-11-05/remediation/</code></a>.</p>
+<ul>
+<li>Fixed CDC cursor recovery, production cluster validation/readiness, misleading
+  manual rebalance success, and missing per-subject publish-rate configuration.
+  The changed Windows Go packages passed their regression suite. Earlier dashboard
+  tests/build passed; chart assertions and <code>git diff --check</code> also pass.</li>
+<li>The final Docker image builds successfully. Trivy 0.75.0 with a freshly downloaded
+  database reports zero fixable HIGH/CRITICAL findings in Debian packages and both
+  Go binaries. The previous image had two APT package findings. Runtime-layer cache
+  bypass, package upgrades and a minimum APT version check close those findings.
+  This thresholded result does not claim zero vulnerabilities of every severity.</li>
+<li><code>cargo audit</code> passes on the updated Rust lockfile (23 dependencies).</li>
+<li>Final-image <code>TestNetworkPartitions</code> passes (258.97 s): isolated nodes, asymmetric
+  link failure and total partition, followed by replica-log agreement.</li>
+<li>Final-image <code>TestRestartInContainersWithABacklogLargerThanTheirMemory</code> passes
+  (172.96 s). Of 16,384 attempts at 64 KiB each, 16,370 were acknowledged and 14
+  failed quorum admission. All acknowledged events were delivered after killing
+  and restarting every node with 1,023 MiB pending. Peak sampled memory was 209 MiB
+  per node against a kernel-enforced 384 MiB limit; no node was OOM-killed.</li>
+<li>Five-worker kind smoke passes on Kubernetes v1.37.0: five Cronos pods placed on
+  separate workers, TLS/auth/key-permission checks, rolling restart and recovery
+  with the first pod's volume emptied. This script sends no events; event recovery
+  evidence comes from the separate container campaign. The local Docker engine
+  uses cgroup v1, so the initial bootstrap failed. A disposable-cluster-only
+  <code>failCgroupV1: false</code> compatibility override allowed the run; the workflow does
+  not apply that override. The cluster was deleted after evidence collection.</li>
+</ul>
+<p>The earlier Linux race run had two package timeouts and a Raft TLS leadership
+failure; five isolated reruns of that TLS test passed. Those original failures
+remain part of the record and are not proof of a data race. The resumed full suite
+passed all 35 test-bearing packages (three others have no test files), with no
+reported races, using Linux amd64 Go 1.27.3, cgo enabled, one package at a time and
+a 600-second package timeout:
+<code>go test -race -p 1 -count=1 -timeout 600s ./internal/... ./pkg/... ./cmd/...</code>.
+This local run is not a claim that remote CI's parallel 180-second profile passed.</p>
+<p>These checks close local container/deployment gaps. Separate-host soak, physical
+power loss, workload-specific capacity, and upgrade/rollback validation remain
+open. They cannot be inferred from a single Docker host.</p>
+<h2 id="configured-tenant-rates">Configured tenant rates<a class="headerlink" href="#configured-tenant-rates" title="Permanent link">&para;</a></h2>
+<p>Create a persistent JSON file, for example:</p>
+<div class="language-json highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="p">{</span><span class="nt">"publisher-a"</span><span class="p">:{</span><span class="nt">"max_events_per_second"</span><span class="p">:</span><span class="mi">1000</span><span class="p">},</span><span class="nt">"publisher-b"</span><span class="p">:{</span><span class="nt">"max_events_per_second"</span><span class="p">:</span><span class="mi">100</span><span class="p">}}</span>
+</span></code></pre></div>
+<p>Start the authenticated server with <code>--tenant-limits-file=/etc/cronos/tenant-limits.json</code>
+or <code>CRONOS_TENANT_LIMITS_FILE</code>. Subjects are verified JWT subjects, not client-supplied
+event metadata. Limits apply per node across the subject's topics, with a one-second
+burst. A batch must fit that burst. Unlisted subjects are unlimited. Restart to load
+changes; bucket state resets on restart. These are not cluster-wide rate limits.</p>
+<p>With Helm, put that JSON into the existing auth Secret and set
+<code>auth.tenantLimitsKey</code> to its key name. Restart the pods after updating the Secret.
+Invalid files and unsupported quota fields fail startup. Storage and in-flight
+quotas remain unsupported: their counters do not yet have durable recovery or
+cluster-wide accounting. Do not advertise quota-isolated shared tenancy.</p>
+<h2 id="cdc-recovery-contract-change">CDC recovery contract change<a class="headerlink" href="#cdc-recovery-contract-change" title="Permanent link">&para;</a></h2>
+<p>Missing, malformed, null, negative-invalid or beyond-log CDC positions now start
+from the retained log's beginning. First enabling CDC on existing data also exports
+retained history. Destinations must tolerate duplicates. This cannot restore records
+already removed by retention; restore them from an appropriate backup if needed.
+All nodes must use consistent CDC configuration.</p>
+<h2 id="executable-topology-coverage">Executable topology coverage<a class="headerlink" href="#executable-topology-coverage" title="Permanent link">&para;</a></h2>
+<p>The manual <code>five-node-production-topology</code> workflow uses five kind workers and
+five Cronos pods with hard anti-affinity. It exercises startup, rolling restart and
+loss of the first pod's data volume using the production security settings. The
+ordinary CI smoke profile remains three pods. Both use reduced resource/partition
+settings for CI. Kind workers share one physical host: this is scheduling/topology
+coverage, not physical multi-host fault or capacity evidence.</p>
+<h2 id="gates-requiring-the-target-environment">Gates requiring the target environment<a class="headerlink" href="#gates-requiring-the-target-environment" title="Permanent link">&para;</a></h2>
+<p>Record the commit and immutable image digest, machine/storage topology, workload,
+configuration, timestamps and raw logs for each run. Agree on throughput, p99
+scheduling lateness, recovery time and acceptable duplicate delivery before testing.</p>
+<ol>
+<li>Run a 24–72 hour representative soak on separate hosts, with actual payload
+   sizes and scheduled backlog, slow consumers, a failed CDC sink and disk pressure.
+   Account for every accepted event through eventual delivery/export; measure
+   memory, disk growth, lateness and refusal rates against the agreed limits.</li>
+<li>Grow from three to five nodes, replace nodes, drain one at a time, and fail a
+   leader during handoff/catch-up. Verify acknowledged-event conservation and
+   replica agreement before proceeding to the next disruption.</li>
+<li>Restore backups containing scheduled events, pending CDC, consumer progress and
+   DLQ records. Measure recovery time and recovery point. Test the intended upgrade
+   path and only supported rollback boundaries on copies of real-sized data.</li>
+<li>Perform controlled host/power-loss tests on disposable infrastructure using the
+   intended disks and durability settings. Process kills and kind restarts do not
+   prove that storage honors power-loss durability.</li>
+<li>Run candidate CI, race and acceptance suites and fresh Go/Rust/image scans.
+   Preserve failures and diagnose intermittent results. Publish the tested digest.</li>
+</ol>
+<p>Automatic snapshot selection for large replication lag and DLQ journal compaction
+remain separate engineering work. Bound supported refill/backlog sizes and alert on
+pinned retention/disk pressure until those paths have measured operating limits.</p>
+<h2 id="dashboard-and-feature-journey-2026-11-05">Dashboard and feature journey, 2026-11-05<a class="headerlink" href="#dashboard-and-feature-journey-2026-11-05" title="Permanent link">&para;</a></h2>
+<p>Run against a Windows amd64 build of the working tree. A single authenticated node
+(real JWTs, RBAC policy, per-subject limits file, persisted schema) and a three-node
+TLS cluster (the acceptance harness, with a workload) were driven through the
+dashboard in a browser and through the public RPCs.</p>
+<p>Verified end to end: sign-in with an admin, a non-admin and an expired token (admin
+APIs refuse the last two); publish, deduplication, schema rejection, delivery no
+earlier than the scheduled time, acknowledgement and replay; cluster topology with
+leaders, replicas and in-sync sets; partition health; replication lag; consumer
+groups and committed-offset lag; schemas; tenant usage with configured limits;
+retention and compaction actions; manual rebalance reported as unsupported.</p>
+<p>Defects found and fixed:</p>
+<ul>
+<li>JSON schema validation ignored <code>required</code>, so <code>{}</code> was accepted by a schema that
+  requires <code>order_id</code>. It is now enforced; other keywords (enum, pattern, ranges,
+  additionalProperties) are still not enforced.</li>
+<li>The dashboard's replication view could not show partition 0 (the HTTP API treated
+  <code>partition_id=0</code> as "all partitions") and titled partition 0 "All Partitions". The
+  HTTP API now treats an explicit 0 as partition 0; the RPC keeps 0 as "all".</li>
+<li>The dashboard labelled the per-node leader count "Leader Partitions" beside the
+  cluster-wide total, so a node leading nothing showed 0 while every partition had a
+  leader. It is now "Led by this node".</li>
+<li><code>AckRequest.next_offset</code> was documented as optional, but a successful ack with any
+  value other than the highest delivered offset plus one is rejected. The comment now
+  says so; the client library already sends it.</li>
+</ul>
+<p>Limits left as they are: replication lag is only reported by a partition's leader
+(the cluster view has the same information from any node), while partition health is
+local to each node and answers for any partition the node holds;
+retention and compaction take 0 as "all local partitions", so partition 0 cannot be
+targeted alone; a node serves the dashboard assets compiled into it, and the files
+checked in under <code>internal/api/web/dist</code> are older than the source (the Docker build
+stages a fresh build, a plain <code>go build</code> does not).</p>
+<p>Acceptance campaign on this host: every test passed except
+<code>TestOverloadIsRefusedAndSurvived</code>, which failed in 1 of 4 runs of this tree and in 3
+of 7 runs of an unmodified HEAD worktree, and in 2 of 2 runs of the cgo build in a
+Linux container. In failing runs the nodes took the whole 624 MiB flood without
+refusing. The evidence points at the test, not the nodes: its events fell due 45 seconds
+into the flood, and the failing runs were the slow ones (about 90 events/s instead of
+200), which outlast that window; the mechanism, that an event which is due no longer
+counts toward the memory the guard measures, is inferred, not observed. With the due
+time at 20 minutes the nodes refused as designed (one run). The test now schedules
+its events 150 seconds out. With that change it passed 4 of 4 runs in the Linux
+container and 4 of 4 on Windows (about 160 s each, up from about 55 s).</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/jatin711-debug/cronos_db_golang" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+      <div class="md-progress" data-md-component="progress" role="progressbar"></div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.instant", "navigation.instant.progress", "navigation.tracking", "navigation.top", "navigation.sections", "navigation.indexes", "search.highlight", "search.suggest", "search.share", "content.tooltips", "toc.follow"], "search": "../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.a5f9d56c.min.js"></script>
+      
+        <script src="https://cdn.jsdelivr.net/npm/svg-pan-zoom@3.6.1/dist/svg-pan-zoom.min.js"></script>
+      
+        <script src="../javascripts/mermaid-zoom.js"></script>
+      
+    
+  </body>
+</html>

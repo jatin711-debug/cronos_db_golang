@@ -1,0 +1,96 @@
+=== RUN   TestNetworkPartitions
+    partition_test.go:56: 03:49:11.324  cutting node2, which leads partition 0, off from the other nodes
+    partition_test.go:61: 03:49:49.324  restoring the links
+    partition_test.go:85: 03:50:08.983  cutting the link between node2, which leads partition 0, and node1, which decides who leads
+    partition_test.go:89: 03:50:40.987  restoring the links
+    partition_test.go:97: 03:50:52.375  cutting node1 off from the other nodes
+    partition_test.go:100: 03:51:04.277  restoring the links
+    partition_test.go:97: 03:51:13.452  cutting node3 off from the other nodes
+    partition_test.go:100: 03:51:48.414  restoring the links
+    partition_test.go:105: 03:52:15.244  cutting every link
+    partition_test.go:110: 03:52:44.364  restoring the links
+    partition_test.go:112: 03:52:53.972  faults done; waiting for the remaining deliveries
+    partition_test.go:116: the nodes' clocks were up to 23 ms ahead of this machine's; a delivery is early if it is earlier than that
+    partition_test.go:117: published 2470 events: 2470 acknowledged, 0 with unknown outcome; 135 delivered more than once
+2026/11/05 03:52:59 [FOLLOWER] Requesting bulk snapshot from leader 127.0.0.1:52742 for partition 0
+2026/11/05 03:52:59 [FOLLOWER] Receiving snapshot file 00000000000000000556.log (7160 bytes)
+2026/11/05 03:52:59 [FOLLOWER] Receiving snapshot file 00000000000000000556.index (24 bytes)
+2026/11/05 03:52:59 [FOLLOWER] Receiving snapshot file recovery-state.snapshot (162 bytes)
+2026/11/05 03:52:59 [WAL-0] Loaded 1 segments, nextOffset=636
+2026/11/05 03:52:59 [FOLLOWER] Snapshot installed for partition 0 up to offset 635 (epoch 24)
+2026/11/05 03:52:59 [FOLLOWER] Requesting bulk snapshot from leader 127.0.0.1:52745 for partition 0
+2026/11/05 03:52:59 [FOLLOWER] Receiving snapshot file 00000000000000000556.log (7160 bytes)
+2026/11/05 03:52:59 [FOLLOWER] Receiving snapshot file 00000000000000000556.index (24 bytes)
+2026/11/05 03:52:59 [FOLLOWER] Receiving snapshot file recovery-state.snapshot (230 bytes)
+2026/11/05 03:53:00 [WAL-0] Loaded 1 segments, nextOffset=636
+2026/11/05 03:53:00 [FOLLOWER] Snapshot installed for partition 0 up to offset 635 (epoch 24)
+2026/11/05 03:53:00 [FOLLOWER] Requesting bulk snapshot from leader 127.0.0.1:52748 for partition 0
+2026/11/05 03:53:00 [FOLLOWER] Receiving snapshot file 00000000000000000554.log (7338 bytes)
+2026/11/05 03:53:00 [FOLLOWER] Receiving snapshot file 00000000000000000554.index (24 bytes)
+2026/11/05 03:53:00 [FOLLOWER] Receiving snapshot file recovery-state.snapshot (162 bytes)
+2026/11/05 03:53:00 [WAL-0] Loaded 1 segments, nextOffset=636
+2026/11/05 03:53:00 [FOLLOWER] Snapshot installed for partition 0 up to offset 635 (epoch 24)
+    partition_test.go:119: partition 0: offsets 556 to 635 on every replica
+2026/11/05 03:53:00 [FOLLOWER] Requesting bulk snapshot from leader 127.0.0.1:52742 for partition 1
+2026/11/05 03:53:02 [FOLLOWER] Receiving snapshot file 00000000000000000369.log (16445 bytes)
+2026/11/05 03:53:02 [FOLLOWER] Receiving snapshot file 00000000000000000369.index (24 bytes)
+2026/11/05 03:53:02 [FOLLOWER] Receiving snapshot file 00000000000000000554.log (6917 bytes)
+2026/11/05 03:53:02 [FOLLOWER] Receiving snapshot file 00000000000000000554.index (24 bytes)
+2026/11/05 03:53:02 [FOLLOWER] Receiving snapshot file recovery-state.snapshot (164 bytes)
+2026/11/05 03:53:02 [WAL-1] Loaded 2 segments, nextOffset=631
+2026/11/05 03:53:02 [FOLLOWER] Snapshot installed for partition 1 up to offset 630 (epoch 17)
+2026/11/05 03:53:02 [FOLLOWER] Requesting bulk snapshot from leader 127.0.0.1:52745 for partition 1
+2026/11/05 03:53:03 [FOLLOWER] Receiving snapshot file 00000000000000000369.log (16445 bytes)
+2026/11/05 03:53:03 [FOLLOWER] Receiving snapshot file 00000000000000000369.index (24 bytes)
+2026/11/05 03:53:03 [FOLLOWER] Receiving snapshot file 00000000000000000554.log (6917 bytes)
+2026/11/05 03:53:03 [FOLLOWER] Receiving snapshot file 00000000000000000554.index (24 bytes)
+2026/11/05 03:53:03 [FOLLOWER] Receiving snapshot file recovery-state.snapshot (164 bytes)
+2026/11/05 03:53:03 [WAL-1] Loaded 2 segments, nextOffset=631
+2026/11/05 03:53:03 [FOLLOWER] Snapshot installed for partition 1 up to offset 630 (epoch 17)
+2026/11/05 03:53:03 [FOLLOWER] Requesting bulk snapshot from leader 127.0.0.1:52748 for partition 1
+2026/11/05 03:53:03 [FOLLOWER] Receiving snapshot file 00000000000000000479.log (13544 bytes)
+2026/11/05 03:53:03 [FOLLOWER] Receiving snapshot file 00000000000000000479.index (24 bytes)
+2026/11/05 03:53:03 [FOLLOWER] Receiving snapshot file recovery-state.snapshot (468 bytes)
+2026/11/05 03:53:03 [WAL-1] Loaded 1 segments, nextOffset=631
+2026/11/05 03:53:04 [FOLLOWER] Snapshot installed for partition 1 up to offset 630 (epoch 17)
+    partition_test.go:119: partition 1: offsets 479 to 630 on every replica
+2026/11/05 03:53:04 [FOLLOWER] Requesting bulk snapshot from leader 127.0.0.1:52742 for partition 2
+2026/11/05 03:53:05 [FOLLOWER] Receiving snapshot file 00000000000000000554.log (6917 bytes)
+2026/11/05 03:53:05 [FOLLOWER] Receiving snapshot file 00000000000000000554.index (24 bytes)
+2026/11/05 03:53:05 [FOLLOWER] Receiving snapshot file recovery-state.snapshot (164 bytes)
+2026/11/05 03:53:05 [WAL-2] Loaded 1 segments, nextOffset=631
+2026/11/05 03:53:05 [FOLLOWER] Snapshot installed for partition 2 up to offset 630 (epoch 17)
+2026/11/05 03:53:05 [FOLLOWER] Requesting bulk snapshot from leader 127.0.0.1:52745 for partition 2
+2026/11/05 03:53:05 [FOLLOWER] Receiving snapshot file 00000000000000000554.log (6917 bytes)
+2026/11/05 03:53:05 [FOLLOWER] Receiving snapshot file 00000000000000000554.index (24 bytes)
+2026/11/05 03:53:05 [FOLLOWER] Receiving snapshot file recovery-state.snapshot (164 bytes)
+2026/11/05 03:53:05 [WAL-2] Loaded 1 segments, nextOffset=631
+2026/11/05 03:53:05 [FOLLOWER] Snapshot installed for partition 2 up to offset 630 (epoch 17)
+2026/11/05 03:53:05 [FOLLOWER] Requesting bulk snapshot from leader 127.0.0.1:52748 for partition 2
+2026/11/05 03:53:05 [FOLLOWER] Receiving snapshot file 00000000000000000554.log (6917 bytes)
+2026/11/05 03:53:05 [FOLLOWER] Receiving snapshot file 00000000000000000554.index (24 bytes)
+2026/11/05 03:53:05 [FOLLOWER] Receiving snapshot file recovery-state.snapshot (168 bytes)
+2026/11/05 03:53:05 [WAL-2] Loaded 1 segments, nextOffset=631
+2026/11/05 03:53:05 [FOLLOWER] Snapshot installed for partition 2 up to offset 630 (epoch 17)
+    partition_test.go:119: partition 2: offsets 554 to 630 on every replica
+2026/11/05 03:53:05 [FOLLOWER] Requesting bulk snapshot from leader 127.0.0.1:52742 for partition 3
+2026/11/05 03:53:06 [FOLLOWER] Receiving snapshot file 00000000000000000557.log (7237 bytes)
+2026/11/05 03:53:06 [FOLLOWER] Receiving snapshot file 00000000000000000557.index (24 bytes)
+2026/11/05 03:53:06 [FOLLOWER] Receiving snapshot file recovery-state.snapshot (164 bytes)
+2026/11/05 03:53:06 [WAL-3] Loaded 1 segments, nextOffset=638
+2026/11/05 03:53:06 [FOLLOWER] Snapshot installed for partition 3 up to offset 637 (epoch 24)
+2026/11/05 03:53:06 [FOLLOWER] Requesting bulk snapshot from leader 127.0.0.1:52745 for partition 3
+2026/11/05 03:53:06 [FOLLOWER] Receiving snapshot file 00000000000000000557.log (7237 bytes)
+2026/11/05 03:53:06 [FOLLOWER] Receiving snapshot file 00000000000000000557.index (24 bytes)
+2026/11/05 03:53:06 [FOLLOWER] Receiving snapshot file recovery-state.snapshot (232 bytes)
+2026/11/05 03:53:06 [WAL-3] Loaded 1 segments, nextOffset=638
+2026/11/05 03:53:06 [FOLLOWER] Snapshot installed for partition 3 up to offset 637 (epoch 24)
+2026/11/05 03:53:06 [FOLLOWER] Requesting bulk snapshot from leader 127.0.0.1:52748 for partition 3
+2026/11/05 03:53:06 [FOLLOWER] Receiving snapshot file 00000000000000000555.log (7415 bytes)
+2026/11/05 03:53:06 [FOLLOWER] Receiving snapshot file 00000000000000000555.index (24 bytes)
+2026/11/05 03:53:06 [FOLLOWER] Receiving snapshot file recovery-state.snapshot (164 bytes)
+2026/11/05 03:53:06 [WAL-3] Loaded 1 segments, nextOffset=638
+2026/11/05 03:53:06 [FOLLOWER] Snapshot installed for partition 3 up to offset 637 (epoch 24)
+    partition_test.go:119: partition 3: offsets 557 to 637 on every replica
+--- PASS: TestNetworkPartitions (286.59s)
+=== RUN   TestRestartInContainersWithABacklogLargerThanTheirMemory
