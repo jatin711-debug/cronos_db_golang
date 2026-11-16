@@ -1064,6 +1064,10 @@ func (s *Segment) ReadEvent(targetOffset int64) (*types.Event, error) {
 	return event, err
 }
 
+// rebuiltIndexInterval is how many records apart the index entries are that a
+// segment adds when it is opened and finds its index stops short.
+const rebuiltIndexInterval = 1000
+
 // skipRecordsChunk is how much of the segment file skipRecords reads at once.
 const skipRecordsChunk = 64 << 10
 
@@ -1537,6 +1541,21 @@ func (s *Segment) scan() error {
 	// handle after the scan, so reading ahead here is safe.
 	reader := bufio.NewReaderSize(file, 1<<20)
 
+	// The index on disk can stop short of the segment: its entries are
+	// buffered and written out from time to time, so a process that is killed
+	// loses the latest. Every record is read here anyway; the missing entries
+	// are noted on the way and added below. Without them a point read beyond
+	// the last entry scanned, and decrypted, everything from that entry on.
+	indexedThrough := int64(-1)
+	if s.index != nil {
+		indexedThrough = s.index.lastEntryOffset()
+	}
+	var missing []IndexEntry
+	nextMissing := indexedThrough + rebuiltIndexInterval
+	if indexedThrough < 0 {
+		nextMissing = -1 // the first record gets an entry
+	}
+
 	// Read through all records
 	for {
 		recordStartPos = lastGoodPos
@@ -1608,7 +1627,16 @@ func (s *Segment) scan() error {
 		s.lastOffset = event.Offset
 		s.lastTS = event.GetScheduleTs()
 		s.times.note(event.GetScheduleTs())
+		if s.index != nil && event.Offset > indexedThrough && event.Offset >= nextMissing {
+			missing = append(missing, IndexEntry{Timestamp: event.GetScheduleTs(), Offset: event.Offset, FilePosition: recordStartPos})
+			nextMissing = event.Offset + rebuiltIndexInterval
+		}
 		lastGoodPos = recordStartPos + 4 + int64(len(recordData)) // After length + recordData
+	}
+	if len(missing) > 0 {
+		if err := s.index.addMissing(missing); err != nil {
+			return fmt.Errorf("add %d missing index entries: %w", len(missing), err)
+		}
 	}
 
 	// Position the logical size at the real data end. OpenSegment then sets the

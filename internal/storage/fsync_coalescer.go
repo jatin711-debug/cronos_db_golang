@@ -2,6 +2,7 @@ package storage
 
 import (
 	"fmt"
+	"log"
 	"sync"
 	"time"
 )
@@ -123,4 +124,20 @@ func (c *FsyncCoalescer) sweep() {
 		}(i, r.seg)
 	}
 	syncWg.Wait()
+
+	// The index of each segment written to goes to disk too, as the WAL's own
+	// flush loop does when there is no coalescer. Without this it stayed in
+	// its write buffer, which holds thousands of entries and a segment has
+	// dozens, until the segment was closed: a node that was killed came back
+	// with its active segments unindexed, and every point read in them
+	// decrypted the segment from its start.
+	for i, r := range results {
+		if r.err != nil || r.seg == nil || r.seg.index == nil {
+			continue
+		}
+		if err := r.seg.index.Flush(); err != nil {
+			wals[i].recordFlushError()
+			log.Printf("[WAL-%d] coalesced index flush error: %v", wals[i].partitionID, err)
+		}
+	}
 }
