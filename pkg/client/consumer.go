@@ -818,7 +818,7 @@ func (c *Consumer) consumeFromNode(ctx context.Context, addr string) error {
 	utils.GoSafe("consumer-ack-sender", func() {
 		defer infraWG.Done()
 		defer cancel()
-		c.ackSender(subCtx, addr, ackStream, ackQueue, sent)
+		c.ackSender(subCtx, addr, ackStream, ackQueue, sent, func() bool { return len(deliveries) == 0 })
 	})
 	if c.cfg.CommitStrategy == CommitStrategyAsync {
 		infraWG.Add(1)
@@ -998,12 +998,19 @@ func (c *Consumer) buildDefaultAck(delivery *types.Delivery, handlerErr error) a
 	}
 }
 
+// ackSender sends acks as the workers produce them. Async acks are held for a
+// batch only while more are on their way: while deliveries wait in the
+// buffer, their acks follow shortly. Once the buffer is empty (idle reports
+// true) an ack is sent at once. Holding it for the flush interval then only
+// keeps the server's credits taken, and a subscription whose credit window is
+// smaller than a batch could take no more than one window per interval.
 func (c *Consumer) ackSender(
 	ctx context.Context,
 	addr string,
 	stream grpc.BidiStreamingClient[types.AckRequest, types.AckResponse],
 	acks <-chan ackEnvelope,
 	sent *sentAcks,
+	idle func() bool,
 ) {
 	batch := make([]ackEnvelope, 0, c.cfg.AckBatchSize)
 	timer := time.NewTimer(c.cfg.AckFlushInterval)
@@ -1078,8 +1085,9 @@ func (c *Consumer) ackSender(
 			}
 			batch = append(batch, ack)
 			c.observeState(0, len(acks))
-			// Someone waits for the answer: it is not held for a batch.
-			if len(batch) >= c.cfg.AckBatchSize || ack.done != nil {
+			// Someone waits for the answer, or nothing else is coming soon:
+			// it is not held for a batch.
+			if len(batch) >= c.cfg.AckBatchSize || ack.done != nil || (len(acks) == 0 && idle != nil && idle()) {
 				if !flush() {
 					return
 				}

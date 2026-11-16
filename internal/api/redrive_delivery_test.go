@@ -99,6 +99,67 @@ func TestBacklogIsDeliveredAtConsumerPace(t *testing.T) {
 	waitForCount(t, received, total, 8*time.Second, "backlog")
 }
 
+// A group with a small credit window keeps up while events written long ago
+// come due among events written a moment ago, and gets every one of them
+// once. The consumer used to hold each ack for its flush interval unless 64
+// had gathered, which a window of 4 never does: the group could take no more
+// than 4 events per interval however fast the server was, and in the soak
+// such a group fell behind for good once the server slowed down. The interval
+// here is ten seconds, so that held acks would show whatever the server's
+// speed: 300 events would take twelve minutes.
+func TestSmallWindowGroupGetsNewEventsWhileOldOnesComeDue(t *testing.T) {
+	const old, fresh = 100, 200
+	_, addr := startPartitionedServer(t, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	c, producer := dialOrders(t, ctx, addr)
+
+	// The old events come first in the log and fall due over a few seconds,
+	// while the new ones are published.
+	dueFrom := time.Now().Add(2 * time.Second).UnixMilli()
+	messages := make([]client.Message, old)
+	for i := range messages {
+		messages[i] = client.Message{
+			MessageID:    fmt.Sprintf("old-%d", i),
+			Topic:        "orders",
+			PartitionKey: "orders",
+			Payload:      []byte("payload"),
+			ScheduleTS:   dueFrom + int64(i)*30, // over three seconds
+		}
+	}
+	if _, err := producer.SendBatch(ctx, messages); err != nil {
+		t.Fatal(err)
+	}
+
+	var received atomic.Int64
+	go func() {
+		cfg := client.DefaultConsumerConfig("orders", "small-window")
+		cfg.PartitionID = 0
+		cfg.StartOffset = 0
+		cfg.MaxBufferSize = 4
+		cfg.AckFlushInterval = 10 * time.Second
+		_ = c.Subscribe(ctx, cfg, func(_ context.Context, d client.Delivery) error {
+			n := int64(len(d.Batch))
+			if d.Event != nil {
+				n++
+			}
+			received.Add(n)
+			return nil
+		})
+	}()
+	time.Sleep(300 * time.Millisecond) // let the subscription register
+	for sent := 0; sent < fresh; sent += 20 {
+		publishOrders(t, ctx, producer, fmt.Sprintf("fresh-%d", sent), 20)
+		time.Sleep(100 * time.Millisecond)
+	}
+	waitForCount(t, &received, old+fresh, 30*time.Second, "old and new events")
+
+	time.Sleep(1500 * time.Millisecond)
+	if got := received.Load(); got != old+fresh {
+		t.Fatalf("received %d events for %d published; completed events were redelivered", got, old+fresh)
+	}
+}
+
 // Events held back while the consumer was out of credits must follow as soon
 // as it acks, not wait for a slow rescan of the log.
 func TestHeldBackEventsFollowAcks(t *testing.T) {
