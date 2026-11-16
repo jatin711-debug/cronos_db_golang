@@ -1830,11 +1830,16 @@ func (pm *PartitionManager) AddFollower(partitionID int32, followerID string, fo
 		return fmt.Errorf("partition %d is not a leader", partitionID)
 	}
 
+	// The cluster's reconcile loop calls this every few seconds for every
+	// follower; only one that is new is worth a line in the log.
+	known := slices.Contains(partition.ReplLeader.FollowerIDs(), followerID)
 	if err := partition.ReplLeader.AddFollower(followerID, followerAddr); err != nil {
 		return fmt.Errorf("add follower %s: %w", followerID, err)
 	}
 
-	log.Printf("[PARTITION] Follower %s added to partition %d", followerID, partitionID)
+	if !known {
+		log.Printf("[PARTITION] Follower %s added to partition %d", followerID, partitionID)
+	}
 	return nil
 }
 
