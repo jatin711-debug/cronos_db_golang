@@ -107,6 +107,10 @@ type GroupManager struct {
 	commitMu sync.Mutex
 	// progressVersion changes whenever any group's progress or membership does.
 	progressVersion atomic.Uint64
+	// journal keeps each partition's recent completions for followers that
+	// need only what changed (see ExportProgressDelta). Its lock may be taken
+	// while mu is held, never the other way round.
+	journal progressJournals
 }
 
 // NewGroupManager creates an in-memory-only group manager.

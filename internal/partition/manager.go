@@ -1777,6 +1777,13 @@ func (pm *PartitionManager) PromoteToLeader(partitionID int32, epoch int64) erro
 	leader.SetProgressPageSource(consumerGroup.ProgressVersion, func(cursor types.ProgressCursor) ([]*types.ConsumerGroupProgress, types.ProgressCursor, bool, error) {
 		return consumerGroup.ExportProgressPage(partitionID, cursor)
 	})
+	// Followers that hold the progress are sent what changes, not all of it
+	// again. What this node recorded while it did not lead is not in its
+	// journal, so every follower takes the full copy first.
+	consumerGroup.ResetProgressJournal(partitionID)
+	leader.SetProgressDeltaSource(func(since uint64) ([]*types.ConsumerGroupProgress, uint64, bool) {
+		return consumerGroup.ExportProgressDelta(partitionID, since)
+	})
 	leader.SetDeadLetterSource(partition.DLQ.Version, partition.DLQ.ExportPage)
 	// A publish whose replication failed is finished once catch-up has taken
 	// its events to a quorum, even if nobody retries it.

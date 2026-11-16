@@ -346,7 +346,9 @@ func (g *GroupManager) ForgetCompletionsFrom(partitionID int32, offset int64) (i
 		}
 		g.lowerHighestCompleted(prefix, offset-1)
 	}
-	g.progressVersion.Add(1)
+	// The journal may name offsets that are gone now; followers get the
+	// full copy next.
+	g.journal.reset(partitionID, g.progressVersion.Add(1))
 	return len(floors), nil
 }
 
@@ -585,7 +587,19 @@ func (g *GroupManager) CommitDeliveries(partitionID int32, commits []DeliveryCom
 			}
 		}
 	}
-	g.progressVersion.Add(1)
+	// Followers that hold the progress so far are sent only these.
+	journaled := make(map[string][]int64, len(added))
+	for groupID, offsets := range added {
+		if _, ok := g.groups[groupID]; !ok {
+			continue
+		}
+		for offset := range offsets {
+			if offset >= cursors[groupID] {
+				journaled[groupID] = append(journaled[groupID], offset)
+			}
+		}
+	}
+	g.noteCompletions(partitionID, journaled)
 	g.mu.Unlock()
 	g.dropCompletionsBelow(store, partitionID, raised)
 	return errs
