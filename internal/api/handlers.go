@@ -1483,7 +1483,10 @@ func (h *EventServiceHandler) redriveRetained(ctx context.Context, p *partition.
 	backlogEnd := p.Wal.GetLastOffset() // registered above, so later events are pushed or queued
 	sweep := origin                     // next offset of the background sweep
 	nextSweep := time.Now().Add(redriveSweepInterval)
-	retryLow, retryHigh := int64(0), int64(-1) // queued redrive range; empty when low > high
+	// retry holds the queued redrive ranges. They are worked through lowest
+	// first, and each keeps its own progress: a range that joins below one
+	// half done does not send the reader back over what it has already done.
+	var retry delivery.OffsetRanges
 	nextServedCheck := time.Now()
 
 	for {
@@ -1493,33 +1496,30 @@ func (h *EventServiceHandler) redriveRetained(ctx context.Context, p *partition.
 			}
 			nextServedCheck = now.Add(servedCheckInterval)
 		}
-		if low, high, ok := requests.Take(); ok {
-			low = max(low, origin)
+		for _, r := range requests.Take() {
+			low, high := max(r.Low, origin), r.High
 			// A range wholly inside the unread backlog is covered by that pass.
 			if covered := low >= backlog && high <= backlogEnd; low <= high && !covered {
-				if retryLow > retryHigh {
-					retryLow, retryHigh = low, high
-				} else {
-					retryLow, retryHigh = min(retryLow, low), max(retryHigh, high)
-				}
+				retry.Add(low, high)
 			}
 		}
 
 		deliverable := p.DeliverableThrough()
 		end := min(p.Wal.GetLastOffset(), deliverable)
-		retryTo := min(retryLow+redriveBatchEvents-1, retryHigh, deliverable)
+		first, retrying := retry.First()
+		retryTo := min(first.Low+redriveBatchEvents-1, first.High, deliverable)
 		backlogTo := min(backlog+redriveBatchEvents-1, backlogEnd, deliverable)
 		var wait time.Duration
 		switch {
-		case retryLow <= retryTo:
-			next, blocked, err := offer(retryLow, retryTo)
+		case retrying && first.Low <= retryTo:
+			next, blocked, err := offer(first.Low, retryTo)
 			if err != nil {
 				return err
 			}
 			if blocked {
 				wait = redriveBlockedWait
 			} else {
-				retryLow = next
+				retry.RemoveBelow(next)
 			}
 		case backlog <= backlogTo:
 			next, blocked, err := offer(backlog, backlogTo)
@@ -1555,7 +1555,7 @@ func (h *EventServiceHandler) redriveRetained(ctx context.Context, p *partition.
 				}
 				wait = redriveSweepInterval
 			}
-			if retryLow <= retryHigh || backlog <= backlogEnd {
+			if retrying || backlog <= backlogEnd {
 				// The rest of these is not replicated yet; look again soon.
 				wait = min(wait, redriveBlockedWait)
 			}

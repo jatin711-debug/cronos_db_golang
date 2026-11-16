@@ -52,15 +52,15 @@ func TestDispatcher_HeldBackEventsAreQueuedForRedrive(t *testing.T) {
 	if got := len(stream.lastMsg.Batch); got != 2 {
 		t.Fatalf("delivered %d events with 2 credits", got)
 	}
-	low, high, ok := cursor.Take()
+	low, high, ok := takeSpan(cursor)
 	if !ok || low != 2 || high != 4 {
 		t.Fatalf("redrive request = [%d, %d] ok=%v, want [2, 4]", low, high, ok)
 	}
 	expectWake(t, cursor, true)
-	if _, _, ok := cursor.Take(); ok {
+	if _, _, ok := takeSpan(cursor); ok {
 		t.Fatal("a taken redrive request must not be reported twice")
 	}
-	if _, _, ok := other.Take(); ok {
+	if _, _, ok := takeSpan(other); ok {
 		t.Fatal("a group that missed nothing was asked to redrive")
 	}
 }
@@ -92,7 +92,7 @@ func TestDispatcher_RedriveGroupFollowsCredits(t *testing.T) {
 	if dispatched != 2 || !blocked {
 		t.Fatalf("first offer: dispatched=%d blocked=%v, want 2 and blocked", dispatched, blocked)
 	}
-	if _, _, ok := cursor.Take(); ok {
+	if _, _, ok := takeSpan(cursor); ok {
 		t.Fatal("a redrive caller keeps its own position; nothing should be queued for it")
 	}
 
@@ -135,13 +135,13 @@ func TestDispatcher_UnsubscribeQueuesAbandonedDeliveries(t *testing.T) {
 	if err := d.DispatchBatch(testEvents(5, 9)); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, ok := cursor.Take(); ok {
+	if _, _, ok := takeSpan(cursor); ok {
 		t.Fatal("nothing was held back yet")
 	}
 	if err := d.Unsubscribe(sub.ID); err != nil {
 		t.Fatal(err)
 	}
-	low, high, ok := cursor.Take()
+	low, high, ok := takeSpan(cursor)
 	if !ok || low != 5 || high != 9 {
 		t.Fatalf("redrive request after disconnect = [%d, %d] ok=%v, want [5, 9]", low, high, ok)
 	}
@@ -217,11 +217,11 @@ func TestWorker_DroppedReadyEventsAreQueuedForRedrive(t *testing.T) {
 
 	w := NewWorker(d, 100) // not started, so the queue only fills
 	w.AddReadyEvents(testEvents(0, 9999))
-	if _, _, ok := cursor.Take(); ok {
+	if _, _, ok := takeSpan(cursor); ok {
 		t.Fatal("nothing was dropped yet")
 	}
 	w.AddReadyEvents(testEvents(10000, 10004))
-	low, high, ok := cursor.Take()
+	low, high, ok := takeSpan(cursor)
 	if !ok || low != 10000 || high != 10004 {
 		t.Fatalf("redrive request for dropped events = [%d, %d] ok=%v, want [10000, 10004]", low, high, ok)
 	}

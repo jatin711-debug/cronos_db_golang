@@ -101,7 +101,7 @@ func TestDispatcher_UnacknowledgedDeliveryOfAConsumerThatLeftGoesBackToTheGroup(
 	if depth := d.GetStats().RetryQueueDepth; depth != 0 {
 		t.Fatalf("%d deliveries still wait to be sent again to a consumer that has left", depth)
 	}
-	if low, high, ok := cursor.Take(); !ok || low != 7 || high != 7 {
+	if low, high, ok := takeSpan(cursor); !ok || low != 7 || high != 7 {
 		t.Fatalf("redrive request = [%d, %d] ok=%v, want [7, 7]", low, high, ok)
 	}
 
@@ -154,7 +154,7 @@ func TestDispatcher_DeliveryThatCannotBeSentAgainGoesBackToTheGroup(t *testing.T
 	var low, high int64
 	eventually(t, "the group to be asked to read the event again", func() bool {
 		var asked bool
-		low, high, asked = cursor.Take()
+		low, high, asked = takeSpan(cursor)
 		return asked
 	})
 	if low != 7 || high != 7 {

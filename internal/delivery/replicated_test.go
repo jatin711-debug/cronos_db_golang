@@ -39,7 +39,7 @@ func TestDispatcher_HoldsBackEntriesThatAreNotReplicated(t *testing.T) {
 		}
 	}
 	// The scheduler has let go of them; the log is read again for them.
-	if low, high, ok := cursor.Take(); !ok || low != 2 || high != 3 {
+	if low, high, ok := takeSpan(cursor); !ok || low != 2 || high != 3 {
 		t.Fatalf("redrive request = [%d, %d] ok=%v, want [2, 3]", low, high, ok)
 	}
 
