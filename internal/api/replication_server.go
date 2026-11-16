@@ -321,11 +321,11 @@ func dropForeignTail(p *partition.Partition, req *types.ReplicationAppendRequest
 	if end <= 0 || end >= p.Wal.GetNextOffset() || end < p.Wal.GetFirstOffset() {
 		return nil
 	}
-	local, err := p.Wal.ReadEvent(end)
+	localTerm, err := p.Wal.GetTermForOffset(end)
 	if err != nil {
 		return fmt.Errorf("read offset %d, beyond the end of the leader's log: %w", end, err)
 	}
-	if local.GetTerm() <= 0 || local.GetTerm() == req.GetTerm() {
+	if localTerm <= 0 || localTerm == req.GetTerm() {
 		return nil // written before terms were kept, or by this leader
 	}
 	removed, err := p.CutLog(end)
@@ -333,7 +333,7 @@ func dropForeignTail(p *partition.Partition, req *types.ReplicationAppendRequest
 		return fmt.Errorf("remove the log tail beyond the leader's end at offset %d: %w", end, err)
 	}
 	slog.Warn("Removed log tail beyond the end of the leader's log, written under another leader",
-		"partition", p.ID, "from_offset", end, "local_term", local.GetTerm(), "leader_term", req.GetTerm(), "entries", removed)
+		"partition", p.ID, "from_offset", end, "local_term", localTerm, "leader_term", req.GetTerm(), "entries", removed)
 	return nil
 }
 
@@ -355,18 +355,21 @@ func logMismatch(p *partition.Partition, req *types.ReplicationAppendRequest) *t
 	if !req.GetHasPrevLog() || req.GetPrevLogTerm() <= 0 || prev < 0 || prev >= p.Wal.GetNextOffset() {
 		return nil
 	}
-	local, err := p.Wal.ReadEvent(prev)
-	if err != nil || local.GetTerm() <= 0 || local.GetTerm() == req.GetPrevLogTerm() {
+	// The WAL remembers the terms of the entries appended since it was opened.
+	// Reading the entry instead found it from the nearest index entry, up to an
+	// index interval of records each read and decrypted, on every append.
+	localTerm, err := p.Wal.GetTermForOffset(prev)
+	if err != nil || localTerm <= 0 || localTerm == req.GetPrevLogTerm() {
 		return nil // not held any more, written before terms were kept, or the same entry
 	}
 	return &types.ReplicationAppendResponse{
-		Error:               fmt.Sprintf("log mismatch at offset %d: written in term %d here, term %d on the leader", prev, local.GetTerm(), req.GetPrevLogTerm()),
+		Error:               fmt.Sprintf("log mismatch at offset %d: written in term %d here, term %d on the leader", prev, localTerm, req.GetPrevLogTerm()),
 		LastOffset:          p.Wal.GetLastOffset(),
 		NextOffset:          p.Wal.GetNextOffset(),
 		Term:                p.Epoch(),
 		LogMismatch:         true,
-		ConflictTerm:        local.GetTerm(),
-		ConflictFirstOffset: p.Wal.FirstOffsetOfTerm(local.GetTerm(), prev),
+		ConflictTerm:        localTerm,
+		ConflictFirstOffset: p.Wal.FirstOffsetOfTerm(localTerm, prev),
 	}
 }
 
