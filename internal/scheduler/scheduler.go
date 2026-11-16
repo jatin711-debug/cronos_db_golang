@@ -117,7 +117,14 @@ type Scheduler struct {
 	readyMu sync.Mutex
 	// tickMu is held while expired timers move from the wheel to the ready
 	// queue, so that Reset cannot run between the two.
-	tickMu           sync.Mutex
+	tickMu sync.Mutex
+	// resets counts Reset calls. The hydrator reads events from the log
+	// before it takes tickMu, and keeps them only if no Reset came between:
+	// after one, an offset can name another entry. Written under tickMu.
+	resets uint64
+	// lastHydrated is how many events the last hydration pass took. The next
+	// pass reads about that many ahead of taking tickMu. Written under tickMu.
+	lastHydrated     int
 	timingWheel      *TimingWheel   // hierarchical wheel for near-future timers
 	readyQueue       []*types.Event // events whose schedule time has arrived
 	readySignal      chan struct{}  // buffered notify for ready-queue consumers
@@ -309,6 +316,7 @@ func (s *Scheduler) scheduleBatchUnbudgeted(events []*types.Event) error {
 func (s *Scheduler) Reset() error {
 	s.tickMu.Lock()
 	defer s.tickMu.Unlock()
+	s.resets++
 	s.budgetMu.Lock()
 	defer s.budgetMu.Unlock()
 	s.timingWheel.Clear()
@@ -629,11 +637,46 @@ func (s *Scheduler) adaptHydratorInterval(hydrated int, scanDuration time.Durati
 	s.hydratorInterval = interval
 }
 
+// readColdEvents reads from the log the events the next hydration pass is
+// likely to take: the first of those the cold store names for its window, as
+// many as the last pass took and some more. A pass can take far fewer than
+// the cold store names, when the memory budget runs out; the old pass read
+// events only until then, and reading all the store names made each pass
+// read up to 1024 events to take a few. Unreadable events are left out; the
+// pass reads them again and reports the error.
+func (s *Scheduler) readColdEvents(limit int) map[int64]*types.Event {
+	s.mu.RLock()
+	lookaheadMs := max(s.hydratorInterval.Milliseconds(), 10000)
+	s.mu.RUnlock()
+	offsets, err := s.coldStore.ScanRangeLimit(0, time.Now().UnixMilli()+s.hotWindowMs+lookaheadMs, limit)
+	if err != nil || len(offsets) == 0 {
+		return nil
+	}
+	events := make(map[int64]*types.Event, len(offsets))
+	for _, offset := range offsets {
+		if event, err := s.eventReader.ReadEvent(offset); err == nil && event != nil {
+			events[offset] = event
+		}
+	}
+	return events
+}
+
 // hydrate scans cold store for events entering the hot window and loads them into the timing wheel.
 // It returns the number of events successfully hydrated.
 func (s *Scheduler) hydrate() int {
+	// The events are read from the log before tickMu is taken: reading is the
+	// slow part, and while tickMu is held the wheel fires no timers. A pass of
+	// 1024 reads held it for seconds, and every timer due meanwhile was late.
+	s.tickMu.Lock()
+	resets, ahead := s.resets, min(max(2*s.lastHydrated, 16), 1024)
+	s.tickMu.Unlock()
+	preRead := s.readColdEvents(ahead)
+
 	s.tickMu.Lock()
 	defer s.tickMu.Unlock()
+	if s.resets != resets {
+		preRead = nil // the log may have been cut and written again
+	}
 	if s.budget != nil {
 		s.budget.hydrateMu.Lock()
 		defer s.budget.hydrateMu.Unlock()
@@ -667,10 +710,15 @@ func (s *Scheduler) hydrate() int {
 	}
 
 	for _, offset := range offsets {
-		event, err := s.eventReader.ReadEvent(offset)
-		if err != nil {
-			log.Printf("[SCHEDULER] Hydrator read error at offset %d: %v", offset, err)
-			continue
+		// The scan above was made under tickMu, so what was removed since
+		// the events were read is not in it.
+		event, ok := preRead[offset]
+		if !ok {
+			event, err = s.eventReader.ReadEvent(offset)
+			if err != nil {
+				log.Printf("[SCHEDULER] Hydrator read error at offset %d: %v", offset, err)
+				continue
+			}
 		}
 		if event == nil {
 			continue
@@ -723,6 +771,7 @@ func (s *Scheduler) hydrate() int {
 			log.Printf("[SCHEDULER] Hydrator delete error: %v", err)
 		}
 	}
+	s.lastHydrated = hydrated
 	if hydrated > 0 {
 		schedulerHydratedEvents.WithLabelValues(partitionLabel).Add(float64(hydrated))
 		log.Printf("[SCHEDULER] Hydrated %d events from cold store to timing wheel (partition=%d)", hydrated, s.partitionID)
