@@ -59,9 +59,12 @@ type Leader struct {
 
 	// progressSource returns the partition's consumer progress and a version
 	// that changes whenever it does. Nil disables progress replication.
-	progressSource    func() (uint64, []*types.ConsumerGroupProgress)
-	progressVersion   func() uint64
-	progressPage      func(types.ProgressCursor) ([]*types.ConsumerGroupProgress, types.ProgressCursor, bool, error)
+	progressSource  func() (uint64, []*types.ConsumerGroupProgress)
+	progressVersion func() uint64
+	progressPage    func(types.ProgressCursor) ([]*types.ConsumerGroupProgress, types.ProgressCursor, bool, error)
+	// progressDelta returns what changed after a version, or ok=false when
+	// only the full copy will do. Nil sends the full copy every time.
+	progressDelta     func(since uint64) (groups []*types.ConsumerGroupProgress, version uint64, ok bool)
 	deadLetterVersion func() uint64
 	deadLetterPage    func(types.DeadLetterCursor) ([]*types.DeadLetterRecord, types.DeadLetterCursor, bool, error)
 	// quorumObserver is told, on every maintenance tick, how far the log is
@@ -145,6 +148,14 @@ type FollowerInfo struct {
 	// progressSentLogEnd is where this follower's log ended, as far as the
 	// leader knew, when that progress was sent. Guarded by mu.
 	progressSentLogEnd int64
+	// progressFullAt is when this follower last took a full copy of the
+	// progress; zero means it has to be sent one before any delta. Guarded by
+	// mu.
+	progressFullAt time.Time
+	// progressCarry holds, per group, completions a delta sent beyond the
+	// follower's log end. The follower leaves those for later, so they go
+	// again with the next delta once its log has grown. Guarded by mu.
+	progressCarry map[string][]int64
 	// feedSent is the change feed position sent with it, feedSentKnown whether
 	// there was one. Guarded by mu.
 	feedSent      int64
@@ -164,6 +175,17 @@ type FollowerInfo struct {
 // copy of consumer progress even when nothing changed, which repairs a
 // follower that lost its copy without the leader noticing.
 const progressResendInterval = 30 * time.Second
+
+// progressFullInterval bounds how long a follower is sent only deltas of the
+// consumer progress before it gets the full copy again. Followers apply
+// progress without syncing it, so a crash can lose a tail of it that no delta
+// would send again. A follower that restarts normally gets the full copy at
+// once: the leader's calls to it fail, and it is connected again. This is the
+// backstop for a restart the leader did not notice. It is long because the
+// full copy can be large: it holds every completion above each group's floor,
+// and an event scheduled hours ahead holds the floor for those hours. What a
+// follower lacks costs redeliveries if it comes to lead, never lost events.
+const progressFullInterval = 30 * time.Minute
 
 // maxPendingSendsPerFollower bounds the batches a slow follower may hold in
 // memory. Beyond it the follower is skipped and later caught up from the WAL.
@@ -296,6 +318,8 @@ func (l *Leader) connectFollower(id, address string) {
 	f.client = client
 	f.Connected = true
 	f.progressSentAt = time.Time{} // a reconnected follower gets progress again
+	f.progressFullAt = time.Time{} // in full: it may have lost what it had
+	f.progressCarry = nil
 	f.progressRoundActive = false
 	f.deadLetterActive = false
 	f.deadLetterSentAt = time.Time{}
