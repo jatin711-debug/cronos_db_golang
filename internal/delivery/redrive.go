@@ -9,25 +9,23 @@ import (
 // RedriveCursor is one subscription's view of redelivery requests for its
 // consumer group. Events that could not be delivered when they became ready
 // (no credits, in-flight cap, a full worker queue, a dropped stream) stay in
-// the WAL; the dispatcher records their offset range here so the subscription
-// re-reads exactly that range instead of polling the whole log.
+// the WAL; the dispatcher records their offsets here so the subscription
+// re-reads exactly those ranges instead of polling the whole log.
 type RedriveCursor struct {
 	group string
 	wake  chan struct{}
 
 	mu        sync.Mutex
-	requested bool
-	low, high int64
+	requested OffsetRanges
 }
 
-// Take returns the offset range requested since the previous Take and clears
-// it. ok is false when nothing was requested.
-func (c *RedriveCursor) Take() (low, high int64, ok bool) {
+// Take returns the offset ranges requested since the previous Take, lowest
+// first, and clears them. It returns nil when nothing was requested.
+func (c *RedriveCursor) Take() []OffsetRange {
 	c.mu.Lock()
-	low, high, ok = c.low, c.high, c.requested
-	c.requested = false
+	ranges := c.requested.Take()
 	c.mu.Unlock()
-	return low, high, ok
+	return ranges
 }
 
 // Wake is signalled when a redrive is requested or the group regains credits.
@@ -42,13 +40,9 @@ func (c *RedriveCursor) notify() {
 	}
 }
 
-func (c *RedriveCursor) request(low, high int64) {
+func (c *RedriveCursor) request(ranges []OffsetRange) {
 	c.mu.Lock()
-	if !c.requested {
-		c.low, c.high, c.requested = low, high, true
-	} else {
-		c.low, c.high = min(c.low, low), max(c.high, high)
-	}
+	c.requested.AddAll(ranges)
 	c.mu.Unlock()
 	c.notify()
 }
@@ -79,22 +73,29 @@ func (d *Dispatcher) RequestRedrive(group string, low, high int64) {
 	if high < low {
 		return
 	}
+	d.RequestRedriveRanges(group, []OffsetRange{{Low: low, High: high}})
+}
+
+// RequestRedriveRanges asks the subscriptions of group to re-read the given
+// WAL offset ranges. An empty group addresses every group on the partition.
+func (d *Dispatcher) RequestRedriveRanges(group string, ranges []OffsetRange) {
+	if len(ranges) == 0 {
+		return
+	}
 	d.redriveMu.RLock()
 	for cursor := range d.redriveCursors {
 		if group == "" || cursor.group == group {
-			cursor.request(low, high)
+			cursor.request(ranges)
 		}
 	}
 	d.redriveMu.RUnlock()
 }
 
-// requestRedriveOf asks group to re-read the offsets spanned by events.
+// requestRedriveOf asks group to re-read the offsets of events.
 func (d *Dispatcher) requestRedriveOf(group string, events []*types.Event) {
-	var span offsetSpan
-	span.add(events...)
-	if span.set {
-		d.RequestRedrive(group, span.low, span.high)
-	}
+	var held OffsetRanges
+	held.AddEvents(events...)
+	d.RequestRedriveRanges(group, held.Take())
 }
 
 // wakeRedrive nudges the group's subscriptions without requesting a range,
@@ -107,25 +108,6 @@ func (d *Dispatcher) wakeRedrive(group string) {
 		}
 	}
 	d.redriveMu.RUnlock()
-}
-
-// offsetSpan accumulates the lowest and highest offset of a set of events.
-type offsetSpan struct {
-	set       bool
-	low, high int64
-}
-
-func (s *offsetSpan) add(events ...*types.Event) {
-	for _, event := range events {
-		if event == nil {
-			continue
-		}
-		if !s.set {
-			s.low, s.high, s.set = event.Offset, event.Offset, true
-			continue
-		}
-		s.low, s.high = min(s.low, event.Offset), max(s.high, event.Offset)
-	}
 }
 
 // RedriveGroup offers retained events to one consumer group. It reports how

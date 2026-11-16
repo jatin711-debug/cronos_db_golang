@@ -60,14 +60,14 @@ func (w *Worker) AddReadyEvents(events []*types.Event) {
 	const maxQueued = 10000
 	w.mu.Lock()
 	accepted := 0
-	var dropped offsetSpan
+	var dropped OffsetRanges
 	for _, event := range events {
 		if event == nil {
 			continue
 		}
 		size := retainedEventBytes(event)
 		if len(w.readyQueue) >= maxQueued || size > w.maxQueueBytes-w.queuedBytes {
-			dropped.add(event) // re-read from the WAL below
+			dropped.AddEvents(event) // re-read from the WAL below
 			continue
 		}
 		w.readyQueue = append(w.readyQueue, event)
@@ -78,9 +78,9 @@ func (w *Worker) AddReadyEvents(events []*types.Event) {
 	if accepted < len(events) && len(events) > 0 {
 		metrics.IncDispatcherBackpressureSkip(strconv.FormatInt(int64(events[0].GetPartitionId()), 10), "worker_capacity", len(events)-accepted)
 	}
-	if dropped.set && w.dispatcher != nil {
+	if !dropped.Empty() && w.dispatcher != nil {
 		// Every subscribed group missed these; point their WAL scans at them.
-		w.dispatcher.RequestRedrive("", dropped.low, dropped.high)
+		w.dispatcher.RequestRedriveRanges("", dropped.Take())
 	}
 	w.signal()
 }

@@ -436,7 +436,7 @@ func (d *Dispatcher) Unsubscribe(subscriptionID string) error {
 
 	partitionID := sub.Partition.ID
 
-	var abandoned offsetSpan
+	var abandoned OffsetRanges
 	for deliveryID, active := range shard.activeDeliveries {
 		if active.Subscription != nil && active.Subscription.ID == subscriptionID {
 			if err := d.decInFlight(1); err != nil {
@@ -444,7 +444,7 @@ func (d *Dispatcher) Unsubscribe(subscriptionID string) error {
 			}
 			events := deliveryEvents(active.Delivery)
 			d.releasePending(sub.ConsumerGroup, events)
-			abandoned.add(events...)
+			abandoned.AddEvents(events...)
 			delete(shard.activeDeliveries, deliveryID)
 			shard.expiry.remove(deliveryID)
 		}
@@ -458,12 +458,10 @@ func (d *Dispatcher) Unsubscribe(subscriptionID string) error {
 	for _, entry := range waiting {
 		events := deliveryEvents(entry.active.Delivery)
 		d.releasePending(sub.ConsumerGroup, events)
-		abandoned.add(events...)
+		abandoned.AddEvents(events...)
 	}
-	if abandoned.set {
-		// Unacked work goes back to the group's remaining subscribers.
-		d.RequestRedrive(sub.ConsumerGroup, abandoned.low, abandoned.high)
-	}
+	// Unacked work goes back to the group's remaining subscribers.
+	d.RequestRedriveRanges(sub.ConsumerGroup, abandoned.Take())
 
 	delete(shard.subscriptions, subscriptionID)
 
@@ -653,26 +651,28 @@ func (d *Dispatcher) dispatchGroupBatch(partitionID int32, events []*types.Event
 	}
 
 	// heldBack records, per group, the offsets this pass could not hand to a
-	// subscriber.
-	var heldBack map[string]*offsetSpan
+	// subscriber. They are kept as separate ranges: one pass can hold back an
+	// event written hours ago next to one written a moment ago, and a single
+	// span over both would send the redrive through everything in between.
+	var heldBack map[string]*OffsetRanges
 	holdBack := func(group string, events ...*types.Event) {
 		blocked = true
 		if onlyGroup != "" {
 			return
 		}
-		span := heldBack[group]
-		if span == nil {
+		held := heldBack[group]
+		if held == nil {
 			if heldBack == nil {
-				heldBack = make(map[string]*offsetSpan, 1)
+				heldBack = make(map[string]*OffsetRanges, 1)
 			}
-			span = &offsetSpan{}
-			heldBack[group] = span
+			held = &OffsetRanges{}
+			heldBack[group] = held
 		}
-		span.add(events...)
+		held.AddEvents(events...)
 	}
 	defer func() {
-		for group, span := range heldBack {
-			d.RequestRedrive(group, span.low, span.high)
+		for group, held := range heldBack {
+			d.RequestRedriveRanges(group, held.Take())
 		}
 	}()
 
