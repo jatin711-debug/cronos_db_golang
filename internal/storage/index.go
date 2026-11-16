@@ -213,6 +213,20 @@ func (idx *Index) FindByOffset(targetOffset int64) (filePosition int64, found bo
 	return idx.entries[i-1].FilePosition, true
 }
 
+// FindEntryByOffset returns the index entry with the largest offset at or
+// below targetOffset. found is false when there is none.
+func (idx *Index) FindEntryByOffset(targetOffset int64) (entry IndexEntry, found bool) {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	i := sort.Search(len(idx.entries), func(i int) bool {
+		return idx.entries[i].Offset > targetOffset
+	})
+	if i == 0 {
+		return IndexEntry{}, false
+	}
+	return idx.entries[i-1], true
+}
+
 // FindByTimestamp finds the closest index entry at or before targetTS
 // (Unix milliseconds). Returns the file position to start scanning from.
 func (idx *Index) FindByTimestamp(targetTS int64) (filePosition int64, found bool) {

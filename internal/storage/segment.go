@@ -1043,8 +1043,15 @@ func (s *Segment) ReadEvent(targetOffset int64) (*types.Event, error) {
 	// Use index to find starting position
 	startPos := int64(64) // Default to after header
 	if s.index != nil {
-		if pos, found := s.index.FindByOffset(targetOffset); found {
-			startPos = pos
+		if entry, found := s.index.FindEntryByOffset(targetOffset); found {
+			startPos = entry.FilePosition
+			// Skip to the record by its place, reading only record lengths,
+			// and decrypt that one record (see skipRecords).
+			if pos, ok := s.skipRecords(entry.FilePosition, targetOffset-entry.Offset); ok {
+				if event, err := s.readEventFrom(targetOffset, pos); err == nil {
+					return event, nil
+				}
+			}
 		}
 	}
 
@@ -1055,6 +1062,70 @@ func (s *Segment) ReadEvent(targetOffset int64) (*types.Event, error) {
 		return s.readEventFrom(targetOffset, 64)
 	}
 	return event, err
+}
+
+// skipRecordsChunk is how much of the segment file skipRecords reads at once.
+const skipRecordsChunk = 64 << 10
+
+var skipRecordsBuffers = sync.Pool{New: func() any {
+	buf := make([]byte, skipRecordsChunk)
+	return &buf
+}}
+
+// skipRecords returns the position of the record n records after the one at
+// pos, found from the records' length prefixes alone. The caller holds s.mu.
+//
+// Each record holds one offset, and offsets follow one another within a
+// segment, so the record at offset o+n is n records after the one at o. A
+// point read used to scan forward from the nearest index entry instead,
+// reading and, with encryption, decrypting up to an index interval of records
+// to learn each one's offset: a thousand records for one event. Lengths are
+// stored in the clear, so the records in between are skipped unread. The
+// caller still checks the offset of the record it finds and falls back to the
+// scan if it is not the one.
+func (s *Segment) skipRecords(pos, n int64) (int64, bool) {
+	if n < 0 {
+		return 0, false
+	}
+	if n == 0 {
+		return pos, true
+	}
+	if data := s.mmapData; data != nil && pos < int64(len(data)) {
+		for ; n > 0; n-- {
+			if pos+4 > int64(len(data)) {
+				return 0, false
+			}
+			length := int64(binary.BigEndian.Uint32(data[pos : pos+4]))
+			if length <= 4 || length > MaxRecordLength {
+				return 0, false
+			}
+			pos += length
+		}
+		return pos, true
+	}
+	if s.segmentFile == nil {
+		return 0, false
+	}
+	pooled := skipRecordsBuffers.Get().(*[]byte)
+	defer skipRecordsBuffers.Put(pooled)
+	buf := *pooled
+	bufStart, bufLen := int64(-1), 0
+	for ; n > 0; n-- {
+		if bufStart < 0 || pos < bufStart || pos+4 > bufStart+int64(bufLen) {
+			read, err := s.segmentFile.ReadAt(buf, pos)
+			if read < 4 && err != nil {
+				return 0, false
+			}
+			bufStart, bufLen = pos, read
+		}
+		at := pos - bufStart
+		length := int64(binary.BigEndian.Uint32(buf[at : at+4]))
+		if length <= 4 || length > MaxRecordLength {
+			return 0, false
+		}
+		pos += length
+	}
+	return pos, true
 }
 
 // readEventFrom reads the event at targetOffset scanning from startPos. The
