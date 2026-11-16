@@ -262,6 +262,35 @@ func (idx *Index) GetEntries() []IndexEntry {
 // entriesAfter returns only the candidates beyond the recovered offset. A
 // healthy segment normally has none, avoiding a copy of its entire index on
 // every startup.
+// lastEntryOffset returns the offset of the last entry, or -1 when there is none.
+func (idx *Index) lastEntryOffset() int64 {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	if len(idx.entries) == 0 {
+		return -1
+	}
+	return idx.entries[len(idx.entries)-1].Offset
+}
+
+// addMissing appends entries found by reading the segment, in order, and
+// writes them to disk. Each must come after the last entry the index holds.
+func (idx *Index) addMissing(entries []IndexEntry) error {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	for _, entry := range entries {
+		if n := len(idx.entries); n > 0 && (entry.Offset <= idx.entries[n-1].Offset || entry.FilePosition <= idx.entries[n-1].FilePosition) {
+			continue
+		}
+		if err := idx.addEntryLocked(entry.Timestamp, entry.Offset, entry.FilePosition); err != nil {
+			return err
+		}
+	}
+	if err := idx.writer.Flush(); err != nil {
+		return err
+	}
+	return idx.file.Sync()
+}
+
 func (idx *Index) entriesAfter(offset int64) []IndexEntry {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
