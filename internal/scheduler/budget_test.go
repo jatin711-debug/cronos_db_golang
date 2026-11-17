@@ -79,11 +79,13 @@ func TestSchedulerBudgetPrioritizesEarlierColdEvent(t *testing.T) {
 	if err := s.Schedule(r[0]); err != nil {
 		t.Fatal(err)
 	}
+	// The earlier event takes the memory from the later one as it is
+	// scheduled; it used to go to the cold store and wait for the hydrator.
 	if err := s.Schedule(r[1]); err != nil {
 		t.Fatal(err)
 	}
-	if n := s.hydrate(); n != 1 {
-		t.Fatalf("hydrated %d, want earlier event", n)
+	if n := s.hydrate(); n != 0 {
+		t.Fatalf("hydrated %d, want 0: the later event must wait on disk", n)
 	}
 	ready := s.GetReadyEvents()
 	if len(ready) != 1 || ready[0].Offset != 1 {

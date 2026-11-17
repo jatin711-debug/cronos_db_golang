@@ -106,9 +106,11 @@ type Scheduler struct {
 	budgetShare    int64
 	retained       int64
 	reservations   map[int64]int64
-	retainedEvents map[int64]*types.Event
-	hydratorWake   chan struct{}
-	mu             sync.RWMutex
+	retainedEvents map[int64]*retainedItem
+	// retainedOrder holds the same events latest due first (see retained.go).
+	retainedOrder retainedHeap
+	hydratorWake  chan struct{}
+	mu            sync.RWMutex
 	// readyMu guards readyQueue on its own dedicated mutex, decoupled from mu.
 	// The ready queue is touched on the hottest paths (ScheduleBatch appends
 	// expired events, GetReadyEvents drains, the tick drains expired timers), so
@@ -122,9 +124,12 @@ type Scheduler struct {
 	// before it takes tickMu, and keeps them only if no Reset came between:
 	// after one, an offset can name another entry. Written under tickMu.
 	resets uint64
-	// lastHydrated is how many events the last hydration pass took. The next
-	// pass reads about that many ahead of taking tickMu. Written under tickMu.
+	// lastHydrated is how many events the last hydration pass took; the next
+	// reads about twice that. hydratedSinceLog and lastHydrateLog keep the
+	// hydrator to one log line a minute. Written under tickMu.
 	lastHydrated     int
+	hydratedSinceLog int
+	lastHydrateLog   time.Time
 	timingWheel      *TimingWheel   // hierarchical wheel for near-future timers
 	readyQueue       []*types.Event // events whose schedule time has arrived
 	readySignal      chan struct{}  // buffered notify for ready-queue consumers
@@ -328,6 +333,8 @@ func (s *Scheduler) Reset() error {
 		s.retained = 0
 		clear(s.reservations)
 		clear(s.retainedEvents)
+		clear(s.retainedOrder)
+		s.retainedOrder = s.retainedOrder[:0]
 	}
 	if s.coldStore != nil {
 		return s.coldStore.Clear()
@@ -561,6 +568,9 @@ func (s *Scheduler) hydratorLoop() {
 	partitionLabel := fmt.Sprintf("%d", s.partitionID)
 	timer := time.NewTimer(s.hydratorInterval)
 	defer timer.Stop()
+	// next is when the timer fires; lastPass is when the last pass ended.
+	next := time.Now().Add(s.hydratorInterval)
+	var lastPass time.Time
 
 	for {
 		select {
@@ -577,9 +587,16 @@ func (s *Scheduler) hydratorLoop() {
 			s.adaptHydratorInterval(hydrated, scanDuration)
 			schedulerHydratorInterval.WithLabelValues(partitionLabel).Set(float64(s.hydratorInterval.Milliseconds()))
 
+			lastPass = time.Now()
+			next = lastPass.Add(s.hydratorInterval)
 			timer.Reset(s.hydratorInterval)
 		case <-s.hydratorWake:
-			timer.Reset(0)
+			// A wake brings the next pass forward, but no closer than
+			// hydratorWakeGap to the last one.
+			if soonest := lastPass.Add(hydratorWakeGap); soonest.Before(next) {
+				next = soonest
+				timer.Reset(max(time.Until(soonest), 0))
+			}
 		case <-s.workerDone:
 			return
 		}
@@ -635,148 +652,6 @@ func (s *Scheduler) adaptHydratorInterval(hydrated int, scanDuration time.Durati
 	}
 
 	s.hydratorInterval = interval
-}
-
-// readColdEvents reads from the log the events the next hydration pass is
-// likely to take: the first of those the cold store names for its window, as
-// many as the last pass took and some more. A pass can take far fewer than
-// the cold store names, when the memory budget runs out; the old pass read
-// events only until then, and reading all the store names made each pass
-// read up to 1024 events to take a few. Unreadable events are left out; the
-// pass reads them again and reports the error.
-func (s *Scheduler) readColdEvents(limit int) map[int64]*types.Event {
-	s.mu.RLock()
-	lookaheadMs := max(s.hydratorInterval.Milliseconds(), 10000)
-	s.mu.RUnlock()
-	offsets, err := s.coldStore.ScanRangeLimit(0, time.Now().UnixMilli()+s.hotWindowMs+lookaheadMs, limit)
-	if err != nil || len(offsets) == 0 {
-		return nil
-	}
-	events := make(map[int64]*types.Event, len(offsets))
-	for _, offset := range offsets {
-		if event, err := s.eventReader.ReadEvent(offset); err == nil && event != nil {
-			events[offset] = event
-		}
-	}
-	return events
-}
-
-// hydrate scans cold store for events entering the hot window and loads them into the timing wheel.
-// It returns the number of events successfully hydrated.
-func (s *Scheduler) hydrate() int {
-	// The events are read from the log before tickMu is taken: reading is the
-	// slow part, and while tickMu is held the wheel fires no timers. A pass of
-	// 1024 reads held it for seconds, and every timer due meanwhile was late.
-	s.tickMu.Lock()
-	resets, ahead := s.resets, min(max(2*s.lastHydrated, 16), 1024)
-	s.tickMu.Unlock()
-	preRead := s.readColdEvents(ahead)
-
-	s.tickMu.Lock()
-	defer s.tickMu.Unlock()
-	if s.resets != resets {
-		preRead = nil // the log may have been cut and written again
-	}
-	if s.budget != nil {
-		s.budget.hydrateMu.Lock()
-		defer s.budget.hydrateMu.Unlock()
-	}
-	now := time.Now().UnixMilli()
-	startTS := int64(0) // Include overdue entries and entries missed during downtime.
-	// Adaptive lookahead: use the current hydrator interval as the lookahead window
-	// so we naturally scan further ahead when running less frequently.
-	s.mu.RLock()
-	lookaheadMs := s.hydratorInterval.Milliseconds()
-	if lookaheadMs < 10000 {
-		lookaheadMs = 10000 // minimum 10s lookahead
-	}
-	s.mu.RUnlock()
-	endTS := now + s.hotWindowMs + lookaheadMs
-
-	offsets, err := s.coldStore.ScanRangeLimit(startTS, endTS, 1024)
-	if err != nil {
-		log.Printf("[SCHEDULER] Hydrator scan error (partition=%d): %v", s.partitionID, err)
-		return 0
-	}
-	if len(offsets) == 0 {
-		return 0
-	}
-
-	partitionLabel := fmt.Sprintf("%d", s.partitionID)
-	var hydrated int
-	var toDelete []struct {
-		Offset     int64
-		ScheduleTS int64
-	}
-
-	for _, offset := range offsets {
-		// The scan above was made under tickMu, so what was removed since
-		// the events were read is not in it.
-		event, ok := preRead[offset]
-		if !ok {
-			event, err = s.eventReader.ReadEvent(offset)
-			if err != nil {
-				log.Printf("[SCHEDULER] Hydrator read error at offset %d: %v", offset, err)
-				continue
-			}
-		}
-		if event == nil {
-			continue
-		}
-		if s.budget != nil {
-			s.budgetMu.Lock()
-			_, exists := s.reservations[event.Offset]
-			reserved := exists || s.reserveEarlier(event)
-			s.budgetMu.Unlock()
-			if !reserved {
-				break
-			} // earliest due first; leave it in the cold store
-			if exists {
-				toDelete = append(toDelete, struct{ Offset, ScheduleTS int64 }{offset, event.ScheduleTs})
-				continue
-			}
-		}
-
-		now := time.Now().UnixMilli()
-		if event.GetScheduleTs() <= now {
-			// Already expired — send directly to ready queue
-			s.readyMu.Lock()
-			s.readyQueue = append(s.readyQueue, event)
-			s.readyMu.Unlock()
-			s.notifyReady()
-		} else {
-			// Add to timing wheel
-			timer := s.timingWheel.GetTimerFast(event.GetOffset(), event, now)
-			if err := s.timingWheel.AddTimer(timer); err != nil {
-				s.timingWheel.PutTimer(timer)
-				if s.budget != nil {
-					s.budgetMu.Lock()
-					s.releaseEvent(event.Offset)
-					s.budgetMu.Unlock()
-				}
-				log.Printf("[SCHEDULER] Hydrator add timer error: %v", err)
-				continue
-			}
-		}
-
-		toDelete = append(toDelete, struct {
-			Offset     int64
-			ScheduleTS int64
-		}{Offset: offset, ScheduleTS: event.GetScheduleTs()})
-		hydrated++
-	}
-
-	if len(toDelete) > 0 {
-		if err := s.coldStore.DeleteBatch(toDelete); err != nil {
-			log.Printf("[SCHEDULER] Hydrator delete error: %v", err)
-		}
-	}
-	s.lastHydrated = hydrated
-	if hydrated > 0 {
-		schedulerHydratedEvents.WithLabelValues(partitionLabel).Add(float64(hydrated))
-		log.Printf("[SCHEDULER] Hydrated %d events from cold store to timing wheel (partition=%d)", hydrated, s.partitionID)
-	}
-	return hydrated
 }
 
 // GetReadyQueueDepth returns the number of events in the ready queue.
@@ -879,6 +754,8 @@ func (s *Scheduler) Stop() {
 		s.retained = 0
 		clear(s.reservations)
 		clear(s.retainedEvents)
+		clear(s.retainedOrder)
+		s.retainedOrder = s.retainedOrder[:0]
 	}
 	s.budgetMu.Unlock()
 	if s.coldStore != nil {
