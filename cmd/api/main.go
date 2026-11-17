@@ -768,7 +768,7 @@ func run() int {
 					}
 
 					if p.DedupStore != nil {
-						if dedupStats, err := p.DedupStore.GetStats(); err == nil && dedupStats != nil {
+						if dedupStats, err := p.DedupStore.Counters(); err == nil && dedupStats != nil {
 							falsePositiveRate := 0.0
 							totalBloomPositives := dedupStats.BloomHits + dedupStats.BloomFalsePositives
 							if totalBloomPositives > 0 {

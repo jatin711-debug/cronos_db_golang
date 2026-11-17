@@ -250,7 +250,7 @@ func (h *HealthChecker) handleDeepHealth(w http.ResponseWriter, r *http.Request)
 
 			// Dedup store check
 			if p.DedupStore != nil {
-				if stats, err := p.DedupStore.GetStats(); err == nil && stats != nil {
+				if stats, err := p.DedupStore.Counters(); err == nil && stats != nil {
 					checks[label+"_dedup"] = HealthCheck{Status: "up", Detail: fmt.Sprintf("bloom %d bytes, FPR %.4f", stats.BloomMemoryBytes, float64(stats.BloomFalsePositives)/float64(stats.BloomHits+stats.BloomFalsePositives+1)), Healthy: true}
 				}
 			}

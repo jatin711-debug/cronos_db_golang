@@ -311,8 +311,20 @@ func (m *Manager) PruneExpired() (int, error) {
 	return m.store.PruneExpired()
 }
 
-// GetStats returns dedup store statistics.
+// GetStats returns dedup store statistics. A Pebble store counts its IDs by
+// reading every one; metrics and health checks use Counters.
 func (m *Manager) GetStats() (*DedupStats, error) {
+	return m.store.GetStats()
+}
+
+// Counters returns the store's counters, without the ID count when that would
+// mean reading the whole store. Metrics read them for every partition every
+// 30 seconds, and each health check for every partition again; reading the
+// whole store each time filled the shared block cache with dedup blocks.
+func (m *Manager) Counters() (*DedupStats, error) {
+	if c, ok := m.store.(interface{ Counters() *DedupStats }); ok {
+		return c.Counters(), nil
+	}
 	return m.store.GetStats()
 }
 
