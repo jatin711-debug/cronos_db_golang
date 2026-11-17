@@ -756,14 +756,23 @@ func (s *BloomPebbleStore) GetStats() (*DedupStats, error) {
 	if err != nil {
 		return nil, err
 	}
+	s.addCounters(stats)
+	return stats, nil
+}
 
+// Counters returns the bloom counters without counting the stored IDs.
+func (s *BloomPebbleStore) Counters() *DedupStats {
+	stats := s.pebble.Counters()
+	s.addCounters(stats)
+	return stats
+}
+
+func (s *BloomPebbleStore) addCounters(stats *DedupStats) {
 	stats.BloomHits = atomic.LoadUint64(&s.bloomHits)
 	stats.BloomFalsePositives = atomic.LoadUint64(&s.bloomFalsePos)
 	stats.PebbleHits = atomic.LoadUint64(&s.pebbleHits)
 	stats.BloomMemoryBytes = s.bloom.MemoryUsageBytes()
 	stats.BloomCount = s.bloom.Count()
-
-	return stats, nil
 }
 
 // Close waits for bloom rebuild and closes the underlying Pebble store.

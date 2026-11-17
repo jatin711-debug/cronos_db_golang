@@ -471,9 +471,15 @@ func (p *PebbleStore) PutBatch(messageIDs []string, offsets, createdTS []int64) 
 	return nil
 }
 
-// GetStats returns store statistics.
-// This is used for observability and test verification, so we compute key count
-// exactly via iteration rather than using file-size based approximations.
+// Counters returns the statistics that need no reading of the store.
+func (p *PebbleStore) Counters() *DedupStats {
+	return &DedupStats{TTLHours: p.ttlHours, LastPruneTS: time.Now().UnixMilli()}
+}
+
+// GetStats returns store statistics, with the key count computed exactly by
+// reading every key. That is for tests and occasional inspection: metrics and
+// health checks use Counters, as a whole-store read on each of them churned
+// the shared block cache.
 func (p *PebbleStore) GetStats() (*DedupStats, error) {
 	// Capture both tiers while flush/claims are paused; counting the pending
 	// buffer before a flush and Pebble after it double-counts the same keys.
