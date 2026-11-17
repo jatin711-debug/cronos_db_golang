@@ -114,3 +114,54 @@ func TestOpenSegmentAddsMissingIndexEntries(t *testing.T) {
 		t.Fatalf("reopening a whole index changed it from %d to %d entries", before, after)
 	}
 }
+
+// A sealed segment's index keeps no write buffer: a node holds every segment
+// its retention pins, and a 64 KiB buffer each added up. Its entries are on
+// disk, and reads through it still work.
+func TestSealedSegmentsDropTheirIndexBuffer(t *testing.T) {
+	dir := t.TempDir()
+	w, err := NewWAL(dir, 0, &WALConfig{SegmentSizeBytes: 64 << 10, IndexInterval: 10, FsyncMode: "batch"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	appendNumbered(t, w, 0, 3000)
+
+	segments := w.GetSegments()
+	if len(segments) < 3 {
+		t.Fatalf("%d segments, want several", len(segments))
+	}
+	active := w.GetActiveSegment()
+	for _, seg := range segments {
+		if seg == active {
+			continue
+		}
+		seg.index.mu.RLock()
+		buffered := seg.index.writer != nil
+		seg.index.mu.RUnlock()
+		if buffered {
+			t.Errorf("sealed segment %s keeps an index write buffer", seg.GetFilename())
+		}
+		info, err := os.Stat(seg.index.filePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := info.Size()/indexEntrySize, int64(seg.index.Count()); got != want {
+			t.Errorf("sealed segment %s: %d index entries on disk, %d in memory", seg.GetFilename(), got, want)
+		}
+	}
+	for _, offset := range []int64{0, 1234, 2999} {
+		ev, err := w.ReadEvent(offset)
+		if err != nil {
+			t.Fatalf("read %d: %v", offset, err)
+		}
+		if want := fmt.Sprintf("m-%d", offset); ev.GetMessageId() != want {
+			t.Fatalf("read %d: got %s, want %s", offset, ev.GetMessageId(), want)
+		}
+	}
+	// The active segment still takes index entries.
+	appendNumbered(t, w, 3000, 3100)
+	if _, err := w.ReadEvent(3099); err != nil {
+		t.Fatal(err)
+	}
+}

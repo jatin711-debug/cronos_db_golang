@@ -2078,6 +2078,14 @@ func (s *Segment) Deactivate() error {
 		errs = append(errs, fmt.Errorf("sync file: %w", err))
 	}
 
+	// The index takes no more entries either: write out what it buffers and
+	// drop the buffer.
+	if s.index != nil {
+		if err := s.index.releaseWriter(); err != nil {
+			errs = append(errs, fmt.Errorf("flush index: %w", err))
+		}
+	}
+
 	s.isActive = false
 	// NOTE: segmentFile and index intentionally stay open for reads.
 	return s.failedWriteLocked(errors.Join(errs...))

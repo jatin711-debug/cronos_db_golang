@@ -44,7 +44,7 @@ type Index struct {
 	mu       sync.RWMutex
 	entries  []IndexEntry  // in-memory copy of on-disk entries (offset-ordered)
 	file     *os.File      // O_APPEND handle for durable entry writes
-	writer   *bufio.Writer // buffered writer; eliminates Seek+Write per entry
+	writer   *bufio.Writer // buffered writer; nil until an entry is written (writerLocked)
 	filePath string        // absolute path to the .index file
 }
 
@@ -68,7 +68,6 @@ func NewIndex(dataDir string, segmentFirstOffset int64) (*Index, error) {
 	idx := &Index{
 		entries:  make([]IndexEntry, 0),
 		file:     file,
-		writer:   bufio.NewWriterSize(file, indexWriteBufSize),
 		filePath: filePath,
 	}
 
@@ -181,7 +180,7 @@ func (idx *Index) addEntryLocked(timestamp, offset, filePosition int64) error {
 	binary.BigEndian.PutUint64(entryBytes[8:16], uint64(offset))
 	binary.BigEndian.PutUint64(entryBytes[16:24], uint64(filePosition))
 
-	if _, err := idx.writer.Write(entryBytes[:]); err != nil {
+	if _, err := idx.writerLocked().Write(entryBytes[:]); err != nil {
 		return fmt.Errorf("write entry: %w", err)
 	}
 
@@ -285,9 +284,40 @@ func (idx *Index) addMissing(entries []IndexEntry) error {
 			return err
 		}
 	}
+	if idx.writer == nil {
+		return nil
+	}
 	if err := idx.writer.Flush(); err != nil {
 		return err
 	}
+	// Most of these indexes are of sealed segments, which take no more
+	// entries: they need no buffer. An active one makes another.
+	idx.writer = nil
+	return idx.file.Sync()
+}
+
+// writerLocked returns the buffered writer, making it on first use. Caller
+// must hold idx.mu.
+func (idx *Index) writerLocked() *bufio.Writer {
+	if idx.writer == nil {
+		idx.writer = bufio.NewWriterSize(idx.file, indexWriteBufSize)
+	}
+	return idx.writer
+}
+
+// releaseWriter writes out and syncs what the buffer holds, then drops the
+// buffer. A sealed segment's index takes no more entries, and a node keeps
+// every segment its retention pins: 64 KiB each, hundreds of them.
+func (idx *Index) releaseWriter() error {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	if idx.writer == nil {
+		return nil
+	}
+	if err := idx.writer.Flush(); err != nil {
+		return err
+	}
+	idx.writer = nil
 	return idx.file.Sync()
 }
 
@@ -383,7 +413,7 @@ func (idx *Index) rewriteLocked() error {
 		return fmt.Errorf("reopen index: %w", err)
 	}
 	idx.file = newFile
-	idx.writer = bufio.NewWriterSize(newFile, indexWriteBufSize)
+	idx.writer = nil
 	return nil
 }
 
