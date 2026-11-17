@@ -22,6 +22,7 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/internal/delivery"
 	"github.com/jatin711-debug/cronos_db_golang/internal/lifecycle"
 	"github.com/jatin711-debug/cronos_db_golang/internal/logcontrol"
+	"github.com/jatin711-debug/cronos_db_golang/internal/pebblemem"
 	"github.com/jatin711-debug/cronos_db_golang/internal/recoverystate"
 	"github.com/jatin711-debug/cronos_db_golang/internal/replication"
 	"github.com/jatin711-debug/cronos_db_golang/internal/scheduler"
@@ -31,8 +32,6 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 
 	log2 "log/slog"
-
-	"github.com/cockroachdb/pebble"
 )
 
 // Partition is a local data partition with its durable log, timer wheel,
@@ -311,7 +310,7 @@ type PartitionManager struct {
 	partitions       map[int32]*Partition // partitionID -> live partition
 	nodeID           string               // local node identity for replication
 	config           *types.Config        // shared server configuration
-	pebbleCache      *pebble.Cache        // optional shared Pebble block cache
+	pebbleMem        *pebblemem.Budget    // Pebble cache and memtable sizes; nil gives defaults
 	tenantAccountant tenantAccountant     // optional delivery accounting hook
 	splitting        map[int32]bool       // partitions currently undergoing split
 	splittingMu      sync.RWMutex         // protects splitting map
@@ -379,10 +378,11 @@ func (pm *PartitionManager) SetTenantAccountant(ta tenantAccountant) {
 	}
 }
 
-// NewPartitionManagerWithCache creates a new partition manager with a shared PebbleDB cache.
-func NewPartitionManagerWithCache(nodeID string, config *types.Config, cache *pebble.Cache) *PartitionManager {
+// NewPartitionManagerWithCache creates a partition manager whose Pebble
+// databases share mem's block cache and take their memtable sizes from it.
+func NewPartitionManagerWithCache(nodeID string, config *types.Config, mem *pebblemem.Budget) *PartitionManager {
 	pm := NewPartitionManager(nodeID, config)
-	pm.pebbleCache = cache
+	pm.pebbleMem = mem
 	return pm
 }
 
@@ -493,7 +493,7 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 	}
 	var eventIndex *lifecycle.Index
 	if (pm.config.EventLifecycle && !pm.config.ClusterEnabled) || lifecycleData {
-		eventIndex, err = lifecycle.Open(dataDir, pm.pebbleCache)
+		eventIndex, err = lifecycle.Open(dataDir, pm.pebbleMem)
 		if err != nil {
 			wal.Close()
 			return fmt.Errorf("open lifecycle index: %w", err)
@@ -516,7 +516,7 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 
 	// Create scheduler with two-tier cold store support
 	hotWindowMinutes := pm.config.HotWindowMinutes
-	sched, err := scheduler.NewScheduler(dataDir, partitionID, int32(pm.config.TickMS), int32(pm.config.WheelSize), hotWindowMinutes, wal, pm.pebbleCache)
+	sched, err := scheduler.NewScheduler(dataDir, partitionID, int32(pm.config.TickMS), int32(pm.config.WheelSize), hotWindowMinutes, wal, pm.pebbleMem)
 	if err != nil {
 		return fmt.Errorf("create scheduler: %w", err)
 	}
@@ -525,7 +525,7 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 			sched.Stop()
 		}
 	}()
-	if err := sched.SetMemoryBudget(pm.schedulerBudget, pm.config.PartitionCount, pm.pebbleCache); err != nil {
+	if err := sched.SetMemoryBudget(pm.schedulerBudget, pm.config.PartitionCount, pm.pebbleMem); err != nil {
 		return fmt.Errorf("configure scheduler budget: %w", err)
 	}
 	// Configure adaptive hydrator intervals if specified
@@ -536,7 +536,7 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 	// Create dedup store with bloom filter for high performance
 	// Expected items per partition with 1% false positive rate
 	// Uses ~10MB memory per partition for bloom filter (at 10M items)
-	dedupStore, err := dedup.NewBloomPebbleStore(dataDir, partitionID, int32(pm.config.DedupTTLHours), pm.config.BloomCapacity, 0.01, pm.pebbleCache)
+	dedupStore, err := dedup.NewBloomPebbleStore(dataDir, partitionID, int32(pm.config.DedupTTLHours), pm.config.BloomCapacity, 0.01, pm.pebbleMem)
 	if err != nil {
 		return fmt.Errorf("create dedup store: %w", err)
 	}
@@ -548,7 +548,7 @@ func (pm *PartitionManager) createPartitionLocked(partitionID int32, topic strin
 	}()
 
 	// Create offset store for persistent consumer offsets
-	offsetStore, err := consumer.NewOffsetStore(dataDir, partitionID, pm.pebbleCache)
+	offsetStore, err := consumer.NewOffsetStore(dataDir, partitionID, pm.pebbleMem)
 	if err != nil {
 		return fmt.Errorf("create offset store: %w", err)
 	}

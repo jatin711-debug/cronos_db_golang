@@ -10,6 +10,7 @@ import (
 
 	"github.com/cockroachdb/pebble"
 	"github.com/jatin711-debug/cronos_db_golang/internal/metrics"
+	"github.com/jatin711-debug/cronos_db_golang/internal/pebblemem"
 )
 
 // BloomFilter abstracts bloom-filter backends (pure Go or Rust FFI).
@@ -208,14 +209,10 @@ type BloomPebbleStore struct {
 // NewBloomPebbleStore creates a bloom-accelerated Pebble dedup store.
 // expectedItems is the expected number of unique message IDs (e.g. 10_000_000).
 // falsePositiveRate is the target bloom FPR (e.g. 0.01 for 1%).
-// cache may be a *pebble.Cache or nil.
-func NewBloomPebbleStore(dataDir string, partitionID int32, ttlHours int32, expectedItems uint64, falsePositiveRate float64, cache interface{}) (*BloomPebbleStore, error) {
+// mem sizes the Pebble database and gives the shared cache; it may be nil.
+func NewBloomPebbleStore(dataDir string, partitionID int32, ttlHours int32, expectedItems uint64, falsePositiveRate float64, mem *pebblemem.Budget) (*BloomPebbleStore, error) {
 	// Create underlying PebbleDB store
-	var pebbleCache *pebble.Cache
-	if cache != nil {
-		pebbleCache = cache.(*pebble.Cache)
-	}
-	pebble, err := NewPebbleStore(dataDir, partitionID, ttlHours, pebbleCache)
+	pebble, err := NewPebbleStore(dataDir, partitionID, ttlHours, mem)
 	if err != nil {
 		return nil, err
 	}

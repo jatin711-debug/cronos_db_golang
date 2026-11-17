@@ -16,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cockroachdb/pebble"
+	"github.com/jatin711-debug/cronos_db_golang/internal/pebblemem"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 	"github.com/prometheus/client_golang/prometheus"
@@ -156,7 +156,7 @@ type Scheduler struct {
 
 // NewScheduler creates a new scheduler.
 // If hotWindowMinutes > 0 and eventReader != nil, far-future events are stored in the cold store.
-func NewScheduler(dataDir string, partitionID int32, tickMs int32, wheelSize int32, hotWindowMinutes int, eventReader EventReader, cache *pebble.Cache) (*Scheduler, error) {
+func NewScheduler(dataDir string, partitionID int32, tickMs int32, wheelSize int32, hotWindowMinutes int, eventReader EventReader, mem *pebblemem.Budget) (*Scheduler, error) {
 	// Create data directory
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		return nil, fmt.Errorf("create scheduler data dir: %w", err)
@@ -167,7 +167,7 @@ func NewScheduler(dataDir string, partitionID int32, tickMs int32, wheelSize int
 	var coldStore *ColdStore
 	if hotWindowMinutes > 0 {
 		var err error
-		coldStore, err = NewColdStore(dataDir, cache)
+		coldStore, err = NewColdStore(dataDir, mem)
 		if err != nil {
 			return nil, fmt.Errorf("create cold store: %w", err)
 		}

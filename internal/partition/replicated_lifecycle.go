@@ -99,7 +99,7 @@ func (pm *PartitionManager) EnableReplicatedLifecycle(p *Partition) error {
 	if err := utils.AtomicWriteFile(marker, []byte(fmt.Sprintf("%d\n", LifecycleFormat)), 0600); err != nil {
 		return fmt.Errorf("write lifecycle marker: %w", err)
 	}
-	index, err := lifecycle.Open(p.DataDir, pm.pebbleCache)
+	index, err := lifecycle.Open(p.DataDir, pm.pebbleMem)
 	if err != nil {
 		return fmt.Errorf("open lifecycle index: %w", err)
 	}
