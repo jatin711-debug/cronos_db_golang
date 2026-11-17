@@ -1,5 +1,23 @@
 # Production release requirements
 
+**v0.13.1 fixes what failed v0.13.0's first 24-hour soak**: acknowledged
+events a slow consumer group never received, throughput that fell to a tenth
+after a node was lost, node memory that outgrew its limit after a few hours,
+and log segments that took three times their size on XFS disks.
+It also makes replicated publishes and scheduled delivery much cheaper. It keeps
+v0.13.0 data directories and changes no API or flag; see the
+[v0.13.1 notes](RELEASE_V0.13.1.md). The release gates (a multi-host soak,
+production-sized recovery and upgrade drills, power-loss testing) are still
+open.
+
+## v0.13.1 release
+
+The [v0.13.1 notes](RELEASE_V0.13.1.md) describe the fixes and the soaks that
+found and checked them. The chart and default image tag are `0.13.1`.
+Publication status, checksums and the exact deployment digest are on the
+[release page](https://github.com/jatin711-debug/cronos_db_golang/releases/tag/v0.13.1).
+This release makes no new capacity claim.
+
 **v0.13.0 stops a consumer group's progress records and the cluster's metadata
 log from growing for the life of a cluster**, and a node that starts acts on
 the cluster metadata only once its copy has caught up; until then it reports
