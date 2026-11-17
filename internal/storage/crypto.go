@@ -166,6 +166,12 @@ func (c *SegmentCipher) EncryptRecord(plaintext []byte, ciphertextPos int64) ([]
 // ciphertext (after the 4-byte length prefix) inside the segment file; it is
 // only used to reconstruct the v1 nonce.
 func (c *SegmentCipher) DecryptRecord(ciphertext []byte, ciphertextPos int64) ([]byte, error) {
+	return c.DecryptRecordInto(nil, ciphertext, ciphertextPos)
+}
+
+// DecryptRecordInto is DecryptRecord writing the plaintext into dst's storage
+// when it has room, instead of a new slice for every record.
+func (c *SegmentCipher) DecryptRecordInto(dst, ciphertext []byte, ciphertextPos int64) ([]byte, error) {
 	if c.aead == nil {
 		return nil, fmt.Errorf("cipher not initialized")
 	}
@@ -176,14 +182,14 @@ func (c *SegmentCipher) DecryptRecord(ciphertext []byte, ciphertextPos int64) ([
 	switch version {
 	case recordCipherV1:
 		nonce := c.nonceForRecord(ciphertextPos)
-		return c.aead.Open(nil, nonce[:], ciphertext[1:], nil)
+		return c.aead.Open(dst[:0], nonce[:], ciphertext[1:], nil)
 	case recordCipherV2:
 		ns := c.aead.NonceSize()
 		if len(ciphertext) < 1+ns {
 			return nil, fmt.Errorf("record too short for v2 nonce")
 		}
 		nonce := ciphertext[1 : 1+ns]
-		return c.aead.Open(nil, nonce, ciphertext[1+ns:], nil)
+		return c.aead.Open(dst[:0], nonce, ciphertext[1+ns:], nil)
 	default:
 		return nil, fmt.Errorf("unsupported record cipher version: %d", version)
 	}
