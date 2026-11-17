@@ -1031,6 +1031,39 @@ func (s *Segment) decryptRecord(ciphertext []byte, ciphertextPos int64) ([]byte,
 	return s.cipher.DecryptRecord(ciphertext, ciphertextPos)
 }
 
+// decryptRecordInto is decryptRecord writing the plaintext into plain's
+// storage when it has room, and keeping plain pointed at it for the next
+// record. A scan used to allocate a new plaintext for every record it read,
+// the largest source of garbage on a busy node; parseEventRecordWithoutLength
+// copies what it keeps, so one buffer serves the whole scan. Without
+// encryption the record is returned as it is and plain is left alone.
+func (s *Segment) decryptRecordInto(plain *[]byte, ciphertext []byte, ciphertextPos int64) ([]byte, error) {
+	if s.cipher == nil {
+		return ciphertext, nil
+	}
+	decrypted, err := s.cipher.DecryptRecordInto(*plain, ciphertext, ciphertextPos)
+	if err == nil {
+		*plain = decrypted
+	}
+	return decrypted, err
+}
+
+// plainBuffers keeps plaintext buffers for reads of a single record.
+var plainBuffers = sync.Pool{New: func() any {
+	buf := make([]byte, 0, 4096)
+	return &buf
+}}
+
+// maxPooledPlain is the largest plaintext buffer kept for reuse.
+const maxPooledPlain = 1 << 20
+
+func putPlainBuffer(buf *[]byte) {
+	if cap(*buf) <= maxPooledPlain {
+		*buf = (*buf)[:0]
+		plainBuffers.Put(buf)
+	}
+}
+
 // ReadEvent reads the event at targetOffset, using the sparse index for seeking.
 func (s *Segment) ReadEvent(targetOffset int64) (*types.Event, error) {
 	s.mu.RLock()
@@ -1200,6 +1233,8 @@ func (s *Segment) readEventMmap(targetOffset int64, startPos int64) (*types.Even
 
 // readEventFile reads event from file using ReadAt (pread, no file handle allocation)
 func (s *Segment) readEventFile(targetOffset int64, startPos int64) (*types.Event, error) {
+	plain := plainBuffers.Get().(*[]byte)
+	defer putPlainBuffer(plain)
 	lengthBytes := make([]byte, 4)
 	recordBuf := make([]byte, 0, 4096)
 	currentPos := startPos
@@ -1236,7 +1271,7 @@ func (s *Segment) readEventFile(targetOffset int64, startPos int64) (*types.Even
 		currentPos += int64(recordLen)
 
 		// Decrypt if needed before parsing
-		decrypted, err := s.decryptRecord(record, ciphertextPos)
+		decrypted, err := s.decryptRecordInto(plain, record, ciphertextPos)
 		if err != nil {
 			return nil, fmt.Errorf("decrypt: %w", err)
 		}
@@ -1279,6 +1314,9 @@ func (s *Segment) ReadEventsByTime(startTS, endTS int64) ([]*types.Event, error)
 	startPos := int64(64)
 
 	scanner := newRecordScanner(s.segmentFile, startPos)
+	defer scanner.release()
+	plain := plainBuffers.Get().(*[]byte)
+	defer putPlainBuffer(plain)
 
 	for {
 		record, ciphertextPos, ok, err := scanner.record()
@@ -1289,7 +1327,7 @@ func (s *Segment) ReadEventsByTime(startTS, endTS int64) ([]*types.Event, error)
 			break
 		}
 
-		decrypted, err := s.decryptRecord(record, ciphertextPos)
+		decrypted, err := s.decryptRecordInto(plain, record, ciphertextPos)
 		if err != nil {
 			return nil, fmt.Errorf("decrypt: %w", err)
 		}
@@ -1357,6 +1395,9 @@ func (s *Segment) readOffsetRange(startOffset, endOffset, maxBytes int64) (resul
 func (s *Segment) scanOffsetRange(startPos, startOffset, endOffset, maxBytes int64) (result []*types.Event, size int64, err error) {
 	// ReadAt on the existing file handle is safe alongside appends.
 	scanner := newRecordScanner(s.segmentFile, startPos)
+	defer scanner.release()
+	plain := plainBuffers.Get().(*[]byte)
+	defer putPlainBuffer(plain)
 
 	for {
 		record, ciphertextPos, ok, err := scanner.record()
@@ -1367,7 +1408,7 @@ func (s *Segment) scanOffsetRange(startPos, startOffset, endOffset, maxBytes int
 			break
 		}
 
-		decrypted, err := s.decryptRecord(record, ciphertextPos)
+		decrypted, err := s.decryptRecordInto(plain, record, ciphertextPos)
 		if err != nil {
 			return nil, 0, fmt.Errorf("decrypt: %w", err)
 		}
@@ -1439,6 +1480,7 @@ func (s *Segment) TruncateAfterOffset(keepThroughOffset int64) (int, error) {
 	var kept timeRange // of the events that stay
 	lengthBytes := make([]byte, 4)
 	recordBuf := make([]byte, 0, 4096)
+	var plain []byte
 	currentPos := int64(64) // after header
 
 	for currentPos < s.sizeBytes {
@@ -1461,7 +1503,7 @@ func (s *Segment) TruncateAfterOffset(keepThroughOffset int64) (int, error) {
 		if _, err := s.segmentFile.ReadAt(record, currentPos+4); err != nil {
 			return 0, fmt.Errorf("read record: %w", err)
 		}
-		decrypted, err := s.decryptRecord(record, currentPos+4)
+		decrypted, err := s.decryptRecordInto(&plain, record, currentPos+4)
 		if err != nil {
 			return 0, fmt.Errorf("decrypt during truncate: %w", err)
 		}
@@ -1534,6 +1576,7 @@ func (s *Segment) scan() error {
 	var recordStartPos int64 = 64
 	lengthBytes := make([]byte, 4)
 	recordBuf := make([]byte, 0, 4096)
+	var plain []byte
 	// invalid is why reading stopped before the end of the file, when it was
 	// for anything but reaching space that was never written.
 	invalid := ""
@@ -1604,7 +1647,7 @@ func (s *Segment) scan() error {
 		}
 
 		// Decrypt if needed, then parse event to get offset and timestamp
-		decrypted, err := s.decryptRecord(recordData, lastGoodPos+4)
+		decrypted, err := s.decryptRecordInto(&plain, recordData, lastGoodPos+4)
 		if err != nil {
 			torn, tornErr := s.tornRecord(recordData, lastGoodPos > 64, reader)
 			if tornErr != nil {

@@ -3,6 +3,7 @@ package storage
 import (
 	"encoding/binary"
 	"io"
+	"sync"
 )
 
 // recordScanBlock is the read-ahead size used when scanning a segment.
@@ -13,16 +14,36 @@ const recordScanBlock = 256 << 10
 // reading the length and the body separately cost two system calls per record
 // and dominated every range read, replay, and catch-up.
 type recordScanner struct {
-	file io.ReaderAt
-	buf  []byte // buf[head:tail] holds bytes read from the file but not yet consumed
-	head int
-	tail int
-	next int64 // file offset of the first byte not yet read into buf
-	eof  bool
+	file   io.ReaderAt
+	buf    []byte // buf[head:tail] holds bytes read from the file but not yet consumed
+	head   int
+	tail   int
+	next   int64 // file offset of the first byte not yet read into buf
+	eof    bool
+	pooled *[]byte // the buffer taken from recordScanBuffers, returned by release
+}
+
+// recordScanBuffers keeps the scanners' read-ahead buffers. A scanner is made
+// for every range read: each redelivery window, each change feed read, each
+// catch-up. Each used to allocate 256 KiB, and that was among the largest
+// sources of garbage on a busy node.
+var recordScanBuffers = sync.Pool{New: func() any {
+	buf := make([]byte, recordScanBlock)
+	return &buf
+}}
+
+// release gives the scanner's buffer back for reuse. Nothing record returned
+// may be used afterwards.
+func (r *recordScanner) release() {
+	if r.pooled != nil {
+		recordScanBuffers.Put(r.pooled)
+	}
+	r.pooled, r.buf = nil, nil
 }
 
 func newRecordScanner(file io.ReaderAt, pos int64) *recordScanner {
-	return &recordScanner{file: file, buf: make([]byte, recordScanBlock), next: pos}
+	pooled := recordScanBuffers.Get().(*[]byte)
+	return &recordScanner{file: file, buf: *pooled, pooled: pooled, next: pos}
 }
 
 // fill buffers at least n unconsumed bytes. It reports false when the file
