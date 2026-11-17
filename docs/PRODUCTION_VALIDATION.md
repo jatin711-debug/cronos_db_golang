@@ -29,6 +29,73 @@ not on separate hosts or Kubernetes; power loss was not tested; and the
 latencies are those of a shared desktop machine. A 24-hour run of `TestSoak` on
 one machine is the next step, before the separate-host run.
 
+## v0.13.1 — 2026-11-18
+
+The first 24-hour run of `TestSoak` ran on RunPod, not on a desktop. It used one
+4-vCPU Linux host with the nodes as processes, in the configuration of the
+local campaign above. v0.13.0 failed it, and v0.13.1 fixes what it found.
+
+**v0.13.0: failed at 7.9 hours.** At the third disruption (a leader lost while
+the slow consumer group caught up), 16,107 acknowledged events had never been
+delivered to that group, and publishes had fallen from about 90 per second to
+9. Local soaks with node profiles reproduced both problems. Held-back events
+were queued for redelivery as one span, which older events kept resetting. The
+client held acknowledgements, which capped a 4-credit group at 80 events per
+second per partition. The fsync coalescer never wrote segment indexes, so after
+a node was killed every point read decrypted its segments from the start.
+
+**2-hour runs of the fixes.** Both passed all seven disruptions with every
+acknowledged event delivered to both groups and exported. The second build,
+with the scheduler, replication and allocation changes, accepted 900,496 events
+(772,635 before). Its shortfall against the target rate was 16,214 events
+(144,054 before). It reconciled the disruptions in 160, 24, 199, 439, 552, 26
+and 14 seconds. Publishes held about 100 per second with a 3–5 ms median through
+the slow group's catch-up (30–50 per second before). The scheduler's hydrator
+took 5–15% of a leader's CPU (48–62% before).
+
+**First 24-hour run of the fixes: stopped at 5.5 hours.** Nothing was lost.
+From about four hours on, the nodes held more than their 384 MiB limits. They
+refused 612,046 publishes within 80 minutes and fired some scheduled
+events up to five minutes late. A heap profile showed Pebble's dedup memtables
+(225 MiB) and block cache (43 MiB) on the Go heap. v0.13.1 sizes both from the
+memory limit. Four dedup stores holding 1.2 million IDs each then take 39 MiB of
+heap instead of 525 MiB.
+
+**Second 24-hour run of the fixes: failed at 7.6 hours, on disk.** Memory
+held: heap in use stayed at 100–250 MiB per node, and publishes ran at about
+100 per second with a 1.6 ms median for 6.5 hours. Then the disk guard refused
+every publish (95.8% of the 40 GB disk), followers rejected appends for the
+same reason, and the third disruption failed when its partitions took no
+publishes within 15 minutes. The nodes' files added up to 13.5 GiB. A
+diagnostic run on the same host found the rest: on XFS, every sealed segment
+held about twice its size in blocks reserved past its end, which XFS never
+freed while the segment stayed open. v0.13.1 truncates a segment to its own
+length when it is sealed or opened.
+
+**Compressed run of the release build.** About the data of 18 hours at 100
+publishes per second, in 4 hours at 450 per second with 8 MiB segments and the
+same durability settings. A first host for it was replaced: its disk stalled
+for about 30 seconds at a time, even with nothing running. The run failed at
+2.7 hours, at its fifth disruption, on capacity. The first four reconciled in
+303, 27, 479 and 940 seconds at a steady 450 publishes per second, with none
+refused, lost or early. Memory held (heap in use at most 258 MiB per node), and
+each node's disk use stayed within 22 MiB of its files' 7.2 GiB. The fifth
+disruption stops the slow consumer group for 14 minutes, which left it 391,000
+events behind. Its catch-up made the nodes CPU-bound, mostly on Pebble
+compactions (58% of a node's CPU, against 36% in steady state). Publishes fell
+to about 180 per second, and the group took about 200 events per second, too
+few to catch up within the 15 minutes the soak allows. At 100 publishes per
+second the same disruption had reconciled in 552 seconds. Scheduled events
+fired up to 122 seconds late around the leader kills. Making catch-up cheaper
+is the next release's work.
+
+**What was run.** The unit suites passed, with the race detector clean on the
+changed packages. The acceptance suite passed on processes on one Windows
+machine, and again in CI on the merged code (the fault campaign in
+996 seconds, and the container tests).
+The soaks above ran on one host, so the separate-host soak gate below stays
+open. The release's own checks are recorded on its release page.
+
 ## v0.13.0 — 2026-11-13
 
 Two growths found after v0.12.2 are stopped, and the take-up guard's firing on
