@@ -212,6 +212,18 @@ func (cs *ColdStore) Delete(offset int64, scheduleTS int64) error {
 	return nil
 }
 
+// Contains reports whether the store holds the reference.
+func (cs *ColdStore) Contains(offset, scheduleTS int64) (bool, error) {
+	_, closer, err := cs.db.Get(cs.buildKey(scheduleTS, offset))
+	if errors.Is(err, pebble.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, closer.Close()
+}
+
 // DeleteIfPresent is used under the scheduler's hydration gate; unlike Delete,
 // it does not decrement the approximate count for a reference that is absent.
 func (cs *ColdStore) DeleteIfPresent(offset, scheduleTS int64) error {
