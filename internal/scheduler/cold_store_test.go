@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/jatin711-debug/cronos_db_golang/internal/pebblemem"
 )
 
 func TestColdStoreStoreAndScan(t *testing.T) {
@@ -137,10 +138,11 @@ func TestColdStoreEmptyScan(t *testing.T) {
 
 func TestColdStoreSharedCache(t *testing.T) {
 	dir := t.TempDir()
-	cache := pebble.NewCache(8 * 1024 * 1024)
-	defer cache.Unref()
+	mem := pebblemem.Plan(256<<20, 4)
+	mem.Cache = pebble.NewCache(mem.CacheBytes)
+	defer mem.Cache.Unref()
 
-	cs, err := NewColdStore(dir, cache)
+	cs, err := NewColdStore(dir, mem)
 	if err != nil {
 		t.Fatalf("create cold store with cache: %v", err)
 	}

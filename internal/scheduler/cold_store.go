@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/jatin711-debug/cronos_db_golang/internal/pebblemem"
 )
 
 // ColdStore persists timer references for far-future events using PebbleDB.
@@ -42,20 +43,19 @@ type ColdStore struct {
 }
 
 // NewColdStore creates a new cold store for far-future scheduled events.
-func NewColdStore(dataDir string, cache *pebble.Cache) (*ColdStore, error) {
+func NewColdStore(dataDir string, mem *pebblemem.Budget) (*ColdStore, error) {
 	dir := filepath.Join(dataDir, "cold_schedule")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, fmt.Errorf("create cold store dir: %w", err)
 	}
 
 	opts := &pebble.Options{
-		Logger:       nil,
-		MemTableSize: 32 * 1024 * 1024, // 32MB — smaller than dedup since this is scan-heavy
-		DisableWAL:   true,             // CronosDB WAL provides durability
+		Logger:     nil,
+		DisableWAL: true, // CronosDB WAL provides durability
 	}
-	if cache != nil {
-		opts.Cache = cache
-	}
+	// Up to 32 MiB, following the node's memory: smaller than dedup's,
+	// since this store is scanned more than written.
+	mem.Apply(pebblemem.Cold, opts)
 
 	db, err := pebble.Open(dir, opts)
 	if err != nil {

@@ -13,6 +13,7 @@ import (
 
 	"github.com/cockroachdb/pebble"
 	"github.com/jatin711-debug/cronos_db_golang/internal/metrics"
+	"github.com/jatin711-debug/cronos_db_golang/internal/pebblemem"
 )
 
 // PebbleStore is a PebbleDB-backed dedup store with an in-memory pending-write
@@ -40,28 +41,26 @@ type PebbleStore struct {
 }
 
 // NewPebbleStore opens (or creates) a per-partition Pebble dedup database under
-// dataDir/dedup_<partitionID>. cache may be shared across partitions; pass nil
-// to use Pebble's default caching.
-func NewPebbleStore(dataDir string, partitionID int32, ttlHours int32, cache *pebble.Cache) (*PebbleStore, error) {
+// dataDir/dedup_<partitionID>. mem sizes its memtables and gives the cache
+// shared across partitions; nil gives the defaults and Pebble's own cache.
+func NewPebbleStore(dataDir string, partitionID int32, ttlHours int32, mem *pebblemem.Budget) (*PebbleStore, error) {
 	// Create data directory
 	dir := filepath.Join(dataDir, fmt.Sprintf("dedup_%d", partitionID))
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, fmt.Errorf("create dedup dir: %w", err)
 	}
 
-	// Open PebbleDB with optimized settings for high throughput
+	// Open PebbleDB with optimized settings for high throughput. The memtable
+	// size follows the node's memory limit: up to 64 MiB, Pebble's default 4.
 	opts := &pebble.Options{
 		Logger:                      nil,
-		MemTableSize:                64 * 1024 * 1024,        // 64MB memtable (default 4MB)
 		MemTableStopWritesThreshold: 10,                      // Allow more memtables before stalling (increased from 4)
 		L0CompactionThreshold:       2,                       // Trigger L0 compaction earlier (reduced from 4)
 		L0StopWritesThreshold:       20,                      // Allow more L0 files before stalling (increased from 12)
 		MaxConcurrentCompactions:    func() int { return 3 }, // Increase parallel compaction (increased from 2)
 		DisableWAL:                  true,                    // Disable PebbleDB WAL (we have our own)
 	}
-	if cache != nil {
-		opts.Cache = cache
-	}
+	mem.Apply(pebblemem.Dedup, opts)
 
 	db, err := pebble.Open(dir, opts)
 	if err != nil {

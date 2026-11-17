@@ -13,6 +13,7 @@ import (
 
 	"github.com/cockroachdb/pebble"
 	"github.com/jatin711-debug/cronos_db_golang/internal/logcontrol"
+	"github.com/jatin711-debug/cronos_db_golang/internal/pebblemem"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 )
 
@@ -37,8 +38,9 @@ type Index struct {
 var ErrIncompleteIndex = errors.New("lifecycle index requires WAL reconstruction")
 
 // Open never trusts the persisted cache. Rebuild must succeed before use.
-func Open(dir string, cache *pebble.Cache) (*Index, error) {
-	opts := &pebble.Options{Cache: cache, MemTableSize: 4 << 20, DisableWAL: true}
+func Open(dir string, mem *pebblemem.Budget) (*Index, error) {
+	opts := &pebble.Options{DisableWAL: true}
+	mem.Apply(pebblemem.Lifecycle, opts)
 	db, err := pebble.Open(filepath.Join(dir, "event_lifecycle"), opts)
 	if err != nil {
 		return nil, err

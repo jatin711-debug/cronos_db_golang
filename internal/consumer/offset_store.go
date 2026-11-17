@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/jatin711-debug/cronos_db_golang/internal/pebblemem"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/utils"
 )
@@ -134,8 +135,9 @@ type OffsetStore struct {
 }
 
 // NewOffsetStore opens (or creates) a Pebble-backed offset store under dataDir
-// for the given partitionID. cache may be nil.
-func NewOffsetStore(dataDir string, partitionID int32, cache *pebble.Cache) (*OffsetStore, error) {
+// for the given partitionID. mem sizes its memtables and gives the shared
+// cache; it may be nil.
+func NewOffsetStore(dataDir string, partitionID int32, mem *pebblemem.Budget) (*OffsetStore, error) {
 	// Create data directory
 	dir := filepath.Join(dataDir, "consumer_offsets")
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -146,9 +148,7 @@ func NewOffsetStore(dataDir string, partitionID int32, cache *pebble.Cache) (*Of
 	opts := &pebble.Options{
 		Logger: nil, // Use default logger
 	}
-	if cache != nil {
-		opts.Cache = cache
-	}
+	mem.Apply(pebblemem.Offsets, opts)
 
 	db, err := pebble.Open(dir, opts)
 	if err != nil {

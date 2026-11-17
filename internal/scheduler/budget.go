@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/cockroachdb/pebble"
+	"github.com/jatin711-debug/cronos_db_golang/internal/pebblemem"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 )
 
@@ -37,12 +37,12 @@ func (b *MemoryBudget) reserve(bytes int64) bool {
 
 // SetMemoryBudget must run before scheduling or starting workers. Each
 // partition gets a fair share, with room for one larger record when empty.
-func (s *Scheduler) SetMemoryBudget(budget *MemoryBudget, partitions int, cache *pebble.Cache) error {
+func (s *Scheduler) SetMemoryBudget(budget *MemoryBudget, partitions int, mem *pebblemem.Budget) error {
 	if budget == nil || budget.limit <= 0 || s.eventReader == nil {
 		return fmt.Errorf("scheduler budget requires a positive limit and WAL reader")
 	}
 	if s.coldStore == nil {
-		store, err := NewColdStore(s.dataDir, cache)
+		store, err := NewColdStore(s.dataDir, mem)
 		if err != nil {
 			return err
 		}

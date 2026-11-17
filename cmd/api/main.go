@@ -26,6 +26,7 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/internal/config"
 	"github.com/jatin711-debug/cronos_db_golang/internal/metrics"
 	"github.com/jatin711-debug/cronos_db_golang/internal/partition"
+	"github.com/jatin711-debug/cronos_db_golang/internal/pebblemem"
 	"github.com/jatin711-debug/cronos_db_golang/internal/replication"
 	"github.com/jatin711-debug/cronos_db_golang/internal/schema"
 	"github.com/jatin711-debug/cronos_db_golang/internal/slo"
@@ -210,13 +211,17 @@ func run() int {
 		}
 	}()
 
-	// Create shared PebbleDB block cache sized to ~25% of available RAM.
-	// This prevents memory fragmentation when running many partitions.
-	sharedCache := pebble.NewCache(256 << 20) // 256MB default; scales with partition count
-	defer sharedCache.Unref()
+	// Size Pebble to the memory limit: one block cache shared by every
+	// partition's databases, and memtables that together take no more than
+	// the cache does. Fixed sizes outgrew a small node's limit.
+	pebbleMem := pebblemem.Plan(memoryLimit, cfg.PartitionCount)
+	pebbleMem.Cache = pebble.NewCache(pebbleMem.CacheBytes)
+	defer pebbleMem.Cache.Unref()
+	slog.Info("Pebble memory", "cache_bytes", pebbleMem.CacheBytes,
+		"dedup_memtable_bytes", pebbleMem.MemTableSize(pebblemem.Dedup),
+		"cold_memtable_bytes", pebbleMem.MemTableSize(pebblemem.Cold))
 
-	// Create partition manager with shared cache
-	pm := partition.NewPartitionManagerWithCache(cfg.NodeID, cfg, sharedCache)
+	pm := partition.NewPartitionManagerWithCache(cfg.NodeID, cfg, pebbleMem)
 
 	// Change data capture and replication to other regions read the change
 	// feed of every partition: accepted events only, in log order, from the
