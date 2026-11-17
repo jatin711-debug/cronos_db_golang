@@ -126,6 +126,10 @@ type FollowerInfo struct {
 	// finishes; the next send waits on it so batches reach the follower in
 	// offset order even after Replicate has returned on quorum. Guarded by mu.
 	sendTail chan struct{}
+	// queued holds the batches queued for this follower and not sent yet, in
+	// offset order. A send takes the ones queued behind it along (see
+	// takeQueued). Guarded by mu.
+	queued [][]*types.Event
 	// pendingSends counts queued and in-flight sends. Guarded by mu.
 	pendingSends int
 
@@ -189,7 +193,10 @@ const progressFullInterval = 30 * time.Minute
 
 // maxPendingSendsPerFollower bounds the batches a slow follower may hold in
 // memory. Beyond it the follower is skipped and later caught up from the WAL.
-const maxPendingSendsPerFollower = 4
+// Publishes wait for their quorum outside the partition's publish lock (see
+// StartReplication), so a follower has a batch queued for every publish in
+// flight on the partition; the bound leaves room for them.
+const maxPendingSendsPerFollower = 64
 
 // catchUpBytes bounds what one catch-up request carries, in bytes as well as
 // in events. Events are up to megabytes each, and a request of five hundred of
@@ -369,15 +376,41 @@ func (l *Leader) RemoveFollower(id string) error {
 // the followers expect; the caller (publish path) serializes appends and
 // replication per partition. RF=1 (no followers, minISR<=1) is a no-op.
 func (l *Leader) Replicate(events []*types.Event) error {
+	pending, err := l.StartReplication(events)
+	if err != nil {
+		return err
+	}
+	return pending.Wait()
+}
+
+// PendingReplication is a batch whose sends to the followers are queued in log
+// order. Wait reports when a quorum holds it.
+type PendingReplication struct {
+	l        *Leader
+	results  chan error
+	queued   int
+	minISR   int
+	settled  bool // nothing to wait for
+	lastSent int64
+}
+
+// StartReplication queues events for every connected follower, after what is
+// already queued for it, and returns without waiting for them. The caller
+// serializes appends and StartReplication per partition, which keeps the
+// sends in offset order; the wait for the quorum can then happen outside that
+// lock. A publish used to hold it for the whole round trip: the leader took
+// one publish per partition at a time, each paying its own fsync, the
+// network and a follower's fsync in turn.
+func (l *Leader) StartReplication(events []*types.Event) (*PendingReplication, error) {
 	if len(events) == 0 {
-		return nil
+		return &PendingReplication{settled: true}, nil
 	}
 	if term := l.newerTerm.Load(); term > 0 {
-		return fmt.Errorf("partition %d has a leader of term %d; this one, of term %d, takes no more publishes", l.partitionID, term, l.GetEpoch())
+		return nil, fmt.Errorf("partition %d has a leader of term %d; this one, of term %d, takes no more publishes", l.partitionID, term, l.GetEpoch())
 	}
 	start, err := l.termStartAfter(events[len(events)-1].Offset)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if start != nil {
 		events = []*types.Event{start}
@@ -409,26 +442,35 @@ func (l *Leader) Replicate(events []*types.Event) error {
 		// No followers to replicate to. Only acceptable when the leader alone
 		// satisfies the durability requirement (RF=1 / minISR<=1).
 		if minISR > 1 {
-			return fmt.Errorf("not enough replicas: min-insync-replicas=%d but no connected followers for partition %d", minISR, l.partitionID)
+			return nil, fmt.Errorf("not enough replicas: min-insync-replicas=%d but no connected followers for partition %d", minISR, l.partitionID)
 		}
-		return nil
+		return &PendingReplication{settled: true}, nil
 	}
 
 	// Checksums are filled in once, before any send starts: the per-follower
 	// sends run concurrently and share these events.
 	checksum := computeBatchChecksum(events)
 
-	results := make(chan error, len(connected))
-	queued := 0
+	pending := &PendingReplication{l: l, results: make(chan error, len(connected)), minISR: minISR, lastSent: events[len(events)-1].Offset}
 	for _, f := range connected {
-		if l.queueSend(f, events, checksum, results) {
-			queued++
+		if l.queueSend(f, events, checksum, pending.results) {
+			pending.queued++
 		}
 	}
+	return pending, nil
+}
 
+// Wait returns once a quorum (min-insync-replicas, counting the leader) has
+// acknowledged the batch, or as soon as that quorum can no longer be reached.
+// Sends still in flight continue in the background.
+func (p *PendingReplication) Wait() error {
+	if p.settled {
+		return nil
+	}
+	l := p.l
 	acks := 1 // the leader itself already has the data in its WAL
-	for outstanding := queued; acks < minISR && outstanding > 0 && acks+outstanding >= minISR; outstanding-- {
-		if err := <-results; err == nil {
+	for outstanding := p.queued; acks < p.minISR && outstanding > 0 && acks+outstanding >= p.minISR; outstanding-- {
+		if err := <-p.results; err == nil {
 			acks++
 		} else if term := l.newerTerm.Load(); term > 0 {
 			// A follower has just answered for a newer leader. The others
@@ -438,9 +480,9 @@ func (l *Leader) Replicate(events []*types.Event) error {
 		}
 	}
 
-	if acks < minISR {
+	if acks < p.minISR {
 		return fmt.Errorf("replication quorum not met: %d of %d required in-sync replicas acked (partition %d, offset %d)",
-			acks, minISR, l.partitionID, events[len(events)-1].Offset)
+			acks, p.minISR, l.partitionID, p.lastSent)
 	}
 	return nil
 }
@@ -474,13 +516,69 @@ func (l *Leader) termStartAfter(last int64) (*types.Event, error) {
 // already has maxPendingSendsPerFollower batches outstanding; that follower is
 // caught up from the WAL by a later send or by the maintenance loop.
 func (l *Leader) queueSend(f *FollowerInfo, events []*types.Event, checksum uint32, results chan<- error) bool {
-	return l.queueFollowerWork(f, results, func() error {
-		err := l.sendToFollower(f, events, checksum)
+	queued := l.queueFollowerWork(f, results, func() error {
+		batch, batchChecksum := l.takeQueued(f, events, checksum)
+		err := l.sendToFollower(f, batch, batchChecksum)
 		if err != nil {
 			l.logSendFailure(f, "Replicate to", err)
 		}
 		return err
 	})
+	if queued {
+		f.mu.Lock()
+		f.queued = append(f.queued, events)
+		f.mu.Unlock()
+	}
+	return queued
+}
+
+// takeQueued returns what a send to a follower carries: its own batch and the
+// batches queued behind it that continue it, up to catchUpBytes, so a
+// follower with publishes waiting takes them in one append and one sync.
+// Those batches' own sends then find the follower has them and finish
+// without a request (sendToFollower). The batches are shared by every
+// follower's send, so they are copied, not extended.
+//
+// A send used to carry its own batch alone. Publishes wait for their quorum
+// outside the partition's publish lock, so a follower can have many queued,
+// and each cost it a round trip and a sync.
+func (l *Leader) takeQueued(f *FollowerInfo, own []*types.Event, checksum uint32) ([]*types.Event, uint32) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	// Everything before this batch has been sent: sends run in queue order.
+	for i, batch := range f.queued {
+		if &batch[0] == &own[0] {
+			f.queued = f.queued[i+1:]
+			break
+		}
+	}
+	next := own[len(own)-1].Offset + 1
+	size := eventsSize(own)
+	var merged []*types.Event
+	for _, batch := range f.queued {
+		batchSize := eventsSize(batch)
+		if batch[0].Offset != next || size+batchSize > catchUpBytes {
+			break
+		}
+		if merged == nil {
+			merged = append(make([]*types.Event, 0, 2*len(own)), own...)
+		}
+		merged = append(merged, batch...)
+		next, size = batch[len(batch)-1].Offset+1, size+batchSize
+	}
+	if merged == nil {
+		return own, checksum
+	}
+	return merged, computeBatchChecksum(merged)
+}
+
+// eventsSize approximates what events take in a replication request.
+func eventsSize(events []*types.Event) int {
+	n := 0
+	for _, e := range events {
+		n += 128 + len(e.Payload) + len(e.MessageId) + len(e.Topic)
+	}
+	return n
 }
 
 // logSendFailure reports a failed send to a follower once per outage. A busy
