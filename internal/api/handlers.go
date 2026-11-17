@@ -676,9 +676,11 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 		}
 	}
 
-	// On a replication leader, append and replication must occur together in
-	// strict offset order; serialize them under the partition's ReplicateMu.
-	// RF=1 / non-leader partitions keep the fast path with no extra locking.
+	// On a replication leader, the append and the queueing of its sends to the
+	// followers must happen in strict offset order; ReplicateMu serializes
+	// them. The wait for the followers' acknowledgements happens after it is
+	// released. RF=1 / non-leader partitions keep the fast path with no extra
+	// locking.
 	if h.partitionManager.ReplicationRequired() || partitionInternal.ReplLeader != nil {
 		partitionInternal.ReplicateMu.Lock()
 		repl := partitionInternal.ReplLeader
@@ -704,13 +706,16 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 				Error:     fmt.Sprintf("append to WAL: %v", err),
 			}, nil
 		}
-		replErr := repl.Replicate([]*types.Event{event})
+		// The sends are queued in log order under ReplicateMu; the wait for
+		// the quorum is not, so the next publish appends meanwhile.
+		pending, replErr := repl.StartReplication([]*types.Event{event})
+		partitionInternal.ReplicateMu.Unlock()
+		if replErr == nil {
+			replErr = pending.Wait()
+		}
 		if replErr != nil {
 			// In the local log but not on the required in-sync replicas.
 			partitionInternal.HoldUnaccepted([]*types.Event{event}, dedupMgr != nil)
-		}
-		partitionInternal.ReplicateMu.Unlock()
-		if replErr != nil {
 			return &types.PublishResponse{
 				ErrorCode: int32(codes.Internal),
 				Success:   false,
@@ -1135,12 +1140,13 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 			}
 
 			// Batch append to WAL (single syscall for all events). When this
-			// partition is a replication leader, the append and the replication to
-			// followers must occur together in strict offset order — Leader.Replicate
-			// requires contiguous offsets and is not safe to call concurrently out of
-			// order. ReplicateMu serializes the two for replicated partitions only;
-			// RF=1 / non-leader partitions (ReplLeader == nil) keep the fully
-			// pipelined fast path with no extra locking.
+			// partition is a replication leader, the append and the queueing of
+			// its sends to the followers must happen in strict offset order —
+			// each follower takes contiguous offsets. ReplicateMu serializes the
+			// two for replicated partitions only, and the wait for the followers'
+			// acknowledgements happens after it is released; RF=1 / non-leader
+			// partitions (ReplLeader == nil) keep the fully pipelined fast path
+			// with no extra locking.
 			if h.partitionManager.ReplicationRequired() || partitionInternal.ReplLeader != nil {
 				partitionInternal.ReplicateMu.Lock()
 				repl := partitionInternal.ReplLeader
@@ -1160,15 +1166,18 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 					setError(int32(len(evts)), fmt.Sprintf("WAL append for partition %d: %v", pid, err))
 					return
 				}
-				replErr := repl.Replicate(evts)
+				// Sends are queued in log order under ReplicateMu; the wait
+				// for the quorum is not, so the next publish appends meanwhile.
+				pending, replErr := repl.StartReplication(evts)
+				partitionInternal.ReplicateMu.Unlock()
+				if replErr == nil {
+					replErr = pending.Wait()
+				}
 				if replErr != nil {
 					// The batch is in the local WAL but did not reach the required
 					// in-sync replicas. It stays held, unscheduled, until it has;
 					// the client's retry finishes this publish.
 					partitionInternal.HoldUnaccepted(evts, !req.AllowDuplicate)
-				}
-				partitionInternal.ReplicateMu.Unlock()
-				if replErr != nil {
 					setError(int32(len(evts)), fmt.Sprintf("replication for partition %d: %v", pid, replErr))
 					return
 				}
