@@ -34,11 +34,42 @@ import (
 // progress only as far as the local log reaches.
 
 func completionKey(group string, partition int32, offset int64) string {
-	return fmt.Sprintf("done:%d:%s:%d:%020d", len(group), group, partition, offset)
+	return string(appendCompletionKey(make([]byte, 0, len(group)+48), group, partition, offset))
 }
 
 func completionPrefix(group string, partition int32) string {
-	return fmt.Sprintf("done:%d:%s:%d:", len(group), group, partition)
+	return string(appendCompletionPrefix(make([]byte, 0, len(group)+24), group, partition))
+}
+
+// appendCompletionPrefix appends completionPrefix(group, partition) to dst.
+func appendCompletionPrefix(dst []byte, group string, partition int32) []byte {
+	dst = append(dst, "done:"...)
+	dst = strconv.AppendInt(dst, int64(len(group)), 10)
+	dst = append(dst, ':')
+	dst = append(dst, group...)
+	dst = append(dst, ':')
+	dst = strconv.AppendInt(dst, int64(partition), 10)
+	return append(dst, ':')
+}
+
+// appendCompletionKey appends completionKey(group, partition, offset) to dst.
+// The keys are stored, so it makes byte for byte what
+// fmt.Sprintf("done:%d:%s:%d:%020d", len(group), group, partition, offset)
+// makes, which these keys were built with; that formatted the string anew for
+// every completion recorded, looked up and replicated, and on a follower that
+// was most of the work of taking its leader's progress. Loops pass one buffer
+// for every key, and the store copies what it is given.
+func appendCompletionKey(dst []byte, group string, partition int32, offset int64) []byte {
+	dst = appendCompletionPrefix(dst, group, partition)
+	if offset < 0 {
+		return fmt.Appendf(dst, "%020d", offset)
+	}
+	var scratch [20]byte
+	digits := strconv.AppendInt(scratch[:0], offset, 10)
+	for i := len(digits); i < len(scratch); i++ {
+		dst = append(dst, '0')
+	}
+	return append(dst, digits...)
 }
 
 func floorKey(group string, partition int32) string {
@@ -496,17 +527,20 @@ func (g *GroupManager) CommitDeliveries(partitionID int32, commits []DeliveryCom
 		err := store.withDB(func(db *pebble.DB) error {
 			batch := db.NewBatch()
 			defer batch.Close()
+			var key []byte // one buffer for every key; the batch copies them
 			for group, offsets := range added {
 				for offset := range offsets {
 					if offset < cursors[group] {
 						continue // already covered by the floor
 					}
-					if err := batch.Set([]byte(completionKey(group, partitionID, offset)), []byte{1}, nil); err != nil {
+					key = appendCompletionKey(key[:0], group, partitionID, offset)
+					if err := batch.Set(key, []byte{1}, nil); err != nil {
 						return err
 					}
 				}
 				recorded := func(offset int64) bool {
-					_, closer, err := db.Get([]byte(completionKey(group, partitionID, offset)))
+					key = appendCompletionKey(key[:0], group, partitionID, offset)
+					_, closer, err := db.Get(key)
 					if err != nil {
 						return false
 					}
@@ -780,13 +814,15 @@ func (g *GroupManager) ApplyReplicatedProgress(partitionID int32, logEnd int64, 
 		err := store.withDB(func(db *pebble.DB) error {
 			batch := db.NewBatch()
 			defer batch.Close()
+			var key []byte // one buffer for every key; the batch copies them
 			for _, progress := range groups {
 				group, cursor := progress.GetGroupId(), max(min(progress.GetCommittedOffset(), logEnd), cursors[progress.GetGroupId()])
 				for _, offset := range progress.GetCompletedOffsets() {
 					if offset < cursor || offset >= logEnd {
 						continue
 					}
-					if err := batch.Set([]byte(completionKey(group, partitionID, offset)), []byte{1}, nil); err != nil {
+					key = appendCompletionKey(key[:0], group, partitionID, offset)
+					if err := batch.Set(key, []byte{1}, nil); err != nil {
 						return err
 					}
 				}
