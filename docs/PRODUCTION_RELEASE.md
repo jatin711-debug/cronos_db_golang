@@ -16,6 +16,13 @@ The [v0.13.1 notes](RELEASE_V0.13.1.md) describe the fixes and the soaks that
 found and checked them. The chart and default image tag are `0.13.1`.
 Publication status, checksums and the exact deployment digest are on the
 [release page](https://github.com/jatin711-debug/cronos_db_golang/releases/tag/v0.13.1).
+v0.13.1 was published on 2026-11-18; its image is `sha256:bf4f69ac9292c1822d6e8a0817aa97e789f96896c34bbc6a7c4375c476924eca`,
+published as `johnny711dock/cronos-db:0.13.1` and `:latest`, and the release is
+marked latest. The release workflow scanned this exact image (no fixable HIGH or
+CRITICAL findings) and ran the network-partition and memory-limited restart tests
+on it. The checksum-verified Windows release binaries passed a rolling upgrade from
+v0.13.0, a rollback and a second upgrade under traffic; the release page carries
+the log and `LOCAL_PUBLICATION_EVIDENCE.json`.
 This release makes no new capacity claim.
 
 **v0.13.0 stops a consumer group's progress records and the cluster's metadata
