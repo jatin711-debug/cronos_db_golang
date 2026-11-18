@@ -603,6 +603,7 @@ type nodeSample struct {
 	rss, heap, held       float64
 	goroutines, handles   float64
 	dataBytes, dlqBytes   int64
+	allocBytes            int64 // blocks the data takes on disk, which can be more than its length
 	files                 int
 	segments, blockingAge float64
 	coldEntries, timers   float64
@@ -985,8 +986,11 @@ func metricsOf(n *node) (sum, most map[string]float64, err error) {
 }
 
 // diskUse adds up the files under a node's data directory, and separately
-// those of its dead-letter journals.
-func diskUse(root string) (total, dlq int64, files int) {
+// those of its dead-letter journals. alloc is what the files take on disk:
+// a filesystem can hold blocks past a file's end that its length does not
+// show. On XFS every WAL segment once held twice its length that way, which
+// filled the disk of a 24-hour soak while the file lengths showed a third.
+func diskUse(root string) (total, dlq int64, files int, alloc int64) {
 	sep := string(filepath.Separator)
 	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
@@ -997,16 +1001,17 @@ func diskUse(root string) (total, dlq int64, files int) {
 			return nil
 		}
 		total += info.Size()
+		alloc += allocatedBytes(info)
 		files++
 		if strings.Contains(path, sep+"dlq"+sep) {
 			dlq += info.Size()
 		}
 		return nil
 	})
-	return total, dlq, files
+	return total, dlq, files, alloc
 }
 
-const soakNodeHeader = "time,elapsed_s,node,process_start,rss_mib,heap_inuse_mib,held_mib,goroutines,handles,data_mib,dlq_mib,files,wal_segments,retention_blocking_age_s,scheduler_cold_entries,scheduler_active_timers\n"
+const soakNodeHeader = "time,elapsed_s,node,process_start,rss_mib,heap_inuse_mib,held_mib,goroutines,handles,data_mib,dlq_mib,files,wal_segments,retention_blocking_age_s,scheduler_cold_entries,scheduler_active_timers,data_alloc_mib\n"
 const soakWorkHeader = "time,elapsed_s,phase,target_rate,accepted,delivered_main,delivered_slow,exported,poison_delivered,main_lag,slow_lag,unexported,publish_n,publish_p50_ms,publish_p99_ms,publish_max_ms,lateness_n,lateness_p50_ms,lateness_p99_ms,lateness_max_ms,refused,failed_attempts,shortfall,cdc_refused,early,unknown\n"
 
 func (s *soak) openReports() {
@@ -1064,13 +1069,14 @@ func (s *soak) sampleOnce(began time.Time) {
 				sm.timers = sum["cronos_scheduler_active_timers"]
 			}
 		}
-		sm.dataBytes, sm.dlqBytes, sm.files = diskUse(n.dataDir)
+		sm.dataBytes, sm.dlqBytes, sm.files, sm.allocBytes = diskUse(n.dataDir)
 		s.samplesMu.Lock()
 		s.samples[n.id] = append(s.samples[n.id], sm)
 		s.samplesMu.Unlock()
-		_, _ = fmt.Fprintf(s.nodeCSV, "%s,%.0f,%s,%.0f,%.1f,%.1f,%.1f,%.0f,%.0f,%.1f,%.2f,%d,%.0f,%.0f,%.0f,%.0f\n",
+		_, _ = fmt.Fprintf(s.nodeCSV, "%s,%.0f,%s,%.0f,%.1f,%.1f,%.1f,%.0f,%.0f,%.1f,%.2f,%d,%.0f,%.0f,%.0f,%.0f,%.1f\n",
 			stamp, elapsed, n.id, sm.processStart, mib(sm.rss), mib(sm.heap), mib(sm.held), sm.goroutines, sm.handles,
-			mib(float64(sm.dataBytes)), mib(float64(sm.dlqBytes)), sm.files, sm.segments, sm.blockingAge, sm.coldEntries, sm.timers)
+			mib(float64(sm.dataBytes)), mib(float64(sm.dlqBytes)), sm.files, sm.segments, sm.blockingAge, sm.coldEntries, sm.timers,
+			mib(float64(sm.allocBytes)))
 	}
 	g := s.l.gap(now.Add(-5*time.Second).UnixMilli(), now.Add(-10*time.Second).UnixMilli(), true)
 	pub, late := s.publishLatency.takeInterval(), s.l.lateness.takeInterval()
@@ -1377,7 +1383,7 @@ func TestSoak(t *testing.T) {
 	s.disrupt("node replaced", func(rec *disruptionRecord) {
 		victim := s.followerOf(0, c.leaderOf(s.observer, 0))
 		c.kill(victim)
-		held, _, _ := diskUse(victim.dataDir)
+		held, _, _, _ := diskUse(victim.dataDir)
 		c.wipe(victim)
 		c.start(victim)
 		rec.Detail = fmt.Sprintf("%s lost %d MiB of data and was started empty", victim.id, held>>20)
@@ -1578,18 +1584,20 @@ func (s *soak) report(early, unknown int) {
 	s.samplesMu.Lock()
 	for id, list := range s.samples {
 		var peakRSS, peakHeap, peakHeld, peakGoroutines float64
-		var peakData, peakDLQ, lastData int64
+		var peakData, peakDLQ, lastData, peakAlloc int64
 		for _, sm := range list {
 			peakRSS, peakHeap, peakHeld = max(peakRSS, sm.rss), max(peakHeap, sm.heap), max(peakHeld, sm.held)
 			peakGoroutines = max(peakGoroutines, sm.goroutines)
 			peakData, peakDLQ = max(peakData, sm.dataBytes), max(peakDLQ, sm.dlqBytes)
 			lastData = sm.dataBytes
+			peakAlloc = max(peakAlloc, sm.allocBytes)
 		}
 		rssSlope, rssSpan := growth(list, func(sm nodeSample) float64 { return sm.rss / (1 << 20) })
 		goSlope, _ := growth(list, func(sm nodeSample) float64 { return sm.goroutines })
 		nodes[id] = map[string]any{
 			"peak_rss_mib": peakRSS / (1 << 20), "peak_heap_inuse_mib": peakHeap / (1 << 20), "peak_held_mib": peakHeld / (1 << 20),
 			"peak_goroutines": peakGoroutines, "peak_data_mib": peakData >> 20, "final_data_mib": lastData >> 20, "peak_dlq_kib": peakDLQ >> 10,
+			"peak_data_alloc_mib":    peakAlloc >> 20,
 			"rss_slope_mib_per_hour": rssSlope, "rss_slope_span_hours": rssSpan.Hours(), "goroutine_slope_per_hour": goSlope,
 		}
 		// A lifetime of four hours or more whose memory climbs by more than
