@@ -94,7 +94,13 @@ jobs:
           npm ci
           npm test
           npm run build
-          npm audit --audit-level=high
+          # What ships in the dashboard bundle must have no high-severity
+          # advisory. The build and test tools (vite, vitest and what they
+          # pull in) are audited too, but only reported: an advisory in them
+          # with no fixed release, such as picomatch GHSA-fc5q-39xc-vjpf,
+          # would otherwise fail every change.
+          npm audit --omit=dev --audit-level=high
+          npm audit --audit-level=high || echo "::warning title=npm audit::high-severity advisories in the dashboard's build and test dependencies; see the log above"
       - uses: azure/setup-helm@v5.0.0
         with:
           version: v3.17.3
