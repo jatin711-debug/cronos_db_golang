@@ -305,6 +305,13 @@ func OpenSegment(dataDir string, filename string, cipher *SegmentCipher) (*Segme
 	// Set nextOffset based on lastOffset found during scan
 	segment.nextOffset = segment.lastOffset + 1
 
+	// Free blocks a filesystem kept past the segment's end. Earlier versions
+	// left about twice a segment's size there for every segment they kept,
+	// and a restart did not return it; this does, at the next start.
+	if err := releaseBeyondEnd(file); err != nil {
+		log.Printf("[SEGMENT] Could not free the space reserved past the end of %s: %v", filename, err)
+	}
+
 	// Reconcile the mmap write cursor with the real data end discovered by scan.
 	// The constructor set mmapWritePos to the on-disk size, which for a segment
 	// with a preallocated tail is far past the last real record. If scan trimmed
@@ -2076,6 +2083,13 @@ func (s *Segment) Deactivate() error {
 	// Persist the file so a reader opening it fresh sees all data.
 	if err := s.segmentFile.Sync(); err != nil {
 		errs = append(errs, fmt.Errorf("sync file: %w", err))
+	}
+
+	// The segment takes no more writes: free what the filesystem reserved
+	// past its end, which it would otherwise hold for as long as the segment
+	// is kept. Failing to only wastes space.
+	if err := releaseBeyondEnd(s.segmentFile); err != nil {
+		log.Printf("[SEGMENT] Could not free the space reserved past the end of %s: %v", s.filename, err)
 	}
 
 	// The index takes no more entries either: write out what it buffers and

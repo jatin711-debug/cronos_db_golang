@@ -40,3 +40,20 @@ func preallocateFile(file *os.File, size int64) error {
 		return fmt.Errorf("fallocate: %w", err)
 	}
 }
+
+// releaseBeyondEnd frees the blocks a filesystem holds past the end of a
+// file. When a write extends a file, XFS reserves about as much again past
+// its end, and it keeps that reservation while the file is open: its
+// background trimming skips files that were ever fallocate'd, as segments
+// are, and closing one does not free it either. A segment's last batch runs a
+// little past its preallocated length, and a sealed segment stays open for
+// reads, so every segment kept about twice its size in hidden blocks for as
+// long as the log kept it: 64 MiB for each 32 MiB segment. Truncating to the
+// current length frees them and changes nothing a reader can see.
+func releaseBeyondEnd(file *os.File) error {
+	stat, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	return file.Truncate(stat.Size())
+}
