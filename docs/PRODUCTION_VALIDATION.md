@@ -96,6 +96,15 @@ machine, and again in CI on the merged code (the fault campaign in
 The soaks above ran on one host, so the separate-host soak gate below stays
 open. The release's own checks are recorded on its release page.
 
+**The release.** Released from `78c06ac`. Checks on the release itself:
+pull-request and `main` CI; the release workflow's image scan (no fixable HIGH or
+CRITICAL findings) and its network-partition and memory-limited restart tests on
+the exact image; a local smoke test of that image under a 512 MiB limit; and
+`TestRollingUpgradeAndRollback` with the checksum-verified Windows binaries of
+v0.13.0 and v0.13.1, which passed in 131.71 s with 796, 749 and 650 acknowledged
+events in its three phases, all delivered, none early, none delivered more than
+once, and replica logs in agreement after each phase.
+
 ## v0.13.0 — 2026-11-13
 
 Two growths found after v0.12.2 are stopped, and the take-up guard's firing on

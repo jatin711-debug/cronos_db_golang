@@ -10,7 +10,8 @@ The v0.13.1 container targets Linux amd64. Check the [release page](https://gith
 
 ```bash
 docker pull johnny711dock/cronos-db:0.13.1    # :latest selects the current stable release
-# For immutable deployments, pin the digest in the release's IMAGE_DIGEST asset.
+# The tested v0.13.1 Linux amd64 image, pinned for immutable deployments:
+docker pull johnny711dock/cronos-db@sha256:bf4f69ac9292c1822d6e8a0817aa97e789f96896c34bbc6a7c4375c476924eca
 ```
 
 For another release, take its pin from the `IMAGE_DIGEST` release asset.
