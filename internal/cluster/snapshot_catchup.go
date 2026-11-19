@@ -6,6 +6,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/jatin711-debug/cronos_db_golang/internal/replication"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
@@ -38,27 +39,17 @@ var snapshotCatchups = promauto.NewCounterVec(prometheus.CounterOpts{
 	Help: "Partitions this node, as a follower far behind, copied from their leader as a snapshot, by outcome",
 }, []string{"outcome"})
 
+// snapshotCatchUpRegistrar is implemented by a partition accessor whose
+// replication handler can ask for a snapshot when an append shows a
+// partition far behind (see requestSnapshot).
+type snapshotCatchUpRegistrar interface {
+	SetSnapshotCatchUp(threshold int64, request func(partitionID int32, leaderID string) bool)
+}
+
 // replicaLogRanger reports where the log of a replica starts and ends ("" is
 // this node). The partition manager implements it.
 type replicaLogRanger interface {
 	ReplicaLogRange(ctx context.Context, addr string, partitionID int32) (found bool, start, last int64, err error)
-}
-
-// needsSnapshot decides whether a follower whose log ends at localLast copies
-// its leader's log, which holds the offsets from leaderStart to leaderLast,
-// instead of replaying what it lacks. Replay sends the entries after
-// localLast, or all of the leader's log when the follower's ends before the
-// leader's starts. A snapshot sends all of it. So the follower must lack at
-// least threshold entries and at least half of the leader's log: a snapshot
-// then sends at most twice what replay would, and sends it as files.
-func needsSnapshot(localLast, leaderStart, leaderLast, threshold int64) bool {
-	if threshold <= 0 || leaderLast < 0 {
-		return false
-	}
-	leaderStart = max(leaderStart, 0)
-	held := leaderLast - leaderStart + 1
-	missing := leaderLast - max(localLast, leaderStart-1)
-	return missing >= threshold && 2*missing >= held
 }
 
 // catchUpFromSnapshots has this node copy, as a snapshot, each partition it
@@ -99,13 +90,58 @@ func (m *Manager) catchUpFromSnapshots() {
 			leaderFound, leaderStart, leaderLast, err = ranger.ReplicaLogRange(ctx, leaderAddr, partitionID)
 		}
 		cancel()
-		if err != nil || !leaderFound || !needsSnapshot(localLast, leaderStart, leaderLast, threshold) {
+		if err != nil || !leaderFound || !replication.NeedsSnapshot(localLast, leaderStart, leaderLast, threshold) {
 			continue
 		}
 		log.Printf("[CLUSTER] catch-up: partition %d ends at offset %d here and its leader %s holds %d to %d; copying the leader's log as a snapshot",
 			partitionID, localLast, committed.LeaderID, leaderStart, leaderLast)
 		m.pullSnapshot(partitionID, leaderAddr)
 	}
+}
+
+// checkSnapshotsInBackground runs catchUpFromSnapshots without holding up
+// the caller: it asks the leaders where their logs are, which can take a
+// while when one does not answer. One check runs at a time.
+func (m *Manager) checkSnapshotsInBackground() {
+	if !m.snapshotChecking.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer m.snapshotChecking.Store(false)
+		m.catchUpFromSnapshots()
+	}()
+}
+
+// requestSnapshot is called by the replication handler when an append from
+// leaderID shows that this node's copy of the partition is far behind (see
+// replication.NeedsSnapshot). It starts a copy unless one ran less than
+// snapshotRetryAfter ago, and reports whether a copy is now running, in
+// which case the handler turns the append away so that replay does not race
+// the copy.
+//
+// The leader's address comes from membership, not from the committed
+// assignments: those are not current yet right after a restart, which is
+// when a node is most often far behind. The handler has already accepted
+// leaderID as the partition's leader at a term this node has seen, and the
+// copy is refused if its source is at an older epoch.
+func (m *Manager) requestSnapshot(partitionID int32, leaderID string) bool {
+	m.mu.RLock()
+	running := m.pulling[partitionID]
+	nodeID := m.config.NodeID
+	m.mu.RUnlock()
+	if running {
+		return true
+	}
+	if leaderID == "" || leaderID == nodeID || !m.snapshotDue(partitionID) {
+		return false
+	}
+	addr := m.aliveNodes()[leaderID]
+	if addr == "" {
+		return false
+	}
+	log.Printf("[CLUSTER] catch-up: an append from %s shows partition %d far behind here; copying the leader's log as a snapshot", leaderID, partitionID)
+	m.pullSnapshot(partitionID, addr)
+	return true
 }
 
 // snapshotDue reports whether no copy of the partition is running and the
@@ -117,8 +153,11 @@ func (m *Manager) snapshotDue(partitionID int32) bool {
 }
 
 // pullSnapshot copies a partition from its leader to this node in the
-// background. Appends from the leader wait while the copy is installed, and
-// resume from where the copy ends.
+// background. SyncPartitionFromLeader holds the partition's replication lock
+// from before it asks for the snapshot until the snapshot is installed, so no
+// append lands meanwhile, and the leader cuts the snapshot after the lock is
+// taken: the installed log ends no earlier than the one it replaces, and no
+// entry this node acknowledged is lost. Appends resume from where it ends.
 func (m *Manager) pullSnapshot(partitionID int32, leaderAddr string) {
 	m.mu.Lock()
 	if m.pulling == nil {

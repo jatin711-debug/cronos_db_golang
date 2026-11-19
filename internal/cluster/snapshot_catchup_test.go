@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/jatin711-debug/cronos_db_golang/internal/replication"
 )
 
 func (f *fakePositions) ReplicaLogRange(_ context.Context, addr string, _ int32) (bool, int64, int64, error) {
@@ -42,8 +44,8 @@ func TestNeedsSnapshot(t *testing.T) {
 		{"empty leader", -1, 0, -1, 100, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := needsSnapshot(tc.localLast, tc.leaderStart, tc.leaderLast, tc.thr); got != tc.want {
-				t.Fatalf("needsSnapshot(%d, %d, %d, %d) = %v, want %v", tc.localLast, tc.leaderStart, tc.leaderLast, tc.thr, got, tc.want)
+			if got := replication.NeedsSnapshot(tc.localLast, tc.leaderStart, tc.leaderLast, tc.thr); got != tc.want {
+				t.Fatalf("NeedsSnapshot(%d, %d, %d, %d) = %v, want %v", tc.localLast, tc.leaderStart, tc.leaderLast, tc.thr, got, tc.want)
 			}
 		})
 	}
@@ -124,5 +126,27 @@ func TestOnlyFollowersCopyFromSnapshots(t *testing.T) {
 				t.Fatalf("%s copied partition 0", name)
 			}
 		})
+	}
+}
+
+// An append that shows a partition far behind asks for a copy from the node
+// that sent it, once: a second request while the copy runs, or within
+// snapshotRetryAfter of it, starts none.
+func TestAppendFarBehindRequestsACopy(t *testing.T) {
+	f := newLeadershipFixture(t, "node-2", "node-1", 3, 2, "node-1", "node-2", "node-3")
+	f.manager.config.SnapshotCatchupThreshold = 1000
+	if !f.manager.requestSnapshot(0, "node-1") {
+		t.Fatal("no copy started for a far-behind partition")
+	}
+	f.waitPulls(t)
+	if addr := f.accessor.syncCalls[0]; addr != "node-1" {
+		t.Fatalf("copied from %q, want node-1", addr)
+	}
+	delete(f.accessor.syncCalls, 0)
+	if f.manager.requestSnapshot(0, "node-1") {
+		t.Fatal("a copy started again right after the last one")
+	}
+	if f.manager.requestSnapshot(1, "node-2") || f.manager.requestSnapshot(2, "") {
+		t.Fatal("a copy started from this node itself or from no node")
 	}
 }

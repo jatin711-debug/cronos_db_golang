@@ -16,6 +16,7 @@ import (
 	"github.com/jatin711-debug/cronos_db_golang/internal/logcontrol"
 	"github.com/jatin711-debug/cronos_db_golang/internal/partition"
 	"github.com/jatin711-debug/cronos_db_golang/internal/recoverystate"
+	"github.com/jatin711-debug/cronos_db_golang/internal/replication"
 	"github.com/jatin711-debug/cronos_db_golang/internal/storage"
 	"github.com/jatin711-debug/cronos_db_golang/pkg/types"
 
@@ -221,6 +222,14 @@ func (h *ReplicationServiceHandler) appendBatch(req *types.ReplicationAppendRequ
 	// before any of the sender's entries are applied.
 	if err := h.acceptLeader(p, req.GetTerm(), req.GetLeaderId()); err != nil {
 		return reject(err.Error())
+	}
+	// A replica far behind copies the leader's log as a snapshot instead of
+	// having it replayed. The append is turned away while the copy runs; the
+	// copy takes the replication lock this append holds once it returns.
+	if threshold, request := h.partitionManager.SnapshotCatchUp(); request != nil && !p.IsLeader() &&
+		replication.NeedsSnapshot(p.Wal.GetNextOffset()-1, req.GetLogStartOffset(), req.GetLeaderLogEnd()-1, threshold) &&
+		request(p.ID, req.GetLeaderId()) {
+		return reject("this replica is far behind and is copying the leader's log as a snapshot")
 	}
 	// The accepted leader says where its log starts. Following it comes first:
 	// it can change where this replica's own log ends.

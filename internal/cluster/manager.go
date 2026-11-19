@@ -44,6 +44,8 @@ type Manager struct {
 	// All are guarded by mu.
 	transferRetryAt map[int32]time.Time
 	snapshotAt      map[int32]time.Time
+	// snapshotChecking is set while catchUpFromSnapshots runs.
+	snapshotChecking atomic.Bool
 	// refusedPlacement is, per partition, the nodes the ring last wanted to
 	// place it on that do not advertise what it requires, so that the
 	// refusal is logged when it changes and not every round. Guarded by
@@ -369,6 +371,10 @@ func (m *Manager) leaderTasks() {
 			wasCurrent := current
 			if current = m.metadataCurrent(); current && !wasCurrent {
 				m.reconcileLocalLeadership()
+				// A node that was away is the most likely to be far behind,
+				// and is better asked now, before its leaders begin to
+				// replay what it lacks, than at the next periodic check.
+				m.checkSnapshotsInBackground()
 			}
 			if m.IsLeader() {
 				m.syncClusterState()
@@ -381,7 +387,7 @@ func (m *Manager) leaderTasks() {
 			m.reconcileLocalLeadership()
 			m.updateReplicaOffsets()
 			if ticks++; ticks%snapshotCheckTicks == 0 {
-				m.catchUpFromSnapshots()
+				m.checkSnapshotsInBackground()
 			}
 			if m.IsLeader() {
 				m.performLeaderTasks()
@@ -519,6 +525,9 @@ func (m *Manager) SetPartitionAccessor(accessor PartitionAccessor) {
 	m.partitionAccessor = accessor
 	if positioner, ok := accessor.(ReplicaPositioner); ok {
 		m.positions = positioner
+	}
+	if registrar, ok := accessor.(snapshotCatchUpRegistrar); ok && m.config.ReplicationFactor > 1 && m.config.SnapshotCatchupThreshold > 0 {
+		registrar.SetSnapshotCatchUp(m.config.SnapshotCatchupThreshold, m.requestSnapshot)
 	}
 	// If router already exists, update it
 	if m.router != nil {

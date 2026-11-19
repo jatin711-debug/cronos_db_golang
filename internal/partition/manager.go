@@ -331,6 +331,10 @@ type PartitionManager struct {
 	// Both are guarded by mu.
 	pinned    map[int32]bool
 	releasing map[int32]bool
+	// snapshotThreshold and snapshotRequest are set by SetSnapshotCatchUp.
+	// Guarded by mu.
+	snapshotThreshold int64
+	snapshotRequest   func(partitionID int32, leaderID string) bool
 	// diskGuard refuses publishes while the data disk is nearly full; nil
 	// when there is none.
 	diskGuard       *DiskGuard
@@ -1988,6 +1992,24 @@ func (pm *PartitionManager) LocalReplicaPosition(partitionID int32) ReplicaPosit
 		AcceptingWrites: accepting,
 		LogStart:        partition.Wal.GetFirstOffset(),
 	}
+}
+
+// SetSnapshotCatchUp lets the replication handler ask for a snapshot of a
+// partition's log when an append from its leader shows this replica lacking
+// at least threshold entries and half of the leader's log (see
+// replication.NeedsSnapshot). request starts the copy and reports whether one
+// is running; the handler then turns the append away.
+func (pm *PartitionManager) SetSnapshotCatchUp(threshold int64, request func(partitionID int32, leaderID string) bool) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	pm.snapshotThreshold, pm.snapshotRequest = threshold, request
+}
+
+// SnapshotCatchUp returns what SetSnapshotCatchUp set (0 and nil without it).
+func (pm *PartitionManager) SnapshotCatchUp() (int64, func(partitionID int32, leaderID string) bool) {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	return pm.snapshotThreshold, pm.snapshotRequest
 }
 
 // ReplicaLogRange returns where the log of the replica on the node at addr
