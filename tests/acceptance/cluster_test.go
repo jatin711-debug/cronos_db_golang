@@ -125,12 +125,17 @@ type node struct {
 	container string
 	created   bool
 	up        bool
+
+	// remote is set for a node that runs on another host, which the test
+	// acts on with commands (see remote_test.go); up and frozen then say
+	// what was last done to it.
+	remote *remoteNode
 }
 
 func (n *node) running() bool {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	if n.container != "" {
+	if n.container != "" || n.remote != nil {
 		return n.up && !n.frozen
 	}
 	return n.cmd != nil && !n.frozen
@@ -337,6 +342,13 @@ func (c *cluster) start(n *node) {
 		c.startContainer(n)
 		return
 	}
+	if n.remote != nil {
+		c.remote(n, "start", n.remote.Start)
+		n.mu.Lock()
+		n.up, n.frozen = true, false
+		n.mu.Unlock()
+		return
+	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	if n.cmd != nil {
@@ -385,6 +397,13 @@ func (c *cluster) kill(n *node) {
 		c.killContainer(n)
 		return
 	}
+	if n.remote != nil {
+		c.remote(n, "kill", n.remote.Kill)
+		n.mu.Lock()
+		n.up, n.frozen = false, false
+		n.mu.Unlock()
+		return
+	}
 	n.mu.Lock()
 	cmd, exited := n.cmd, n.exited
 	n.cmd, n.exited, n.frozen = nil, nil, false
@@ -414,6 +433,10 @@ func (c *cluster) wipe(n *node) {
 		c.note(n, "data removed")
 		return
 	}
+	if n.remote != nil {
+		c.remote(n, "wipe", n.remote.Wipe)
+		return
+	}
 	if err := os.RemoveAll(n.dataDir); err != nil {
 		c.t.Fatalf("remove the data of %s: %v", n.id, err)
 	}
@@ -423,6 +446,13 @@ func (c *cluster) wipe(n *node) {
 // freeze stops the node's process from running until thaw.
 func (c *cluster) freeze(n *node) {
 	c.t.Helper()
+	if n.remote != nil {
+		c.remote(n, "freeze", n.remote.Freeze)
+		n.mu.Lock()
+		n.frozen = true
+		n.mu.Unlock()
+		return
+	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	if n.cmd == nil {
@@ -437,6 +467,13 @@ func (c *cluster) freeze(n *node) {
 
 func (c *cluster) thaw(n *node) {
 	c.t.Helper()
+	if n.remote != nil {
+		c.remote(n, "thaw", n.remote.Thaw)
+		n.mu.Lock()
+		n.frozen = false
+		n.mu.Unlock()
+		return
+	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	if n.cmd == nil {

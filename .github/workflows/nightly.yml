@@ -5,6 +5,12 @@ name: nightly-acceptance
 # gets, and the faults these tests make are of that kind. It also runs on
 # request, for any branch:
 #   gh workflow run nightly.yml --ref <branch>
+#
+# With catchup_ab it runs only the catch-up comparison instead: the soak's
+# "consumer group behind" disruption at 450 publishes per second, as in the
+# v0.13.1 compressed soak, once with the baseline release's server and once
+# with the branch's, on the same runner, and a table of how each did:
+#   gh workflow run nightly.yml --ref <branch> -f catchup_ab=true
 on:
   schedule:
     - cron: "17 3 * * *"
@@ -14,6 +20,16 @@ on:
         description: How many times each test runs
         required: false
         default: "3"
+        type: string
+      catchup_ab:
+        description: Run only the catch-up comparison of the baseline release and this branch
+        required: false
+        default: false
+        type: boolean
+      baseline:
+        description: Tag of the release to compare with (catchup_ab)
+        required: false
+        default: v0.13.1
         type: string
 
 permissions:
@@ -27,6 +43,7 @@ jobs:
   # Three server processes: killed, frozen, restarted, restored from backups,
   # flooded, and restarted with a backlog larger than their memory.
   processes:
+    if: ${{ !inputs.catchup_ab }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
@@ -54,6 +71,7 @@ jobs:
   # Three containers of the image: links cut between them, and a memory limit
   # that the kernel enforces.
   containers:
+    if: ${{ !inputs.catchup_ab }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
@@ -77,3 +95,95 @@ jobs:
           path: build/container-logs
           retention-days: 14
           if-no-files-found: ignore
+
+  # The catch-up comparison (catchup_ab). Both legs run on this one runner,
+  # one after the other, with the soak's settings of the compressed run:
+  # 450 publishes per second, 8 MiB segments, nodes of 2 CPUs and 384 MiB,
+  # 100,000 delayed events seeded, and a slow group stopped for 14 minutes
+  # after 30 minutes of warm-up. A leg that fails still leaves its report.
+  catchup-ab:
+    if: ${{ inputs.catchup_ab }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    env:
+      CGO_ENABLED: "0"
+      BASELINE: ${{ inputs.baseline || 'v0.13.1' }}
+      AB: ${{ github.workspace }}/build/catchup-ab
+      CRONOS_SOAK_DURATION: 70m
+      CRONOS_SOAK_WARMUP: 30m
+      CRONOS_SOAK_WINDOW: 14m
+      CRONOS_SOAK_ONLY: "5"
+      CRONOS_SOAK_RATE: "450"
+      CRONOS_SOAK_BURST_RATE: "450"
+      CRONOS_SOAK_SEGMENT_MIB: "8"
+      CRONOS_SOAK_NODE_PROCS: "2"
+      CRONOS_SOAK_NODE_MEMORY_MIB: "384"
+      CRONOS_SOAK_SEED: "100000"
+      CRONOS_SOAK_RECOVER_WITHIN: 45m
+      CRONOS_SOAK_SAMPLE: 30s
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Build both servers and the soak
+        run: |
+          set -euo pipefail
+          mkdir -p "$AB"
+          go build -o "$AB/cronos-api-branch" ./cmd/api
+          git worktree add "$RUNNER_TEMP/baseline" "$BASELINE"
+          (cd "$RUNNER_TEMP/baseline" && go build -o "$AB/cronos-api-baseline" ./cmd/api)
+          go test -c -tags acceptance -o "$AB/acceptance.test" ./tests/acceptance
+          # The nodes' data goes on the runner's larger disk.
+          sudo mkdir -p /mnt/catchup-ab && sudo chown "$(id -u):$(id -g)" /mnt/catchup-ab
+          nproc; free -m; df -h / /mnt
+      - name: Soak with the baseline server
+        id: baseline
+        continue-on-error: true
+        working-directory: tests/acceptance
+        env:
+          TMPDIR: /mnt/catchup-ab
+        run: |
+          CRONOS_BINARY="$AB/cronos-api-baseline" CRONOS_SOAK_OUT="$AB/baseline-report" \
+          CRONOS_ACCEPTANCE_ARTIFACTS="$AB/baseline-logs" \
+            "$AB/acceptance.test" -test.run '^TestSoak$' -test.v -test.timeout 150m 2>&1 | tee "$AB/baseline.log"
+      - name: Soak with the branch's server
+        id: branch
+        continue-on-error: true
+        working-directory: tests/acceptance
+        env:
+          TMPDIR: /mnt/catchup-ab
+        run: |
+          CRONOS_BINARY="$AB/cronos-api-branch" CRONOS_SOAK_OUT="$AB/branch-report" \
+          CRONOS_ACCEPTANCE_ARTIFACTS="$AB/branch-logs" \
+            "$AB/acceptance.test" -test.run '^TestSoak$' -test.v -test.timeout 150m 2>&1 | tee "$AB/branch.log"
+      - name: Compare
+        if: always()
+        run: |
+          {
+            echo "## Catch-up: $BASELINE against ${GITHUB_REF_NAME} ($(git rev-parse --short HEAD))"
+            echo
+            echo "Soak legs: baseline ${{ steps.baseline.outcome }}, branch ${{ steps.branch.outcome }}."
+            echo
+            python3 scripts/soak/catchup-summary.py "$BASELINE=$AB/baseline-report/workload.csv" "branch=$AB/branch-report/workload.csv"
+            echo
+            for leg in baseline branch; do
+              echo "**$leg:**"
+              echo '```'
+              grep -E 'disruption consumer group behind|^--- |FAIL|lost|early' "$AB/$leg.log" | head -20 || true
+              echo '```'
+            done
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Keep the reports and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: catchup-ab
+          path: |
+            build/catchup-ab/*-report
+            build/catchup-ab/*-logs
+            build/catchup-ab/*.log
+          retention-days: 14
+          if-no-files-found: warn

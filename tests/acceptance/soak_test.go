@@ -57,6 +57,13 @@ import (
 //	CRONOS_SOAK_RECOVER_WITHIN   bound on recovery and reconciliation after a disruption (15m)
 //	CRONOS_SOAK_OUT              directory for the CSV and JSON reports
 //	CRONOS_SOAK_PPROF            set to serve each node's profiles on a loopback port
+//	CRONOS_SOAK_ONLY             run only these disruptions (numbers 1-7, comma-separated),
+//	                             one after another once the warm-up is over
+//	CRONOS_SOAK_WARMUP           length of the warm-up (a twelfth of the run, 10m to 1h)
+//	CRONOS_SOAK_WINDOW           length of the outage windows (half a disruption slot)
+//
+// CRONOS_SOAK_ONLY with CRONOS_SOAK_WARMUP and CRONOS_SOAK_WINDOW repeats one
+// disruption of a long run in a short one, to compare builds on it.
 //
 // The nodes run as processes of this machine below normal priority, so that
 // the soak leaves the machine to whatever else it is doing. That makes this
@@ -91,6 +98,10 @@ type soakSettings struct {
 	sample        time.Duration
 	recoverWithin time.Duration
 	out           string
+	// only holds the disruptions to run (1-7), all when empty; warmup and
+	// window override the derived lengths when set.
+	only           map[int]bool
+	warmup, window time.Duration
 }
 
 func envNumber(t *testing.T, name string, fallback float64) float64 {
@@ -142,6 +153,18 @@ func loadSoakSettings(t *testing.T) soakSettings {
 		sample:        envDuration(t, "CRONOS_SOAK_SAMPLE", time.Minute),
 		recoverWithin: envDuration(t, "CRONOS_SOAK_RECOVER_WITHIN", 15*time.Minute),
 		out:           os.Getenv("CRONOS_SOAK_OUT"),
+	}
+	s.warmup = envDuration(t, "CRONOS_SOAK_WARMUP", 0)
+	s.window = envDuration(t, "CRONOS_SOAK_WINDOW", 0)
+	if raw := os.Getenv("CRONOS_SOAK_ONLY"); raw != "" {
+		s.only = make(map[int]bool)
+		for _, field := range strings.Split(raw, ",") {
+			n, err := strconv.Atoi(strings.TrimSpace(field))
+			if err != nil || n < 1 || n > 7 {
+				t.Fatalf("CRONOS_SOAK_ONLY=%q: want disruption numbers from 1 to 7", raw)
+			}
+			s.only[n] = true
+		}
 	}
 	if s.rate <= 0 || s.burstRate < s.rate || s.burstFor >= s.burstEvery || s.nodeProcs < 1 || s.segmentBytes < 1<<20 || s.sample < 5*time.Second {
 		t.Fatalf("inconsistent soak settings: %+v", s)
@@ -538,13 +561,21 @@ func (r *cdcReceiver) flush() {
 	r.arrivalsMu.Unlock()
 }
 
-func startCDCReceiver(t *testing.T, ledger *soakLedger) *cdcReceiver {
+// startCDCReceiver listens on listen (a free loopback port when empty); url
+// is how the nodes reach it, derived from the listener when empty.
+func startCDCReceiver(t *testing.T, ledger *soakLedger, listen, url string) *cdcReceiver {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if listen == "" {
+		listen = "127.0.0.1:0"
+	}
+	ln, err := net.Listen("tcp", listen)
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := &cdcReceiver{ledger: ledger, url: "http://" + ln.Addr().String() + "/cdc"}
+	if url == "" {
+		url = "http://" + ln.Addr().String() + "/cdc"
+	}
+	r := &cdcReceiver{ledger: ledger, url: url}
 	srv := &http.Server{Handler: r, ReadHeaderTimeout: 10 * time.Second}
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { _ = srv.Close() })
@@ -622,6 +653,8 @@ type soak struct {
 	producer *client.Producer
 
 	steadyStart, publishEnd time.Time
+	// disruptions counts the disruptions reached (see disrupt).
+	disruptions int
 	// steadyAt is steadyStart for the sampler, which runs before it is set.
 	steadyAt  atomic.Int64
 	phaseName atomic.Value // string; "" means steady or burst by the clock
@@ -1069,7 +1102,11 @@ func (s *soak) sampleOnce(began time.Time) {
 				sm.timers = sum["cronos_scheduler_active_timers"]
 			}
 		}
-		sm.dataBytes, sm.dlqBytes, sm.files, sm.allocBytes = diskUse(n.dataDir)
+		if n.remote != nil {
+			sm.dataBytes = remoteDiskUse(n)
+		} else {
+			sm.dataBytes, sm.dlqBytes, sm.files, sm.allocBytes = diskUse(n.dataDir)
+		}
 		s.samplesMu.Lock()
 		s.samples[n.id] = append(s.samples[n.id], sm)
 		s.samplesMu.Unlock()
@@ -1209,8 +1246,14 @@ func (s *soak) followerOf(partition int32, leader *node) *node {
 }
 
 // disrupt runs one disruption and reconciles after it, and records both.
+// With CRONOS_SOAK_ONLY it skips the disruptions that are not named there.
 func (s *soak) disrupt(name string, do func(rec *disruptionRecord)) {
 	s.t.Helper()
+	s.disruptions++
+	if len(s.cfg.only) > 0 && !s.cfg.only[s.disruptions] {
+		step(s.t, "disruption %d (%s) skipped: not in CRONOS_SOAK_ONLY", s.disruptions, name)
+		return
+	}
 	rec := disruptionRecord{Name: name, Start: time.Now()}
 	s.phaseName.Store("disruption")
 	step(s.t, "disruption: %s", name)
@@ -1225,6 +1268,10 @@ func clampDuration(d, lo, hi time.Duration) time.Duration { return min(max(d, lo
 
 func TestSoak(t *testing.T) {
 	cfg := loadSoakSettings(t)
+	if rc := loadRemote(t); rc != nil {
+		runSoak(t, cfg, newRemoteCluster(t, rc), rc)
+		return
+	}
 
 	c := newCluster(t,
 		"--fsync-mode=every_event",
@@ -1257,12 +1304,22 @@ func TestSoak(t *testing.T) {
 		}
 		c.nodeArgs = func(n *node) []string { return []string{"--pprof-addr=" + pprofAddr[n.id]} }
 	}
+	runSoak(t, cfg, c, nil)
+}
 
+// runSoak runs the soak on c: local processes, or with rc the nodes of a
+// remote cluster (see remote_test.go).
+func runSoak(t *testing.T, cfg soakSettings, c *cluster, rc *remoteConfig) {
 	s := &soak{t: t, cfg: cfg, c: c, publishLatency: newPhaseHist(), samples: make(map[string][]nodeSample)}
 	s.phaseName.Store("seed")
 	s.l = newSoakLedger(s.phase)
-	s.cdc = startCDCReceiver(t, s.l)
-	c.env = []string{fmt.Sprintf("GOMAXPROCS=%d", cfg.nodeProcs), "CRONOS_CDC_WEBHOOK_URL=" + s.cdc.url}
+	if rc != nil {
+		s.cdc = startCDCReceiver(t, s.l, rc.CDCListen, rc.CDCURL)
+		t.Logf("remote cluster: the nodes must send their change feed to %s", s.cdc.url)
+	} else {
+		s.cdc = startCDCReceiver(t, s.l, "", "")
+		c.env = []string{fmt.Sprintf("GOMAXPROCS=%d", cfg.nodeProcs), "CRONOS_CDC_WEBHOOK_URL=" + s.cdc.url}
+	}
 
 	t.Logf("soak %s: %s steady at %.0f/s, bursts of %.0f/s for %s every %s, %d delayed events seeded, nodes limited to %d MiB and %d CPUs, %d MiB segments",
 		s.l.run, cfg.duration, cfg.rate, cfg.burstRate, cfg.burstFor, cfg.burstEvery, cfg.seed, cfg.nodeMemory>>20, cfg.nodeProcs, cfg.segmentBytes>>20)
@@ -1291,12 +1348,23 @@ func TestSoak(t *testing.T) {
 	s.startPublishers()
 
 	warm := clampDuration(cfg.duration/12, 10*time.Minute, time.Hour)
+	if cfg.warmup > 0 {
+		warm = cfg.warmup
+	}
 	cool := clampDuration(cfg.duration/12, 10*time.Minute, time.Hour)
 	const disruptions = 7
 	slot := (cfg.duration - warm - cool) / disruptions
 	window := clampDuration(slot/2, time.Minute, 2*time.Hour)
+	if cfg.window > 0 {
+		window = cfg.window
+	}
 	down := clampDuration(slot/6, 30*time.Second, 5*time.Minute)
-	at := func(i int) time.Time { return s.steadyStart.Add(warm + time.Duration(i)*slot) }
+	at := func(i int) time.Time {
+		if len(cfg.only) > 0 {
+			return s.steadyStart.Add(warm) // the chosen ones, one after another
+		}
+		return s.steadyStart.Add(warm + time.Duration(i)*slot)
+	}
 	t.Logf("disruptions every %s after %s of warm-up; outage windows of %s, nodes down for %s", slot, warm, window, down)
 
 	// 1. The node that leads partition 0 is lost, and comes back later.
@@ -1383,7 +1451,12 @@ func TestSoak(t *testing.T) {
 	s.disrupt("node replaced", func(rec *disruptionRecord) {
 		victim := s.followerOf(0, c.leaderOf(s.observer, 0))
 		c.kill(victim)
-		held, _, _, _ := diskUse(victim.dataDir)
+		var held int64
+		if victim.remote != nil {
+			held = remoteDiskUse(victim)
+		} else {
+			held, _, _, _ = diskUse(victim.dataDir)
+		}
 		c.wipe(victim)
 		c.start(victim)
 		rec.Detail = fmt.Sprintf("%s lost %d MiB of data and was started empty", victim.id, held>>20)
