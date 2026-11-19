@@ -234,6 +234,12 @@ type Config struct {
 	// below it. 0 disables the check.
 	MaxDiskUsage float64
 
+	// MaxScheduleAhead is how far in the future an event may be scheduled,
+	// by a publish or a reschedule. 0 means no limit. The log is removed
+	// from its start only, so an event due far ahead keeps everything
+	// written after it on disk until it is delivered.
+	MaxScheduleAhead time.Duration
+
 	// FollowerReadsEnabled allows serving some read/replay traffic from followers.
 	FollowerReadsEnabled bool
 

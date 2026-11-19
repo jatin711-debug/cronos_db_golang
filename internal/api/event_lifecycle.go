@@ -46,6 +46,9 @@ func (h *EventServiceHandler) CancelEvent(ctx context.Context, req *types.EventM
 }
 
 func (h *EventServiceHandler) RescheduleEvent(ctx context.Context, req *types.EventMutationRequest) (*types.EventStateResponse, error) {
+	if err := h.checkScheduleAhead(req.GetScheduleTs()); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
 	return h.mutateEvent(ctx, req, lifecycle.Reschedule)
 }
 

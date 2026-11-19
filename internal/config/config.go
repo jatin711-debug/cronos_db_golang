@@ -233,6 +233,7 @@ func LoadConfig() (*types.Config, error) {
 
 	// Load shedding
 	flag.Float64Var(&config.LoadSheddingThreshold, "load-shedding-threshold", 0.0, "Load shedding threshold (0.0-1.0, 0 = disabled)")
+	flag.DurationVar(&config.MaxScheduleAhead, "max-schedule-ahead", 0, "Refuse publishes and reschedules due further ahead than this (0 = no limit). An event due far ahead keeps every later log segment on disk until it is delivered, unless --wal-relocation-bytes moves it")
 	flag.Float64Var(&config.MaxDiskUsage, "max-disk-usage", DefaultMaxDiskUsage, "Refuse publishes once the filesystem holding data-dir is this full (0.0-1.0, 0 = never); they are taken again two points below")
 
 	// Follower reads
@@ -380,6 +381,9 @@ func ValidateConfig(c *types.Config) error {
 	}
 	if c.SchedulerMemoryBytes != 0 && c.SchedulerMemoryBytes < 32<<20 {
 		return fmt.Errorf("scheduler-memory must be zero (default) or at least 32 MiB")
+	}
+	if c.MaxScheduleAhead < 0 || (c.MaxScheduleAhead > 0 && c.MaxScheduleAhead < time.Second) {
+		return fmt.Errorf("max-schedule-ahead must be 0 (no limit) or at least 1s")
 	}
 	if c.MaxDiskUsage != 0 && (c.MaxDiskUsage < 0.05 || c.MaxDiskUsage > 1) {
 		// Publishes are taken again two points below the limit, so a limit

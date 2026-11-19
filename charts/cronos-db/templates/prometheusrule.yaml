@@ -128,4 +128,18 @@ spec:
             severity: warning
           annotations:
             summary: "CronosDB node {{`{{ $labels.instance }}`}} holds 80% of its memory limit and refuses publishes"
+
+        # The log is removed from its start only: one event due far ahead keeps
+        # every segment written after it until it is delivered.
+        - alert: CronosDBRetentionHeldByFutureEvent
+          expr: |
+            max by (instance, partition) (
+              cronos_retention_blocked_bytes{job=~".*cronos-db.*", reason="future_schedule"}
+            ) > {{ .Values.alerts.retentionHeldByFutureEventBytes | int64 }}
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "An event scheduled in the future keeps {{`{{ $value | humanize1024 }}`}}B of log on CronosDB node {{`{{ $labels.instance }}`}}, partition {{`{{ $labels.partition }}`}}"
+            description: "Retention cannot remove segments written after an event that is not due yet. Set --max-schedule-ahead to refuse such events, or enable --wal-relocation-bytes with --event-lifecycle to copy them forward."
 {{- end }}

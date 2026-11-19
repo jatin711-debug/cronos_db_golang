@@ -580,6 +580,24 @@ producers flood a cluster that has a small limit and no consumer; the nodes
 refuse, none dies, and everything that was acknowledged is delivered once a
 consumer starts.
 
+## Events scheduled far ahead
+
+The log is removed from its start only, so an event that is not due yet keeps
+every segment written after it on disk until it is delivered and finished. At
+100 events per second, one event scheduled a day ahead keeps a day of log on
+every replica. Three settings bound this:
+
+- `--max-schedule-ahead` refuses publishes and reschedules due further ahead
+  than the given duration (`InvalidArgument`). Off by default.
+- `--wal-relocation-bytes`, with `--event-lifecycle`, lets a retention pass
+  copy events that are not due yet out of the oldest segment, so that it can
+  go (see [retention and relocation](RETENTION_AND_EVENT_LIFECYCLE.md#retention-and-relocation)).
+- `cronos_retention_blocked_bytes{reason="future_schedule"}` reports the bytes
+  of closed segments kept from the blocking event's segment on, beside
+  `cronos_retention_blocking_offset` and `cronos_retention_blocking_age_seconds`.
+  With `alerts.enabled`, the chart warns when that stays above
+  `alerts.retentionHeldByFutureEventBytes` (10 GiB) for 30 minutes.
+
 A node that restarts leaves on disk what is due and not delivered: a
 subscription reads it from the log at the pace its consumers take it, a few
 megabytes at a time. Two tests hold it to that. In
@@ -684,8 +702,9 @@ The runtime fixes do not close every product or validation gap:
 Known limits of what is released are in the
 [audit](PRODUCTION_AUDIT_2026-09-27.md): log entries are removed from the
 start of a replicated log only, so without eligible relocation one pinned event
-keeps later segments; a partition shared by several topics keeps a completion record per
-finished event until the start of its log passes it. Up to `v0.6.0` a leader
+keeps later segments (see [events scheduled far ahead](#events-scheduled-far-ahead)).
+A group's completions above its floor are kept as bitmap blocks of 4,096 offsets
+(up to `v0.13.1`, one record per finished event). Up to `v0.6.0` a leader
 sent its followers at most 100,000 of those per group, so after a failover a
 group could be given events again that it had finished; since `v0.7.0` they
 go in pages, all of them.

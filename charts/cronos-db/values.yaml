@@ -182,6 +182,12 @@ metrics:
 
 alerts:
   enabled: false
+  # Warn when an event scheduled in the future keeps this many bytes of closed
+  # log segments on a node for 30 minutes: the log is removed from its start
+  # only, so everything written after that event waits for it to be delivered.
+  # Set --max-schedule-ahead, or let --wal-relocation-bytes (with
+  # --event-lifecycle) copy such events forward.
+  retentionHeldByFutureEventBytes: 10737418240
   # Warn when the 99th percentile of delivery lateness, the time between an
   # event's scheduled time and its first delivery to a consumer, stays above
   # this many seconds.

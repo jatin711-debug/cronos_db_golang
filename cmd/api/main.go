@@ -505,6 +505,8 @@ func run() int {
 		eventHandler = api.NewEventServiceHandler(pm, nil, nil)
 	}
 
+	eventHandler.SetMaxScheduleAhead(cfg.MaxScheduleAhead)
+
 	// Wire framework components into event handler
 	if auditLogger != nil {
 		eventHandler.SetAuditLogger(auditLogger)

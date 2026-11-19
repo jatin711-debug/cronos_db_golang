@@ -60,6 +60,9 @@ type EventServiceHandler struct {
 	auditLogger      *audit.Logger
 	authPolicy       *auth.Policy
 	authEnabled      bool // true when JWT authentication is active
+	// maxScheduleAhead is how far ahead an event may be scheduled (0: no
+	// limit; see SetMaxScheduleAhead).
+	maxScheduleAhead time.Duration
 }
 
 // DedupManager is the interface EventService uses for message-ID deduplication.
@@ -157,6 +160,25 @@ func (h *EventServiceHandler) dedupManagerForPartition(partitionID int32) DedupM
 		return p.DedupStore
 	}
 	return nil
+}
+
+// SetMaxScheduleAhead sets how far in the future an event may be scheduled
+// (0: no limit).
+func (h *EventServiceHandler) SetMaxScheduleAhead(limit time.Duration) {
+	h.maxScheduleAhead = limit
+}
+
+// checkScheduleAhead refuses a schedule time further ahead than the limit.
+func (h *EventServiceHandler) checkScheduleAhead(scheduleTs int64) error {
+	if h.maxScheduleAhead <= 0 {
+		return nil
+	}
+	ahead := time.Duration(scheduleTs-time.Now().UnixMilli()) * time.Millisecond
+	if ahead <= h.maxScheduleAhead {
+		return nil
+	}
+	return fmt.Errorf("schedule_ts is %s ahead, more than this node takes (%s, --max-schedule-ahead)",
+		ahead.Round(time.Second), h.maxScheduleAhead)
 }
 
 // SetClusterRouter sets the cluster router for partition-aware request routing.
@@ -477,6 +499,13 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 			ErrorCode: int32(codes.InvalidArgument),
 			Success:   false,
 			Error:     "schedule_ts is required",
+		}, nil
+	}
+	if err := h.checkScheduleAhead(event.GetScheduleTs()); err != nil {
+		return &types.PublishResponse{
+			ErrorCode: int32(codes.InvalidArgument),
+			Success:   false,
+			Error:     err.Error(),
 		}, nil
 	}
 
@@ -881,6 +910,10 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 			continue
 		}
 		if err := h.checkEventSize(ctx, event); err != nil {
+			setError(1, fmt.Sprintf("validation failed: msgId=%q: %v", event.GetMessageId(), err))
+			continue
+		}
+		if err := h.checkScheduleAhead(event.GetScheduleTs()); err != nil {
 			setError(1, fmt.Sprintf("validation failed: msgId=%q: %v", event.GetMessageId(), err))
 			continue
 		}

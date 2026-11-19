@@ -84,14 +84,14 @@ func (p *Partition) PruneWAL(ctx context.Context, opts storage.PruneOptions) (in
 	now := time.Now().UnixMilli()
 	defer func() {
 		if blocker == nil {
-			metrics.SetRetentionBlocker(p.ID, -1, "", 0)
+			metrics.SetRetentionBlocker(p.ID, -1, "", 0, 0)
 			return
 		}
 		age := float64(0)
 		if blocker.CreatedTs > 0 {
 			age = float64(now-blocker.CreatedTs) / 1000
 		}
-		metrics.SetRetentionBlocker(p.ID, blocker.Offset, blockerReason, age)
+		metrics.SetRetentionBlocker(p.ID, blocker.Offset, blockerReason, age, p.closedBytesFrom(blocker.Offset))
 	}()
 
 	deleted, err := p.ConsumerGroup.WithRetentionCheck(func(eligible func(*types.Event) bool) (int, error) {
@@ -164,6 +164,23 @@ func (p *Partition) PruneWAL(ctx context.Context, opts storage.PruneOptions) (in
 		err = p.Wal.Failure()
 	}
 	return deleted, err
+}
+
+// closedBytesFrom returns the size of the closed log segments from the one
+// that holds offset on: what retention has to keep while the entry at offset
+// blocks it. The active segment is never removed, so it does not count.
+func (p *Partition) closedBytesFrom(offset int64) int64 {
+	segments := p.Wal.GetSegments()
+	if len(segments) > 0 {
+		segments = segments[:len(segments)-1] // the active segment
+	}
+	var total int64
+	for _, seg := range segments {
+		if seg.GetLastOffset() >= offset {
+			total += seg.GetSize()
+		}
+	}
+	return total
 }
 
 func (p *Partition) deadLettersSafeToPrune() bool {
