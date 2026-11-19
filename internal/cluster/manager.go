@@ -39,8 +39,11 @@ type Manager struct {
 	// nanoseconds), or 0 if membership has not been observed.
 	membershipChangedAt atomic.Int64
 	// transferRetryAt delays restarting an abandoned handoff; pulling marks
-	// partitions this node is copying for a handoff. Both are guarded by mu.
+	// partitions this node is copying, for a handoff or to catch up (see
+	// catchUpFromSnapshots), and snapshotAt when a catch-up copy last began.
+	// All are guarded by mu.
 	transferRetryAt map[int32]time.Time
+	snapshotAt      map[int32]time.Time
 	// refusedPlacement is, per partition, the nodes the ring last wanted to
 	// place it on that do not advertise what it requires, so that the
 	// refusal is logged when it changes and not every round. Guarded by
@@ -76,33 +79,34 @@ type Manager struct {
 func NewManager(cfg *Config) *Manager {
 	// Convert simple config to internal config
 	config := &ClusterConfig{
-		ClusterID:         "cronos-cluster",
-		NodeID:            cfg.NodeID,
-		BindAddr:          cfg.GossipAddr,
-		AdvertiseAddr:     cfg.GossipAddr,
-		GRPCAddr:          cfg.GRPCAddr,
-		ClientAddr:        cfg.ClientAddr,
-		Capabilities:      normalizeCapabilities(cfg.Capabilities),
-		RaftAddr:          cfg.RaftAddr,
-		RaftDataDir:       cfg.RaftDir,
-		SeedNodes:         cfg.SeedNodes,
-		HeartbeatInterval: cfg.HeartbeatInterval,
-		ElectionTimeout:   cfg.HeartbeatInterval * 5,
-		FailureTimeout:    cfg.FailureTimeout,
-		SuspectTimeout:    cfg.SuspectTimeout,
-		ReplicationFactor: cfg.ReplicationFactor,
-		MinInSyncReplicas: cfg.MinInSyncReplicas,
-		ExpectedNodes:     cfg.ExpectedNodes,
-		FormationWait:     cfg.FormationWait,
-		NumPartitions:     cfg.PartitionCount,
-		VirtualNodes:      cfg.VirtualNodes,
-		ServerTLS:         cfg.ServerTLS,
-		ClientTLS:         cfg.ClientTLS,
-		ClientTLSNow:      cfg.ClientTLSNow,
-		Bootstrap:         cfg.Bootstrap,
-		Rack:              cfg.Rack,
-		Zone:              cfg.Zone,
-		Region:            cfg.Region,
+		ClusterID:                "cronos-cluster",
+		NodeID:                   cfg.NodeID,
+		BindAddr:                 cfg.GossipAddr,
+		AdvertiseAddr:            cfg.GossipAddr,
+		GRPCAddr:                 cfg.GRPCAddr,
+		ClientAddr:               cfg.ClientAddr,
+		Capabilities:             normalizeCapabilities(cfg.Capabilities),
+		RaftAddr:                 cfg.RaftAddr,
+		RaftDataDir:              cfg.RaftDir,
+		SeedNodes:                cfg.SeedNodes,
+		HeartbeatInterval:        cfg.HeartbeatInterval,
+		ElectionTimeout:          cfg.HeartbeatInterval * 5,
+		FailureTimeout:           cfg.FailureTimeout,
+		SuspectTimeout:           cfg.SuspectTimeout,
+		ReplicationFactor:        cfg.ReplicationFactor,
+		MinInSyncReplicas:        cfg.MinInSyncReplicas,
+		SnapshotCatchupThreshold: cfg.SnapshotCatchupThreshold,
+		ExpectedNodes:            cfg.ExpectedNodes,
+		FormationWait:            cfg.FormationWait,
+		NumPartitions:            cfg.PartitionCount,
+		VirtualNodes:             cfg.VirtualNodes,
+		ServerTLS:                cfg.ServerTLS,
+		ClientTLS:                cfg.ClientTLS,
+		ClientTLSNow:             cfg.ClientTLSNow,
+		Bootstrap:                cfg.Bootstrap,
+		Rack:                     cfg.Rack,
+		Zone:                     cfg.Zone,
+		Region:                   cfg.Region,
 	}
 
 	if config.Capabilities == nil {
@@ -349,6 +353,7 @@ func (m *Manager) leaderTasks() {
 	fast := time.NewTicker(500 * time.Millisecond)
 	defer fast.Stop()
 	current := false // whether the metadata was current at the last fast tick
+	ticks := 0       // of the slow ticker
 
 	for {
 		select {
@@ -375,6 +380,9 @@ func (m *Manager) leaderTasks() {
 			// after a failover.
 			m.reconcileLocalLeadership()
 			m.updateReplicaOffsets()
+			if ticks++; ticks%snapshotCheckTicks == 0 {
+				m.catchUpFromSnapshots()
+			}
 			if m.IsLeader() {
 				m.performLeaderTasks()
 			}

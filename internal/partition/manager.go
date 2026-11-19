@@ -1933,6 +1933,9 @@ type ReplicaPosition struct {
 	Epoch int64
 	// AcceptingWrites is true while the node serves publishes as leader.
 	AcceptingWrites bool
+	// LogStart is the offset of the first entry the log holds (0 from a node
+	// that does not report it).
+	LogStart int64
 }
 
 // SetWritableCheck supplies the cluster's view of whether this node may accept
@@ -1983,7 +1986,22 @@ func (pm *PartitionManager) LocalReplicaPosition(partitionID int32) ReplicaPosit
 		LastTerm:        lastTerm,
 		Epoch:           partition.Epoch(),
 		AcceptingWrites: accepting,
+		LogStart:        partition.Wal.GetFirstOffset(),
 	}
+}
+
+// ReplicaLogRange returns where the log of the replica on the node at addr
+// starts and ends ("" for this node): the first offset it holds and its last
+// (-1 when empty). found is false when the node holds no data for the
+// partition.
+func (pm *PartitionManager) ReplicaLogRange(ctx context.Context, addr string, partitionID int32) (found bool, start, last int64, err error) {
+	position := pm.LocalReplicaPosition(partitionID)
+	if addr != "" {
+		if position, err = pm.RemoteReplicaPosition(ctx, addr, partitionID); err != nil {
+			return false, 0, -1, err
+		}
+	}
+	return position.Found, position.LogStart, position.LastOffset, nil
 }
 
 // partitionOnDisk reports whether this node has a directory for the
@@ -2073,6 +2091,7 @@ func (pm *PartitionManager) remoteReplicaPosition(ctx context.Context, addr stri
 		LastTerm:        resp.GetLastTerm(),
 		Epoch:           resp.GetEpoch(),
 		AcceptingWrites: resp.GetAcceptingWrites(),
+		LogStart:        resp.GetLogStart(),
 	}, nil
 }
 

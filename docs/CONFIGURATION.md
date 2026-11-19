@@ -190,7 +190,7 @@ certificates. Changing the replication factor does not create missing nodes.
 | `--replication-batch` | `CRONOS_REPLICATION_BATCH` | `100` | Events per replication batch. Larger batches trade request overhead for batch size and latency. |
 | `--replication-timeout` | `CRONOS_REPLICATION_TIMEOUT` | `10s` | Time allowed for replication. A timeout can leave a write's outcome unknown; retry the same message/request ID. |
 | `--min-insync-replicas` | `CRONOS_MIN_IN_SYNC_REPLICAS` | `1` | Replicas, including the leader, required before a write is acknowledged. `0` means 1; production requires at least 2. Lifecycle mode in a cluster requires a majority of the replication factor. Higher values tolerate fewer unavailable replicas. |
-| `--snapshot-catchup-threshold` | `CRONOS_SNAPSHOT_CATCHUP_THRESHOLD` | `10000` | Parsed but unused. Startup synchronization installs snapshots; connected followers catch up incrementally. Changing this does not trigger snapshots based on lag. |
+| `--snapshot-catchup-threshold` | `CRONOS_SNAPSHOT_CATCHUP_THRESHOLD` | `10000` | Lag, in events, from which a follower copies its leader's log as a snapshot instead of replaying it entry by entry: checked every 30 seconds, when the follower lacks at least this many entries and at least half of what the leader's log holds (a snapshot sends all of it). `0` leaves every follower to replay. Joins, handoffs and moves use snapshots regardless. |
 
 ## Security
 

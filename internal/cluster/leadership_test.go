@@ -68,6 +68,8 @@ type fakePositions struct {
 	local       string
 	byNode      map[string]ReplicaPosition
 	unreachable map[string]bool
+	// starts holds where each node's log starts (see ReplicaLogRange).
+	starts map[string]int64
 }
 
 func (f *fakePositions) set(node string, position ReplicaPosition) {

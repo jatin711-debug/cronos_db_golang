@@ -252,6 +252,9 @@ type Config struct {
 	// MinInSyncReplicas is how many replicas, leader included, acknowledge a
 	// write. It decides how many replicas an election must hear from.
 	MinInSyncReplicas int
+	// SnapshotCatchupThreshold is the lag, in events, from which a follower
+	// copies its leader's log instead of replaying it; 0 never does.
+	SnapshotCatchupThreshold int64
 	// ExpectedNodes is how many nodes a new cluster starts with; partitions
 	// that never had a leader are assigned as soon as that many are alive.
 	// Zero means unknown.
@@ -319,6 +322,10 @@ type ClusterConfig struct {
 	ReplicationFactor int `json:"replication_factor"`
 	// MinInSyncReplicas is how many replicas, leader included, acknowledge a write.
 	MinInSyncReplicas int `json:"min_in_sync_replicas"`
+	// SnapshotCatchupThreshold is the lag, in events, from which a follower
+	// copies its leader's log instead of replaying it (see
+	// catchUpFromSnapshots); 0 never does.
+	SnapshotCatchupThreshold int64 `json:"snapshot_catchup_threshold"`
 	// ExpectedNodes and FormationWait decide when a new cluster assigns its
 	// first partition leaders; see Config.
 	ExpectedNodes int           `json:"expected_nodes"`

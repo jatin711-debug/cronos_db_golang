@@ -181,7 +181,7 @@ func LoadConfig() (*types.Config, error) {
 	flag.IntVar(&config.ReplicationBatchSize, "replication-batch", DefaultReplicationBatchSize, "Replication batch size")
 	flag.DurationVar(&config.ReplicationTimeout, "replication-timeout", 10*time.Second, "Replication timeout")
 	flag.IntVar(&config.MinInSyncReplicas, "min-insync-replicas", DefaultMinInSyncReplicas, "Minimum in-sync replicas (incl. leader) required to ack a write; 0 = 1")
-	flag.Int64Var(&config.SnapshotCatchupThreshold, "snapshot-catchup-threshold", DefaultSnapshotCatchupThreshold, "Reserved; currently unused (does not trigger snapshots based on lag)")
+	flag.Int64Var(&config.SnapshotCatchupThreshold, "snapshot-catchup-threshold", DefaultSnapshotCatchupThreshold, "Replication lag, in events, from which a follower copies its leader's log as a snapshot instead of replaying it entry by entry, when the lag is also at least half of what the leader's log holds (0 = never)")
 
 	// Raft configuration
 	flag.StringVar(&config.RaftDir, "raft-dir", DefaultRaftDir, "Raft data directory")

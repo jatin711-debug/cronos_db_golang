@@ -714,7 +714,7 @@ The runtime fixes do not close every product or validation gap:
   image has no signed workflow provenance; automated publishing requires the
   Docker Hub repository secrets. The thresholded image scan found no fixable
   HIGH/CRITICAL findings at scan time; it is not a claim of zero vulnerabilities.
-- Lag-driven automatic snapshots remain unwired, manual `TriggerRebalance` returns
+- Manual `TriggerRebalance` returns
   `Unimplemented`. Per-subject per-node publish rates can be configured with
   `--tenant-limits-file`; durable storage/in-flight and cluster-wide quotas
   remain unsupported. See the [architecture limitations](../ARCHITECTURE.md#known-limitations).

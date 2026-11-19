@@ -406,6 +406,10 @@ message ReplicationPositionResponse {
 
   // True while this node accepts publishes for the partition as its leader.
   bool accepting_writes = 5;
+
+  // Offset of the first entry the log holds; what lay below was removed.
+  // Nodes up to v0.13.1 do not report it (0).
+  int64 log_start = 6;
 }
 
 // ReplicationLeaderReportRequest asks a node about the partitions it leads.

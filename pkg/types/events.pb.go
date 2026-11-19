@@ -2131,8 +2131,11 @@ type ReplicationPositionResponse struct {
 	Epoch int64 `protobuf:"varint,4,opt,name=epoch,proto3" json:"epoch,omitempty"`
 	// True while this node accepts publishes for the partition as its leader.
 	AcceptingWrites bool `protobuf:"varint,5,opt,name=accepting_writes,json=acceptingWrites,proto3" json:"accepting_writes,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// Offset of the first entry the log holds; what lay below was removed.
+	// Nodes up to v0.13.1 do not report it (0).
+	LogStart      int64 `protobuf:"varint,6,opt,name=log_start,json=logStart,proto3" json:"log_start,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ReplicationPositionResponse) Reset() {
@@ -2198,6 +2201,13 @@ func (x *ReplicationPositionResponse) GetAcceptingWrites() bool {
 		return x.AcceptingWrites
 	}
 	return false
+}
+
+func (x *ReplicationPositionResponse) GetLogStart() int64 {
+	if x != nil {
+		return x.LogStart
+	}
+	return 0
 }
 
 // ReplicationLeaderReportRequest asks a node about the partitions it leads.
@@ -5467,14 +5477,15 @@ const file_proto_events_proto_rawDesc = "" +
 	"\x1aReplicationPositionRequest\x12!\n" +
 	"\fpartition_id\x18\x01 \x01(\x05R\vpartitionId\x12\x1f\n" +
 	"\vfence_epoch\x18\x02 \x01(\x03R\n" +
-	"fenceEpoch\"\xb2\x01\n" +
+	"fenceEpoch\"\xcf\x01\n" +
 	"\x1bReplicationPositionResponse\x12\x14\n" +
 	"\x05found\x18\x01 \x01(\bR\x05found\x12\x1f\n" +
 	"\vlast_offset\x18\x02 \x01(\x03R\n" +
 	"lastOffset\x12\x1b\n" +
 	"\tlast_term\x18\x03 \x01(\x03R\blastTerm\x12\x14\n" +
 	"\x05epoch\x18\x04 \x01(\x03R\x05epoch\x12)\n" +
-	"\x10accepting_writes\x18\x05 \x01(\bR\x0facceptingWrites\" \n" +
+	"\x10accepting_writes\x18\x05 \x01(\bR\x0facceptingWrites\x12\x1b\n" +
+	"\tlog_start\x18\x06 \x01(\x03R\blogStart\" \n" +
 	"\x1eReplicationLeaderReportRequest\"\x9c\x02\n" +
 	"\x15LeaderPartitionReport\x12!\n" +
 	"\fpartition_id\x18\x01 \x01(\x05R\vpartitionId\x12\x14\n" +
