@@ -29,6 +29,9 @@ cosign verify ghcr.io/jatin711-debug/cronos-db:<version> \
   --certificate-identity-regexp '^https://github.com/jatin711-debug/cronos_db_golang/\.github/workflows/release\.yml@'
 ```
 
+In Git Bash on Windows, set `MSYS_NO_PATHCONV=1` for the `cosign` command, or
+Git Bash rewrites the identity pattern and no signature matches.
+
 Or build it from a checkout:
 
 ```bash

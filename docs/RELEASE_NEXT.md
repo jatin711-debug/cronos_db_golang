@@ -112,4 +112,18 @@ million records.
 
 ## Verification
 
-To be completed when the release is cut.
+So far, on the branch:
+
+- **Release workflow, dry run** (run 44516011602, 2026-11-19): every job
+  passed. The amd64 image passed the container fault tests; the arm64 image
+  was built on an arm64 runner, scanned and started; the two were published
+  as one index (`ghcr.io/jatin711-debug/cronos-db-dryrun:0.0.0-dryrun.19`,
+  linux/amd64 and linux/arm64). `gh attestation verify` found its SLSA
+  provenance, signed by `release.yml` on the branch, and its SPDX SBOM, and
+  `cosign verify` with the identity pattern in [Docker](../DOCKER.md) accepted
+  its signature.
+- **Power cuts:** `TestPowerLoss` passed with `every_event` (3 runs) and
+  `batch` (2 runs), and failed with `periodic` as a control; see
+  [fault testing](FAULT_TESTING.md).
+
+The rest is completed when the release is cut.
