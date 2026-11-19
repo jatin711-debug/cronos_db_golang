@@ -2,8 +2,9 @@ name: nightly-acceptance
 
 # Every night, on the default branch: the acceptance tests several times over.
 # A fault that shows once in a few runs is not found by the one run a change
-# gets, and the faults these tests make are of that kind. It also runs on
-# request, for any branch:
+# gets, and the faults these tests make are of that kind. With them run a
+# rolling upgrade from the last release and back, and power cuts on LazyFS.
+# It also runs on request, for any branch:
 #   gh workflow run nightly.yml --ref <branch>
 #
 # With catchup_ab it runs only the catch-up comparison instead: the soak's
@@ -93,6 +94,91 @@ jobs:
         with:
           name: nightly-container-node-logs
           path: build/container-logs
+          retention-days: 14
+          if-no-files-found: ignore
+
+  # A rolling upgrade from the last release to this commit, a rollback to it
+  # on data this commit has written, and an upgrade again, under load.
+  upgrade:
+    if: ${{ !inputs.catchup_ab }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CGO_ENABLED: "0"
+      CRONOS_ACCEPTANCE_ARTIFACTS: ${{ github.workspace }}/build/upgrade-logs
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Build this commit's server and the last release's
+        run: |
+          set -euo pipefail
+          baseline="${{ inputs.baseline }}"
+          if [ -z "$baseline" ]; then baseline=$(git describe --tags --abbrev=0 --match 'v*' HEAD^); fi
+          echo "upgrading from $baseline"
+          mkdir -p build/upgrade
+          go build -o build/upgrade/cronos-api ./cmd/api
+          git worktree add "$RUNNER_TEMP/baseline" "$baseline"
+          (cd "$RUNNER_TEMP/baseline" && go build -o "$GITHUB_WORKSPACE/build/upgrade/cronos-api-baseline" ./cmd/api)
+      - name: Rolling upgrade and rollback
+        env:
+          CRONOS_BINARY: ${{ github.workspace }}/build/upgrade/cronos-api
+          CRONOS_UPGRADE_FROM_BINARY: ${{ github.workspace }}/build/upgrade/cronos-api-baseline
+        run: go test -tags acceptance -count=1 -timeout 50m -v -run '^TestRollingUpgradeAndRollback$' ./tests/acceptance/
+      - name: Keep the node logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-upgrade-node-logs
+          path: build/upgrade-logs
+          retention-days: 14
+          if-no-files-found: ignore
+
+  # Power cuts: each node's data on LazyFS, which drops what was not synced
+  # (docs/FAULT_TESTING.md), with both durable fsync modes.
+  power-loss:
+    if: ${{ !inputs.catchup_ab }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CGO_ENABLED: "0"
+      CRONOS_ACCEPTANCE_ARTIFACTS: ${{ github.workspace }}/build/power-loss-logs
+      LAZYFS_COMMIT: 3edad01aa936b81fed9bd64e47e725fc5ef6c977
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Build LazyFS
+        env:
+          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+        run: |
+          set -euo pipefail
+          sudo apt-get update -o Acquire::Retries=3
+          sudo apt-get install -y --no-install-recommends cmake g++ libfuse3-dev fuse3
+          git clone --quiet https://github.com/dsrhaslab/lazyfs.git "$RUNNER_TEMP/lazyfs"
+          git -C "$RUNNER_TEMP/lazyfs" checkout --quiet "$LAZYFS_COMMIT"
+          (cd "$RUNNER_TEMP/lazyfs/libs/libpcache" && ./build.sh > /dev/null)
+          (cd "$RUNNER_TEMP/lazyfs/lazyfs" && ./build.sh > /dev/null)
+          ls -l /dev/fuse "$RUNNER_TEMP/lazyfs/lazyfs/build/lazyfs"
+      - name: Power cuts with every_event and batch fsync
+        env:
+          CRONOS_LAZYFS_BIN: ${{ runner.temp }}/lazyfs/lazyfs/build/lazyfs
+          LD_LIBRARY_PATH: ${{ runner.temp }}/lazyfs/libs/libpcache/build
+        run: |
+          set -euo pipefail
+          for mode in every_event batch; do
+            CRONOS_POWERLOSS_FSYNC=$mode go test -tags acceptance -count=1 -timeout 25m -v -run '^TestPowerLoss$' ./tests/acceptance/
+          done
+      - name: Keep the node logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-power-loss-node-logs
+          path: build/power-loss-logs
           retention-days: 14
           if-no-files-found: ignore
 
