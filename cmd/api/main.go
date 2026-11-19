@@ -272,8 +272,11 @@ func run() int {
 	})
 	diskMonitor.Start()
 	defer diskMonitor.Stop()
-	if cfg.MaxDiskUsage > 0 {
+	// The ballast first: the guard then judges the disk with it in place.
+	partition.EnsureBallast(cfg.DataDir, cfg.DiskBallastBytes)
+	if cfg.MaxDiskUsage > 0 || cfg.MinFreeDiskBytes > 0 {
 		diskGuard := partition.NewDiskGuard(cfg.DataDir, cfg.MaxDiskUsage)
+		diskGuard.SetMinFree(cfg.MinFreeDiskBytes)
 		diskGuard.Start()
 		defer diskGuard.Stop()
 		pm.SetDiskGuard(diskGuard)

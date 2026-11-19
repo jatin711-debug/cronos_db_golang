@@ -182,6 +182,10 @@ metrics:
 
 alerts:
   enabled: false
+  # Warn when the filesystem holding a node's data stays more than this full
+  # for 10 minutes, before --max-disk-usage (0.95) makes the node refuse
+  # publishes.
+  diskUsedWarnRatio: 0.85
   # Warn when an event scheduled in the future keeps this many bytes of closed
   # log segments on a node for 30 minutes: the log is removed from its start
   # only, so everything written after that event waits for it to be delivered.

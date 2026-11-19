@@ -100,6 +100,23 @@ var diskPublishRefused = promauto.NewGauge(prometheus.GaugeOpts{
 	Help: "1 while the node refuses publishes because the filesystem holding its data is nearly full",
 })
 
+var (
+	diskUsedRatio = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "cronos_disk_used_ratio",
+		Help: "Used fraction of the filesystem holding the node's data, as last sampled",
+	})
+	diskFreeBytes = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "cronos_disk_free_bytes",
+		Help: "Free bytes of the filesystem holding the node's data, as last sampled",
+	})
+)
+
+// diskSample is one reading of the filesystem that holds the data.
+type diskSample struct {
+	used        float64 // used fraction
+	free, total uint64  // bytes
+}
+
 // diskGuardResumeGap is how far below its limit disk usage must fall before a
 // DiskGuard takes publishes again, so that it does not switch back and forth
 // at the limit.
@@ -120,18 +137,20 @@ const diskGuardResumeGap = 0.02
 // for every publish.
 type DiskGuard struct {
 	dataDir  string
-	refuseAt float64 // used fraction at which publishes are refused
+	refuseAt float64 // used fraction at which publishes are refused (0: none)
+	minFree  uint64  // free bytes below which publishes are refused (0: none)
 	interval time.Duration
-	usage    func() (float64, error)
-	used     atomic.Uint64 // math.Float64bits of the last sample
+	usage    func() (diskSample, error)
+	used     atomic.Uint64 // math.Float64bits of the last sample's used fraction
+	free     atomic.Uint64 // free bytes in the last sample
 	refusing atomic.Bool
 	quit     chan struct{}
 	stopOnce sync.Once
 }
 
 // NewDiskGuard returns a guard that refuses publishes once the filesystem
-// holding dataDir is refuseAt full (a fraction in (0, 1]), and takes them again
-// below refuseAt minus two points.
+// holding dataDir is refuseAt full (a fraction in (0, 1]; 0 for no such
+// limit), and takes them again below refuseAt minus two points.
 func NewDiskGuard(dataDir string, refuseAt float64) *DiskGuard {
 	g := &DiskGuard{
 		dataDir:  dataDir,
@@ -139,14 +158,21 @@ func NewDiskGuard(dataDir string, refuseAt float64) *DiskGuard {
 		interval: 2 * time.Second,
 		quit:     make(chan struct{}),
 	}
-	g.usage = func() (float64, error) {
+	g.usage = func() (diskSample, error) {
 		stat, err := disk.Usage(g.dataDir)
 		if err != nil {
-			return 0, fmt.Errorf("disk usage check: %w", err)
+			return diskSample{}, fmt.Errorf("disk usage check: %w", err)
 		}
-		return stat.UsedPercent / 100.0, nil
+		return diskSample{used: stat.UsedPercent / 100.0, free: stat.Free, total: stat.Total}, nil
 	}
 	return g
+}
+
+// SetMinFree makes the guard refuse publishes, too, while fewer than bytes
+// are free, and take them again once two points of the filesystem more are
+// free. Call it before Start.
+func (g *DiskGuard) SetMinFree(bytes int64) {
+	g.minFree = uint64(max(bytes, 0))
 }
 
 // Start samples usage once, so that the first publishes are already judged,
@@ -175,23 +201,34 @@ func (g *DiskGuard) Stop() {
 // sample reads usage and decides whether publishes are refused. A failed read
 // leaves the decision as it was.
 func (g *DiskGuard) sample() {
-	used, err := g.usage()
+	s, err := g.usage()
 	if err != nil {
 		slog.Warn("Disk usage check failed", "data_dir", g.dataDir, "error", err)
 		return
 	}
-	g.used.Store(math.Float64bits(used))
+	g.used.Store(math.Float64bits(s.used))
+	g.free.Store(s.free)
+	diskUsedRatio.Set(s.used)
+	diskFreeBytes.Set(float64(s.free))
+	full := g.refuseAt > 0 && s.used >= g.refuseAt
+	short := g.minFree > 0 && s.free < g.minFree
+	// Two points of the filesystem below the limits before publishes come
+	// back, so that usage at a limit does not switch them on and off.
+	gap := uint64(diskGuardResumeGap * float64(s.total))
+	clear := (g.refuseAt <= 0 || s.used < g.refuseAt-diskGuardResumeGap) &&
+		(g.minFree == 0 || s.free >= g.minFree+gap)
 	switch {
-	case !g.refusing.Load() && used >= g.refuseAt:
+	case !g.refusing.Load() && (full || short):
 		g.refusing.Store(true)
 		diskPublishRefused.Set(1)
 		slog.Error("Refusing publishes: the filesystem holding the data is nearly full",
-			"data_dir", g.dataDir, "used", fmt.Sprintf("%.1f%%", used*100), "limit", fmt.Sprintf("%.1f%%", g.refuseAt*100))
-	case g.refusing.Load() && used < g.refuseAt-diskGuardResumeGap:
+			"data_dir", g.dataDir, "used", fmt.Sprintf("%.1f%%", s.used*100), "free_bytes", s.free,
+			"limit", fmt.Sprintf("%.1f%%", g.refuseAt*100), "min_free_bytes", g.minFree)
+	case g.refusing.Load() && clear:
 		g.refusing.Store(false)
 		diskPublishRefused.Set(0)
 		slog.Info("Taking publishes again: disk usage is below the limit",
-			"data_dir", g.dataDir, "used", fmt.Sprintf("%.1f%%", used*100), "limit", fmt.Sprintf("%.1f%%", g.refuseAt*100))
+			"data_dir", g.dataDir, "used", fmt.Sprintf("%.1f%%", s.used*100), "free_bytes", s.free)
 	}
 }
 
@@ -201,6 +238,10 @@ func (g *DiskGuard) Check() error {
 		return nil
 	}
 	used := math.Float64frombits(g.used.Load())
+	if free := g.free.Load(); g.minFree > 0 && (g.refuseAt <= 0 || used < g.refuseAt) {
+		return fmt.Errorf("the node's disk has %d bytes free, at or below its floor of %d (--min-free-disk-bytes); publishes are refused until more is free (deliveries continue, and retention frees space as consumers finish events)",
+			free, g.minFree)
+	}
 	return fmt.Errorf("the node's disk is %.1f%% full, at or above its limit of %.1f%%; publishes are refused until usage falls below %.1f%% (deliveries continue, and retention frees space as consumers finish events)",
 		used*100, g.refuseAt*100, (g.refuseAt-diskGuardResumeGap)*100)
 }

@@ -234,6 +234,16 @@ type Config struct {
 	// below it. 0 disables the check.
 	MaxDiskUsage float64
 
+	// MinFreeDiskBytes refuses publishes while the filesystem holding DataDir
+	// has less free space than this, whatever MaxDiskUsage says. 0 disables
+	// the check.
+	MinFreeDiskBytes int64
+
+	// DiskBallastBytes is the size of a file the node keeps in DataDir to
+	// reserve space: deleting it frees room to recover a full disk. 0 keeps
+	// none (and removes one left from before).
+	DiskBallastBytes int64
+
 	// MaxScheduleAhead is how far in the future an event may be scheduled,
 	// by a publish or a reschedule. 0 means no limit. The log is removed
 	// from its start only, so an event due far ahead keeps everything

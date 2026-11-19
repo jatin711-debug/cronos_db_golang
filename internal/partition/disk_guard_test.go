@@ -12,7 +12,7 @@ func TestDiskGuard_RefusesAtTheLimitWithHysteresis(t *testing.T) {
 	g := NewDiskGuard(t.TempDir(), 0.90)
 	var used float64
 	var readErr error
-	g.usage = func() (float64, error) { return used, readErr }
+	g.usage = func() (diskSample, error) { return diskSample{used: used, free: 1 << 40, total: 1 << 41}, readErr }
 
 	steps := []struct {
 		used    float64

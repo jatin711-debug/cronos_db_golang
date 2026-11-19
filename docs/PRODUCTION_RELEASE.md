@@ -580,6 +580,26 @@ producers flood a cluster that has a small limit and no consumer; the nodes
 refuse, none dies, and everything that was acknowledged is delivered once a
 consumer starts.
 
+## Disk space
+
+A node refuses publishes, with `ResourceExhausted`, once the filesystem that
+holds its data is `--max-disk-usage` full (95 percent by default), and takes
+them again two points below. Deliveries, acknowledgements, retention and
+replication go on, so consumers finishing events frees space. A percentage
+leaves little room on a small disk and more than needed on a large one:
+`--min-free-disk-bytes` adds a floor in bytes, and publishes are refused below
+whichever limit comes first. `cronos_disk_used_ratio`, `cronos_disk_free_bytes`
+and `cronos_disk_publish_refused` show where a node stands. With
+`alerts.enabled` the chart warns at `alerts.diskUsedWarnRatio` (85 percent)
+for 10 minutes, and again once publishes are refused.
+
+`--disk-ballast-bytes` keeps a file of that size, `disk-ballast` in the data
+directory, that holds space in reserve. If a disk fills regardless, delete the
+file: the room it frees lets the node deliver, prune its log and restart. The
+node creates it again at its next start, if there is room for it and 256 MiB
+besides. On Linux the space is allocated with `fallocate`; on a filesystem
+that compresses data, a ballast may reserve less than its size.
+
 ## Events scheduled far ahead
 
 The log is removed from its start only, so an event that is not due yet keeps

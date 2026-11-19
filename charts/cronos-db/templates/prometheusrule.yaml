@@ -56,6 +56,14 @@ spec:
           annotations:
             summary: "CronosDB node {{`{{ $labels.instance }}`}} cannot start new WAL segments; full segments keep growing"
 
+        - alert: CronosDBDiskFillingUp
+          expr: max by (instance) (cronos_disk_used_ratio{job=~".*cronos-db.*"}) > {{ .Values.alerts.diskUsedWarnRatio }}
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "The data disk of CronosDB node {{`{{ $labels.instance }}`}} is {{`{{ $value | humanizePercentage }}`}} full; publishes are refused at --max-disk-usage"
+
         - alert: CronosDBPublishesRefusedDiskFull
           expr: max by (instance) (cronos_disk_publish_refused{job=~".*cronos-db.*"}) > 0
           for: 1m

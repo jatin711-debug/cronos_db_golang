@@ -234,6 +234,8 @@ func LoadConfig() (*types.Config, error) {
 	// Load shedding
 	flag.Float64Var(&config.LoadSheddingThreshold, "load-shedding-threshold", 0.0, "Load shedding threshold (0.0-1.0, 0 = disabled)")
 	flag.DurationVar(&config.MaxScheduleAhead, "max-schedule-ahead", 0, "Refuse publishes and reschedules due further ahead than this (0 = no limit). An event due far ahead keeps every later log segment on disk until it is delivered, unless --wal-relocation-bytes moves it")
+	flag.Int64Var(&config.MinFreeDiskBytes, "min-free-disk-bytes", 0, "Refuse publishes while the filesystem holding data-dir has less free space than this many bytes, whatever --max-disk-usage says (0 = no floor)")
+	flag.Int64Var(&config.DiskBallastBytes, "disk-ballast-bytes", 0, "Keep a file of this many bytes in data-dir to reserve space; delete it to recover a full disk, and the node creates it again at its next start when there is room (0 = none, and one left from before is removed)")
 	flag.Float64Var(&config.MaxDiskUsage, "max-disk-usage", DefaultMaxDiskUsage, "Refuse publishes once the filesystem holding data-dir is this full (0.0-1.0, 0 = never); they are taken again two points below")
 
 	// Follower reads
@@ -381,6 +383,9 @@ func ValidateConfig(c *types.Config) error {
 	}
 	if c.SchedulerMemoryBytes != 0 && c.SchedulerMemoryBytes < 32<<20 {
 		return fmt.Errorf("scheduler-memory must be zero (default) or at least 32 MiB")
+	}
+	if c.MinFreeDiskBytes < 0 || c.DiskBallastBytes < 0 {
+		return fmt.Errorf("min-free-disk-bytes and disk-ballast-bytes must not be negative")
 	}
 	if c.MaxScheduleAhead < 0 || (c.MaxScheduleAhead > 0 && c.MaxScheduleAhead < time.Second) {
 		return fmt.Errorf("max-schedule-ahead must be 0 (no limit) or at least 1s")
