@@ -40,6 +40,9 @@ import (
 //	                           written here, with {{FIFO}} where the fault FIFO goes
 //	CRONOS_LAZYFS_UNMOUNT      the unmount command (fusermount3 -u, else fusermount -u)
 //	CRONOS_POWERLOSS_ROUNDS    single-node cuts before the cut of all nodes (6)
+//	CRONOS_POWERLOSS_FSYNC     the nodes' --fsync-mode (every_event); batch is the
+//	                           production default, and periodic, which acknowledges
+//	                           before it syncs, should fail: a check of the test itself
 //
 // The configuration written here follows LazyFS 0.2's default.toml; another
 // version may name its settings differently, so give it CRONOS_LAZYFS_CONFIG.
@@ -54,7 +57,12 @@ func TestPowerLoss(t *testing.T) {
 			t.Fatalf("CRONOS_POWERLOSS_ROUNDS=%q", raw)
 		}
 	}
-	c := newCluster(t, "--fsync-mode=every_event")
+	fsync := "every_event"
+	if mode := os.Getenv("CRONOS_POWERLOSS_FSYNC"); mode != "" {
+		fsync = mode
+	}
+	t.Logf("nodes sync with --fsync-mode=%s", fsync)
+	c := newCluster(t, "--fsync-mode="+fsync)
 	mounts := make(map[string]*lazyMount, len(c.nodes))
 	for _, n := range c.nodes {
 		m := mountLazyFS(t, bin, filepath.Join(c.dir, "lazyfs-"+n.id))

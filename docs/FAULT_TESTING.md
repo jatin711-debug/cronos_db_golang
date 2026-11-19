@@ -39,10 +39,26 @@ the test writes follows LazyFS 0.2's `config/default.toml`. For another
 version, pass a configuration with `CRONOS_LAZYFS_CONFIG` and put `{{FIFO}}`
 where the fault FIFO path goes.
 
-**Status:** the test is written and compiles for Linux. It has not run yet: it
-needs a Linux machine with FUSE, which the development machine is not. Until
-it passes, power-loss safety rests on the design (an event is acknowledged
-only once a majority has synced it) and on kill tests, which cannot show it.
+`CRONOS_POWERLOSS_FSYNC` sets the nodes' `--fsync-mode` (`every_event`).
+
+**Results (2026-11-19, WSL2 Ubuntu 24.04, LazyFS at commit `3edad01`):**
+
+| `--fsync-mode` | Runs | Outcome |
+|---|---|---|
+| `every_event` | 3 | Passed: every acknowledged event delivered, none twice, replica logs equal |
+| `batch` (the production default) | 2 | Passed, as above |
+| `periodic` | 1 | Failed, as it should: one acknowledged event was never delivered, 72 were delivered twice, and one node lost a partition. `periodic` acknowledges before it syncs, and production mode refuses it; the run shows that the test detects lost writes |
+
+Each run cut single nodes six times, leaders first, then all three nodes at
+once, under a workload of about 40 publishes per second. These are short runs
+on one machine: they show that acknowledgement waits for a synced majority,
+not how a long run under load behaves.
+
+LazyFS builds without root when `cmake` and the libfuse3 headers are missing:
+`cmake` from a Python virtual environment, the headers from
+`apt-get download libfuse3-dev` unpacked with `dpkg -x`, named with `CPATH`
+and `LIBRARY_PATH`, and `CMAKE_POLICY_VERSION_MINIMUM=3.5` for CMake 4. The
+executable needs `LD_LIBRARY_PATH` pointing at `libs/libpcache/build`.
 LazyFS itself has had bugs (Jepsen found one that zeroed a file extended
 after a dropped write), so a failure needs a look at the node logs before it
 is blamed on CronosDB.
