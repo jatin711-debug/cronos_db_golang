@@ -11,6 +11,11 @@ name: release-binaries
 # ghcr.io always, for linux/amd64 and linux/arm64 behind one tag, attested
 # and signed; to Docker Hub as well when its credentials are in the secrets.
 # A manual run stages an amd64 image archive unless publish_image is set.
+#
+# A dry run (dry_run, from any branch: gh workflow run release.yml --ref <branch>
+# -f tag=dryrun -f dry_run=true) does every step on the branch's commit,
+# pushes, attests and signs as ghcr.io/<owner>/cronos-db-dryrun, and touches
+# no release and no Docker Hub repository.
 on:
   release:
     types: [published]
@@ -22,6 +27,11 @@ on:
         type: string
       publish_image:
         description: Publish the tested images (ghcr.io, and Docker Hub with its secrets) instead of staging an archive
+        required: false
+        default: false
+        type: boolean
+      dry_run:
+        description: Run every step on the dispatched commit and publish only to ghcr.io/<owner>/cronos-db-dryrun
         required: false
         default: false
         type: boolean
@@ -38,10 +48,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      TAG: ${{ inputs.dry_run && format('v0.0.0-dryrun.{0}', github.run_number) || github.event.release.tag_name || inputs.tag }}
+      IMAGE_NAME: ${{ inputs.dry_run && 'cronos-db-dryrun' || 'cronos-db' }}
     steps:
       - name: Require a draft release for preparation
-        if: github.event_name == 'workflow_dispatch' && !inputs.publish_image
+        if: github.event_name == 'workflow_dispatch' && !inputs.publish_image && !inputs.dry_run
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -50,7 +61,7 @@ jobs:
           test "$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" = true
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.release.tag_name || inputs.tag }}
+          ref: ${{ inputs.dry_run && github.sha || github.event.release.tag_name || inputs.tag }}
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
@@ -94,6 +105,7 @@ jobs:
           kill "$server" || true
           exit 1
       - name: Attach the binaries to the release
+        if: ${{ !inputs.dry_run }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "$TAG" dist/*.tar.gz dist/*.zip dist/SHA256SUMS --clobber
@@ -111,15 +123,17 @@ jobs:
     outputs:
       digest: ${{ steps.pushed.outputs.digest }}
     env:
-      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      TAG: ${{ inputs.dry_run && format('v0.0.0-dryrun.{0}', github.run_number) || github.event.release.tag_name || inputs.tag }}
+      IMAGE_NAME: ${{ inputs.dry_run && 'cronos-db-dryrun' || 'cronos-db' }}
       CRONOS_IMAGE: cronos-db:release-check
       CRONOS_ACCEPTANCE_ARTIFACTS: ${{ github.workspace }}/build/release-image-logs
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.release.tag_name || inputs.tag }}
+          ref: ${{ inputs.dry_run && github.sha || github.event.release.tag_name || inputs.tag }}
           fetch-depth: 0
       - name: Require a release tag from main
+        if: ${{ !inputs.dry_run }}
         shell: bash
         run: |
           set -euo pipefail
@@ -147,7 +161,7 @@ jobs:
       - name: Test network faults and memory-limited restart on this image
         run: go test -tags acceptance -count=1 -timeout 40m -v -run 'TestNetworkPartitions|TestRestartInContainersWithABacklogLargerThanTheirMemory' ./tests/acceptance/
       - name: Stage the tested image on the draft release
-        if: github.event_name == 'workflow_dispatch' && !inputs.publish_image
+        if: github.event_name == 'workflow_dispatch' && !inputs.publish_image && !inputs.dry_run
         env:
           GH_TOKEN: ${{ github.token }}
           IMAGE: docker.io/johnny711dock/cronos-db
@@ -164,18 +178,18 @@ jobs:
           sha256sum "$archive" > IMAGE_ARCHIVE_SHA256
           gh release upload "$TAG" "$archive" IMAGE_ID IMAGE_ARCHIVE_SHA256 release-image-scan.json --clobber
       - uses: docker/login-action@v3
-        if: github.event_name == 'release' || inputs.publish_image
+        if: github.event_name == 'release' || inputs.publish_image || inputs.dry_run
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
       - name: Push the tested image by digest
-        if: github.event_name == 'release' || inputs.publish_image
+        if: github.event_name == 'release' || inputs.publish_image || inputs.dry_run
         id: pushed
         shell: bash
         run: |
           set -euo pipefail
-          repo="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/cronos-db"
+          repo="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/$IMAGE_NAME"
           candidate="$repo:build-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-amd64"
           docker tag "$CRONOS_IMAGE" "$candidate"
           docker push "$candidate"
@@ -200,7 +214,7 @@ jobs:
   # and report ready; the container tests run on the amd64 image.
   image-arm64:
     needs: binaries
-    if: github.event_name == 'release' || inputs.publish_image
+    if: github.event_name == 'release' || inputs.publish_image || inputs.dry_run
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
     permissions:
@@ -209,12 +223,13 @@ jobs:
     outputs:
       digest: ${{ steps.pushed.outputs.digest }}
     env:
-      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      TAG: ${{ inputs.dry_run && format('v0.0.0-dryrun.{0}', github.run_number) || github.event.release.tag_name || inputs.tag }}
+      IMAGE_NAME: ${{ inputs.dry_run && 'cronos-db-dryrun' || 'cronos-db' }}
       CRONOS_IMAGE: cronos-db:release-check-arm64
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.release.tag_name || inputs.tag }}
+          ref: ${{ inputs.dry_run && github.sha || github.event.release.tag_name || inputs.tag }}
       - name: Build once from the release source
         run: docker build --pull --no-cache-filter runtime --label "org.opencontainers.image.revision=$(git rev-parse HEAD)" --label "org.opencontainers.image.version=$TAG" --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" -t "$CRONOS_IMAGE" .
       - name: Require an arm64 image
@@ -257,7 +272,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          repo="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/cronos-db"
+          repo="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/$IMAGE_NAME"
           candidate="$repo:build-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-arm64"
           docker tag "$CRONOS_IMAGE" "$candidate"
           docker push "$candidate"
@@ -280,7 +295,7 @@ jobs:
   # repository secrets the same index is copied there, attested and signed too.
   publish-image:
     needs: [image, image-arm64]
-    if: github.event_name == 'release' || inputs.publish_image
+    if: github.event_name == 'release' || inputs.publish_image || inputs.dry_run
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -290,11 +305,12 @@ jobs:
       attestations: write
       artifact-metadata: write
     env:
-      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      TAG: ${{ inputs.dry_run && format('v0.0.0-dryrun.{0}', github.run_number) || github.event.release.tag_name || inputs.tag }}
+      IMAGE_NAME: ${{ inputs.dry_run && 'cronos-db-dryrun' || 'cronos-db' }}
       AMD64_DIGEST: ${{ needs.image.outputs.digest }}
       ARM64_DIGEST: ${{ needs.image-arm64.outputs.digest }}
       HUB_IMAGE: docker.io/johnny711dock/cronos-db
-      HAS_DOCKERHUB: ${{ secrets.DOCKERHUB_TOKEN != '' }}
+      HAS_DOCKERHUB: ${{ secrets.DOCKERHUB_TOKEN != '' && !inputs.dry_run }}
     steps:
       - uses: docker/setup-buildx-action@v3
       - uses: sigstore/cosign-installer@v3
@@ -309,7 +325,7 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$AMD64_DIGEST" =~ ^sha256:[0-9a-f]{64}$ && "$ARM64_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
-          repo="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/cronos-db"
+          repo="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/$IMAGE_NAME"
           docker buildx imagetools create -t "$repo:${TAG#v}" "$repo@$AMD64_DIGEST" "$repo@$ARM64_DIGEST"
           digest=$(docker buildx imagetools inspect "$repo:${TAG#v}" --format '{{json .Manifest}}' | jq -r .digest)
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
@@ -369,6 +385,14 @@ jobs:
         if: env.HAS_DOCKERHUB == 'true'
         run: cosign sign --yes "$HUB_IMAGE@${{ steps.index.outputs.digest }}"
       - name: Attach image evidence to the release
+        if: ${{ !inputs.dry_run }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "$TAG" IMAGE_DIGEST cronos-db.spdx.json --repo "$GITHUB_REPOSITORY" --clobber
+      - name: Keep the image evidence of the run
+        uses: actions/upload-artifact@v4
+        with:
+          name: published-image-evidence
+          path: |
+            IMAGE_DIGEST
+            cronos-db.spdx.json
