@@ -84,6 +84,10 @@ func (g *GroupManager) PassOtherEntries(groupID string, partitionID int32, from,
 			pass = false
 		}
 	}
+	var plan *completionPlan
+	if pass {
+		plan = g.planLocked(groupID, partitionID, nil, to, -1, false)
+	}
 	store := g.offsetStore
 	g.mu.RUnlock()
 	if !pass {
@@ -91,12 +95,11 @@ func (g *GroupManager) PassOtherEntries(groupID string, partitionID int32, from,
 	}
 
 	if store != nil {
-		// Not synced: a floor that is lost is raised again by the next sweep,
-		// and the records it covers are removed only after it is raised here.
+		// Not synced: a floor that is lost is raised again by the next sweep.
 		err := store.withDB(func(db *pebble.DB) error {
 			batch := db.NewBatch()
 			defer batch.Close()
-			if err := setFloorInBatch(batch, groupID, partitionID, to); err != nil {
+			if err := writePlan(batch, partitionID, plan); err != nil {
 				return err
 			}
 			return batch.Commit(pebble.NoSync)
@@ -110,17 +113,12 @@ func (g *GroupManager) PassOtherEntries(groupID string, partitionID int32, from,
 	}
 
 	g.mu.Lock()
+	defer g.mu.Unlock()
 	group := g.groups[groupID]
 	if group == nil {
-		g.mu.Unlock()
 		return false, nil // removed meanwhile
 	}
-	if store == nil {
-		for offset := floor; offset < to; offset++ {
-			delete(g.completed, completionKey(groupID, partitionID, offset))
-		}
-	}
-	g.setFloorLocked(groupID, partitionID, to)
+	g.installPlanLocked(partitionID, plan)
 	if to > group.CommittedOffsets[partitionID] {
 		group.CommittedOffsets[partitionID] = to
 		group.UpdatedTS = time.Now().UnixMilli()
@@ -128,9 +126,7 @@ func (g *GroupManager) PassOtherEntries(groupID string, partitionID int32, from,
 			_ = store.CommitOffset(groupID, partitionID, to)
 		}
 	}
-	g.raiseHighestCompleted(completionPrefix(groupID, partitionID), to-1)
+	g.raiseHighestCompleted(plan.prefix, to-1)
 	g.progressVersion.Add(1)
-	g.mu.Unlock()
-	g.dropCompletionsBelow(store, partitionID, map[string]int64{groupID: to})
 	return true, nil
 }

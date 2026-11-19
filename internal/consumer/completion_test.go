@@ -2,6 +2,7 @@ package consumer
 
 import (
 	"fmt"
+	"math/bits"
 	"testing"
 	"time"
 
@@ -271,6 +272,8 @@ func TestCompletionAfterCloseDoesNotPanic(t *testing.T) {
 	}
 }
 
+// completionRecordCount counts the completions stored for a group on
+// partition 0: the bits set in its stored blocks.
 func completionRecordCount(t *testing.T, manager *GroupManager, group string) int {
 	t.Helper()
 	count := 0
@@ -282,7 +285,17 @@ func completionRecordCount(t *testing.T, manager *GroupManager, group string) in
 		}
 		defer iter.Close()
 		for iter.First(); iter.Valid(); iter.Next() {
-			count++
+			if _, _, ok := parseBlockKey(string(iter.Key())); !ok {
+				count++ // a per-offset record of an earlier release
+				continue
+			}
+			block, err := decodeBlock(iter.Value())
+			if err != nil {
+				return err
+			}
+			for _, word := range block {
+				count += bits.OnesCount64(word)
+			}
 		}
 		return nil
 	})

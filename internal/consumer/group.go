@@ -82,7 +82,10 @@ type GroupManager struct {
 	groups      map[string]*types.ConsumerGroup
 	partitions  map[int32]*types.Partition // partition_id -> partition
 	offsetStore *OffsetStore               // persistent offset storage
-	completed   map[string]bool            // Used only by the in-memory manager.
+	// sets holds each group's completions above its floor per partition,
+	// keyed by completionPrefix (see completion_set.go). Guarded by mu, and
+	// changed only with commitMu held too.
+	sets map[string]*completionSet
 	// floors holds each group's completion floor per partition, keyed by
 	// completionPrefix: every offset below it is complete. Guarded by mu.
 	floors map[string]int64
@@ -95,9 +98,8 @@ type GroupManager struct {
 
 	// completedMax caches, per group and partition, the highest offset known
 	// complete. Guarded by completedMaxMu, which is never held while waiting
-	// for mu. A key is absent until it is first read from the stored state;
-	// raises that come before then wait in completedRaised (see
-	// raiseHighestCompleted).
+	// for mu. A key is absent until it is first read; raises that come before
+	// then wait in completedRaised (see raiseHighestCompleted).
 	completedMaxMu  sync.Mutex
 	completedMax    map[string]int64
 	completedRaised map[string]int64
@@ -158,6 +160,9 @@ func NewGroupManagerWithStore(offsetStore *OffsetStore) *GroupManager {
 	if offsetStore != nil {
 		if floors, err := offsetStore.loadFloors(); err == nil {
 			gm.floors = floors
+		}
+		if sets, err := offsetStore.loadCompletionSets(gm.floors); err == nil {
+			gm.sets = sets
 		}
 		for id, group := range offsetStore.LoadGroups() {
 			// Progress is written with every ack; the group record only when
@@ -568,19 +573,38 @@ func (g *GroupManager) ListGroups() []*types.ConsumerGroup {
 	return groups
 }
 
-// DeleteGroup deletes a consumer group and its persisted metadata, if any.
+// DeleteGroup deletes a consumer group, its persisted metadata and its
+// progress. A group created later under the same name starts afresh: up to
+// v0.13.1 it found the old group's floor and completions and skipped what
+// they covered.
 func (g *GroupManager) DeleteGroup(groupID string) error {
+	g.commitMu.Lock()
+	defer g.commitMu.Unlock()
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	if _, exists := g.groups[groupID]; !exists {
+	group, exists := g.groups[groupID]
+	if !exists {
 		return fmt.Errorf("group %s not found", groupID)
 	}
 
 	delete(g.groups, groupID)
+	var prefixes []string
+	for partitionID := range group.CommittedOffsets {
+		prefix := completionPrefix(groupID, partitionID)
+		prefixes = append(prefixes, prefix)
+		delete(g.sets, prefix)
+		delete(g.floors, prefix)
+		g.completedMaxMu.Lock()
+		delete(g.completedMax, prefix)
+		delete(g.completedRaised, prefix)
+		g.completedMaxMu.Unlock()
+	}
 	if g.offsetStore != nil {
 		_ = g.offsetStore.DeletePersistedGroup(groupID)
+		_ = g.offsetStore.deleteProgress(prefixes)
 	}
+	g.progressVersion.Add(1)
 	return nil
 }
 

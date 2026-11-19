@@ -15,9 +15,10 @@ import (
 // A group's progress on a partition has two parts. The completion floor is
 // the offset below which every event is complete; it only moves over events
 // whose completion the server validated. Above the floor, completion is
-// recorded per event, because schedule order need not match WAL order and a
-// later delivery must not carry the floor over an unfinished timer. Records the
-// floor has passed are redundant and are removed as it advances.
+// recorded per event, as a bit in a block of offsets (see completion_set.go),
+// because schedule order need not match WAL order and a later delivery must
+// not carry the floor over an unfinished timer. Bits the floor has passed are
+// redundant and are cleared as it advances.
 //
 // The floor is distinct from the group's committed offset, which older APIs
 // can set directly: an offset committed that way proves nothing about the
@@ -33,10 +34,6 @@ import (
 // when a partition starts, and ApplyReplicatedProgress takes a leader's
 // progress only as far as the local log reaches.
 
-func completionKey(group string, partition int32, offset int64) string {
-	return string(appendCompletionKey(make([]byte, 0, len(group)+48), group, partition, offset))
-}
-
 func completionPrefix(group string, partition int32) string {
 	return string(appendCompletionPrefix(make([]byte, 0, len(group)+24), group, partition))
 }
@@ -50,26 +47,6 @@ func appendCompletionPrefix(dst []byte, group string, partition int32) []byte {
 	dst = append(dst, ':')
 	dst = strconv.AppendInt(dst, int64(partition), 10)
 	return append(dst, ':')
-}
-
-// appendCompletionKey appends completionKey(group, partition, offset) to dst.
-// The keys are stored, so it makes byte for byte what
-// fmt.Sprintf("done:%d:%s:%d:%020d", len(group), group, partition, offset)
-// makes, which these keys were built with; that formatted the string anew for
-// every completion recorded, looked up and replicated, and on a follower that
-// was most of the work of taking its leader's progress. Loops pass one buffer
-// for every key, and the store copies what it is given.
-func appendCompletionKey(dst []byte, group string, partition int32, offset int64) []byte {
-	dst = appendCompletionPrefix(dst, group, partition)
-	if offset < 0 {
-		return fmt.Appendf(dst, "%020d", offset)
-	}
-	var scratch [20]byte
-	digits := strconv.AppendInt(scratch[:0], offset, 10)
-	for i := len(digits); i < len(scratch); i++ {
-		dst = append(dst, '0')
-	}
-	return append(dst, digits...)
 }
 
 func floorKey(group string, partition int32) string {
@@ -100,25 +77,25 @@ func (g *GroupManager) SetLogStart(partitionID int32, offset int64) error {
 		g.mu.RUnlock()
 		return nil
 	}
-	var raises []string // groups whose floor is below the new start
+	var plans []*completionPlan // for groups whose floor is below the new start
 	for id, group := range g.groups {
 		if _, tracked := group.CommittedOffsets[partitionID]; !tracked {
 			continue
 		}
 		if g.floors[completionPrefix(id, partitionID)] < offset {
-			raises = append(raises, id)
+			plans = append(plans, g.planLocked(id, partitionID, nil, offset, -1, false))
 		}
 	}
 	store := g.offsetStore
 	g.mu.RUnlock()
 
-	if store != nil && len(raises) > 0 {
+	if store != nil && len(plans) > 0 {
 		// Not synced: the log start is read from the log again at startup.
 		err := store.withDB(func(db *pebble.DB) error {
 			batch := db.NewBatch()
 			defer batch.Close()
-			for _, id := range raises {
-				if err := setFloorInBatch(batch, id, partitionID, offset); err != nil {
+			for _, p := range plans {
+				if err := writePlan(batch, partitionID, p); err != nil {
 					return err
 				}
 			}
@@ -132,40 +109,27 @@ func (g *GroupManager) SetLogStart(partitionID int32, offset int64) error {
 		}
 	}
 
-	raised := make(map[string]int64, len(raises))
 	g.mu.Lock()
+	defer g.mu.Unlock()
 	if g.logStart == nil {
 		g.logStart = make(map[int32]int64)
 	}
 	g.logStart[partitionID] = offset
-	for _, id := range raises {
-		group := g.groups[id]
+	for _, p := range plans {
+		group := g.groups[p.group]
 		if group == nil {
 			continue
 		}
-		prefix := completionPrefix(id, partitionID)
-		if store == nil {
-			for key := range g.completed {
-				if strings.HasPrefix(key, prefix) {
-					if done, ok := parseCompletionOffset(key, prefix); ok && done < offset {
-						delete(g.completed, key)
-					}
-				}
-			}
-		}
-		g.setFloorLocked(id, partitionID, offset)
-		raised[id] = offset
+		g.installPlanLocked(partitionID, p)
 		if offset > group.CommittedOffsets[partitionID] {
 			group.CommittedOffsets[partitionID] = offset
 			if store != nil {
-				_ = store.CommitOffset(id, partitionID, offset)
+				_ = store.CommitOffset(p.group, partitionID, offset)
 			}
 		}
-		g.raiseHighestCompleted(prefix, offset-1)
+		g.raiseHighestCompleted(p.prefix, offset-1)
 	}
 	g.progressVersion.Add(1)
-	g.mu.Unlock()
-	g.dropCompletionsBelow(store, partitionID, raised)
 	return nil
 }
 
@@ -180,17 +144,10 @@ func (g *GroupManager) completedLocked(group string, partition int32, offset int
 	if offset < g.floorLocked(group, partition) {
 		return true
 	}
-	key := completionKey(group, partition, offset)
-	if g.offsetStore == nil {
-		return g.completed[key]
+	if g.offsetStore != nil && g.offsetStore.isClosed() {
+		return false // a closed store vouches for nothing above the floor
 	}
-	return g.offsetStore.withDB(func(db *pebble.DB) error {
-		_, closer, err := db.Get([]byte(key))
-		if err != nil {
-			return err
-		}
-		return closer.Close()
-	}) == nil
+	return g.sets[completionPrefix(group, partition)].has(offset)
 }
 
 func (g *GroupManager) IsCompleted(group string, partition int32, offset int64) bool {
@@ -305,19 +262,19 @@ func (g *GroupManager) ForgetCompletionsFrom(partitionID int32, offset int64) (i
 	store := g.offsetStore
 	g.mu.RUnlock()
 
-	// floors holds, for each group with something to forget, its stored floor.
-	floors := make(map[string]int64)
+	var plans []*completionPlan // for each group with something to forget
 	for _, id := range tracked {
 		highest := g.highestCompleted(id, partitionID)
 		g.mu.RLock()
-		floor := g.floors[completionPrefix(id, partitionID)]
+		prefix := completionPrefix(id, partitionID)
+		floor := g.floors[prefix]
 		committed := g.groups[id].CommittedOffsets[partitionID]
-		g.mu.RUnlock()
 		if highest >= offset || floor > offset || committed > offset {
-			floors[id] = floor
+			plans = append(plans, g.forgetPlanLocked(id, prefix, floor, offset))
 		}
+		g.mu.RUnlock()
 	}
-	if len(floors) == 0 {
+	if len(plans) == 0 {
 		return 0, nil
 	}
 
@@ -325,17 +282,9 @@ func (g *GroupManager) ForgetCompletionsFrom(partitionID int32, offset int64) (i
 		err := store.withDB(func(db *pebble.DB) error {
 			batch := db.NewBatch()
 			defer batch.Close()
-			for id, floor := range floors {
-				prefix := completionPrefix(id, partitionID)
-				if err := batch.DeleteRange([]byte(completionKey(id, partitionID, offset)), []byte(prefix+":"), nil); err != nil {
+			for _, p := range plans {
+				if err := writePlan(batch, partitionID, p); err != nil {
 					return err
-				}
-				if floor > offset {
-					value := make([]byte, 8)
-					binary.BigEndian.PutUint64(value, uint64(offset))
-					if err := batch.Set([]byte(floorKey(id, partitionID)), value, nil); err != nil {
-						return err
-					}
 				}
 			}
 			return batch.Commit(pebble.Sync)
@@ -347,80 +296,60 @@ func (g *GroupManager) ForgetCompletionsFrom(partitionID int32, offset int64) (i
 
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	for id, floor := range floors {
-		group := g.groups[id]
+	for _, p := range plans {
+		group := g.groups[p.group]
 		if group == nil {
 			continue
 		}
-		prefix := completionPrefix(id, partitionID)
-		if store == nil {
-			for key := range g.completed {
-				if strings.HasPrefix(key, prefix) {
-					if done, ok := parseCompletionOffset(key, prefix); ok && done >= offset {
-						delete(g.completed, key)
-					}
-				}
-			}
-		}
-		if floor > offset {
-			g.setFloorLocked(id, partitionID, offset)
-		}
+		g.installPlanLocked(partitionID, p)
 		if group.CommittedOffsets[partitionID] > offset {
 			group.CommittedOffsets[partitionID] = offset
 			group.UpdatedTS = time.Now().UnixMilli()
 			if store != nil {
-				_ = store.CommitOffset(id, partitionID, offset)
+				_ = store.CommitOffset(p.group, partitionID, offset)
 			}
 			// The group record carries the committed offset too, and the
 			// higher of the two is taken when it is read back.
 			g.persistGroup(group)
 		}
-		g.lowerHighestCompleted(prefix, offset-1)
+		g.lowerHighestCompleted(p.prefix, offset-1)
 	}
 	// The journal may name offsets that are gone now; followers get the
 	// full copy next.
 	g.journal.reset(partitionID, g.progressVersion.Add(1))
-	return len(floors), nil
+	return len(plans), nil
 }
 
-func parseCompletionOffset(key, prefix string) (int64, bool) {
-	offset, err := strconv.ParseInt(strings.TrimPrefix(key, prefix), 10, 64)
-	return offset, err == nil
-}
-
-func (g *GroupManager) loadHighestCompleted(prefix string) int64 {
-	highest := int64(-1)
-	if g.offsetStore == nil {
-		g.mu.RLock()
-		for key := range g.completed {
-			if strings.HasPrefix(key, prefix) {
-				if offset, ok := parseCompletionOffset(key, prefix); ok && offset > highest {
-					highest = offset
+// forgetPlanLocked makes the plan that removes a group's completions at and
+// beyond offset and brings its stored floor down to offset if it was past it.
+// The caller holds commitMu and at least a read lock on mu.
+func (g *GroupManager) forgetPlanLocked(group, prefix string, floor, offset int64) *completionPlan {
+	p := &completionPlan{group: group, prefix: prefix, before: floor, floor: min(floor, offset), put: make(map[int64]*completionBlock)}
+	if set := g.sets[prefix]; set != nil {
+		for block, held := range set.blocks {
+			switch {
+			case block > blockOf(offset):
+				p.drop = append(p.drop, block)
+			case block == blockOf(offset):
+				kept := *held
+				kept.clearFrom(offset)
+				if kept.empty() {
+					p.drop = append(p.drop, block)
+				} else if kept != *held {
+					p.put[block] = &kept
 				}
 			}
 		}
-		g.mu.RUnlock()
-		return highest
 	}
-	// Offsets are zero-padded digits, so the last key under the prefix is the
-	// highest, and ':' (the byte after '9') bounds them from above.
-	_ = g.offsetStore.withDB(func(db *pebble.DB) error {
-		iter, err := db.NewIter(&pebble.IterOptions{
-			LowerBound: []byte(prefix),
-			UpperBound: []byte(prefix + ":"),
-		})
-		if err != nil {
-			return err
-		}
-		defer iter.Close()
-		if iter.Last() {
-			if offset, ok := parseCompletionOffset(string(iter.Key()), prefix); ok {
-				highest = offset
-			}
-		}
-		return nil
-	})
-	return highest
+	return p
+}
+
+// loadHighestCompleted returns the highest offset recorded complete above
+// the floor for the group and partition of prefix, or -1.
+func (g *GroupManager) loadHighestCompleted(prefix string) int64 {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.sets[prefix].highest()
 }
 
 // WithRetentionCheck gives a caller that verifies and prunes WAL segments the
@@ -503,56 +432,30 @@ func (g *GroupManager) CommitDeliveries(partitionID int32, commits []DeliveryCom
 			cursors[commit.GroupID] = g.floorLocked(commit.GroupID, partitionID)
 		}
 	}
-	store := g.offsetStore
-	g.mu.RUnlock()
-
 	// added holds, per group, the offsets this call completes.
-	added := make(map[string]map[int64]struct{}, len(cursors))
+	added := make(map[string][]int64, len(cursors))
 	for i, commit := range commits {
 		if errs[i] != nil {
 			continue
 		}
-		offsets := added[commit.GroupID]
-		if offsets == nil {
-			offsets = make(map[int64]struct{}, len(commit.Events))
-			added[commit.GroupID] = offsets
-		}
 		for _, event := range commit.Events {
-			offsets[event.Offset] = struct{}{}
+			added[commit.GroupID] = append(added[commit.GroupID], event.Offset)
 		}
 	}
+	plans := make(map[string]*completionPlan, len(added))
+	for group, offsets := range added {
+		plans[group] = g.planLocked(group, partitionID, offsets, 0, -1, true)
+	}
+	store := g.offsetStore
+	g.mu.RUnlock()
 
-	advanced := make(map[string]int64, len(cursors))
 	if store != nil {
 		err := store.withDB(func(db *pebble.DB) error {
 			batch := db.NewBatch()
 			defer batch.Close()
-			var key []byte // one buffer for every key; the batch copies them
-			for group, offsets := range added {
-				for offset := range offsets {
-					if offset < cursors[group] {
-						continue // already covered by the floor
-					}
-					key = appendCompletionKey(key[:0], group, partitionID, offset)
-					if err := batch.Set(key, []byte{1}, nil); err != nil {
-						return err
-					}
-				}
-				recorded := func(offset int64) bool {
-					key = appendCompletionKey(key[:0], group, partitionID, offset)
-					_, closer, err := db.Get(key)
-					if err != nil {
-						return false
-					}
-					closer.Close()
-					return true
-				}
-				cursor := advanceCursor(cursors[group], offsets, recorded)
-				advanced[group] = cursor
-				if cursor > cursors[group] {
-					if err := setFloorInBatch(batch, group, partitionID, cursor); err != nil {
-						return err
-					}
+			for _, p := range plans {
+				if err := writePlan(batch, partitionID, p); err != nil {
+					return err
 				}
 			}
 			if batch.Empty() {
@@ -574,43 +477,29 @@ func (g *GroupManager) CommitDeliveries(partitionID int32, commits []DeliveryCom
 		}
 	}
 
-	raised := make(map[string]int64, len(added))
 	g.mu.Lock()
-	for groupID, offsets := range added {
+	defer g.mu.Unlock()
+	// Followers that hold the progress so far are sent only these.
+	journaled := make(map[string][]int64, len(added))
+	for groupID, p := range plans {
 		group, ok := g.groups[groupID]
 		if !ok {
 			continue // removed meanwhile; reported per commit below
 		}
-		if store == nil {
-			if g.completed == nil {
-				g.completed = make(map[string]bool)
-			}
-			for offset := range offsets {
-				g.completed[completionKey(groupID, partitionID, offset)] = true
-			}
-			advanced[groupID] = advanceCursor(cursors[groupID], offsets, func(offset int64) bool {
-				return g.completed[completionKey(groupID, partitionID, offset)]
-			})
-			for offset := cursors[groupID]; offset < advanced[groupID]; offset++ {
-				delete(g.completed, completionKey(groupID, partitionID, offset))
-			}
-		}
-		highest := advanced[groupID] - 1
-		for offset := range offsets {
+		g.installPlanLocked(partitionID, p)
+		highest := p.floor - 1
+		for _, offset := range added[groupID] {
 			highest = max(highest, offset)
+			if offset >= cursors[groupID] {
+				journaled[groupID] = append(journaled[groupID], offset)
+			}
 		}
-		g.raiseHighestCompleted(completionPrefix(groupID, partitionID), highest)
-
-		floor := advanced[groupID]
-		if floor > cursors[groupID] {
-			g.setFloorLocked(groupID, partitionID, floor)
-			raised[groupID] = floor
-		}
-		if floor > group.CommittedOffsets[partitionID] {
-			group.CommittedOffsets[partitionID] = floor
+		g.raiseHighestCompleted(p.prefix, highest)
+		if p.floor > group.CommittedOffsets[partitionID] {
+			group.CommittedOffsets[partitionID] = p.floor
 			group.UpdatedTS = time.Now().UnixMilli()
 			if store != nil {
-				_ = store.CommitOffset(groupID, partitionID, floor)
+				_ = store.CommitOffset(groupID, partitionID, p.floor)
 			}
 		}
 	}
@@ -621,21 +510,7 @@ func (g *GroupManager) CommitDeliveries(partitionID int32, commits []DeliveryCom
 			}
 		}
 	}
-	// Followers that hold the progress so far are sent only these.
-	journaled := make(map[string][]int64, len(added))
-	for groupID, offsets := range added {
-		if _, ok := g.groups[groupID]; !ok {
-			continue
-		}
-		for offset := range offsets {
-			if offset >= cursors[groupID] {
-				journaled[groupID] = append(journaled[groupID], offset)
-			}
-		}
-	}
 	g.noteCompletions(partitionID, journaled)
-	g.mu.Unlock()
-	g.dropCompletionsBelow(store, partitionID, raised)
 	return errs
 }
 
@@ -647,40 +522,11 @@ var progressWritten func()
 // floorKeyPrefix prefixes the stored completion floor of a group on a partition.
 const floorKeyPrefix = "floor:"
 
-// setFloorInBatch stores a group's raised completion floor in the caller's
-// batch. The completion records the floor now covers stay: until the floor is
-// raised in memory too, a reader still answers from them, and one that found
-// neither would take completed events for unfinished ones and have them
-// delivered again. dropCompletionsBelow removes them afterwards.
+// setFloorInBatch stores a group's completion floor in the caller's batch.
 func setFloorInBatch(batch *pebble.Batch, group string, partition int32, floor int64) error {
 	value := make([]byte, 8)
 	binary.BigEndian.PutUint64(value, uint64(floor))
 	return batch.Set([]byte(floorKey(group, partition)), value, nil)
-}
-
-// dropCompletionsBelow removes the completion records that the floors just
-// raised in memory now cover; floors maps a group to its new floor on the
-// partition. A reader answers from the floor from then on, so the records are
-// redundant. The caller holds commitMu, so no ack records anything below a
-// floor meanwhile.
-//
-// The write is not synced, and a failure is not reported: records a crash or a
-// failed write leaves behind are redundant too, and the next raise removes
-// them with its own, since it starts from the lowest record of the group.
-func (g *GroupManager) dropCompletionsBelow(store *OffsetStore, partition int32, floors map[string]int64) {
-	if store == nil || len(floors) == 0 {
-		return
-	}
-	_ = store.withDB(func(db *pebble.DB) error {
-		batch := db.NewBatch()
-		defer batch.Close()
-		for group, floor := range floors {
-			if err := batch.DeleteRange([]byte(completionPrefix(group, partition)), []byte(completionKey(group, partition, floor)), nil); err != nil {
-				return err
-			}
-		}
-		return batch.Commit(pebble.NoSync)
-	})
 }
 
 // loadFloors reads every stored completion floor, keyed by completion prefix.
@@ -705,18 +551,6 @@ func (s *OffsetStore) loadFloors() (map[string]int64, error) {
 		return nil
 	})
 	return floors, err
-}
-
-// advanceCursor moves a completion floor over the contiguous run of completed
-// offsets that starts at it. An offset is complete when this call adds it or a
-// record for it already exists.
-func advanceCursor(cursor int64, added map[int64]struct{}, recorded func(int64) bool) int64 {
-	for {
-		if _, ok := added[cursor]; !ok && !recorded(cursor) {
-			return cursor
-		}
-		cursor++
-	}
 }
 
 // maxExportedCompletions bounds the per-group completion set sent to followers.
@@ -746,42 +580,10 @@ func (g *GroupManager) ExportProgress(partitionID int32) (version uint64, groups
 	return version, groups
 }
 
-// completedFromLocked lists the offsets at or above from that have completion
-// records, in ascending order. The caller holds g.mu.
+// completedFromLocked lists the offsets at or above from that are recorded
+// complete, in ascending order. The caller holds g.mu.
 func (g *GroupManager) completedFromLocked(group string, partition int32, from int64) []int64 {
-	prefix := completionPrefix(group, partition)
-	var offsets []int64
-	if g.offsetStore == nil {
-		for key := range g.completed {
-			if strings.HasPrefix(key, prefix) {
-				if offset, ok := parseCompletionOffset(key, prefix); ok && offset >= from {
-					offsets = append(offsets, offset)
-				}
-			}
-		}
-		sort.Slice(offsets, func(i, j int) bool { return offsets[i] < offsets[j] })
-		if len(offsets) > maxExportedCompletions {
-			offsets = offsets[:maxExportedCompletions]
-		}
-		return offsets
-	}
-	_ = g.offsetStore.withDB(func(db *pebble.DB) error {
-		iter, err := db.NewIter(&pebble.IterOptions{
-			LowerBound: []byte(completionKey(group, partition, from)),
-			UpperBound: []byte(prefix + ":"),
-		})
-		if err != nil {
-			return err
-		}
-		defer iter.Close()
-		for iter.First(); iter.Valid() && len(offsets) < maxExportedCompletions; iter.Next() {
-			if offset, ok := parseCompletionOffset(string(iter.Key()), prefix); ok {
-				offsets = append(offsets, offset)
-			}
-		}
-		return nil
-	})
-	return offsets
+	return g.sets[completionPrefix(group, partition)].ascend(from, maxExportedCompletions)
 }
 
 // ApplyReplicatedProgress installs the leader's consumer progress on a
@@ -799,13 +601,14 @@ func (g *GroupManager) ApplyReplicatedProgress(partitionID int32, logEnd int64, 
 	defer g.commitMu.Unlock()
 
 	g.mu.RLock()
-	cursors := make(map[string]int64, len(groups))
+	plans := make(map[string]*completionPlan, len(groups))
 	for _, progress := range groups {
-		if existing := g.groups[progress.GetGroupId()]; existing != nil && existing.Topic != progress.GetTopic() {
+		groupID := progress.GetGroupId()
+		if existing := g.groups[groupID]; existing != nil && existing.Topic != progress.GetTopic() {
 			g.mu.RUnlock()
-			return fmt.Errorf("consumer group %s belongs to topic %q, not %q", progress.GetGroupId(), existing.Topic, progress.GetTopic())
+			return fmt.Errorf("consumer group %s belongs to topic %q, not %q", groupID, existing.Topic, progress.GetTopic())
 		}
-		cursors[progress.GetGroupId()] = g.floorLocked(progress.GetGroupId(), partitionID)
+		plans[groupID] = g.planLocked(groupID, partitionID, progress.GetCompletedOffsets(), min(progress.GetCommittedOffset(), logEnd), logEnd, false)
 	}
 	store := g.offsetStore
 	g.mu.RUnlock()
@@ -814,22 +617,9 @@ func (g *GroupManager) ApplyReplicatedProgress(partitionID int32, logEnd int64, 
 		err := store.withDB(func(db *pebble.DB) error {
 			batch := db.NewBatch()
 			defer batch.Close()
-			var key []byte // one buffer for every key; the batch copies them
-			for _, progress := range groups {
-				group, cursor := progress.GetGroupId(), max(min(progress.GetCommittedOffset(), logEnd), cursors[progress.GetGroupId()])
-				for _, offset := range progress.GetCompletedOffsets() {
-					if offset < cursor || offset >= logEnd {
-						continue
-					}
-					key = appendCompletionKey(key[:0], group, partitionID, offset)
-					if err := batch.Set(key, []byte{1}, nil); err != nil {
-						return err
-					}
-				}
-				if cursor > cursors[group] {
-					if err := setFloorInBatch(batch, group, partitionID, cursor); err != nil {
-						return err
-					}
+			for _, p := range plans {
+				if err := writePlan(batch, partitionID, p); err != nil {
+					return err
 				}
 			}
 			if batch.Empty() {
@@ -845,11 +635,12 @@ func (g *GroupManager) ApplyReplicatedProgress(partitionID int32, logEnd int64, 
 		}
 	}
 
-	raised := make(map[string]int64, len(groups))
 	g.mu.Lock()
+	defer g.mu.Unlock()
 	now := time.Now().UnixMilli()
 	for _, progress := range groups {
 		groupID := progress.GetGroupId()
+		p := plans[groupID]
 		group := g.groups[groupID]
 		changed := false
 		if group == nil {
@@ -869,43 +660,25 @@ func (g *GroupManager) ApplyReplicatedProgress(partitionID int32, logEnd int64, 
 			group.CommittedOffsets[partitionID] = -1
 			changed = true
 		}
-		cursor := max(min(progress.GetCommittedOffset(), logEnd), cursors[groupID])
-		highest := cursor - 1
+		g.installPlanLocked(partitionID, p)
+		highest := p.floor - 1
 		for _, offset := range progress.GetCompletedOffsets() {
-			if offset < cursor || offset >= logEnd {
-				continue
-			}
-			highest = max(highest, offset)
-			if store == nil {
-				if g.completed == nil {
-					g.completed = make(map[string]bool)
-				}
-				g.completed[completionKey(groupID, partitionID, offset)] = true
+			if offset >= p.floor && offset < logEnd {
+				highest = max(highest, offset)
 			}
 		}
-		if cursor > cursors[groupID] {
-			if store == nil {
-				for offset := cursors[groupID]; offset < cursor; offset++ {
-					delete(g.completed, completionKey(groupID, partitionID, offset))
-				}
-			}
-			g.setFloorLocked(groupID, partitionID, cursor)
-			raised[groupID] = cursor
-		}
-		if cursor > group.CommittedOffsets[partitionID] {
+		if p.floor > group.CommittedOffsets[partitionID] {
 			if store != nil {
-				_ = store.CommitOffset(groupID, partitionID, cursor)
+				_ = store.CommitOffset(groupID, partitionID, p.floor)
 			}
-			group.CommittedOffsets[partitionID] = cursor
+			group.CommittedOffsets[partitionID] = p.floor
 			changed = true
 		}
-		g.raiseHighestCompleted(completionPrefix(groupID, partitionID), highest)
+		g.raiseHighestCompleted(p.prefix, highest)
 		if changed {
 			group.UpdatedTS = now
 			g.persistGroup(group)
 		}
 	}
-	g.mu.Unlock()
-	g.dropCompletionsBelow(store, partitionID, raised)
 	return nil
 }

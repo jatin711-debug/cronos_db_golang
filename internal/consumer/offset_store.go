@@ -116,6 +116,8 @@ type OffsetStore struct {
 	// it is closed.
 	closeMu sync.RWMutex
 	closed  bool
+	// closedFlag is set with closed, for readers that only ask.
+	closedFlag atomic.Bool
 
 	pendingMu sync.RWMutex
 	pending   map[offsetKey]int64 // offset >= 0 is a commit. offset == -2 means deleted.
@@ -520,8 +522,35 @@ func (s *OffsetStore) Close() error {
 	s.flushPending()
 	s.closeMu.Lock()
 	s.closed = true
+	s.closedFlag.Store(true)
 	s.closeMu.Unlock()
 	return s.db.Close()
+}
+
+// isClosed reports whether Close has been called, without waiting for calls
+// that are inside withDB.
+func (s *OffsetStore) isClosed() bool { return s.closedFlag.Load() }
+
+// deleteProgress removes the stored floors and completion blocks of the
+// groups and partitions whose completion prefixes are given.
+func (s *OffsetStore) deleteProgress(prefixes []string) error {
+	if len(prefixes) == 0 {
+		return nil
+	}
+	return s.withDB(func(db *pebble.DB) error {
+		batch := db.NewBatch()
+		defer batch.Close()
+		for _, prefix := range prefixes {
+			// Its blocks, and any records of earlier releases.
+			if err := batch.DeleteRange([]byte(prefix), []byte(prefix+":"), nil); err != nil {
+				return err
+			}
+			if err := batch.Delete([]byte(floorKeyPrefix+prefix), nil); err != nil {
+				return err
+			}
+		}
+		return batch.Commit(pebble.NoSync)
+	})
 }
 
 var errOffsetStoreClosed = errors.New("consumer offset store is closed")
