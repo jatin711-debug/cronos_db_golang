@@ -710,10 +710,16 @@ The runtime fixes do not close every product or validation gap:
 - Relocation is opt-in and bounded. Unfinished due work, unresolved mutations,
   lagging dead-letter replication and other retention gates can still pin a
   log. Dead-letter journal/tombstone history is not compacted.
-- Distribution has one Linux amd64 image and five non-cgo binary targets. The
-  image has no signed workflow provenance; automated publishing requires the
-  Docker Hub repository secrets. The thresholded image scan found no fixable
-  HIGH/CRITICAL findings at scan time; it is not a claim of zero vulnerabilities.
+- Up to v0.13.1, distribution has one Linux amd64 image and five non-cgo
+  binary targets, and the image has no signed workflow provenance. The release
+  workflow now publishes each release to `ghcr.io/jatin711-debug/cronos-db` for
+  Linux amd64 and arm64, with attested provenance, an SBOM and a cosign
+  signature, using only the workflow's own token; it also copies the image to
+  Docker Hub when the repository has `DOCKERHUB_USERNAME` and
+  `DOCKERHUB_TOKEN` secrets. The arm64 image is scanned and started, while the
+  container fault tests run on amd64. The thresholded image scan found no
+  fixable HIGH/CRITICAL findings at scan time; it is not a claim of zero
+  vulnerabilities.
 - Manual `TriggerRebalance` returns
   `Unimplemented`. Per-subject per-node publish rates can be configured with
   `--tenant-limits-file`; durable storage/in-flight and cluster-wide quotas

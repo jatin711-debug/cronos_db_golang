@@ -16,6 +16,19 @@ docker pull johnny711dock/cronos-db@sha256:bf4f69ac9292c1822d6e8a0817aa97e789f96
 
 For another release, take its pin from the `IMAGE_DIGEST` release asset.
 
+Releases built by the release workflow after v0.13.1 are also published to
+GitHub's registry, for Linux amd64 and arm64 behind one tag. Each such image
+carries signed build provenance and an SBOM attestation, and a cosign
+signature made by the workflow, which you can check before deploying:
+
+```bash
+docker pull ghcr.io/jatin711-debug/cronos-db:<version>
+gh attestation verify oci://ghcr.io/jatin711-debug/cronos-db:<version> --owner jatin711-debug
+cosign verify ghcr.io/jatin711-debug/cronos-db:<version> \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp '^https://github.com/jatin711-debug/cronos_db_golang/\.github/workflows/release\.yml@'
+```
+
 Or build it from a checkout:
 
 ```bash

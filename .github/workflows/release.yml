@@ -7,8 +7,10 @@ name: release-binaries
 #
 # It builds the source of the tag, with the script of the tag, so it works for
 # releases from the first one that has scripts/build-release-binaries.sh.
-# The image job tests and scans the exact local image it then publishes.
-# A manual run stages an image archive unless publish_image is explicitly set.
+# The image jobs test and scan the exact local images they then publish: to
+# ghcr.io always, for linux/amd64 and linux/arm64 behind one tag, attested
+# and signed; to Docker Hub as well when its credentials are in the secrets.
+# A manual run stages an amd64 image archive unless publish_image is set.
 on:
   release:
     types: [published]
@@ -19,7 +21,7 @@ on:
         required: true
         type: string
       publish_image:
-        description: Publish the tested image to Docker Hub instead of staging an archive
+        description: Publish the tested images (ghcr.io, and Docker Hub with its secrets) instead of staging an archive
         required: false
         default: false
         type: boolean
@@ -96,18 +98,20 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "$TAG" dist/*.tar.gz dist/*.zip dist/SHA256SUMS --clobber
 
+  # The amd64 image: built once, scanned, put through the container tests,
+  # and then pushed by digest. The arm64 image is built natively in its own
+  # job, and the publish job puts both behind one multi-platform tag.
   image:
     needs: binaries
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
       contents: write
-      id-token: write
-      attestations: write
-      artifact-metadata: write
+      packages: write
+    outputs:
+      digest: ${{ steps.pushed.outputs.digest }}
     env:
       TAG: ${{ github.event.release.tag_name || inputs.tag }}
-      IMAGE: docker.io/johnny711dock/cronos-db
       CRONOS_IMAGE: cronos-db:release-check
       CRONOS_ACCEPTANCE_ARTIFACTS: ${{ github.workspace }}/build/release-image-logs
     steps:
@@ -128,7 +132,7 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Build once from the release source
-        run: docker build --pull --no-cache-filter runtime --label "org.opencontainers.image.revision=$(git rev-parse HEAD)" --label "org.opencontainers.image.version=$TAG" -t "$CRONOS_IMAGE" .
+        run: docker build --pull --no-cache-filter runtime --label "org.opencontainers.image.revision=$(git rev-parse HEAD)" --label "org.opencontainers.image.version=$TAG" --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" -t "$CRONOS_IMAGE" .
       - name: Scan the image that will be published
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
@@ -146,6 +150,7 @@ jobs:
         if: github.event_name == 'workflow_dispatch' && !inputs.publish_image
         env:
           GH_TOKEN: ${{ github.token }}
+          IMAGE: docker.io/johnny711dock/cronos-db
         shell: bash
         run: |
           set -euo pipefail
@@ -161,41 +166,23 @@ jobs:
       - uses: docker/login-action@v3
         if: github.event_name == 'release' || inputs.publish_image
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - name: Push the tested image and capture its registry digest
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Push the tested image by digest
         if: github.event_name == 'release' || inputs.publish_image
         id: pushed
         shell: bash
         run: |
           set -euo pipefail
-          candidate="$IMAGE:build-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          repo="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/cronos-db"
+          candidate="$repo:build-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-amd64"
           docker tag "$CRONOS_IMAGE" "$candidate"
           docker push "$candidate"
           ref=$(docker image inspect "$candidate" --format '{{index .RepoDigests 0}}')
           digest=${ref##*@}
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
-          printf '%s@%s\n' "$IMAGE" "$digest" > IMAGE_DIGEST
-      - name: Sign provenance for the exact published digest
-        if: github.event_name == 'release' || inputs.publish_image
-        uses: actions/attest@v4
-        with:
-          subject-name: docker.io/johnny711dock/cronos-db
-          subject-digest: ${{ steps.pushed.outputs.digest }}
-          push-to-registry: true
-      - name: Give the attested image its release tag
-        if: github.event_name == 'release' || inputs.publish_image
-        shell: bash
-        run: |
-          set -euo pipefail
-          docker tag "$CRONOS_IMAGE" "$IMAGE:${TAG#v}"
-          docker push "$IMAGE:${TAG#v}"
-      - name: Attach image evidence to the release
-        if: github.event_name == 'release' || inputs.publish_image
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$TAG" IMAGE_DIGEST release-image-scan.json --clobber
       - name: Preserve image test evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -203,8 +190,185 @@ jobs:
           name: release-image-evidence
           path: |
             release-image-scan.json
-            IMAGE_DIGEST
             IMAGE_ID
             IMAGE_ARCHIVE_SHA256
             build/release-image-logs
           if-no-files-found: ignore
+
+  # The arm64 image, built on an arm64 runner (free for public repositories)
+  # rather than emulated. It is scanned, and a container of it has to start
+  # and report ready; the container tests run on the amd64 image.
+  image-arm64:
+    needs: binaries
+    if: github.event_name == 'release' || inputs.publish_image
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.pushed.outputs.digest }}
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      CRONOS_IMAGE: cronos-db:release-check-arm64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+      - name: Build once from the release source
+        run: docker build --pull --no-cache-filter runtime --label "org.opencontainers.image.revision=$(git rev-parse HEAD)" --label "org.opencontainers.image.version=$TAG" --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" -t "$CRONOS_IMAGE" .
+      - name: Require an arm64 image
+        run: test "$(docker image inspect "$CRONOS_IMAGE" --format '{{.Architecture}}')" = arm64
+      - name: Scan the image that will be published
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          image-ref: cronos-db:release-check-arm64
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          version: v0.75.0
+          format: json
+          output: release-image-scan-arm64.json
+      - name: Start a container of the image
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run -d --name release-check -p 127.0.0.1:18080:8080 "$CRONOS_IMAGE" \
+            --dev --node-id=release-check --auth-enabled=false --data-dir=/data --raft-dir=/data/raft
+          for attempt in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:18080/health/ready > /dev/null; then
+              echo "the container is ready"
+              docker rm -f release-check
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "the container did not become ready"
+          docker logs release-check | tail -50
+          exit 1
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Push the tested image by digest
+        id: pushed
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/cronos-db"
+          candidate="$repo:build-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-arm64"
+          docker tag "$CRONOS_IMAGE" "$candidate"
+          docker push "$candidate"
+          ref=$(docker image inspect "$candidate" --format '{{index .RepoDigests 0}}')
+          digest=${ref##*@}
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - name: Preserve image scan
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-image-evidence-arm64
+          path: release-image-scan-arm64.json
+          if-no-files-found: ignore
+
+  # One tag for both platforms, on GitHub's registry, which the workflow can
+  # write with its own token: provenance and an SBOM attested for the digest
+  # of the multi-platform index, and the index signed with cosign (keyless,
+  # through the workflow's OIDC identity). With Docker Hub credentials in the
+  # repository secrets the same index is copied there, attested and signed too.
+  publish-image:
+    needs: [image, image-arm64]
+    if: github.event_name == 'release' || inputs.publish_image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      AMD64_DIGEST: ${{ needs.image.outputs.digest }}
+      ARM64_DIGEST: ${{ needs.image-arm64.outputs.digest }}
+      HUB_IMAGE: docker.io/johnny711dock/cronos-db
+      HAS_DOCKERHUB: ${{ secrets.DOCKERHUB_TOKEN != '' }}
+    steps:
+      - uses: docker/setup-buildx-action@v3
+      - uses: sigstore/cosign-installer@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Put both platforms behind the release tag
+        id: index
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$AMD64_DIGEST" =~ ^sha256:[0-9a-f]{64}$ && "$ARM64_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          repo="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/cronos-db"
+          docker buildx imagetools create -t "$repo:${TAG#v}" "$repo@$AMD64_DIGEST" "$repo@$ARM64_DIGEST"
+          digest=$(docker buildx imagetools inspect "$repo:${TAG#v}" --format '{{json .Manifest}}' | jq -r .digest)
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          # Both platforms, and nothing else, are behind the tag.
+          platforms=$(docker buildx imagetools inspect "$repo@$digest" --raw | jq -r '[.manifests[] | select(.platform.os == "linux") | .platform.architecture] | sort | join(",")')
+          test "$platforms" = "amd64,arm64"
+          echo "repo=$repo" >> "$GITHUB_OUTPUT"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          printf '%s@%s\n' "$repo" "$digest" > IMAGE_DIGEST
+      - name: Attest provenance for the published index
+        uses: actions/attest@v4
+        with:
+          subject-name: ${{ steps.index.outputs.repo }}
+          subject-digest: ${{ steps.index.outputs.digest }}
+          push-to-registry: true
+      - name: Describe what the image holds
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ steps.index.outputs.repo }}@${{ steps.index.outputs.digest }}
+          format: spdx-json
+          output-file: cronos-db.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+      - name: Attest the SBOM for the published index
+        uses: actions/attest-sbom@v2
+        with:
+          subject-name: ${{ steps.index.outputs.repo }}
+          subject-digest: ${{ steps.index.outputs.digest }}
+          sbom-path: cronos-db.spdx.json
+          push-to-registry: true
+      - name: Sign the published index
+        run: cosign sign --yes "${{ steps.index.outputs.repo }}@${{ steps.index.outputs.digest }}"
+      - uses: docker/login-action@v3
+        if: env.HAS_DOCKERHUB == 'true'
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Copy the index to Docker Hub
+        if: env.HAS_DOCKERHUB == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          src="${{ steps.index.outputs.repo }}@${{ steps.index.outputs.digest }}"
+          docker buildx imagetools create -t "$HUB_IMAGE:${TAG#v}" "$src"
+          digest=$(docker buildx imagetools inspect "$HUB_IMAGE:${TAG#v}" --format '{{json .Manifest}}' | jq -r .digest)
+          # The copy is the same index, so it has the same digest.
+          test "$digest" = "${{ steps.index.outputs.digest }}"
+          printf '%s@%s\n' "$HUB_IMAGE" "$digest" >> IMAGE_DIGEST
+      - name: Attest provenance on Docker Hub
+        if: env.HAS_DOCKERHUB == 'true'
+        uses: actions/attest@v4
+        with:
+          subject-name: ${{ env.HUB_IMAGE }}
+          subject-digest: ${{ steps.index.outputs.digest }}
+          push-to-registry: true
+      - name: Sign the index on Docker Hub
+        if: env.HAS_DOCKERHUB == 'true'
+        run: cosign sign --yes "$HUB_IMAGE@${{ steps.index.outputs.digest }}"
+      - name: Attach image evidence to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" IMAGE_DIGEST cronos-db.spdx.json --repo "$GITHUB_REPOSITORY" --clobber
