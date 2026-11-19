@@ -161,4 +161,22 @@ describe("useRunCompaction", () => {
       expect.objectContaining({ method: "POST" }),
     );
   });
+
+  it("names partition 0, and leaves the partition out for all", async () => {
+    const response = { success: true, error: "", segments_compacted: 0 };
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async () => new Response(JSON.stringify(response), { status: 200 }));
+
+    const { result } = renderHook(() => useRunCompaction());
+    await act(async () => {
+      await result.current.mutate({ partition_id: 0 });
+    });
+    await act(async () => {
+      await result.current.mutate({});
+    });
+
+    expect(fetchMock).toHaveBeenNthCalledWith(1, "/api/admin/compaction/run?partition_id=0", expect.objectContaining({ method: "POST" }));
+    expect(fetchMock).toHaveBeenNthCalledWith(2, "/api/admin/compaction/run", expect.objectContaining({ method: "POST" }));
+  });
 });

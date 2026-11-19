@@ -436,12 +436,13 @@ export function useRunRetention(): MutatorState<RunRetentionResponse, RunRetenti
   });
 }
 
-export function useRunCompaction(): MutatorState<RunCompactionResponse, { partition_id: number }> {
-  return useMutation((params) =>
-    apiFetch<RunCompactionResponse>(`/api/admin/compaction/run?partition_id=${params.partition_id}`, {
-      method: "POST",
-    }),
-  );
+// Without partition_id the server compacts every partition of the node; 0 is
+// partition 0.
+export function useRunCompaction(): MutatorState<RunCompactionResponse, { partition_id?: number }> {
+  return useMutation((params) => {
+    const qs = params.partition_id !== undefined ? `?partition_id=${params.partition_id}` : "";
+    return apiFetch<RunCompactionResponse>(`/api/admin/compaction/run${qs}`, { method: "POST" });
+  });
 }
 
 export function useTriggerRebalance(): MutatorState<RebalanceResponse, void> {

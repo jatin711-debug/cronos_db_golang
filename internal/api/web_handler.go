@@ -382,7 +382,7 @@ func (h *WebHandler) handleRunRetention(w http.ResponseWriter, r *http.Request) 
 	maxAge, _ := strconv.ParseInt(r.URL.Query().Get("max_age_hours"), 10, 64)
 	maxSize, _ := strconv.ParseInt(r.URL.Query().Get("max_size_bytes"), 10, 64)
 	resp, err := h.adminHandler.RunRetention(r.Context(), &types.RunRetentionRequest{
-		PartitionId:  pid,
+		PartitionId:  partitionOrAll(r, pid),
 		MaxAgeHours:  maxAge,
 		MaxSizeBytes: maxSize,
 	})
@@ -401,12 +401,12 @@ func (h *WebHandler) handleRunCompaction(w http.ResponseWriter, r *http.Request)
 		h.writeGRPCError(w, status.Error(codes.InvalidArgument, "POST required"))
 		return
 	}
-	pid, err := parsePartitionID(r)
+	pid, err := parsePartitionIDOrZero(r)
 	if err != nil {
 		h.writeGRPCError(w, status.Error(codes.InvalidArgument, err.Error()))
 		return
 	}
-	resp, err := h.adminHandler.RunCompaction(r.Context(), &types.RunCompactionRequest{PartitionId: pid})
+	resp, err := h.adminHandler.RunCompaction(r.Context(), &types.RunCompactionRequest{PartitionId: partitionOrAll(r, pid)})
 	if err != nil {
 		h.writeGRPCError(w, err)
 		return
@@ -470,6 +470,15 @@ func parsePartitionID(r *http.Request) (int32, error) {
 		return 0, err
 	}
 	return pid, nil
+}
+
+// partitionOrAll is pid when the request names a partition, 0 included, and
+// nil, meaning every partition, when it names none.
+func partitionOrAll(r *http.Request, pid int32) *int32 {
+	if r.URL.Query().Get("partition_id") == "" {
+		return nil
+	}
+	return &pid
 }
 
 // parsePartitionIDOrZero returns 0 when ?partition_id is missing.

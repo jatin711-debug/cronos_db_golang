@@ -542,8 +542,11 @@ func (x *PartitionHealthResponse) GetLastError() string {
 }
 
 type ReplicationLag struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	PartitionId   int32                  `protobuf:"varint,1,opt,name=partition_id,json=partitionId,proto3" json:"partition_id,omitempty"` // 0 means all partitions
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Unset means every partition this node leads; 0 is partition 0. Up to
+	// v0.13.1 the field was not optional, could not tell partition 0 from
+	// unset, and 0 meant all.
+	PartitionId   *int32 `protobuf:"varint,1,opt,name=partition_id,json=partitionId,proto3,oneof" json:"partition_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -579,8 +582,8 @@ func (*ReplicationLag) Descriptor() ([]byte, []int) {
 }
 
 func (x *ReplicationLag) GetPartitionId() int32 {
-	if x != nil {
-		return x.PartitionId
+	if x != nil && x.PartitionId != nil {
+		return *x.PartitionId
 	}
 	return 0
 }
@@ -998,10 +1001,11 @@ func (x *AdminConsumerGroupLagResponse) GetLag() int64 {
 }
 
 type RunRetentionRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	PartitionId   int32                  `protobuf:"varint,1,opt,name=partition_id,json=partitionId,proto3" json:"partition_id,omitempty"` // 0 means all partitions
-	MaxAgeHours   int64                  `protobuf:"varint,2,opt,name=max_age_hours,json=maxAgeHours,proto3" json:"max_age_hours,omitempty"`
-	MaxSizeBytes  int64                  `protobuf:"varint,3,opt,name=max_size_bytes,json=maxSizeBytes,proto3" json:"max_size_bytes,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Unset means every partition of this node; 0 is partition 0.
+	PartitionId   *int32 `protobuf:"varint,1,opt,name=partition_id,json=partitionId,proto3,oneof" json:"partition_id,omitempty"`
+	MaxAgeHours   int64  `protobuf:"varint,2,opt,name=max_age_hours,json=maxAgeHours,proto3" json:"max_age_hours,omitempty"`
+	MaxSizeBytes  int64  `protobuf:"varint,3,opt,name=max_size_bytes,json=maxSizeBytes,proto3" json:"max_size_bytes,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1037,8 +1041,8 @@ func (*RunRetentionRequest) Descriptor() ([]byte, []int) {
 }
 
 func (x *RunRetentionRequest) GetPartitionId() int32 {
-	if x != nil {
-		return x.PartitionId
+	if x != nil && x.PartitionId != nil {
+		return *x.PartitionId
 	}
 	return 0
 }
@@ -1126,9 +1130,10 @@ func (x *RunRetentionResponse) GetBytesFreed() int64 {
 }
 
 type RunCompactionRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	PartitionId   int32                  `protobuf:"varint,1,opt,name=partition_id,json=partitionId,proto3" json:"partition_id,omitempty"` // 0 means all partitions
-	BeforeOffset  int64                  `protobuf:"varint,2,opt,name=before_offset,json=beforeOffset,proto3" json:"before_offset,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Unset means every partition of this node; 0 is partition 0.
+	PartitionId   *int32 `protobuf:"varint,1,opt,name=partition_id,json=partitionId,proto3,oneof" json:"partition_id,omitempty"`
+	BeforeOffset  int64  `protobuf:"varint,2,opt,name=before_offset,json=beforeOffset,proto3" json:"before_offset,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1164,8 +1169,8 @@ func (*RunCompactionRequest) Descriptor() ([]byte, []int) {
 }
 
 func (x *RunCompactionRequest) GetPartitionId() int32 {
-	if x != nil {
-		return x.PartitionId
+	if x != nil && x.PartitionId != nil {
+		return *x.PartitionId
 	}
 	return 0
 }
@@ -1785,9 +1790,10 @@ const file_proto_admin_proto_rawDesc = "" +
 	"\freplay_error\x18\t \x01(\bR\vreplayError\x12\x1d\n" +
 	"\n" +
 	"last_error\x18\n" +
-	" \x01(\tR\tlastError\"3\n" +
-	"\x0eReplicationLag\x12!\n" +
-	"\fpartition_id\x18\x01 \x01(\x05R\vpartitionId\"\xab\x01\n" +
+	" \x01(\tR\tlastError\"I\n" +
+	"\x0eReplicationLag\x12&\n" +
+	"\fpartition_id\x18\x01 \x01(\x05H\x00R\vpartitionId\x88\x01\x01B\x0f\n" +
+	"\r_partition_id\"\xab\x01\n" +
 	"\x16ReplicationLagResponse\x12!\n" +
 	"\fpartition_id\x18\x01 \x01(\x05R\vpartitionId\x122\n" +
 	"\x15leader_high_watermark\x18\x02 \x01(\x03R\x13leaderHighWatermark\x12:\n" +
@@ -1819,20 +1825,22 @@ const file_proto_admin_proto_rawDesc = "" +
 	"\fpartition_id\x18\x02 \x01(\x05R\vpartitionId\x12)\n" +
 	"\x10committed_offset\x18\x03 \x01(\x03R\x0fcommittedOffset\x128\n" +
 	"\x18partition_high_watermark\x18\x04 \x01(\x03R\x16partitionHighWatermark\x12\x10\n" +
-	"\x03lag\x18\x05 \x01(\x03R\x03lag\"\x82\x01\n" +
-	"\x13RunRetentionRequest\x12!\n" +
-	"\fpartition_id\x18\x01 \x01(\x05R\vpartitionId\x12\"\n" +
+	"\x03lag\x18\x05 \x01(\x03R\x03lag\"\x98\x01\n" +
+	"\x13RunRetentionRequest\x12&\n" +
+	"\fpartition_id\x18\x01 \x01(\x05H\x00R\vpartitionId\x88\x01\x01\x12\"\n" +
 	"\rmax_age_hours\x18\x02 \x01(\x03R\vmaxAgeHours\x12$\n" +
-	"\x0emax_size_bytes\x18\x03 \x01(\x03R\fmaxSizeBytes\"\x92\x01\n" +
+	"\x0emax_size_bytes\x18\x03 \x01(\x03R\fmaxSizeBytesB\x0f\n" +
+	"\r_partition_id\"\x92\x01\n" +
 	"\x14RunRetentionResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x14\n" +
 	"\x05error\x18\x02 \x01(\tR\x05error\x12)\n" +
 	"\x10segments_deleted\x18\x03 \x01(\x03R\x0fsegmentsDeleted\x12\x1f\n" +
 	"\vbytes_freed\x18\x04 \x01(\x03R\n" +
-	"bytesFreed\"^\n" +
-	"\x14RunCompactionRequest\x12!\n" +
-	"\fpartition_id\x18\x01 \x01(\x05R\vpartitionId\x12#\n" +
-	"\rbefore_offset\x18\x02 \x01(\x03R\fbeforeOffset\"\x9f\x01\n" +
+	"bytesFreed\"t\n" +
+	"\x14RunCompactionRequest\x12&\n" +
+	"\fpartition_id\x18\x01 \x01(\x05H\x00R\vpartitionId\x88\x01\x01\x12#\n" +
+	"\rbefore_offset\x18\x02 \x01(\x03R\fbeforeOffsetB\x0f\n" +
+	"\r_partition_id\"\x9f\x01\n" +
 	"\x15RunCompactionResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x14\n" +
 	"\x05error\x18\x02 \x01(\tR\x05error\x12-\n" +
@@ -1967,6 +1975,9 @@ func file_proto_admin_proto_init() {
 	if File_proto_admin_proto != nil {
 		return
 	}
+	file_proto_admin_proto_msgTypes[6].OneofWrappers = []any{}
+	file_proto_admin_proto_msgTypes[14].OneofWrappers = []any{}
+	file_proto_admin_proto_msgTypes[16].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{

@@ -115,12 +115,15 @@ cronos-admin --server=localhost:9000 admin retention-run --max-age-hours=168
 cronos-admin --server=localhost:9000 admin compaction-run
 ```
 
-Partition 0 is a valid target for health and consumer-group lag. For
-retention, compaction and replication lag, `0` means every applicable
-partition on this node, including partition 0. On the dashboard's HTTP admin
-API (`/api/admin/...`), `partition_id=0` names partition 0 for
-`partition-health` and `replication-lag`; only the RPC and the CLI read `0` as
-"all partitions" for replication lag.
+Partition 0 is a partition like any other, and every command can name it.
+Retention, compaction and replication lag cover every applicable partition on
+the node when no partition is given: leave out `--partition-id` for
+`retention-run` and `compaction-run`, and the argument for `replication-lag`.
+The RPCs and the dashboard's HTTP admin API (`/api/admin/...`) work the same
+way: a `partition_id` of 0 is partition 0, and no `partition_id` means all.
+Up to v0.13.1, `0` meant all partitions for these three, so partition 0 could
+not be targeted alone; a script that passes `--partition-id=0` or
+`partition_id=0` to mean "all" should now leave it out.
 
 ### Cluster membership
 

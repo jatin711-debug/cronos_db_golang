@@ -26,6 +26,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/protobuf/proto"
 )
 
 // CLI flags and shared gRPC clients used by subcommands after dial.
@@ -679,16 +680,16 @@ func adminPartitionHealthCmd() *cobra.Command {
 func adminReplicationLagCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "replication-lag [partition-id]",
-		Short: "Show leader HWM and per-follower lag (0 = all local leaders)",
+		Short: "Show leader HWM and per-follower lag (no partition-id = every partition this node leads)",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			pid := int32(0)
+			var pid *int32
 			if len(args) == 1 {
 				v, err := strconv.ParseInt(args[0], 10, 32)
 				if err != nil {
 					return err
 				}
-				pid = int32(v)
+				pid = proto.Int32(int32(v))
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
@@ -838,6 +839,15 @@ func adminTenantUsageCmd() *cobra.Command {
 	}
 }
 
+// partitionFlag is the --partition-id the command was given, 0 included, or
+// nil, meaning every partition, when it was not given.
+func partitionFlag(cmd *cobra.Command, id int64) *int32 {
+	if !cmd.Flags().Changed("partition-id") {
+		return nil
+	}
+	return proto.Int32(int32(id))
+}
+
 // adminRetentionRunCmd triggers a one-shot age/size retention run.
 func adminRetentionRunCmd() *cobra.Command {
 	var partitionID int64
@@ -851,7 +861,7 @@ func adminRetentionRunCmd() *cobra.Command {
 			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 			defer cancel()
 			resp, err := adminClient.RunRetention(ctx, &types.RunRetentionRequest{
-				PartitionId:  int32(partitionID),
+				PartitionId:  partitionFlag(cmd, partitionID),
 				MaxAgeHours:  maxAgeHours,
 				MaxSizeBytes: maxSizeBytes,
 			})
@@ -867,7 +877,7 @@ func adminRetentionRunCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().Int64Var(&partitionID, "partition-id", 0, "Partition ID (0 = all)")
+	cmd.Flags().Int64Var(&partitionID, "partition-id", 0, "Partition ID (omit for every partition of the node)")
 	cmd.Flags().Int64Var(&maxAgeHours, "max-age-hours", 0, "Max age in hours (0 = no limit)")
 	cmd.Flags().Int64Var(&maxSizeBytes, "max-size-bytes", 0, "Max size in bytes (0 = no limit)")
 	return cmd
@@ -884,7 +894,7 @@ func adminCompactionRunCmd() *cobra.Command {
 			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 			defer cancel()
 			resp, err := adminClient.RunCompaction(ctx, &types.RunCompactionRequest{
-				PartitionId: int32(partitionID),
+				PartitionId: partitionFlag(cmd, partitionID),
 			})
 			if err != nil {
 				return err
@@ -897,7 +907,7 @@ func adminCompactionRunCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().Int64Var(&partitionID, "partition-id", 0, "Partition ID (0 = every partition of the node)")
+	cmd.Flags().Int64Var(&partitionID, "partition-id", 0, "Partition ID (omit for every partition of the node)")
 	return cmd
 }
 

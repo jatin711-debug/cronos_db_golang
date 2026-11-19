@@ -391,9 +391,8 @@ func (h *AdminServiceHandler) GetReplicationLag(
 	ctx context.Context,
 	req *types.ReplicationLag,
 ) (*types.ReplicationLagResponse, error) {
-	// On the RPC, partition_id 0 means all partitions: the field cannot tell
-	// "partition 0" from "not set". The HTTP API can, and asks for one.
-	return h.replicationLag(ctx, req.GetPartitionId(), req.GetPartitionId() == 0)
+	// Unset means every partition this node leads; 0 is partition 0.
+	return h.replicationLag(ctx, req.GetPartitionId(), req.PartitionId == nil)
 }
 
 // replicationLag answers GetReplicationLag. With all set it aggregates the
@@ -592,7 +591,8 @@ func (h *AdminServiceHandler) GetConsumerGroupLag(
 // ---------------------------------------------------------------------------
 
 // RunRetention plans age/size retention and delegates deletion to live WALs.
-// partition_id=0 selects all local partitions. Completion checks always apply.
+// Without a partition_id it covers every local partition; partition_id=0 is
+// partition 0. Completion checks always apply.
 func (h *AdminServiceHandler) RunRetention(
 	ctx context.Context,
 	req *types.RunRetentionRequest,
@@ -609,7 +609,10 @@ func (h *AdminServiceHandler) RunRetention(
 
 	resp := &types.RunRetentionResponse{Success: true}
 	pid := req.GetPartitionId()
-	if pid == 0 {
+	if pid < 0 {
+		return nil, status.Errorf(codes.InvalidArgument, "partition_id must not be negative (got %d)", pid)
+	}
+	if req.PartitionId == nil {
 		stats, err := enforcer.RunWithStats(ctx)
 		resp.SegmentsDeleted, resp.BytesFreed = stats.SegmentsDeleted, stats.BytesFreed
 		if err != nil {
@@ -646,8 +649,8 @@ func (h *AdminServiceHandler) RunRetention(
 // ---------------------------------------------------------------------------
 
 // RunCompaction removes only segments whose events are durably completed by
-// every matching group. Partition zero remains reserved for aggregate requests
-// in this admin API; use PartitionService for explicit partition zero.
+// every matching group. Without a partition_id it covers every local
+// partition; partition_id=0 is partition 0.
 func (h *AdminServiceHandler) RunCompaction(
 	ctx context.Context,
 	req *types.RunCompactionRequest,
@@ -656,9 +659,13 @@ func (h *AdminServiceHandler) RunCompaction(
 		return nil, err
 	}
 
-	// As for retention, 0 means every partition of this node.
+	if req.GetPartitionId() < 0 {
+		return nil, status.Errorf(codes.InvalidArgument, "partition_id must not be negative (got %d)", req.GetPartitionId())
+	}
+	// As for retention, no partition_id means every partition of this node.
 	var partitions []*partition.Partition
-	if pid := req.GetPartitionId(); pid != 0 && h.pm != nil {
+	if req.PartitionId != nil && h.pm != nil {
+		pid := req.GetPartitionId()
 		p, err := h.pm.GetInternalPartition(pid)
 		if err != nil {
 			return &types.RunCompactionResponse{

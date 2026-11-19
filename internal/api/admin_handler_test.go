@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"net"
+	"strings"
 	"testing"
 
 	"github.com/jatin711-debug/cronos_db_golang/internal/auth"
@@ -12,6 +13,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 // dialAdminServer wires a real grpc.Server bound to a random local port,
@@ -246,9 +248,48 @@ func TestAdminServiceHandler_PartitionZeroCanBeNamed(t *testing.T) {
 	if _, err = client.GetPartitionHealth(ctx, &types.PartitionHealth{PartitionId: -1}); status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("negative partition: %v", err)
 	}
-	// 0 names every partition of the node for compaction, as for retention.
-	resp, err := client.RunCompaction(ctx, &types.RunCompactionRequest{PartitionId: 0})
+	resp, err := client.RunCompaction(ctx, &types.RunCompactionRequest{PartitionId: proto.Int32(0)})
 	if err != nil || !resp.GetSuccess() {
-		t.Fatalf("compaction of every partition: %+v, %v", resp, err)
+		t.Fatalf("compaction of partition 0: %+v, %v", resp, err)
+	}
+}
+
+// Naming partition 0 asks for partition 0, not for every partition: on a node
+// that does not hold it, the maintenance RPCs say so instead of running on
+// the partitions it does hold. Leaving the partition out still means all.
+func TestAdminServiceHandler_PartitionZeroIsNotEveryPartition(t *testing.T) {
+	cfg := &types.Config{DataDir: t.TempDir(), PartitionCount: 3, FsyncMode: "periodic", FlushIntervalMS: 10, TickMS: 10, WheelSize: 64, DedupTTLHours: 1, BloomCapacity: 1000}
+	pm := partition.NewPartitionManager("test-node", cfg)
+	defer pm.Close()
+	for _, id := range []int32{1, 2} {
+		if err := pm.CreatePartition(id, "orders"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h := NewAdminServiceHandler(pm, nil, nil, "test-node", cfg.DataDir, nil, nil)
+	client, teardown := dialAdminServer(t, h)
+	defer teardown()
+	ctx := context.Background()
+
+	compacted, err := client.RunCompaction(ctx, &types.RunCompactionRequest{PartitionId: proto.Int32(0)})
+	if err != nil || compacted.GetSuccess() || !strings.Contains(compacted.GetError(), "partition 0 not found") {
+		t.Fatalf("compaction of partition 0, which this node does not hold: %+v, %v", compacted, err)
+	}
+	retained, err := client.RunRetention(ctx, &types.RunRetentionRequest{PartitionId: proto.Int32(0), MaxSizeBytes: 1})
+	if err != nil || retained.GetSuccess() || !strings.Contains(retained.GetError(), "partition 0 not found") {
+		t.Fatalf("retention of partition 0, which this node does not hold: %+v, %v", retained, err)
+	}
+	if _, err := client.GetReplicationLag(ctx, &types.ReplicationLag{PartitionId: proto.Int32(0)}); err == nil || !strings.Contains(err.Error(), "partition 0 not found") {
+		t.Fatalf("replication lag of partition 0, which this node does not hold: %v", err)
+	}
+
+	if all, err := client.RunCompaction(ctx, &types.RunCompactionRequest{}); err != nil || !all.GetSuccess() {
+		t.Fatalf("compaction of every partition: %+v, %v", all, err)
+	}
+	if all, err := client.RunRetention(ctx, &types.RunRetentionRequest{MaxSizeBytes: 1 << 40}); err != nil || !all.GetSuccess() {
+		t.Fatalf("retention of every partition: %+v, %v", all, err)
+	}
+	if _, err := client.RunCompaction(ctx, &types.RunCompactionRequest{PartitionId: proto.Int32(-1)}); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("compaction of a negative partition: %v", err)
 	}
 }

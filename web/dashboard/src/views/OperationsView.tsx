@@ -36,8 +36,35 @@ export function OperationsView() {
   );
 }
 
+const ALL_PARTITIONS = "all";
+
+// PartitionSelect picks one partition, 0 included, or every partition of the
+// node (undefined), which sends no partition_id.
+function PartitionSelect({
+  partitions,
+  value,
+  onChange,
+}: {
+  partitions: number[];
+  value: number | undefined;
+  onChange: (id: number | undefined) => void;
+}) {
+  return (
+    <select
+      className="rounded-md border border-(--color-border) bg-(--color-background) px-3 py-2 text-sm text-(--color-foreground) outline-none focus:ring-1 focus:ring-(--color-ring)"
+      value={value === undefined ? ALL_PARTITIONS : String(value)}
+      onChange={(e) => onChange(e.target.value === ALL_PARTITIONS ? undefined : parseInt(e.target.value, 10))}
+    >
+      <option value={ALL_PARTITIONS}>All local partitions</option>
+      {partitions.map((id) => (
+        <option key={id} value={id}>{id}</option>
+      ))}
+    </select>
+  );
+}
+
 function RetentionPanel({ partitions }: { partitions: number[] }) {
-  const [partitionId, setPartitionId] = useState<number>(partitions[0] ?? 0);
+  const [partitionId, setPartitionId] = useState<number | undefined>(undefined);
   const [maxAgeHours, setMaxAgeHours] = useState<number>(24);
   const retention = useRunRetention();
   const { addToast } = useToast();
@@ -69,15 +96,7 @@ function RetentionPanel({ partitions }: { partitions: number[] }) {
       <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
         <label className="flex flex-col gap-1 text-xs text-muted-foreground">
           Partition
-          <select
-            className="rounded-md border border-(--color-border) bg-(--color-background) px-3 py-2 text-sm text-(--color-foreground) outline-none focus:ring-1 focus:ring-(--color-ring)"
-            value={partitionId}
-            onChange={(e) => setPartitionId(parseInt(e.target.value, 10))}
-          >
-            {partitions.map((id) => (
-              <option key={id} value={id}>{id === 0 ? "All local partitions (0)" : id}</option>
-            ))}
-          </select>
+          <PartitionSelect partitions={partitions} value={partitionId} onChange={setPartitionId} />
         </label>
         <label className="flex flex-col gap-1 text-xs text-muted-foreground">
           Max age (hours)
@@ -102,7 +121,7 @@ function RetentionPanel({ partitions }: { partitions: number[] }) {
 }
 
 function CompactionPanel({ partitions }: { partitions: number[] }) {
-  const [partitionId, setPartitionId] = useState<number>(partitions[0] ?? 0);
+  const [partitionId, setPartitionId] = useState<number | undefined>(undefined);
   const compaction = useRunCompaction();
   const { addToast } = useToast();
 
@@ -133,15 +152,7 @@ function CompactionPanel({ partitions }: { partitions: number[] }) {
       <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
         <label className="flex flex-col gap-1 text-xs text-muted-foreground">
           Partition
-          <select
-            className="rounded-md border border-(--color-border) bg-(--color-background) px-3 py-2 text-sm text-(--color-foreground) outline-none focus:ring-1 focus:ring-(--color-ring)"
-            value={partitionId}
-            onChange={(e) => setPartitionId(parseInt(e.target.value, 10))}
-          >
-            {partitions.map((id) => (
-              <option key={id} value={id}>{id === 0 ? "All local partitions (0)" : id}</option>
-            ))}
-          </select>
+          <PartitionSelect partitions={partitions} value={partitionId} onChange={setPartitionId} />
         </label>
         <Button onClick={() => compaction.mutate({ partition_id: partitionId })} disabled={compaction.loading}>
           {compaction.loading ? "Running..." : "Run Compaction"}
