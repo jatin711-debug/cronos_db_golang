@@ -30,6 +30,8 @@ if [[ ${1:-} == setup ]]; then
   printf 'subjectAltName=IP:127.0.0.1,DNS:localhost\nextendedKeyUsage=serverAuth,clientAuth\nkeyUsage=critical,digitalSignature,keyEncipherment\n' > ext.cnf
   openssl x509 -req -in tls.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 7 -extfile ext.cnf -out tls.crt 2>/dev/null
   openssl rand -hex 16 > wal.key
+  # The server refuses a key that others can read.
+  chmod 600 wal.key tls.key ca.key
   {
     echo '{'
     echo '  "ca": "certs/ca.crt", "cert": "certs/tls.crt", "key": "certs/tls.key",'

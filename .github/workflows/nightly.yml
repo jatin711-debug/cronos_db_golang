@@ -182,6 +182,55 @@ jobs:
           retention-days: 14
           if-no-files-found: ignore
 
+  # The soak's remote mode (CRONOS_SOAK_REMOTE), against three nodes that
+  # scripts/soak/local-remote-node.sh runs as processes of this runner: a
+  # short, light run of the disruptions that act on nodes by command (lost,
+  # frozen, replaced), so that the driver for a soak on separate hosts keeps
+  # working.
+  remote-soak:
+    if: ${{ !inputs.catchup_ab }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CGO_ENABLED: "0"
+      CRONOS_REMOTE_ROOT: ${{ github.workspace }}/build/remote-soak
+      CRONOS_ACCEPTANCE_ARTIFACTS: ${{ github.workspace }}/build/remote-soak-logs
+      CRONOS_SOAK_DURATION: 20m
+      CRONOS_SOAK_WARMUP: 3m
+      CRONOS_SOAK_WINDOW: 2m
+      CRONOS_SOAK_ONLY: "1,2,6"
+      CRONOS_SOAK_RATE: "50"
+      CRONOS_SOAK_BURST_RATE: "50"
+      CRONOS_SOAK_SEED: "2000"
+      CRONOS_SOAK_SAMPLE: 30s
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Three stand-in hosts
+        run: |
+          set -euo pipefail
+          go build -o build/cronos-api ./cmd/api
+          bash scripts/soak/local-remote-node.sh setup build/cronos-api
+      - name: Soak driving them by command
+        env:
+          CRONOS_SOAK_REMOTE: ${{ github.workspace }}/build/remote-soak/remote.json
+        run: go test -tags acceptance -count=1 -timeout 50m -v -run '^TestSoak$' ./tests/acceptance/
+      - name: Stop the nodes
+        if: always()
+        run: for n in node1 node2 node3; do bash scripts/soak/local-remote-node.sh kill $n || true; done
+      - name: Keep the node logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-remote-soak-logs
+          path: |
+            build/remote-soak-logs
+            build/remote-soak/node*/log
+          retention-days: 14
+          if-no-files-found: ignore
+
   # The catch-up comparison (catchup_ab). Both legs run on this one runner,
   # one after the other, with the soak's settings of the compressed run:
   # 450 publishes per second, 8 MiB segments, nodes of 2 CPUs and 384 MiB,
