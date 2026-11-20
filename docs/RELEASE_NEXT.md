@@ -143,5 +143,13 @@ So far, on the branch:
   the soak resubscribing its slow group).
 - **CI** (run 44711035735): every job passed, including the race suite, the
   acceptance suite and the container tests.
+- **Nightly jobs** (run 44721002444): the acceptance and container suites
+  passed, with as many repeated deliveries per fault test as the last nightly
+  run of v0.13.1 on `main`; the rolling upgrade from v0.13.1, rollback and
+  upgrade again passed, the rollback phase delivering 60 events twice as
+  described under "Read before upgrading"; `TestPowerLoss` passed on a
+  GitHub runner with `every_event` and `batch`; and the soak's remote mode
+  passed against three nodes driven by command (a leader lost, a leader
+  frozen, a node replaced by an empty one).
 
 The rest is completed when the release is cut.
