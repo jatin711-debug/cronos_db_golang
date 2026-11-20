@@ -157,6 +157,10 @@ Before the release:
   passed against three nodes driven by command (a leader lost, a leader
   frozen, a node replaced by an empty one).
 
-The release page records what the release workflow checked on the published
-images: the scan, the container fault tests of the amd64 image, the start of
-the arm64 image, and the digest of the published index.
+The release workflow (run 44736155746) built both images from the tag, scanned
+them (no fixable HIGH or CRITICAL findings), ran the network-partition and
+memory-limited restart tests on the amd64 image and started the arm64 one,
+then published them as one index, `sha256:c913c3fa52f2d20b9069e618721f34a55dcd977c6537cfcdeaef808791604669`, with attested provenance, an SPDX
+SBOM and a cosign signature. The index was copied unchanged, signature and
+attestations included, to `johnny711dock/cronos-db:0.14.0` and `:latest`.
+`gh attestation verify` and `cosign verify` accept it under both names.
