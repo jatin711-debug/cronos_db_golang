@@ -1,7 +1,12 @@
-# CronosDB, next release (unreleased)
+# CronosDB v0.14.0
 
-These notes collect what branch `feat/production-readiness` changes since
-v0.13.1. The version number is chosen when the release is cut. It is not 1.0:
+This release makes catching up a consumer group far behind cheap: on the
+catch-up that failed v0.13.1's compressed soak, publishes now hold their rate
+and the group is back in step in a third of the time. A follower far behind
+is copied a snapshot of its leader's log instead of having it replayed. Events
+scheduled far ahead can be bounded and their cost on disk is reported, disks
+get a free-space floor and a ballast, and images are published for Linux amd64
+and arm64 with signed provenance. It is not 1.0:
 the release gates of the
 [1.0 readiness review](RELEASE_READINESS_1.0.0_2026-10-28.md) are still open
 (a passing 24-hour soak, a soak on separate hosts, power-loss testing on real
@@ -119,7 +124,7 @@ million records.
 
 ## Verification
 
-So far, on the branch:
+Before the release:
 
 - **Release workflow, dry run** (run 44516011602, 2026-11-19): every job
   passed. The amd64 image passed the container fault tests; the arm64 image
@@ -152,4 +157,6 @@ So far, on the branch:
   passed against three nodes driven by command (a leader lost, a leader
   frozen, a node replaced by an empty one).
 
-The rest is completed when the release is cut.
+The release page records what the release workflow checked on the published
+images: the scan, the container fault tests of the amd64 image, the start of
+the arm64 image, and the digest of the published index.

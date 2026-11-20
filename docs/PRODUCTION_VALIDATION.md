@@ -29,6 +29,33 @@ not on separate hosts or Kubernetes; power loss was not tested; and the
 latencies are those of a shared desktop machine. A 24-hour run of `TestSoak` on
 one machine is the next step, before the separate-host run.
 
+## v0.14.0 — 2026-11-20
+
+The long tests moved to GitHub-hosted runners. The compressed soak's
+consumer-group catch-up (450 publishes per second, a group stopped for 14
+minutes and about 390,000 events behind, nodes of 2 CPUs and 384 MiB) ran on
+one runner with each server in turn (`nightly.yml`, `catchup_ab`). v0.13.1
+reconciled after 50 minutes, with publishes at a median of 405 per second and
+28 at the worst; v0.14.0 after 17 minutes, with publishes held at 450 and a
+median publish latency of 13 ms instead of 63. Its first run failed this
+release: a bug in the new completion blocks delivered finished events again
+and a group with 4 credits fell 1.6 million behind. The fix came with a test
+that checks the blocks against a plain model.
+
+Power cuts were tested for the first time, with LazyFS dropping what the nodes
+had not synced (`TestPowerLoss`): single nodes six times, then all three at
+once. With `every_event` and `batch` fsync every acknowledged event was
+delivered, in WSL2 and on a GitHub runner; with `periodic`, which acknowledges
+before it syncs, an acknowledged event was lost, as the control expects. The
+nightly workflow also ran the rolling upgrade from v0.13.1 with a rollback (60
+events delivered twice in the rollback phase, as the notes describe) and the
+soak's remote mode against three nodes driven by command.
+
+This does not close the gates below: the soaks were short repeats of one
+disruption, on one host each; LazyFS models a page cache, not a disk that
+loses its own writes; and the remote mode ran against processes on one runner,
+not separate hosts.
+
 ## v0.13.1 — 2026-11-18
 
 The first 24-hour run of `TestSoak` ran on RunPod, not on a desktop. It used one

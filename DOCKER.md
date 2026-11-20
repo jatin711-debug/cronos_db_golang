@@ -6,23 +6,23 @@
 
 ### Get the image
 
-The v0.13.1 container targets Linux amd64. Check the [release page](https://github.com/jatin711-debug/cronos_db_golang/releases/tag/v0.13.1) for publication status and image evidence:
+The v0.14.0 image is published for Linux amd64 and arm64, as
+`johnny711dock/cronos-db` on Docker Hub and `ghcr.io/jatin711-debug/cronos-db`
+on GitHub's registry; both names hold the same image, with the same digest.
+Check the [release page](https://github.com/jatin711-debug/cronos_db_golang/releases/tag/v0.14.0)
+for publication status and image evidence:
 
 ```bash
-docker pull johnny711dock/cronos-db:0.13.1    # :latest selects the current stable release
-# The tested v0.13.1 Linux amd64 image, pinned for immutable deployments:
-docker pull johnny711dock/cronos-db@sha256:bf4f69ac9292c1822d6e8a0817aa97e789f96896c34bbc6a7c4375c476924eca
+docker pull johnny711dock/cronos-db:0.14.0    # :latest selects the current stable release
+docker pull ghcr.io/jatin711-debug/cronos-db:0.14.0
+# For immutable deployments, pin the digest in the release's IMAGE_DIGEST asset.
 ```
 
-For another release, take its pin from the `IMAGE_DIGEST` release asset.
-
-Releases built by the release workflow after v0.13.1 are also published to
-GitHub's registry, for Linux amd64 and arm64 behind one tag. Each such image
-carries signed build provenance and an SBOM attestation, and a cosign
-signature made by the workflow, which you can check before deploying:
+From v0.14.0 the release workflow publishes each image itself. It carries
+signed build provenance and an SBOM attestation, and a cosign signature made
+by the workflow, which you can check before deploying:
 
 ```bash
-docker pull ghcr.io/jatin711-debug/cronos-db:<version>
 gh attestation verify oci://ghcr.io/jatin711-debug/cronos-db:<version> --owner jatin711-debug
 cosign verify ghcr.io/jatin711-debug/cronos-db:<version> \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
@@ -52,7 +52,7 @@ docker run -d \
   -p 9000:9000 \
   -p 8080:8080 \
   -v cronos-data:/data \
-  johnny711dock/cronos-db:0.13.1 \
+  johnny711dock/cronos-db:0.14.0 \
   --node-id=my-node \
   --data-dir=/data \
   --dev
@@ -96,7 +96,7 @@ docker run -d \
   -p 9000:9000 \
   -p 8080:8080 \
   -v /path/on/host:/data \
-  johnny711dock/cronos-db:0.13.1 \
+  johnny711dock/cronos-db:0.14.0 \
   --node-id=my-node \
   --data-dir=/data \
   --dev
@@ -226,7 +226,7 @@ docker run -d \
   -v cronos-node1-data:/data \
   -v /etc/cronos/certs:/certs:ro \
   --env-file /etc/cronos/secrets.env \
-  johnny711dock/cronos-db:0.13.1 \
+  johnny711dock/cronos-db:0.14.0 \
   --node-id=node1 \
   --data-dir=/data \
   --cluster \

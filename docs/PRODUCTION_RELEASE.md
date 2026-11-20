@@ -1,5 +1,27 @@
 # Production release requirements
 
+**v0.14.0 makes catching up a consumer group far behind cheap**: on the
+catch-up that failed v0.13.1's compressed soak, the group was back in step in
+17 minutes instead of 50, with publishes held at 450 per second. It also copies
+a far-behind follower a snapshot, bounds and reports what events scheduled far
+ahead keep on disk, adds a free-space floor and a disk ballast, and publishes
+signed images for Linux amd64 and arm64. Two changes need attention before
+upgrading (partition 0 in the admin APIs, and redelivery after a rollback); see
+the [v0.14.0 notes](RELEASE_V0.14.0.md). The release gates (a 24-hour soak, a
+soak on separate hosts, power-loss testing on real disks, production-sized
+drills) are still open.
+
+## v0.14.0 release
+
+The [v0.14.0 notes](RELEASE_V0.14.0.md) describe the changes and the tests
+that checked them. The chart and default image tag are `0.14.0`. The release
+workflow builds, scans and tests the images and publishes them to
+`ghcr.io/jatin711-debug/cronos-db` with attested provenance, an SBOM and a
+cosign signature; the same index is copied to `johnny711dock/cronos-db`.
+Publication status, checksums and the exact deployment digest are on the
+[release page](https://github.com/jatin711-debug/cronos_db_golang/releases/tag/v0.14.0).
+This release makes no new capacity claim.
+
 **v0.13.1 fixes what failed v0.13.0's first 24-hour soak**: acknowledged
 events a slow consumer group never received, throughput that fell to a tenth
 after a node was lost, node memory that outgrew its limit after a few hours,
