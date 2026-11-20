@@ -126,8 +126,10 @@ func TestAdvanceWheelDoesNotFireEarly(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Stop()
-	start := s.timingWheel.startTimeMs
-	due := start + 5_000
+	// Due 5 s from now, not from when the wheel started: a scheduler that took
+	// that long to open had the event due already, and Schedule rightly made it
+	// ready at once, which read as firing early.
+	due := time.Now().UnixMilli() + 5_000
 	if err := s.Schedule(&types.Event{Offset: 1, ScheduleTs: due, Topic: "t", MessageId: "m"}); err != nil {
 		t.Fatal(err)
 	}
@@ -135,6 +137,9 @@ func TestAdvanceWheelDoesNotFireEarly(t *testing.T) {
 	s.advanceWheel(due - 1)
 	s.tickMu.Unlock()
 	if ready := s.GetReadyEvents(); len(ready) != 0 {
+		if now := time.Now().UnixMilli(); now >= due {
+			t.Skipf("the clock reached the due time (%d ms past) before the check; nothing to judge", now-due)
+		}
 		t.Fatalf("the event fired with the clock 1 ms before it was due")
 	}
 	for i := 0; i < 10 && len(s.GetReadyEvents()) == 0; i++ {

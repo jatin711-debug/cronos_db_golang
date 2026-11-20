@@ -76,6 +76,10 @@ func TestCountersMatchStatsWithoutCounting(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
+	// The filter is filled from Pebble in the background once the store is
+	// open. Done after the claims below, it added them a second time, and
+	// the two reads compared here found different counts.
+	store.rebuildWG.Wait()
 	m := NewManager(store)
 	for i := 0; i < 50; i++ {
 		id := fmt.Sprintf("m-%d", i)
