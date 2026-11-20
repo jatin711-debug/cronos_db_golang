@@ -64,11 +64,17 @@ func (b *completionBlock) set(offset int64) {
 	b[bit/64] |= 1 << uint(bit%64)
 }
 
-// clearBelow clears the bits of offsets below offset, which lies in this
-// block or past it.
+// clearBelow clears the bits of offsets below offset, wherever offset lies:
+// a block wholly below it is emptied, a block past it is left as it is.
 func (b *completionBlock) clearBelow(offset int64, block int64) {
-	if blockOf(offset) > block {
+	switch at := blockOf(offset); {
+	case at > block:
 		*b = completionBlock{}
+		return
+	case at < block:
+		// Every offset of this block is at or above offset: nothing goes.
+		// Clearing the bits below offset's place in its own block here too
+		// dropped completions of every later block that a plan touched.
 		return
 	}
 	bit := int(offset % completionBlockBits)

@@ -312,7 +312,9 @@ func (g *GroupManager) ForgetCompletionsFrom(partitionID int32, offset int64) (i
 			// higher of the two is taken when it is read back.
 			g.persistGroup(group)
 		}
-		g.lowerHighestCompleted(p.prefix, offset-1)
+		// Not below the floor that remains: the log start can be above
+		// offset, and everything below it stays complete.
+		g.lowerHighestCompleted(p.prefix, max(offset, g.floorLocked(p.group, partitionID))-1)
 	}
 	// The journal may name offsets that are gone now; followers get the
 	// full copy next.
