@@ -52,7 +52,14 @@ million records.
   floor, the offset store writes 6.4 instead of 35.5 bytes of WAL and 6.5
   instead of 43.6 bytes of flushes and compactions per event, and a
   completion check takes 150 ns instead of 40 µs. A group whose floor keeps
-  up with its acks stores no blocks at all.
+  up with its acks stores no blocks at all. Repeating the compressed soak's
+  catch-up (a group stopped for 14 minutes at 450 publishes per second, about
+  390,000 events behind) on one GitHub runner with each server: v0.13.1 took
+  50 minutes from the start of the disruption to reconcile, with publishes at
+  a median of 405 per second (28 at the worst) and a median latency of 63 ms;
+  this release took 17 minutes, about 3 of them catching up, with publishes
+  held at 450 per second and a median latency of 13 ms. Neither lost,
+  refused or delivered early anything.
 - **A follower far behind is copied a snapshot.** When an append from the
   leader shows that a follower lacks at least `--snapshot-catchup-threshold`
   entries and at least half of the leader's log, the follower copies the log
@@ -125,5 +132,16 @@ So far, on the branch:
 - **Power cuts:** `TestPowerLoss` passed with `every_event` (3 runs) and
   `batch` (2 runs), and failed with `periodic` as a control; see
   [fault testing](FAULT_TESTING.md).
+- **Catch-up comparison** (nightly workflow, `catchup_ab`, run 44698712329):
+  the numbers under Changes. Its first run (2026-11-20) failed this branch: a
+  bug in the new completion blocks dropped completions of blocks past the
+  floor's block, so finished events were delivered again, and a group with 4
+  credits fell 1.6 million events behind. The fix came with a test that
+  checks the blocks against a plain model through random acks, floor raises,
+  replicated progress, log cuts and restarts. In the passing run both groups
+  received every accepted event, with no more repeats than v0.13.1 (16, from
+  the soak resubscribing its slow group).
+- **CI** (run 44711035735): every job passed, including the race suite, the
+  acceptance suite and the container tests.
 
 The rest is completed when the release is cut.
