@@ -221,7 +221,11 @@ type soakLedger struct {
 	cdcUnknown int
 
 	accepted, mainDelivered, slowDelivered, poisonDelivered, exported atomic.Int64
-	byPartition                                                       [partitionCount]atomic.Int64
+	// mainRepeats and slowRepeats count deliveries of an event the group had
+	// received already: at-least-once allows them, and many of them mean the
+	// server sends again what was finished.
+	mainRepeats, slowRepeats atomic.Int64
+	byPartition              [partitionCount]atomic.Int64
 
 	lateness *phaseHist // first deliveries to the main group, by phase
 	phase    func(time.Time) string
@@ -324,6 +328,8 @@ func (l *soakLedger) delivered(group soakGroup, event *types.Event, receivedAt i
 	case group == groupSlow:
 		if ev.slow == 0 {
 			l.slowDelivered.Add(1)
+		} else {
+			l.slowRepeats.Add(1)
 		}
 		ev.slow = min(ev.slow, 254) + 1
 	default:
@@ -335,6 +341,9 @@ func (l *soakLedger) delivered(group soakGroup, event *types.Event, receivedAt i
 				now := time.UnixMilli(receivedAt)
 				l.lateness.add(l.phase(now), float64(max(receivedAt-due, 0)))
 			}
+		}
+		if ev.main > 0 && group != groupPoison {
+			l.mainRepeats.Add(1)
 		}
 		ev.main = min(ev.main, 254) + 1
 	}
@@ -1045,7 +1054,7 @@ func diskUse(root string) (total, dlq int64, files int, alloc int64) {
 }
 
 const soakNodeHeader = "time,elapsed_s,node,process_start,rss_mib,heap_inuse_mib,held_mib,goroutines,handles,data_mib,dlq_mib,files,wal_segments,retention_blocking_age_s,scheduler_cold_entries,scheduler_active_timers,data_alloc_mib\n"
-const soakWorkHeader = "time,elapsed_s,phase,target_rate,accepted,delivered_main,delivered_slow,exported,poison_delivered,main_lag,slow_lag,unexported,publish_n,publish_p50_ms,publish_p99_ms,publish_max_ms,lateness_n,lateness_p50_ms,lateness_p99_ms,lateness_max_ms,refused,failed_attempts,shortfall,cdc_refused,early,unknown\n"
+const soakWorkHeader = "time,elapsed_s,phase,target_rate,accepted,delivered_main,delivered_slow,exported,poison_delivered,main_lag,slow_lag,unexported,publish_n,publish_p50_ms,publish_p99_ms,publish_max_ms,lateness_n,lateness_p50_ms,lateness_p99_ms,lateness_max_ms,refused,failed_attempts,shortfall,cdc_refused,early,unknown,main_repeats,slow_repeats\n"
 
 func (s *soak) openReports() {
 	s.t.Helper()
@@ -1120,11 +1129,12 @@ func (s *soak) sampleOnce(began time.Time) {
 	s.l.mu.Lock()
 	early, unknown := s.l.earlyN, s.l.unknownN
 	s.l.mu.Unlock()
-	_, _ = fmt.Fprintf(s.workCSV, "%s,%.0f,%s,%.0f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%.1f,%.1f,%.1f,%d,%.1f,%.1f,%.1f,%d,%d,%d,%d,%d,%d\n",
+	_, _ = fmt.Fprintf(s.workCSV, "%s,%.0f,%s,%.0f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%.1f,%.1f,%.1f,%d,%.1f,%.1f,%.1f,%d,%d,%d,%d,%d,%d,%d,%d\n",
 		stamp, elapsed, s.phase(now), s.rateAt(now), s.l.accepted.Load(), s.l.mainDelivered.Load(), s.l.slowDelivered.Load(),
 		s.l.exported.Load(), s.l.poisonDelivered.Load(), g.mainN, g.slowN, g.unexportedN,
 		pub.n, pub.quantile(0.5), pub.quantile(0.99), pub.max, late.n, late.quantile(0.5), late.quantile(0.99), late.max,
-		s.refused.Load(), s.failedAttempts.Load(), s.shortfall.Load(), s.cdc.refused.Load(), early, unknown)
+		s.refused.Load(), s.failedAttempts.Load(), s.shortfall.Load(), s.cdc.refused.Load(), early, unknown,
+		s.l.mainRepeats.Load(), s.l.slowRepeats.Load())
 	_ = s.nodeCSV.Sync()
 	_ = s.workCSV.Sync()
 	s.cdc.flush()
@@ -1692,6 +1702,8 @@ func (s *soak) report(early, unknown int) {
 		"accepted":              s.l.accepted.Load(),
 		"delivered_main":        s.l.mainDelivered.Load(),
 		"delivered_slow":        s.l.slowDelivered.Load(),
+		"repeated_main":         s.l.mainRepeats.Load(),
+		"repeated_slow":         s.l.slowRepeats.Load(),
 		"exported":              s.l.exported.Load(),
 		"poison_delivered":      s.l.poisonDelivered.Load(),
 		"max_poison_deliveries": s.l.maxPoisonDeliveries(),

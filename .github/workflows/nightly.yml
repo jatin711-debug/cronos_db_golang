@@ -32,6 +32,16 @@ on:
         required: false
         default: v0.13.1
         type: string
+      catchup_legs:
+        description: Legs of the catch-up comparison to run (both, branch)
+        required: false
+        default: both
+        type: string
+      catchup_profile:
+        description: Profile the nodes during the catch-up comparison, and stop each leg after 40 minutes
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -276,14 +286,22 @@ jobs:
           nproc; free -m; df -h / /mnt
       - name: Soak with the baseline server
         id: baseline
+        if: ${{ inputs.catchup_legs != 'branch' }}
         continue-on-error: true
         working-directory: tests/acceptance
         env:
           TMPDIR: /mnt/catchup-ab
         run: |
+          # A leg stopped by timeout leaves its nodes running; they go here.
+          trap 'pkill -f "$AB/cronos-api-" || true' EXIT
+          limit=150m
+          if [ "${{ inputs.catchup_profile }}" = true ]; then
+            export CRONOS_SOAK_PPROF=1 limit=40m
+            nohup bash "$GITHUB_WORKSPACE/scripts/soak/capture-profiles.sh" "$AB/baseline.log" "$AB/baseline-pprof" 15 26 32 > "$AB/baseline-pprof.log" 2>&1 &
+          fi
           CRONOS_BINARY="$AB/cronos-api-baseline" CRONOS_SOAK_OUT="$AB/baseline-report" \
           CRONOS_ACCEPTANCE_ARTIFACTS="$AB/baseline-logs" \
-            "$AB/acceptance.test" -test.run '^TestSoak$' -test.v -test.timeout 150m 2>&1 | tee "$AB/baseline.log"
+            timeout "$limit" "$AB/acceptance.test" -test.run '^TestSoak$' -test.v -test.timeout 150m 2>&1 | tee "$AB/baseline.log"
       - name: Soak with the branch's server
         id: branch
         continue-on-error: true
@@ -291,9 +309,16 @@ jobs:
         env:
           TMPDIR: /mnt/catchup-ab
         run: |
+          # A leg stopped by timeout leaves its nodes running; they go here.
+          trap 'pkill -f "$AB/cronos-api-" || true' EXIT
+          limit=150m
+          if [ "${{ inputs.catchup_profile }}" = true ]; then
+            export CRONOS_SOAK_PPROF=1 limit=40m
+            nohup bash "$GITHUB_WORKSPACE/scripts/soak/capture-profiles.sh" "$AB/branch.log" "$AB/branch-pprof" 15 26 32 > "$AB/branch-pprof.log" 2>&1 &
+          fi
           CRONOS_BINARY="$AB/cronos-api-branch" CRONOS_SOAK_OUT="$AB/branch-report" \
           CRONOS_ACCEPTANCE_ARTIFACTS="$AB/branch-logs" \
-            "$AB/acceptance.test" -test.run '^TestSoak$' -test.v -test.timeout 150m 2>&1 | tee "$AB/branch.log"
+            timeout "$limit" "$AB/acceptance.test" -test.run '^TestSoak$' -test.v -test.timeout 150m 2>&1 | tee "$AB/branch.log"
       - name: Compare
         if: always()
         run: |
@@ -319,6 +344,8 @@ jobs:
           path: |
             build/catchup-ab/*-report
             build/catchup-ab/*-logs
+            build/catchup-ab/*-pprof
             build/catchup-ab/*.log
+            build/catchup-ab/cronos-api-*
           retention-days: 14
           if-no-files-found: warn
