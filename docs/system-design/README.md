@@ -207,7 +207,7 @@ decides who waits for it:
 
 | Mode | A publish is acknowledged… | A power loss can lose | Use it when |
 |---|---|---|---|
-| `every_event` | after its own sync | nothing acknowledged | correctness matters more than rate |
+| `every_event` | after its own sync; on a replicated partition, after a sync that started after its append, shared as in `batch` | nothing acknowledged | correctness matters more than rate |
 | `batch` (default) | after a sync that started after its append; writers arriving during a sync share the next one (*group commit*) | nothing acknowledged | the normal case |
 | `periodic` | at once; a background sync runs every `--flush-interval` (1 s) | up to one interval | load tests and development only: production mode refuses it |
 

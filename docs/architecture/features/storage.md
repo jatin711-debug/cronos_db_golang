@@ -23,7 +23,10 @@ Storage module provides durable append-only event persistence with indexed reads
 1. Append assigns offsets and writes WAL v2 records (8-byte Raft term + 4-byte payload checksum) to the active segment.
 2. Sparse index tracks offsets for read and replay efficiency.
 3. Durability depends on fsync mode:
-   - `every_event` — fsync each write
+   - `every_event` — fsync each write. A publish to a replicated partition
+     is the exception: its sync is shared with the publishes that arrived
+     during the sync before it, as in `batch`, and runs while the followers
+     are sent the events (see [replication](replication.md))
    - `batch` (default) — **group-commit** fsync (concurrent writers share one sync)
    - `periodic` — background / coalescer flush with a bounded loss window
 4. Segment rotation keeps prior segments **readable**; compaction and retention reclaim space.

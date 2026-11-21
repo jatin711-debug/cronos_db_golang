@@ -69,6 +69,15 @@ the WAL from three sources in priority order:
 3. **Sweep** — 256 records every 500 ms from the group's first incomplete offset,
    as a safety net for anything not explicitly queued.
 
+An ack returns its delivery's credits as soon as the server has read it
+(`Dispatcher.ReleaseAckedCredits`), before the completion is recorded: the
+record is a durable write, and the consumer's next window is on its way while
+the disk syncs. The delivery itself counts as on its way until the completion
+is recorded, so its events are not handed out again in between, and the
+`AckResponse` is sent only once the write is durable. The acks of every
+consumer stream of a partition that arrive during one such write are recorded
+together by the next (`GroupManager.CommitDeliveries`).
+
 The dispatcher skips records already completed or in flight for the group, so a
 range offered twice is not delivered twice.
 
