@@ -38,11 +38,48 @@ type journalEntry struct {
 
 // progressJournal holds one partition's recent completions, oldest first.
 type progressJournal struct {
+	// entries[head:] are the entries held. Those before head were dropped
+	// and are cleared; see dropOldest.
 	entries []journalEntry
+	head    int
 	offsets int
 	// horizon is the latest version whose completions may be missing from
 	// entries: a delta can be built only from a version at or after it.
 	horizon uint64
+}
+
+// journalCompactAt is the least number of dropped entries at the front of a
+// journal that is worth moving the held ones over.
+const journalCompactAt = 1024
+
+// live returns the entries held, oldest first.
+func (journal *progressJournal) live() []journalEntry {
+	return journal.entries[journal.head:]
+}
+
+// dropOldest forgets the oldest entries until the journal is within its
+// bound.
+//
+// The entries dropped stay in the slice, cleared, until they are at least as
+// many as the ones held, and the held ones are moved to the front then: each
+// move costs no more than the drops since the last one. They used to be moved
+// on every drop. A journal at its bound drops with every ack, so every ack
+// copied the whole journal, megabytes of it, under the journal's lock; in the
+// soak that was a fifth of a leader's CPU.
+func (journal *progressJournal) dropOldest() {
+	for journal.offsets > maxJournalOffsets && journal.head < len(journal.entries) {
+		oldest := &journal.entries[journal.head]
+		journal.offsets -= len(oldest.offsets)
+		journal.horizon = max(journal.horizon, oldest.version)
+		*oldest = journalEntry{} // lets go of its offsets
+		journal.head++
+	}
+	if journal.head >= journalCompactAt && 2*journal.head >= len(journal.entries) {
+		held := copy(journal.entries, journal.entries[journal.head:])
+		clear(journal.entries[held:])
+		journal.entries = journal.entries[:held]
+		journal.head = 0
+	}
 }
 
 type progressJournals struct {
@@ -68,15 +105,7 @@ func (j *progressJournals) recordLocked(partitionID int32, version uint64, added
 		journal.entries = append(journal.entries, journalEntry{version: version, group: group, offsets: offsets})
 		journal.offsets += len(offsets)
 	}
-	drop := 0
-	for journal.offsets > maxJournalOffsets && drop < len(journal.entries) {
-		journal.offsets -= len(journal.entries[drop].offsets)
-		journal.horizon = max(journal.horizon, journal.entries[drop].version)
-		drop++
-	}
-	if drop > 0 {
-		journal.entries = append(journal.entries[:0], journal.entries[drop:]...)
-	}
+	journal.dropOldest()
 }
 
 // reset empties a partition's journal: no delta reaches back past version.
@@ -96,10 +125,11 @@ func (j *progressJournals) sinceLocked(partitionID int32, version uint64) (map[s
 	if journal == nil || version < journal.horizon {
 		return nil, 0, false
 	}
-	first := sort.Search(len(journal.entries), func(i int) bool { return journal.entries[i].version > version })
+	entries := journal.live()
+	first := sort.Search(len(entries), func(i int) bool { return entries[i].version > version })
 	added := make(map[string][]int64)
 	total := 0
-	for _, entry := range journal.entries[first:] {
+	for _, entry := range entries[first:] {
 		added[entry.group] = append(added[entry.group], entry.offsets...)
 		total += len(entry.offsets)
 	}

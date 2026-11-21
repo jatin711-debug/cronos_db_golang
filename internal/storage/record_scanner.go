@@ -74,6 +74,34 @@ func (r *recordScanner) fill(n int) (bool, error) {
 	return true, nil
 }
 
+// skip passes over the next n records, reading only their length prefixes: the
+// lengths are stored in the clear, so a record passed over is neither
+// decrypted nor parsed. ok is false when the data ends, or stops reading as
+// records, before that; the scanner is then of no further use.
+func (r *recordScanner) skip(n int64) (ok bool, err error) {
+	for ; n > 0; n-- {
+		if have, err := r.fill(4); err != nil || !have {
+			return false, err
+		}
+		length := int64(binary.BigEndian.Uint32(r.buf[r.head:]))
+		if length <= 4 || length > MaxRecordLength {
+			return false, nil
+		}
+		if buffered := int64(r.tail - r.head); length > buffered {
+			// The record runs past what was read: the rest of it is not read
+			// at all, and the next read starts after it.
+			if r.eof {
+				return false, nil
+			}
+			r.next += length - buffered
+			r.head, r.tail = 0, 0
+			continue
+		}
+		r.head += int(length)
+	}
+	return true, nil
+}
+
 // record returns the next record without its 4-byte length prefix, and the
 // file position where that body starts. The slice is only valid until the next
 // call. ok is false at the end of the data: end of file, a truncated record,

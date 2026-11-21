@@ -55,6 +55,15 @@ exist:
    quorum is reached, or as soon as it can no longer be reached; sends to
    the remaining followers finish in the background, in offset order.
    Each `Append` RPC is bounded by `--replication-timeout`.
+6. The leader's own disk works at the same time. A publish holds the
+   partition's publish lock while it appends and queues its sends, and waits
+   outside it both for its followers and for the sync of the leader's log
+   (`WAL.AppendBatchDeferred`), so the publishes that arrive during one sync
+   share the next. A follower can therefore acknowledge an entry before the
+   leader holds it durably. Until it does, the leader does not count itself
+   among the replicas that hold the entry (`WAL.DurableThrough`,
+   `Leader.replicaCountOffset`): the entry is not acknowledged to its
+   publisher and is not handed to consumers.
 
 Replica counting alone cannot commit an earlier leader's entries. In v0.8.0
 term-start mode, promotion or reactivation first appends and fsyncs a
@@ -366,7 +375,9 @@ retry is published as new.
   what followers have acknowledged and, in term-start mode, the current-term
   commitment proof (`Leader.QuorumOffset`), not from the
   `InSync` flag; `InSync` feeds only reports (`GetInSyncReplicas`, the
-  leader's stats). A follower of a partition whose log is empty on both sides
+  leader's stats). The leader counts as one of those replicas only as far as
+  its own log is durable, since it sends an entry to its followers before its
+  own sync of it has finished. A follower of a partition whose log is empty on both sides
   counts as in sync, since it holds all of the leader's log
   (`bothEmpty` in `Leader.appendToFollower`). In the `batch` and
   `every_event` fsync modes a follower syncs an append before it

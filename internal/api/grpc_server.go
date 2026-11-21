@@ -85,6 +85,20 @@ func DefaultConfig() *Config {
 	}
 }
 
+// connBufferSize is the size of the read buffer and of the write buffer that
+// the gRPC servers keep for each connection.
+//
+// The library allocates both when a connection is made and keeps them for as
+// long as it lasts, whether or not anything is sent. They were 4 MiB each,
+// sized for throughput tests over a handful of connections: forty idle client
+// connections held 161 MiB of heap, against a node's memory limit of a few
+// hundred. At 64 KiB the same forty hold under 4 MiB. What a buffer saves is
+// system calls, one for each 64 KiB of a large request or reply, which costs
+// microseconds per megabyte; and behind TLS a read returns one record of at
+// most 16 KiB however large the buffer is. Flow control is not affected: the
+// windows below are counters, not memory.
+const connBufferSize = 64 << 10
+
 // NewGRPCServer creates a new gRPC server.
 // Returns an error if TLS is requested but cannot be configured.
 func NewGRPCServer(config *Config) (*GRPCServer, error) {
@@ -152,8 +166,8 @@ func NewGRPCServer(config *Config) (*GRPCServer, error) {
 		grpc.NumStreamWorkers(uint32(streamWorkers)),
 		grpc.InitialWindowSize(16 * 1024 * 1024),
 		grpc.InitialConnWindowSize(32 * 1024 * 1024),
-		grpc.WriteBufferSize(4 * 1024 * 1024),
-		grpc.ReadBufferSize(4 * 1024 * 1024),
+		grpc.WriteBufferSize(connBufferSize),
+		grpc.ReadBufferSize(connBufferSize),
 		grpc.ConnectionTimeout(30 * time.Second),
 		grpc.KeepaliveParams(keepalive.ServerParameters{
 			Time:    config.KeepaliveMinTime,

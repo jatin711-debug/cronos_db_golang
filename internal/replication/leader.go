@@ -463,12 +463,16 @@ func (l *Leader) StartReplication(events []*types.Event) (*PendingReplication, e
 // Wait returns once a quorum (min-insync-replicas, counting the leader) has
 // acknowledged the batch, or as soon as that quorum can no longer be reached.
 // Sends still in flight continue in the background.
+//
+// The leader is counted as holding the batch. A caller that appended it
+// without waiting for its sync (storage.WAL.AppendBatchDeferred) waits for
+// that sync as well before it takes the batch for replicated.
 func (p *PendingReplication) Wait() error {
 	if p.settled {
 		return nil
 	}
 	l := p.l
-	acks := 1 // the leader itself already has the data in its WAL
+	acks := 1 // the leader itself has the data in its WAL
 	for outstanding := p.queued; acks < p.minISR && outstanding > 0 && acks+outstanding >= p.minISR; outstanding-- {
 		if err := <-p.results; err == nil {
 			acks++
@@ -518,6 +522,9 @@ func (l *Leader) termStartAfter(last int64) (*types.Event, error) {
 func (l *Leader) queueSend(f *FollowerInfo, events []*types.Event, checksum uint32, results chan<- error) bool {
 	queued := l.queueFollowerWork(f, results, func() error {
 		batch, batchChecksum := l.takeQueued(f, events, checksum)
+		if batch == nil {
+			return nil // an earlier send carried it
+		}
 		err := l.sendToFollower(f, batch, batchChecksum)
 		if err != nil {
 			l.logSendFailure(f, "Replicate to", err)
@@ -536,12 +543,20 @@ func (l *Leader) queueSend(f *FollowerInfo, events []*types.Event, checksum uint
 // batches queued behind it that continue it, up to catchUpBytes, so a
 // follower with publishes waiting takes them in one append and one sync.
 // Those batches' own sends then find the follower has them and finish
-// without a request (sendToFollower). The batches are shared by every
-// follower's send, so they are copied, not extended.
+// without a request: takeQueued returns nothing for a batch the follower has
+// acknowledged. The batches are shared by every follower's send, so they are
+// copied, not extended.
 //
 // A send used to carry its own batch alone. Publishes wait for their quorum
 // outside the partition's publish lock, so a follower can have many queued,
 // and each cost it a round trip and a sync.
+//
+// And a send whose batch had been carried already used to take what was
+// queued behind it all the same, and send what of that was new. Its publish
+// was replicated, and was told so only after that request, and after one more
+// for every send still ahead of it in the queue: with sixteen publishers a
+// publish waited about ten round trips for an answer its follower had given
+// in the first, and each request carried one or two events.
 func (l *Leader) takeQueued(f *FollowerInfo, own []*types.Event, checksum uint32) ([]*types.Event, uint32) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -551,6 +566,11 @@ func (l *Leader) takeQueued(f *FollowerInfo, own []*types.Event, checksum uint32
 			f.queued = f.queued[i+1:]
 			break
 		}
+	}
+	// What decides is how far the follower has acknowledged this log, as in
+	// sendToFollower.
+	if f.LastAckTS > 0 && f.NextOffset >= 0 && f.HighWatermark >= own[len(own)-1].Offset {
+		return nil, 0
 	}
 	next := own[len(own)-1].Offset + 1
 	size := eventsSize(own)
@@ -1023,9 +1043,13 @@ func (l *Leader) replicaCountOffset() int64 {
 	if l.newerTerm.Load() > 0 {
 		return -1 // what the followers hold now is another leader's log
 	}
+	// The leader is one of the replicas counted, and holds an entry once it is
+	// durable in its own log. A publish sends its entries to the followers
+	// while the leader's disk still works on them, so a follower can have
+	// acknowledged an entry that the leader could yet lose.
 	last := int64(-1)
 	if l.wal != nil {
-		last = l.wal.GetLastOffset()
+		last = l.wal.DurableThrough()
 	}
 
 	l.mu.RLock()

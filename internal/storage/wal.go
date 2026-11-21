@@ -115,6 +115,12 @@ type WAL struct {
 	gcCurrent *groupSync // sync in flight, nil when idle
 	gcNext    *groupSync // sync that starts when gcCurrent finishes
 
+	// deferred holds, in offset order, the appends whose sync their caller
+	// waits for after the append has returned (AppendBatchDeferred), until
+	// that sync has succeeded. See DurableThrough. deferMu is taken after mu.
+	deferMu  sync.Mutex
+	deferred []*deferredAppend
+
 	// checkpointMu is held while Checkpoint copies files, and by everything
 	// that deletes segment files or cuts them short. It is taken before mu.
 	checkpointMu sync.Mutex
@@ -667,11 +673,112 @@ func (w *WAL) advanceAppendTurn(endOffset int64) {
 // log at the offsets they were given; any other error means they are not. After
 // an error wrapping ErrLogFailed the log takes no more appends.
 func (w *WAL) AppendBatch(events []*types.Event) error {
+	_, err := w.appendBatch(events, false)
+	return err
+}
+
+// AppendBatchDeferred appends as AppendBatch does, but returns once the events
+// are in the log and written out, before they are durable. The caller makes
+// them durable with the PendingSync it is given, and must call its Wait
+// whether or not it still needs the answer.
+//
+// It is for a caller that orders its appends under a lock of its own, as a
+// replication leader does: the lock is held for the append and not for the
+// disk, so the appends of every writer that arrives during one sync share the
+// next, and what the caller does besides (sending to followers) runs while the
+// disk works. Until Wait has returned nil the events count as not durable:
+// DurableThrough stays below them.
+//
+// An error means what it means for AppendBatch, and that there is nothing to
+// wait for.
+func (w *WAL) AppendBatchDeferred(events []*types.Event) (*PendingSync, error) {
+	return w.appendBatch(events, true)
+}
+
+// AppendEventDeferred appends a single event, as AppendBatchDeferred does.
+func (w *WAL) AppendEventDeferred(event *types.Event) (*PendingSync, error) {
+	return w.appendBatch([]*types.Event{event}, true)
+}
+
+// deferredAppend is an append that is in the log and not yet known durable.
+type deferredAppend struct {
+	first int64
+	done  bool
+}
+
+// PendingSync is the durability of an append made with AppendBatchDeferred.
+type PendingSync struct {
+	w     *WAL
+	seg   *Segment
+	entry *deferredAppend // nil when the fsync mode promises nothing to wait for
+}
+
+// Wait returns once the append is durable, sharing the sync with every append
+// that was waiting for one. It is called once. An error means the append is
+// in the log and may not be durable (EventsAppended reports true), and that
+// the log takes no more appends.
+func (p *PendingSync) Wait() error {
+	w := p.w
+	if p.entry != nil {
+		if err := w.groupCommitSync(p.seg); err != nil {
+			return &AppendedError{Err: w.fail(fmt.Errorf("sync batch: %w", err))}
+		}
+	}
+	// A sync of this append that succeeded after another one failed does not
+	// make it durable: the failed one may have dropped its pages.
+	if err := w.Failure(); err != nil {
+		return &AppendedError{Err: err}
+	}
+	if p.entry != nil {
+		w.deferMu.Lock()
+		p.entry.done = true
+		for len(w.deferred) > 0 && w.deferred[0].done {
+			w.deferred[0] = nil
+			w.deferred = w.deferred[1:]
+		}
+		if len(w.deferred) == 0 {
+			w.deferred = nil // lets go of the array the queue ran through
+		}
+		w.deferMu.Unlock()
+	}
+	return nil
+}
+
+// DurableThrough returns the offset up to which the log's entries are as
+// durable as its fsync mode makes them: its last offset, unless an append made
+// with AppendBatchDeferred is still waiting for its sync, and then the offset
+// before the first such append. -1 means none.
+//
+// A replication leader counts itself among the replicas that hold an entry
+// only up to here. It sends an entry to its followers while its own disk
+// still works on it, so a follower can acknowledge the entry first; were the
+// leader counted then, an entry held durably by that one follower alone would
+// pass for replicated, and be handed to consumers.
+//
+// A sync that failed leaves its append waiting for good: the log has failed
+// and vouches for nothing from that append on.
+func (w *WAL) DurableThrough() int64 {
+	// The log end is read first. An append is entered in deferred before it
+	// reaches a segment, and leaves only when it is durable, so every entry
+	// this log end covers is either durable or still in deferred below.
+	last := w.GetLastOffset()
+	w.deferMu.Lock()
+	if len(w.deferred) > 0 {
+		last = min(last, w.deferred[0].first-1)
+	}
+	w.deferMu.Unlock()
+	return max(last, -1)
+}
+
+func (w *WAL) appendBatch(events []*types.Event, deferSync bool) (*PendingSync, error) {
 	if len(events) == 0 {
-		return nil
+		if deferSync {
+			return &PendingSync{w: w}, nil
+		}
+		return nil, nil
 	}
 	if err := w.Failure(); err != nil {
-		return err
+		return nil, err
 	}
 
 	start := time.Now()
@@ -701,7 +808,7 @@ func (w *WAL) AppendBatch(events []*types.Event) error {
 					recordBufPool.Put(prepared[j].Buf)
 				}
 			}
-			return err
+			return nil, err
 		}
 		prepared[i] = prep
 	}
@@ -742,7 +849,20 @@ func (w *WAL) AppendBatch(events []*types.Event) error {
 	if err := w.Failure(); err != nil {
 		w.mu.Unlock()
 		w.advanceAppendTurn(endOffset)
-		return err
+		return nil, err
+	}
+	// A deferred append is entered before its records reach the segment, so
+	// that the log end never covers one that DurableThrough does not know of.
+	// With periodic sync nothing is promised, and nothing is waited for.
+	pending := (*PendingSync)(nil)
+	if deferSync {
+		pending = &PendingSync{w: w}
+		if w.fsyncMode != FsyncPeriodic {
+			pending.entry = &deferredAppend{first: startOffset}
+			w.deferMu.Lock()
+			w.deferred = append(w.deferred, pending.entry)
+			w.deferMu.Unlock()
+		}
 	}
 	if err := w.activeSegment.AppendPreparedBatchLocked(prepared, w.config.IndexInterval); err != nil {
 		// Part of the batch may be in the segment, and the offsets are
@@ -750,7 +870,7 @@ func (w *WAL) AppendBatch(events []*types.Event) error {
 		err = w.fail(fmt.Errorf("append prepared batch to segment: %w", err))
 		w.mu.Unlock()
 		w.advanceAppendTurn(endOffset)
-		return err
+		return nil, err
 	}
 	w.noteTermsLocked(prepared)
 
@@ -761,14 +881,27 @@ func (w *WAL) AppendBatch(events []*types.Event) error {
 
 	// every_event flushes and syncs inline, under the WAL lock. batch does both
 	// after releasing it (groupCommitSync), so other writers keep appending
-	// while the disk works and then share one sync.
+	// while the disk works and then share one sync. A deferred append leaves
+	// the sync to its caller in both modes (PendingSync.Wait), and only writes
+	// the records out here: whoever reads the log from now on, a send that
+	// has to catch a follower up for one, finds them in the file.
 	syncSegment := w.activeSegment
-	if w.fsyncMode == FsyncEveryEvent {
+	if pending != nil {
+		pending.seg = syncSegment
+		if pending.entry != nil {
+			if err := syncSegment.WriteOut(); err != nil {
+				err = w.fail(fmt.Errorf("write batch: %w", err))
+				w.mu.Unlock()
+				w.advanceAppendTurn(endOffset)
+				return nil, &AppendedError{Err: err}
+			}
+		}
+	} else if w.fsyncMode == FsyncEveryEvent {
 		if err := syncSegment.Flush(); err != nil {
 			err = w.fail(fmt.Errorf("sync batch: %w", err))
 			w.mu.Unlock()
 			w.advanceAppendTurn(endOffset)
-			return &AppendedError{Err: err}
+			return nil, &AppendedError{Err: err}
 		}
 	}
 
@@ -779,19 +912,23 @@ func (w *WAL) AppendBatch(events []*types.Event) error {
 	w.advanceAppendTurn(endOffset)
 	w.mu.Unlock()
 
+	if pending != nil {
+		return pending, nil
+	}
+
 	// Batch mode: make the append durable outside the WAL lock, sharing the
 	// flush and fsync with every writer that appended in the meantime.
 	if w.fsyncMode == FsyncBatch {
 		if err := w.groupCommitSync(syncSegment); err != nil {
-			return &AppendedError{Err: w.fail(fmt.Errorf("sync batch: %w", err))}
+			return nil, &AppendedError{Err: w.fail(fmt.Errorf("sync batch: %w", err))}
 		}
 	}
 	// A sync of this append that succeeded after another one failed does not
 	// make it durable: the failed one may have dropped its pages.
 	if err := w.Failure(); err != nil {
-		return &AppendedError{Err: err}
+		return nil, &AppendedError{Err: err}
 	}
-	return nil
+	return nil, nil
 }
 
 // returnBuffersToPool returns prepared record buffers to the sync.Pool if they
@@ -1287,8 +1424,9 @@ func (w *WAL) Flush() error {
 	return w.Failure()
 }
 
-// groupCommitSync makes a completed append durable in FsyncBatch mode, sharing
-// the flush and fsync between concurrent writers.
+// groupCommitSync makes a completed append durable, sharing the flush and fsync
+// between concurrent writers: an append in FsyncBatch mode, and in either
+// syncing mode one whose caller waits for the sync itself (PendingSync.Wait).
 //
 // A writer may only rely on a sync that started after its append finished: a
 // sync already in flight captured the segment's write position earlier and
