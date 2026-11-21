@@ -58,8 +58,8 @@ func NewInternalGRPCServer(config *InternalConfig) (*InternalGRPCServer, error) 
 		grpc.NumStreamWorkers(uint32(streamWorkers)),
 		grpc.InitialWindowSize(16 * 1024 * 1024),
 		grpc.InitialConnWindowSize(32 * 1024 * 1024),
-		grpc.WriteBufferSize(4 * 1024 * 1024),
-		grpc.ReadBufferSize(4 * 1024 * 1024),
+		grpc.WriteBufferSize(connBufferSize),
+		grpc.ReadBufferSize(connBufferSize),
 		grpc.ConnectionTimeout(30 * time.Second),
 		grpc.KeepaliveParams(keepalive.ServerParameters{
 			Time:    10 * time.Second,
