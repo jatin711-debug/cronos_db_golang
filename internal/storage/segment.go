@@ -39,6 +39,7 @@ type Segment struct {
 	nextOffset      int64     // next offset expected to be appended in this segment
 	indexEntries    int64     // number of sparse index entries written
 	nextIndexOffset int64     // relative event count threshold for next index entry
+	lastIndexPos    int64     // file position of the record the last index entry was added for
 	sizeBytes       int64     // logical data end in bytes (header + records)
 	createdTS       int64     // segment creation time (Unix ms)
 	isActive        bool      // true while this segment accepts appends
@@ -523,14 +524,8 @@ func (s *Segment) AppendPreparedBatchLocked(prepared []*PreparedRecord, indexInt
 
 		s.sizeBytes = filePos + written
 
-		// Write index entry if needed (using sparse indexing)
-		// Use AddEntryUnsafe to avoid nested locking
-		if s.nextOffset-s.firstOffset >= s.nextIndexOffset {
-			if err := s.index.AddEntryUnsafe(prep.Event.GetScheduleTs(), prep.Event.Offset, filePos); err != nil {
-				return fmt.Errorf("write index: %w", err)
-			}
-			s.nextIndexOffset += indexInterval
-			s.indexEntries++
+		if err := s.indexRecord(prep.Event.GetScheduleTs(), prep.Event.Offset, filePos, indexInterval); err != nil {
+			return err
 		}
 
 		// Advance file pos for next event in batch
@@ -581,14 +576,8 @@ func (s *Segment) appendBatchInternal(events []*types.Event, indexInterval int64
 
 		s.sizeBytes = filePos + written
 
-		// Write index entry if needed (using sparse indexing)
-		// Use AddEntryUnsafe to avoid triple-lock (WAL→Segment→Index)
-		if s.nextOffset-s.firstOffset >= s.nextIndexOffset {
-			if err := s.index.AddEntryUnsafe(event.GetScheduleTs(), event.Offset, filePos); err != nil {
-				return fmt.Errorf("write index: %w", err)
-			}
-			s.nextIndexOffset += indexInterval
-			s.indexEntries++
+		if err := s.indexRecord(event.GetScheduleTs(), event.Offset, filePos, indexInterval); err != nil {
+			return err
 		}
 
 		// Advance file pos for next event in batch
@@ -625,16 +614,41 @@ func (s *Segment) appendEventActive(event *types.Event, indexInterval int64) err
 	s.nextOffset++
 	s.sizeBytes = filePos + written
 
-	// Write index entry if needed (using sparse indexing)
-	// Use AddEntryUnsafe to avoid nested locking
-	if s.nextOffset-s.firstOffset >= s.nextIndexOffset {
-		if err := s.index.AddEntryUnsafe(event.GetScheduleTs(), event.Offset, filePos); err != nil {
-			return fmt.Errorf("write index: %w", err)
-		}
-		s.nextIndexOffset += indexInterval
-		s.indexEntries++
-	}
+	return s.indexRecord(event.GetScheduleTs(), event.Offset, filePos, indexInterval)
+}
 
+// indexSpanBytes is the most record bytes the index leaves between two of its
+// entries, whatever the interval in events.
+//
+// A read finds its record from the nearest entry before it, passing over the
+// records in between by their lengths, and has to read them from the file to
+// do so. With an entry every thousand events of a kilobyte or two, a point
+// read read a megabyte on average for one event: in the soak, bringing events
+// back from the cold store this way took a tenth of a leader's CPU. An entry
+// is 24 bytes, held in memory for every segment, so this costs at most 10 MiB
+// of memory for 100 GiB of log.
+const indexSpanBytes = 256 << 10
+
+// indexRecord adds an index entry for the record just appended at filePos,
+// when one is due: every indexInterval events, and whenever indexSpanBytes of
+// records have been written since the last entry. The caller holds s.mu, and
+// has counted the record in s.nextOffset.
+//
+// It takes the index's own lock (AddEntryUnsafe), not the WAL's or the
+// segment's, which the caller already holds.
+func (s *Segment) indexRecord(scheduleTs, offset, filePos, indexInterval int64) error {
+	byCount := s.nextOffset-s.firstOffset >= s.nextIndexOffset
+	if !byCount && filePos-s.lastIndexPos < indexSpanBytes {
+		return nil
+	}
+	if err := s.index.AddEntryUnsafe(scheduleTs, offset, filePos); err != nil {
+		return fmt.Errorf("write index: %w", err)
+	}
+	if byCount {
+		s.nextIndexOffset += indexInterval
+	}
+	s.lastIndexPos = filePos
+	s.indexEntries++
 	return nil
 }
 
@@ -1375,36 +1389,65 @@ func (s *Segment) readOffsetRange(startOffset, endOffset, maxBytes int64) (resul
 		return result, 0, nil // removed (retention, truncation) after the caller listed it
 	}
 
-	// Find starting position using index
+	// Find starting position using index: the nearest record before the
+	// range whose position is known, and how many records lie between it and
+	// the range. Without an entry that is the segment's first record.
 	startPos := int64(64) // Default to after header
+	between := startOffset - s.firstOffset
 	if s.index != nil {
-		if pos, found := s.index.FindByOffset(startOffset); found {
-			startPos = pos
+		if entry, found := s.index.FindEntryByOffset(startOffset); found {
+			startPos, between = entry.FilePosition, startOffset-entry.Offset
 		}
 	}
-	result, size, err = s.scanOffsetRange(startPos, startOffset, endOffset, maxBytes)
-	if startPos > 64 {
-		// The index only says where to start; it can be wrong. A scan that
-		// does not begin with the first offset of the range the segment holds
-		// started in the wrong place, and is done again from the segment's
-		// start. It used to return nothing, and no error.
-		want := max(startOffset, s.firstOffset)
-		if want <= endOffset && want <= s.lastOffset &&
-			(err != nil || len(result) == 0 || result[0].Offset != want) {
-			return s.scanOffsetRange(64, startOffset, endOffset, maxBytes)
+	// want is the first offset of the range that the segment holds. A scan
+	// that does not begin with it started in the wrong place.
+	want := max(startOffset, s.firstOffset)
+	expected := want <= endOffset && want <= s.lastOffset
+	begins := func() bool { return err == nil && len(result) > 0 && result[0].Offset == want }
+
+	// Each record holds one offset, and offsets follow one another within a
+	// segment, so the records between are passed over by their lengths
+	// (recordScanner.skip), as a point read does (skipRecords). A range read
+	// used to decrypt each of them to learn its offset: with an index entry
+	// every thousand events, a reader following the end of the log, the change
+	// feed for one, decrypted five hundred records on average to be given the
+	// one or two that were new. In the soak that was a sixth of a leader's CPU.
+	if between > 0 && expected {
+		result, size, err = s.scanOffsetRange(startPos, between, startOffset, endOffset, maxBytes)
+		if begins() {
+			return result, size, nil
 		}
+		// Not where the lengths said: read from the known record instead.
+	}
+	result, size, err = s.scanOffsetRange(startPos, 0, startOffset, endOffset, maxBytes)
+	if startPos > 64 && expected && !begins() {
+		// The index only says where to start; it can be wrong. The scan is
+		// done again from the segment's start. It used to return nothing,
+		// and no error.
+		return s.scanOffsetRange(64, 0, startOffset, endOffset, maxBytes)
 	}
 	return result, size, err
 }
 
 // scanOffsetRange reads the events of an inclusive offset range, scanning the
-// segment from startPos. The caller holds s.mu.
-func (s *Segment) scanOffsetRange(startPos, startOffset, endOffset, maxBytes int64) (result []*types.Event, size int64, err error) {
+// segment from startPos after passing over skip records there. The caller
+// holds s.mu.
+func (s *Segment) scanOffsetRange(startPos, skip, startOffset, endOffset, maxBytes int64) (result []*types.Event, size int64, err error) {
 	// ReadAt on the existing file handle is safe alongside appends.
 	scanner := newRecordScanner(s.segmentFile, startPos)
 	defer scanner.release()
 	plain := plainBuffers.Get().(*[]byte)
 	defer putPlainBuffer(plain)
+
+	if skip > 0 {
+		ok, err := scanner.skip(skip)
+		if err != nil {
+			return nil, 0, fmt.Errorf("read record lengths: %w", err)
+		}
+		if !ok {
+			return nil, 0, nil
+		}
+	}
 
 	for {
 		record, ciphertextPos, ok, err := scanner.record()
@@ -1605,6 +1648,14 @@ func (s *Segment) scan() error {
 	if indexedThrough < 0 {
 		nextMissing = -1 // the first record gets an entry
 	}
+	// The entries added are also no more than indexSpanBytes apart, as the
+	// ones written with the records are (indexRecord).
+	lastIndexedPos := int64(0)
+	if s.index != nil {
+		if last, found := s.index.FindEntryByOffset(indexedThrough); found {
+			lastIndexedPos = last.FilePosition
+		}
+	}
 
 	// Read through all records
 	for {
@@ -1677,9 +1728,11 @@ func (s *Segment) scan() error {
 		s.lastOffset = event.Offset
 		s.lastTS = event.GetScheduleTs()
 		s.times.note(event.GetScheduleTs())
-		if s.index != nil && event.Offset > indexedThrough && event.Offset >= nextMissing {
+		if s.index != nil && event.Offset > indexedThrough &&
+			(event.Offset >= nextMissing || recordStartPos-lastIndexedPos >= indexSpanBytes) {
 			missing = append(missing, IndexEntry{Timestamp: event.GetScheduleTs(), Offset: event.Offset, FilePosition: recordStartPos})
 			nextMissing = event.Offset + rebuiltIndexInterval
+			lastIndexedPos = recordStartPos
 		}
 		lastGoodPos = recordStartPos + 4 + int64(len(recordData)) // After length + recordData
 	}
