@@ -1,0 +1,5 @@
+--- FAIL: TestAuditProductionRequiresCluster (0.00s)
+    zz_current_audit_test.go:5: production validation accepted cluster=false with RF=3/minISR=2: runtime has only a standalone copy
+FAIL
+FAIL	github.com/jatin711-debug/cronos_db_golang/internal/config	0.863s
+FAIL

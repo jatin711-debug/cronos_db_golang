@@ -1,0 +1,166 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 710" width="1000" height="710" role="img" aria-labelledby="title desc" font-family="'Segoe UI', system-ui, -apple-system, BlinkMacSystemFont, Roboto, 'Helvetica Neue', Arial, sans-serif">
+  <title id="title">Scheduling — a hierarchical timing wheel with a cold store</title>
+  <desc id="desc">Schedule decides by distance: timers under six seconds go into the level 0 wheel of 600 ten-millisecond slots, timers under an hour into the level 1 wheel of 600 six-second slots, and timers beyond the 60-minute hot window into a Pebble cold store that only keeps a reference. A hydrator moves cold entries into the wheels as they approach. Every tick the current slot is expired into the ready queue for delivery.</desc>
+  <defs>
+    <marker id="ah-2e8b57" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8.5" markerHeight="8.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0.9 L9.6 5 L0 9.1 z" fill="#2e8b57"/></marker>
+    <marker id="ah-57606a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8.5" markerHeight="8.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0.9 L9.6 5 L0 9.1 z" fill="#57606a"/></marker>
+    <marker id="ah-7c4ddb" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8.5" markerHeight="8.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0.9 L9.6 5 L0 9.1 z" fill="#7c4ddb"/></marker>
+  </defs>
+
+  <!-- card: the diagram brings its own background so it reads on light and dark pages -->
+  <rect x="0.5" y="0.5" width="999" height="709" rx="14" fill="#ffffff" stroke="#d0d7de"/>
+  <text x="28" y="37" font-size="20" font-weight="700" fill="#1f2328">Scheduling — a hierarchical timing wheel with a cold store</text>
+  <text x="28" y="58" font-size="12.5" fill="#57606a">The question “which events are due now?” is answered by position on a clock face, not by sorting. Dots are pending timers.</text>
+  <rect x="40" y="78" width="920" height="34" rx="8" fill="#f4f5f7" stroke="#8b949e" stroke-width="1.3"/>
+  <text x="500" y="99.2" font-size="12" fill="#1f2328" text-anchor="middle" font-weight="600">Schedule(event):  how far away is schedule_ts?</text>
+  <path d="M190 112 L190 156.6" fill="none" stroke="#57606a" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#ah-57606a)"/>
+  <text x="198" y="140" font-size="10.8" fill="#57606a" paint-order="stroke" stroke="#ffffff" stroke-width="4" stroke-linejoin="round">less than 6 s</text>
+  <path d="M500 112 L500 172.6" fill="none" stroke="#57606a" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#ah-57606a)"/>
+  <text x="508" y="140" font-size="10.8" fill="#57606a" paint-order="stroke" stroke="#ffffff" stroke-width="4" stroke-linejoin="round">less than 1 hour</text>
+  <path d="M825 112 L825 168.6" fill="none" stroke="#57606a" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#ah-57606a)"/>
+  <text x="817" y="140" font-size="10.8" fill="#57606a" text-anchor="end" paint-order="stroke" stroke="#ffffff" stroke-width="4" stroke-linejoin="round">beyond the 60 min hot window</text>
+
+  <!-- level 0 -->
+  <path d="M190.0 162.0 A100 100 0 0 1 215.9 165.4 L206.0 202.1 A62 62 0 0 0 190.0 200.0 Z" fill="#fff4d9" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M215.9 165.4 A100 100 0 0 1 240.0 175.4 L221.0 208.3 A62 62 0 0 0 206.0 202.1 Z" fill="#fff4d9" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M240.0 175.4 A100 100 0 0 1 260.7 191.3 L233.8 218.2 A62 62 0 0 0 221.0 208.3 Z" fill="#fff4d9" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M260.7 191.3 A100 100 0 0 1 276.6 212.0 L243.7 231.0 A62 62 0 0 0 233.8 218.2 Z" fill="#c98a00" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M276.6 212.0 A100 100 0 0 1 286.6 236.1 L249.9 246.0 A62 62 0 0 0 243.7 231.0 Z" fill="#fff4d9" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M286.6 236.1 A100 100 0 0 1 290.0 262.0 L252.0 262.0 A62 62 0 0 0 249.9 246.0 Z" fill="#fff4d9" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M290.0 262.0 A100 100 0 0 1 286.6 287.9 L249.9 278.0 A62 62 0 0 0 252.0 262.0 Z" fill="#fff4d9" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M286.6 287.9 A100 100 0 0 1 276.6 312.0 L243.7 293.0 A62 62 0 0 0 249.9 278.0 Z" fill="#fff4d9" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M276.6 312.0 A100 100 0 0 1 260.7 332.7 L233.8 305.8 A62 62 0 0 0 243.7 293.0 Z" fill="#fff4d9" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M260.7 332.7 A100 100 0 0 1 240.0 348.6 L221.0 315.7 A62 62 0 0 0 233.8 305.8 Z" fill="#fff4d9" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M240.0 348.6 A100 100 0 0 1 215.9 358.6 L206.0 321.9 A62 62 0 0 0 221.0 315.7 Z" fill="#fff4d9" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M215.9 358.6 A100 100 0 0 1 190.0 362.0 L190.0 324.0 A62 62 0 0 0 206.0 321.9 Z" fill="#fff4d9" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M190.0 362.0 A100 100 0 0 1 164.1 358.6 L174.0 321.9 A62 62 0 0 0 190.0 324.0 Z" fill="#fff4d9" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M164.1 358.6 A100 100 0 0 1 140.0 348.6 L159.0 315.7 A62 62 0 0 0 174.0 321.9 Z" fill="#fff4d9" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M140.0 348.6 A100 100 0 0 1 119.3 332.7 L146.2 305.8 A62 62 0 0 0 159.0 315.7 Z" fill="#fff4d9" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M119.3 332.7 A100 100 0 0 1 103.4 312.0 L136.3 293.0 A62 62 0 0 0 146.2 305.8 Z" fill="#fff4d9" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M103.4 312.0 A100 100 0 0 1 93.4 287.9 L130.1 278.0 A62 62 0 0 0 136.3 293.0 Z" fill="#fff4d9" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M93.4 287.9 A100 100 0 0 1 90.0 262.0 L128.0 262.0 A62 62 0 0 0 130.1 278.0 Z" fill="#fff4d9" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M90.0 262.0 A100 100 0 0 1 93.4 236.1 L130.1 246.0 A62 62 0 0 0 128.0 262.0 Z" fill="#fff4d9" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M93.4 236.1 A100 100 0 0 1 103.4 212.0 L136.3 231.0 A62 62 0 0 0 130.1 246.0 Z" fill="#fff4d9" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M103.4 212.0 A100 100 0 0 1 119.3 191.3 L146.2 218.2 A62 62 0 0 0 136.3 231.0 Z" fill="#fff4d9" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M119.3 191.3 A100 100 0 0 1 140.0 175.4 L159.0 208.3 A62 62 0 0 0 146.2 218.2 Z" fill="#fff4d9" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M140.0 175.4 A100 100 0 0 1 164.1 165.4 L174.0 202.1 A62 62 0 0 0 159.0 208.3 Z" fill="#fff4d9" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M164.1 165.4 A100 100 0 0 1 190.0 162.0 L190.0 200.0 A62 62 0 0 0 174.0 202.1 Z" fill="#fff4d9" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
+  <circle cx="190" cy="262" r="100" fill="none" stroke="#c98a00" stroke-width="1.4"/>
+  <circle cx="190" cy="262" r="62" fill="#ffffff" stroke="#c98a00" stroke-width="1.2"/>
+  <circle cx="249.2" cy="216.5" r="3.1" fill="#ffffff" stroke="#6b4700" stroke-width="1"/>
+  <circle cx="259.3" cy="208.8" r="3.1" fill="#ffffff" stroke="#6b4700" stroke-width="1"/>
+  <circle cx="270.3" cy="251.4" r="3.1" fill="#6b4700" stroke="#6b4700" stroke-width="1"/>
+  <circle cx="246.7" cy="305.5" r="3.1" fill="#6b4700" stroke="#6b4700" stroke-width="1"/>
+  <circle cx="254.3" cy="311.3" r="3.1" fill="#6b4700" stroke="#6b4700" stroke-width="1"/>
+  <circle cx="261.8" cy="317.1" r="3.1" fill="#6b4700" stroke="#6b4700" stroke-width="1"/>
+  <circle cx="239.3" cy="326.3" r="3.1" fill="#6b4700" stroke="#6b4700" stroke-width="1"/>
+  <circle cx="161.4" cy="331" r="3.1" fill="#6b4700" stroke="#6b4700" stroke-width="1"/>
+  <circle cx="156.6" cy="342.7" r="3.1" fill="#6b4700" stroke="#6b4700" stroke-width="1"/>
+  <circle cx="109.7" cy="272.6" r="3.1" fill="#6b4700" stroke="#6b4700" stroke-width="1"/>
+  <circle cx="130.8" cy="216.5" r="3.1" fill="#6b4700" stroke="#6b4700" stroke-width="1"/>
+  <circle cx="120.7" cy="208.8" r="3.1" fill="#6b4700" stroke="#6b4700" stroke-width="1"/>
+  <line x1="190" y1="262" x2="234.4" y2="227.9" stroke="#6b4700" stroke-width="2.2"/>
+  <circle cx="190" cy="262" r="4" fill="#6b4700"/>
+  <text x="284" y="190" font-size="10.8" fill="#6b4700" font-weight="700">now</text>
+  <text x="190" y="388" font-size="12.8" fill="#1f2328" text-anchor="middle" font-weight="700">Level 0</text>
+  <text x="190" y="405" font-size="11" fill="#57606a" text-anchor="middle">600 slots × 10 ms = one turn in 6 s</text>
+  <text x="190" y="420" font-size="10" fill="#57606a" text-anchor="middle" font-style="italic">(24 of the 600 slots drawn)</text>
+
+  <!-- level 1 -->
+  <path d="M500.0 178.0 A84 84 0 0 1 521.7 180.9 L513.5 211.8 A52 52 0 0 0 500.0 210.0 Z" fill="#f2ecfd" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M521.7 180.9 A84 84 0 0 1 542.0 189.3 L526.0 217.0 A52 52 0 0 0 513.5 211.8 Z" fill="#f2ecfd" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M542.0 189.3 A84 84 0 0 1 559.4 202.6 L536.8 225.2 A52 52 0 0 0 526.0 217.0 Z" fill="#f2ecfd" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M559.4 202.6 A84 84 0 0 1 572.7 220.0 L545.0 236.0 A52 52 0 0 0 536.8 225.2 Z" fill="#f2ecfd" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M572.7 220.0 A84 84 0 0 1 581.1 240.3 L550.2 248.5 A52 52 0 0 0 545.0 236.0 Z" fill="#f2ecfd" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M581.1 240.3 A84 84 0 0 1 584.0 262.0 L552.0 262.0 A52 52 0 0 0 550.2 248.5 Z" fill="#f2ecfd" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M584.0 262.0 A84 84 0 0 1 581.1 283.7 L550.2 275.5 A52 52 0 0 0 552.0 262.0 Z" fill="#f2ecfd" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M581.1 283.7 A84 84 0 0 1 572.7 304.0 L545.0 288.0 A52 52 0 0 0 550.2 275.5 Z" fill="#f2ecfd" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M572.7 304.0 A84 84 0 0 1 559.4 321.4 L536.8 298.8 A52 52 0 0 0 545.0 288.0 Z" fill="#f2ecfd" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M559.4 321.4 A84 84 0 0 1 542.0 334.7 L526.0 307.0 A52 52 0 0 0 536.8 298.8 Z" fill="#f2ecfd" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M542.0 334.7 A84 84 0 0 1 521.7 343.1 L513.5 312.2 A52 52 0 0 0 526.0 307.0 Z" fill="#7c4ddb" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M521.7 343.1 A84 84 0 0 1 500.0 346.0 L500.0 314.0 A52 52 0 0 0 513.5 312.2 Z" fill="#f2ecfd" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M500.0 346.0 A84 84 0 0 1 478.3 343.1 L486.5 312.2 A52 52 0 0 0 500.0 314.0 Z" fill="#f2ecfd" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M478.3 343.1 A84 84 0 0 1 458.0 334.7 L474.0 307.0 A52 52 0 0 0 486.5 312.2 Z" fill="#f2ecfd" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M458.0 334.7 A84 84 0 0 1 440.6 321.4 L463.2 298.8 A52 52 0 0 0 474.0 307.0 Z" fill="#f2ecfd" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M440.6 321.4 A84 84 0 0 1 427.3 304.0 L455.0 288.0 A52 52 0 0 0 463.2 298.8 Z" fill="#f2ecfd" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M427.3 304.0 A84 84 0 0 1 418.9 283.7 L449.8 275.5 A52 52 0 0 0 455.0 288.0 Z" fill="#f2ecfd" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M418.9 283.7 A84 84 0 0 1 416.0 262.0 L448.0 262.0 A52 52 0 0 0 449.8 275.5 Z" fill="#f2ecfd" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M416.0 262.0 A84 84 0 0 1 418.9 240.3 L449.8 248.5 A52 52 0 0 0 448.0 262.0 Z" fill="#f2ecfd" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M418.9 240.3 A84 84 0 0 1 427.3 220.0 L455.0 236.0 A52 52 0 0 0 449.8 248.5 Z" fill="#f2ecfd" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M427.3 220.0 A84 84 0 0 1 440.6 202.6 L463.2 225.2 A52 52 0 0 0 455.0 236.0 Z" fill="#f2ecfd" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M440.6 202.6 A84 84 0 0 1 458.0 189.3 L474.0 217.0 A52 52 0 0 0 463.2 225.2 Z" fill="#f2ecfd" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M458.0 189.3 A84 84 0 0 1 478.3 180.9 L486.5 211.8 A52 52 0 0 0 474.0 217.0 Z" fill="#f2ecfd" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M478.3 180.9 A84 84 0 0 1 500.0 178.0 L500.0 210.0 A52 52 0 0 0 486.5 211.8 Z" fill="#f2ecfd" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
+  <circle cx="500" cy="262" r="84" fill="none" stroke="#7c4ddb" stroke-width="1.4"/>
+  <circle cx="500" cy="262" r="52" fill="#ffffff" stroke="#7c4ddb" stroke-width="1.2"/>
+  <circle cx="526" cy="324.8" r="3.1" fill="#ffffff" stroke="#3d1f85" stroke-width="1"/>
+  <circle cx="491.8" cy="324.1" r="3.1" fill="#3d1f85" stroke="#3d1f85" stroke-width="1"/>
+  <circle cx="490.4" cy="334.7" r="3.1" fill="#3d1f85" stroke="#3d1f85" stroke-width="1"/>
+  <circle cx="446.1" cy="303.4" r="3.1" fill="#3d1f85" stroke="#3d1f85" stroke-width="1"/>
+  <circle cx="444.6" cy="239" r="3.1" fill="#3d1f85" stroke="#3d1f85" stroke-width="1"/>
+  <circle cx="437.2" cy="236" r="3.1" fill="#3d1f85" stroke="#3d1f85" stroke-width="1"/>
+  <circle cx="429.8" cy="232.9" r="3.1" fill="#3d1f85" stroke="#3d1f85" stroke-width="1"/>
+  <circle cx="474" cy="199.2" r="3.1" fill="#3d1f85" stroke="#3d1f85" stroke-width="1"/>
+  <circle cx="538.1" cy="212.3" r="3.1" fill="#3d1f85" stroke="#3d1f85" stroke-width="1"/>
+  <circle cx="544.6" cy="203.8" r="3.1" fill="#3d1f85" stroke="#3d1f85" stroke-width="1"/>
+  <line x1="500" y1="262" x2="517.6" y2="304.5" stroke="#3d1f85" stroke-width="2.2"/>
+  <circle cx="500" cy="262" r="4" fill="#3d1f85"/>
+  <text x="500" y="388" font-size="12.8" fill="#1f2328" text-anchor="middle" font-weight="700">Level 1</text>
+  <text x="500" y="405" font-size="11" fill="#57606a" text-anchor="middle">600 slots × 6 s = one turn per hour</text>
+  <text x="500" y="420" font-size="10" fill="#57606a" text-anchor="middle" font-style="italic">(more levels follow the same rule)</text>
+  <path d="M414 262 L293.4 262" fill="none" stroke="#7c4ddb" stroke-width="1.8" stroke-linejoin="round" marker-end="url(#ah-7c4ddb)"/>
+  <text x="353" y="252" font-size="11.2" fill="#3d1f85" text-anchor="middle" font-weight="700">cascade</text>
+  <text x="353" y="280" font-size="10.3" fill="#57606a" text-anchor="middle">each turn of level 0,</text>
+  <text x="353" y="293" font-size="10.3" fill="#57606a" text-anchor="middle">one level-1 slot is</text>
+  <text x="353" y="306" font-size="10.3" fill="#57606a" text-anchor="middle">dealt out into it</text>
+
+  <!-- cold store -->
+  <rect x="700" y="170" width="260" height="150" rx="8" fill="#e7f6ed" stroke="#2e8b57" stroke-width="1.3"/>
+  <text x="830" y="218.7" font-size="13.5" fill="#145232" text-anchor="middle" font-weight="600">Cold store (Pebble)</text>
+  <text x="830" y="236.9" font-size="11" fill="#1f2328" text-anchor="middle">for timers beyond the hot window</text>
+  <text x="830" y="251.6" font-size="11" fill="#1f2328" text-anchor="middle" font-family="ui-monospace, 'Cascadia Mono', 'SF Mono', Consolas, Menlo, monospace">key = [schedule_ts][offset]</text>
+  <text x="830" y="266.4" font-size="11" fill="#1f2328" text-anchor="middle">a 16-byte reference only:</text>
+  <text x="830" y="281.1" font-size="11" fill="#1f2328" text-anchor="middle">the event itself stays in the log</text>
+  <path d="M700 262 L587.4 262" fill="none" stroke="#2e8b57" stroke-width="1.8" stroke-linejoin="round" marker-end="url(#ah-2e8b57)"/>
+  <text x="643" y="252" font-size="11.2" fill="#145232" text-anchor="middle" font-weight="700">hydrator</text>
+  <text x="643" y="280" font-size="10.3" fill="#57606a" text-anchor="middle">moves the next</text>
+  <text x="643" y="293" font-size="10.3" fill="#57606a" text-anchor="middle">window in, every</text>
+  <text x="643" y="306" font-size="10.3" fill="#57606a" text-anchor="middle">5 s – 5 min</text>
+
+  <!-- tick pipeline -->
+  <rect x="40" y="446" width="212" height="62" rx="8" fill="#fff4d9" stroke="#c98a00" stroke-width="1.3"/>
+  <text x="146" y="473" font-size="13.5" fill="#6b4700" text-anchor="middle" font-weight="600">Tick, every 10 ms</text>
+  <text x="146" y="490.9" font-size="10.8" fill="#1f2328" text-anchor="middle">move the hand one slot</text>
+  <rect x="276" y="446" width="212" height="62" rx="8" fill="#fff4d9" stroke="#c98a00" stroke-width="1.3"/>
+  <text x="382" y="473" font-size="13.5" fill="#6b4700" text-anchor="middle" font-weight="600">Expire that slot</text>
+  <text x="382" y="490.9" font-size="10.8" fill="#1f2328" text-anchor="middle">every timer in it is due</text>
+  <path d="M252 477 L274.6 477" fill="none" stroke="#57606a" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#ah-57606a)"/>
+  <rect x="512" y="446" width="212" height="62" rx="8" fill="#eaf2fe" stroke="#3b78d8" stroke-width="1.3"/>
+  <text x="618" y="465.8" font-size="13.5" fill="#0b3a7e" text-anchor="middle" font-weight="600">Ready queue</text>
+  <text x="618" y="483.7" font-size="10.8" fill="#1f2328" text-anchor="middle">bounded: publishes are</text>
+  <text x="618" y="498.2" font-size="10.8" fill="#1f2328" text-anchor="middle">refused when it is full</text>
+  <path d="M488 477 L510.6 477" fill="none" stroke="#57606a" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#ah-57606a)"/>
+  <rect x="748" y="446" width="212" height="62" rx="8" fill="#eaf2fe" stroke="#3b78d8" stroke-width="1.3"/>
+  <text x="854" y="465.8" font-size="13.5" fill="#0b3a7e" text-anchor="middle" font-weight="600">Delivery worker</text>
+  <text x="854" y="483.7" font-size="10.8" fill="#1f2328" text-anchor="middle">hands batches to the</text>
+  <text x="854" y="498.2" font-size="10.8" fill="#1f2328" text-anchor="middle">dispatcher</text>
+  <path d="M724 477 L746.6 477" fill="none" stroke="#57606a" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#ah-57606a)"/>
+  <path d="M190 428 L190 444.6" fill="none" stroke="#57606a" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#ah-57606a)"/>
+  <rect x="40" y="528" width="452" height="166" rx="8" fill="#fffbe8" stroke="#d9bf50" stroke-width="1.2"/>
+  <text x="53" y="551" font-size="12.5" fill="#4d3f00" font-weight="700">Why a wheel instead of a priority queue?</text>
+  <text x="53" y="573.9" font-size="11.3" fill="#1f2328">A min-heap fires timers in exact order, but costs O(log n) per insert and per pop</text>
+  <text x="53" y="590" font-size="11.3" fill="#1f2328">— and with millions of pending timers each operation walks through cold</text>
+  <text x="53" y="606" font-size="11.3" fill="#1f2328">memory.</text>
+  <text x="53" y="626" font-size="11.3" fill="#1f2328">A timing wheel is a clock face of buckets: insert, cancel and expire are O(1).</text>
+  <text x="53" y="642.1" font-size="11.3" fill="#1f2328">The price is precision — a timer fires on its tick, not on its millisecond.</text>
+  <text x="53" y="662.1" font-size="11.3" fill="#1f2328">A far timer starts on a coarse wheel and moves down a level each time it gets</text>
+  <text x="53" y="678.1" font-size="11.3" fill="#1f2328">close.</text>
+  <rect x="508" y="528" width="452" height="166" rx="8" fill="#fffbe8" stroke="#d9bf50" stroke-width="1.2"/>
+  <text x="521" y="551" font-size="12.5" fill="#4d3f00" font-weight="700">What it costs, and what happens after a crash</text>
+  <text x="521" y="573.9" font-size="11.3" fill="#1f2328">Every timer in the wheels is in RAM. That is why a far-future event leaves only</text>
+  <text x="521" y="590" font-size="11.3" fill="#1f2328">a reference in the cold store until it comes within the hot window.</text>
+  <text x="521" y="610" font-size="11.3" fill="#1f2328">The wheels are not saved. After a restart they are rebuilt by re-reading the log,</text>
+  <text x="521" y="626" font-size="11.3" fill="#1f2328">and events that came due while the node was down fire at once.</text>
+  <text x="521" y="646" font-size="11.3" fill="#1f2328">Past 10 M pending timers or 1 M ready events a publish is refused, rather than</text>
+  <text x="521" y="662.1" font-size="11.3" fill="#1f2328">the node running out of memory.</text>
+</svg>

@@ -1,0 +1,133 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 748" width="1000" height="748" role="img" aria-labelledby="title desc" font-family="'Segoe UI', system-ui, -apple-system, BlinkMacSystemFont, Roboto, 'Helvetica Neue', Arial, sans-serif">
+  <title id="title">Storage — the append-only, segmented event log (WAL)</title>
+  <desc id="desc">A partition log is a row of segment files. Closed segments never change; only the newest is written. Each segment starts with a 64-byte header followed by length-prefixed records carrying a CRC, the leader term, the offset, the schedule timestamp, message ID, topic, payload and metadata. A sparse index maps every 1000th offset to a byte position. The fsync mode decides when appended bytes must be on disk.</desc>
+  <defs>
+    <marker id="ah-57606a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8.5" markerHeight="8.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0.9 L9.6 5 L0 9.1 z" fill="#57606a"/></marker>
+  </defs>
+
+  <!-- card: the diagram brings its own background so it reads on light and dark pages -->
+  <rect x="0.5" y="0.5" width="999" height="747" rx="14" fill="#ffffff" stroke="#d0d7de"/>
+  <text x="28" y="37" font-size="20" font-weight="700" fill="#1f2328">Storage — the append-only, segmented event log (WAL)</text>
+  <text x="28" y="58" font-size="12.5" fill="#57606a">One log per partition. Events are only ever added at the end; old data leaves by deleting whole files.</text>
+
+  <!-- 1: segments -->
+  <text x="40" y="92" font-size="12.8" fill="#1f2328" font-weight="700">1 · A partition’s log is a row of segment files</text>
+  <rect x="40" y="104" width="215" height="54" rx="8" fill="#e7f6ed" stroke="#2e8b57" stroke-width="1.3"/>
+  <text x="147.5" y="127" font-size="13.5" fill="#145232" text-anchor="middle" font-weight="600">segment 1</text>
+  <text x="147.5" y="144.9" font-size="10.8" fill="#57606a" text-anchor="middle">closed · never changes again</text>
+  <rect x="275" y="104" width="215" height="54" rx="8" fill="#e7f6ed" stroke="#2e8b57" stroke-width="1.3"/>
+  <text x="382.5" y="127" font-size="13.5" fill="#145232" text-anchor="middle" font-weight="600">segment 2</text>
+  <text x="382.5" y="144.9" font-size="10.8" fill="#57606a" text-anchor="middle">closed · never changes again</text>
+  <rect x="510" y="104" width="215" height="54" rx="8" fill="#e7f6ed" stroke="#2e8b57" stroke-width="1.3"/>
+  <text x="617.5" y="127" font-size="13.5" fill="#145232" text-anchor="middle" font-weight="600">segment 3</text>
+  <text x="617.5" y="144.9" font-size="10.8" fill="#57606a" text-anchor="middle">closed · never changes again</text>
+  <rect x="745" y="104" width="215" height="54" rx="8" fill="#fff4d9" stroke="#c98a00" stroke-width="1.3"/>
+  <text x="852.5" y="127" font-size="13.5" fill="#6b4700" text-anchor="middle" font-weight="600">segment 4 — active</text>
+  <text x="852.5" y="144.9" font-size="10.8" fill="#57606a" text-anchor="middle">appends land here</text>
+  <text x="40" y="176" font-size="10.8" fill="#57606a">← oldest: retention and compaction delete whole files from this end</text>
+  <text x="960" y="176" font-size="10.8" fill="#57606a" text-anchor="end">a new file starts when this one reaches 512 MB →</text>
+  <text x="40" y="196" font-size="11.3" fill="#1f2328">Closed files never change, so they can be memory-mapped for reads, copied for a backup, or sent to a follower while writes continue.</text>
+
+  <!-- 2: inside a segment -->
+  <text x="40" y="232" font-size="12.8" fill="#1f2328" font-weight="700">2 · Inside a segment file</text>
+  <rect x="40" y="244" width="110" height="34" rx="8" fill="#f4f5f7" stroke="#8b949e" stroke-width="1.3"/>
+  <text x="95" y="264.9" font-size="11" fill="#1f2328" text-anchor="middle" font-weight="600">header · 64 B</text>
+  <rect x="150" y="244" width="150" height="34" rx="8" fill="#e7f6ed" stroke="#2e8b57" stroke-width="1.3"/>
+  <text x="225" y="264.9" font-size="11" fill="#1f2328" text-anchor="middle" font-weight="600">record</text>
+  <rect x="300" y="244" width="150" height="34" rx="8" fill="#e7f6ed" stroke="#2e8b57" stroke-width="1.3"/>
+  <text x="375" y="264.9" font-size="11" fill="#1f2328" text-anchor="middle" font-weight="600">record</text>
+  <rect x="450" y="244" width="150" height="34" rx="8" fill="#e7f6ed" stroke="#2e8b57" stroke-width="1.3"/>
+  <text x="525" y="264.9" font-size="11" fill="#1f2328" text-anchor="middle" font-weight="600">record</text>
+  <rect x="600" y="244" width="360" height="34" rx="8" fill="#ffffff" stroke="#c9d1d9" stroke-width="1.3" stroke-dasharray="5 4"/>
+  <text x="780" y="264.8" font-size="10.8" fill="#57606a" text-anchor="middle">free space, preallocated</text>
+  <text x="40" y="296" font-size="10.5" fill="#57606a">header: magic “CRNOS1” · version · first offset · created time · CRC32</text>
+  <path d="M300 278 L40 322 M450 278 L960 322" fill="none" stroke="#afb8c1" stroke-width="1" stroke-linejoin="round" stroke-dasharray="3 3"/>
+  <rect x="40" y="322" width="48" height="40" rx="3" fill="#f4f5f7" stroke="#8b949e" stroke-width="1.1"/>
+  <text x="64" y="346" font-size="10.5" fill="#24292f" text-anchor="middle" font-family="ui-monospace, 'Cascadia Mono', 'SF Mono', Consolas, Menlo, monospace">len</text>
+  <text x="64" y="377" font-size="9.8" fill="#57606a" text-anchor="middle">4</text>
+  <rect x="88" y="322" width="58" height="40" rx="3" fill="#fdecea" stroke="#cf3a30" stroke-width="1.1"/>
+  <text x="117" y="346" font-size="10.5" fill="#8a1f17" text-anchor="middle" font-family="ui-monospace, 'Cascadia Mono', 'SF Mono', Consolas, Menlo, monospace">crc32</text>
+  <text x="117" y="377" font-size="9.8" fill="#57606a" text-anchor="middle">4</text>
+  <rect x="146" y="322" width="56" height="40" rx="3" fill="#f2ecfd" stroke="#7c4ddb" stroke-width="1.1"/>
+  <text x="174" y="346" font-size="10.5" fill="#3d1f85" text-anchor="middle" font-family="ui-monospace, 'Cascadia Mono', 'SF Mono', Consolas, Menlo, monospace">term</text>
+  <text x="174" y="377" font-size="9.8" fill="#57606a" text-anchor="middle">8</text>
+  <rect x="202" y="322" width="62" height="40" rx="3" fill="#fff4d9" stroke="#c98a00" stroke-width="1.1"/>
+  <text x="233" y="346" font-size="10.5" fill="#6b4700" text-anchor="middle" font-family="ui-monospace, 'Cascadia Mono', 'SF Mono', Consolas, Menlo, monospace">offset</text>
+  <text x="233" y="377" font-size="9.8" fill="#57606a" text-anchor="middle">8</text>
+  <rect x="264" y="322" width="92" height="40" rx="3" fill="#fff4d9" stroke="#c98a00" stroke-width="1.1"/>
+  <text x="310" y="346" font-size="10.5" fill="#6b4700" text-anchor="middle" font-family="ui-monospace, 'Cascadia Mono', 'SF Mono', Consolas, Menlo, monospace">schedule_ts</text>
+  <text x="310" y="377" font-size="9.8" fill="#57606a" text-anchor="middle">8</text>
+  <rect x="356" y="322" width="100" height="40" rx="3" fill="#eaf2fe" stroke="#3b78d8" stroke-width="1.1"/>
+  <text x="406" y="346" font-size="10.5" fill="#0b3a7e" text-anchor="middle" font-family="ui-monospace, 'Cascadia Mono', 'SF Mono', Consolas, Menlo, monospace">message_id</text>
+  <text x="406" y="377" font-size="9.8" fill="#57606a" text-anchor="middle">2 + n</text>
+  <rect x="456" y="322" width="64" height="40" rx="3" fill="#eaf2fe" stroke="#3b78d8" stroke-width="1.1"/>
+  <text x="488" y="346" font-size="10.5" fill="#0b3a7e" text-anchor="middle" font-family="ui-monospace, 'Cascadia Mono', 'SF Mono', Consolas, Menlo, monospace">topic</text>
+  <text x="488" y="377" font-size="9.8" fill="#57606a" text-anchor="middle">2 + n</text>
+  <rect x="520" y="322" width="240" height="40" rx="3" fill="#e7f6ed" stroke="#2e8b57" stroke-width="1.1"/>
+  <text x="640" y="346" font-size="10.5" fill="#145232" text-anchor="middle" font-family="ui-monospace, 'Cascadia Mono', 'SF Mono', Consolas, Menlo, monospace">payload</text>
+  <text x="640" y="377" font-size="9.8" fill="#57606a" text-anchor="middle">4 + n</text>
+  <rect x="760" y="322" width="96" height="40" rx="3" fill="#f4f5f7" stroke="#8b949e" stroke-width="1.1"/>
+  <text x="808" y="346" font-size="10.5" fill="#24292f" text-anchor="middle" font-family="ui-monospace, 'Cascadia Mono', 'SF Mono', Consolas, Menlo, monospace">payload crc</text>
+  <text x="808" y="377" font-size="9.8" fill="#57606a" text-anchor="middle">4</text>
+  <rect x="856" y="322" width="104" height="40" rx="3" fill="#f4f5f7" stroke="#8b949e" stroke-width="1.1"/>
+  <text x="908" y="346" font-size="10.5" fill="#24292f" text-anchor="middle" font-family="ui-monospace, 'Cascadia Mono', 'SF Mono', Consolas, Menlo, monospace">meta</text>
+  <text x="908" y="377" font-size="9.8" fill="#57606a" text-anchor="middle">2 + …</text>
+  <text x="968" y="377" font-size="9.8" fill="#57606a" text-anchor="end">bytes</text>
+  <rect x="40" y="393" width="9" height="9" rx="2" fill="#fdecea" stroke="#cf3a30" stroke-width="1.1"/>
+  <text x="56" y="402" font-size="11.1" fill="#1f2328">crc32 covers the rest of the record: a torn or corrupted write is detected, and on restart the file is cut back to its last good record.</text>
+  <rect x="40" y="411" width="9" height="9" rx="2" fill="#f2ecfd" stroke="#7c4ddb" stroke-width="1.1"/>
+  <text x="56" y="420" font-size="11.1" fill="#1f2328">term is the leader epoch that wrote the record: a follower uses it to tell a retried entry from one written by a different leader.</text>
+  <rect x="40" y="429" width="9" height="9" rx="2" fill="#fff4d9" stroke="#c98a00" stroke-width="1.1"/>
+  <text x="56" y="438" font-size="11.1" fill="#1f2328">schedule_ts and message_id are in the record itself, so timers and dedup state can be rebuilt from the log alone.</text>
+
+  <!-- 3: sparse index -->
+  <text x="40" y="476" font-size="12.8" fill="#1f2328" font-weight="700">3 · Sparse index: find an offset without scanning the whole file</text>
+  <rect x="40" y="490" width="146" height="28" rx="5" fill="#f4f5f7" stroke="#8b949e" stroke-width="1.3"/>
+  <text x="113" y="507.6" font-size="10.3" fill="#1f2328" text-anchor="middle" font-family="ui-monospace, 'Cascadia Mono', 'SF Mono', Consolas, Menlo, monospace">offset 0 → byte …</text>
+  <rect x="198" y="490" width="146" height="28" rx="5" fill="#f4f5f7" stroke="#8b949e" stroke-width="1.3"/>
+  <text x="271" y="507.6" font-size="10.3" fill="#1f2328" text-anchor="middle" font-family="ui-monospace, 'Cascadia Mono', 'SF Mono', Consolas, Menlo, monospace">offset 1000 → byte …</text>
+  <rect x="356" y="490" width="146" height="28" rx="5" fill="#f4f5f7" stroke="#8b949e" stroke-width="1.3"/>
+  <text x="429" y="507.6" font-size="10.3" fill="#1f2328" text-anchor="middle" font-family="ui-monospace, 'Cascadia Mono', 'SF Mono', Consolas, Menlo, monospace">offset 2000 → byte …</text>
+  <rect x="514" y="490" width="146" height="28" rx="5" fill="#f4f5f7" stroke="#8b949e" stroke-width="1.3"/>
+  <text x="587" y="507.6" font-size="10.3" fill="#1f2328" text-anchor="middle" font-family="ui-monospace, 'Cascadia Mono', 'SF Mono', Consolas, Menlo, monospace">offset 3000 → byte …</text>
+  <rect x="40" y="552" width="632" height="22" rx="3" fill="#e7f6ed" stroke="#2e8b57" stroke-width="1.1"/>
+  <path d="M113 518 L49.2 551.4" fill="none" stroke="#57606a" stroke-width="1.2" stroke-linejoin="round" marker-end="url(#ah-57606a)"/>
+  <line x1="48" y1="552" x2="48" y2="574" stroke="#2e8b57" stroke-width="1.6"/>
+  <path d="M271 518 L233.1 551.1" fill="none" stroke="#57606a" stroke-width="1.2" stroke-linejoin="round" marker-end="url(#ah-57606a)"/>
+  <line x1="232" y1="552" x2="232" y2="574" stroke="#2e8b57" stroke-width="1.6"/>
+  <path d="M429 518 L398.9 551" fill="none" stroke="#57606a" stroke-width="1.2" stroke-linejoin="round" marker-end="url(#ah-57606a)"/>
+  <line x1="398" y1="552" x2="398" y2="574" stroke="#2e8b57" stroke-width="1.6"/>
+  <path d="M587 518 L589.9 550.6" fill="none" stroke="#57606a" stroke-width="1.2" stroke-linejoin="round" marker-end="url(#ah-57606a)"/>
+  <line x1="590" y1="552" x2="590" y2="574" stroke="#2e8b57" stroke-width="1.6"/>
+  <text x="40" y="592" font-size="10.5" fill="#57606a">the segment file: records differ in size, so a byte position cannot be computed from an offset</text>
+  <rect x="700" y="470" width="260" height="124" rx="8" fill="#fffbe8" stroke="#d9bf50" stroke-width="1.2"/>
+  <text x="713" y="493" font-size="12.5" fill="#4d3f00" font-weight="700">Why sparse?</text>
+  <text x="713" y="515.4" font-size="10.9" fill="#1f2328">One 24-byte entry per 1,000 events. A lookup</text>
+  <text x="713" y="530.8" font-size="10.9" fill="#1f2328">is a binary search in memory, then a scan of</text>
+  <text x="713" y="546.3" font-size="10.9" fill="#1f2328">at most 1,000 records. A dense index reads</text>
+  <text x="713" y="561.8" font-size="10.9" fill="#1f2328">faster but costs a write per event; this one</text>
+  <text x="713" y="577.3" font-size="10.9" fill="#1f2328">can be rebuilt from the segment.</text>
+
+  <!-- 4: fsync modes -->
+  <text x="40" y="630" font-size="12.8" fill="#1f2328" font-weight="700">4 · The durability knob: when must the bytes be on disk?</text>
+  <text x="392" y="630" font-size="11" fill="#57606a" font-family="ui-monospace, 'Cascadia Mono', 'SF Mono', Consolas, Menlo, monospace">--fsync-mode</text>
+  <path d="M755 626 L613.4 626" fill="none" stroke="#57606a" stroke-width="1.3" stroke-linejoin="round" marker-end="url(#ah-57606a)"/>
+  <path d="M755 626 L896.6 626" fill="none" stroke="#57606a" stroke-width="1.3" stroke-linejoin="round" marker-end="url(#ah-57606a)"/>
+  <text x="604" y="630" font-size="11" fill="#57606a" text-anchor="end">safer</text>
+  <text x="906" y="630" font-size="11" fill="#57606a">faster</text>
+  <rect x="40" y="644" width="296" height="88" rx="8" fill="#e7f6ed" stroke="#2e8b57" stroke-width="1.3"/>
+  <text x="188" y="669.5" font-size="13.5" fill="#145232" text-anchor="middle" font-weight="600">every_event</text>
+  <text x="188" y="687.4" font-size="10.8" fill="#1f2328" text-anchor="middle">sync to disk inside every append</text>
+  <text x="188" y="701.9" font-size="10.8" fill="#1f2328" text-anchor="middle" font-style="italic">power loss: nothing acknowledged is lost</text>
+  <text x="188" y="716.4" font-size="10.8" fill="#57606a" text-anchor="middle">cost: one disk sync per call</text>
+  <rect x="352" y="644" width="296" height="88" rx="8" fill="#eaf2fe" stroke="#3b78d8" stroke-width="1.3"/>
+  <text x="500" y="669.5" font-size="13.5" fill="#0b3a7e" text-anchor="middle" font-weight="600">batch  (default)</text>
+  <text x="500" y="687.4" font-size="10.8" fill="#1f2328" text-anchor="middle">group commit: writers that arrive while</text>
+  <text x="500" y="701.9" font-size="10.8" fill="#1f2328" text-anchor="middle">a sync is running share the next one</text>
+  <text x="500" y="716.4" font-size="10.8" fill="#1f2328" text-anchor="middle" font-style="italic">power loss: nothing acknowledged is lost</text>
+  <rect x="664" y="644" width="296" height="88" rx="8" fill="#fff4d9" stroke="#c98a00" stroke-width="1.3"/>
+  <text x="812" y="669.5" font-size="13.5" fill="#6b4700" text-anchor="middle" font-weight="600">periodic</text>
+  <text x="812" y="687.4" font-size="10.8" fill="#1f2328" text-anchor="middle">background sync once per interval (1 s)</text>
+  <text x="812" y="701.9" font-size="10.8" fill="#1f2328" text-anchor="middle" font-style="italic">power loss: the last interval can be lost</text>
+  <text x="812" y="716.4" font-size="10.8" fill="#57606a" text-anchor="middle">cost: lowest — appends never wait for disk</text>
+</svg>
