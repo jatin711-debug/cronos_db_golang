@@ -76,8 +76,8 @@ not guaranteed disk quotas. See the [retention contract](RETENTION_AND_EVENT_LIF
 | Flag | Environment variable | Default | What it does and when to change it |
 |---|---|---|---|
 | `--segment-size` | `CRONOS_SEGMENT_SIZE` | `536870912` | WAL segment size in bytes before rotation (512 MiB). Smaller segments allow finer cleanup at the cost of more files. |
-| `--index-interval` | `CRONOS_INDEX_INTERVAL` | `1000` | Events between sparse log index entries. A smaller value speeds seeking at the cost of a larger index. |
-| `--fsync-mode` | `CRONOS_FSYNC_MODE` | `batch` | `batch` groups disk syncs and waits for durability; `every_event` syncs each event. `periodic` can acknowledge before disk sync and is refused in production. |
+| `--index-interval` | `CRONOS_INDEX_INTERVAL` | `1000` | Events between sparse log index entries. A smaller value speeds seeking at the cost of a larger index. Whatever the value, the index also gets an entry at least every 256 KiB of records, so that a read never passes over more than that to reach its event. |
+| `--fsync-mode` | `CRONOS_FSYNC_MODE` | `batch` | `batch` groups disk syncs and waits for durability; `every_event` syncs each append before the log takes the next. On a partition that is replicated, a publish waits in both modes for a sync that began after its append, and publishes that arrive during one sync share the next. `periodic` can acknowledge before disk sync and is refused in production. |
 | `--flush-interval` | `CRONOS_FLUSH_INTERVAL` | `1000` | Background WAL flush interval in milliseconds. Must be positive. In periodic mode this affects the unsynced-data window. |
 | `--compaction-interval` | `CRONOS_COMPACTION_INTERVAL` | `10m` | How often each partition removes closed segments whose events are finished. `0` disables scheduled compaction; an admin command can still run it. |
 | `--retention-max-age-hours` | `CRONOS_RETENTION_MAX_AGE_HOURS` | `168` | Age in hours after which closed segments may be removed, subject to safety checks. `0` disables the age target. |
