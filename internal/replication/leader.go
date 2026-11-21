@@ -463,12 +463,16 @@ func (l *Leader) StartReplication(events []*types.Event) (*PendingReplication, e
 // Wait returns once a quorum (min-insync-replicas, counting the leader) has
 // acknowledged the batch, or as soon as that quorum can no longer be reached.
 // Sends still in flight continue in the background.
+//
+// The leader is counted as holding the batch. A caller that appended it
+// without waiting for its sync (storage.WAL.AppendBatchDeferred) waits for
+// that sync as well before it takes the batch for replicated.
 func (p *PendingReplication) Wait() error {
 	if p.settled {
 		return nil
 	}
 	l := p.l
-	acks := 1 // the leader itself already has the data in its WAL
+	acks := 1 // the leader itself has the data in its WAL
 	for outstanding := p.queued; acks < p.minISR && outstanding > 0 && acks+outstanding >= p.minISR; outstanding-- {
 		if err := <-p.results; err == nil {
 			acks++
@@ -1023,9 +1027,13 @@ func (l *Leader) replicaCountOffset() int64 {
 	if l.newerTerm.Load() > 0 {
 		return -1 // what the followers hold now is another leader's log
 	}
+	// The leader is one of the replicas counted, and holds an entry once it is
+	// durable in its own log. A publish sends its entries to the followers
+	// while the leader's disk still works on them, so a follower can have
+	// acknowledged an entry that the leader could yet lose.
 	last := int64(-1)
 	if l.wal != nil {
-		last = l.wal.GetLastOffset()
+		last = l.wal.DurableThrough()
 	}
 
 	l.mu.RLock()

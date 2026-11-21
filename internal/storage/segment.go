@@ -2022,6 +2022,33 @@ func (s *Segment) FlushBuffer() error {
 	return s.failedWriteLocked(s.flushWriter())
 }
 
+// WriteOut hands what the segment's buffer holds to the operating system,
+// without syncing it: the records are then in the file for whoever reads it,
+// and a later Sync makes them durable. A mapped segment has no buffer; what
+// was appended to it is in the file already.
+//
+// It does not wait for flushMu, which a sync holds for as long as the disk
+// takes: an append that writes out behind a sync in flight would wait for
+// that sync, and the appends that arrive during one sync could not share the
+// next. The buffer is guarded by s.mu. A write that fails is recorded as
+// FlushBuffer records it; one that failed earlier is reported by the sync
+// that follows, as it would be anyway.
+func (s *Segment) WriteOut() error {
+	s.mu.Lock()
+	if s.closed || s.mmapData != nil || s.writer == nil {
+		s.mu.Unlock()
+		return nil
+	}
+	err := s.flushWriter()
+	s.mu.Unlock()
+	if err == nil {
+		return nil
+	}
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
+	return s.failedWriteLocked(err)
+}
+
 // Sync persists the segment file to disk (fdatasync).
 // For mmap segments, this flushes the mmap view.
 // Safe to call on a closed segment — returns nil without action.

@@ -707,9 +707,15 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 
 	// On a replication leader, the append and the queueing of its sends to the
 	// followers must happen in strict offset order; ReplicateMu serializes
-	// them. The wait for the followers' acknowledgements happens after it is
-	// released. RF=1 / non-leader partitions keep the fast path with no extra
-	// locking.
+	// them. The waits, for this node's disk and for the followers'
+	// acknowledgements, happen after it is released, and at the same time.
+	// RF=1 / non-leader partitions keep the fast path with no extra locking.
+	//
+	// The append used to wait for its sync inside the lock. A partition then
+	// took one publish per sync, however many were waiting, though the log
+	// can cover all of them with one; and the followers were sent an event
+	// only once the leader's disk had finished with it, so a publish paid for
+	// the two disks one after the other.
 	if h.partitionManager.ReplicationRequired() || partitionInternal.ReplLeader != nil {
 		partitionInternal.ReplicateMu.Lock()
 		repl := partitionInternal.ReplLeader
@@ -722,7 +728,8 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 				Error:     fmt.Sprintf("replication leader for partition %d is not ready", partitionID),
 			}, nil
 		}
-		if err := partitionInternal.Wal.AppendEvent(event); err != nil {
+		durable, err := partitionInternal.Wal.AppendEventDeferred(event)
+		if err != nil {
 			if storage.EventsAppended(err) {
 				partitionInternal.HoldUnaccepted([]*types.Event{event}, dedupMgr != nil)
 			} else {
@@ -735,10 +742,20 @@ func (h *EventServiceHandler) Publish(ctx context.Context, req *types.PublishReq
 				Error:     fmt.Sprintf("append to WAL: %v", err),
 			}, nil
 		}
-		// The sends are queued in log order under ReplicateMu; the wait for
-		// the quorum is not, so the next publish appends meanwhile.
+		// The sends are queued in log order under ReplicateMu; the waits are
+		// not, so the next publish appends meanwhile.
 		pending, replErr := repl.StartReplication([]*types.Event{event})
 		partitionInternal.ReplicateMu.Unlock()
+		// The event is in the log either way; it is accepted only if it is
+		// durable here and on the required replicas.
+		if err := durable.Wait(); err != nil {
+			partitionInternal.HoldUnaccepted([]*types.Event{event}, dedupMgr != nil)
+			return &types.PublishResponse{
+				ErrorCode: int32(codes.Internal),
+				Success:   false,
+				Error:     fmt.Sprintf("append to WAL: %v", err),
+			}, nil
+		}
 		if replErr == nil {
 			replErr = pending.Wait()
 		}
@@ -1176,10 +1193,11 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 			// partition is a replication leader, the append and the queueing of
 			// its sends to the followers must happen in strict offset order —
 			// each follower takes contiguous offsets. ReplicateMu serializes the
-			// two for replicated partitions only, and the wait for the followers'
-			// acknowledgements happens after it is released; RF=1 / non-leader
-			// partitions (ReplLeader == nil) keep the fully pipelined fast path
-			// with no extra locking.
+			// two for replicated partitions only, and the waits, for this
+			// node's disk and for the followers' acknowledgements, happen after
+			// it is released and at the same time (see Publish); RF=1 /
+			// non-leader partitions (ReplLeader == nil) keep the fully
+			// pipelined fast path with no extra locking.
 			if h.partitionManager.ReplicationRequired() || partitionInternal.ReplLeader != nil {
 				partitionInternal.ReplicateMu.Lock()
 				repl := partitionInternal.ReplLeader
@@ -1189,7 +1207,8 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 					setError(int32(len(evts)), fmt.Sprintf("replication leader for partition %d is not ready", pid))
 					return
 				}
-				if err := partitionInternal.Wal.AppendBatch(evts); err != nil {
+				durable, err := partitionInternal.Wal.AppendBatchDeferred(evts)
+				if err != nil {
 					if storage.EventsAppended(err) {
 						partitionInternal.HoldUnaccepted(evts, !req.AllowDuplicate)
 					} else {
@@ -1199,10 +1218,17 @@ func (h *EventServiceHandler) PublishBatch(ctx context.Context, req *types.Publi
 					setError(int32(len(evts)), fmt.Sprintf("WAL append for partition %d: %v", pid, err))
 					return
 				}
-				// Sends are queued in log order under ReplicateMu; the wait
-				// for the quorum is not, so the next publish appends meanwhile.
+				// Sends are queued in log order under ReplicateMu; the waits
+				// are not, so the next publish appends meanwhile.
 				pending, replErr := repl.StartReplication(evts)
 				partitionInternal.ReplicateMu.Unlock()
+				// The batch is in the log either way; it is accepted only if it
+				// is durable here and on the required replicas.
+				if err := durable.Wait(); err != nil {
+					partitionInternal.HoldUnaccepted(evts, !req.AllowDuplicate)
+					setError(int32(len(evts)), fmt.Sprintf("WAL append for partition %d: %v", pid, err))
+					return
+				}
 				if replErr == nil {
 					replErr = pending.Wait()
 				}
