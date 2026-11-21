@@ -2,6 +2,7 @@ package consumer
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -407,7 +408,113 @@ func (g *GroupManager) CommitDelivery(groupID string, partitionID int32, events 
 // prefix; the records the floor has passed are dropped once it is raised in
 // memory as well (see setFloorInBatch). It returns one error slot per commit,
 // in order.
+//
+// Calls that arrive while a write is under way are recorded together by the
+// next one. Every consumer stream brings its acks in a call of its own, and
+// each call used to make its own write, one after the other: however many
+// consumers a partition had, it recorded one stream's acks per disk sync.
 func (g *GroupManager) CommitDeliveries(partitionID int32, commits []DeliveryCommit) []error {
+	if len(commits) == 0 {
+		return nil
+	}
+	call := &commitCall{partitionID: partitionID, commits: commits, done: make(chan struct{}), lead: make(chan struct{})}
+	g.commitQueueMu.Lock()
+	g.commitQueue = append(g.commitQueue, call)
+	if g.committing {
+		// A write is under way. This call is recorded by the next one, which
+		// is made by whichever call has waited longest: possibly this one.
+		g.commitQueueMu.Unlock()
+		select {
+		case <-call.done:
+			return call.errs
+		case <-call.lead:
+		}
+		g.commitQueueMu.Lock()
+	} else {
+		g.committing = true
+	}
+	// This call makes the write, for itself and for every call that waits.
+	// It makes one, so that it is not kept writing for as long as others
+	// keep arriving.
+	waiting := g.commitQueue
+	g.commitQueue = nil
+	g.commitQueueMu.Unlock()
+	// Whatever becomes of this write, the calls it took are answered and the
+	// next write is handed on: were it to panic, and the panic be recovered
+	// further up, no later ack of the partition could be recorded otherwise.
+	defer func() {
+		for _, taken := range waiting {
+			select {
+			case <-taken.done:
+			default:
+				taken.errs = make([]error, len(taken.commits))
+				for i := range taken.errs {
+					taken.errs[i] = errCommitAbandoned
+				}
+				close(taken.done)
+			}
+		}
+		g.commitQueueMu.Lock()
+		if len(g.commitQueue) > 0 {
+			close(g.commitQueue[0].lead)
+		} else {
+			g.committing = false
+		}
+		g.commitQueueMu.Unlock()
+	}()
+	g.commitTogether(waiting)
+	return call.errs
+}
+
+// errCommitAbandoned answers a call whose write did not run to its end.
+var errCommitAbandoned = errors.New("the write that was to record this delivery's completion did not finish")
+
+// commitCall is one call of CommitDeliveries waiting for its write. done is
+// closed when a write has recorded it, and lead when the write that records
+// it is its own to make.
+type commitCall struct {
+	partitionID int32
+	commits     []DeliveryCommit
+	errs        []error
+	done        chan struct{}
+	lead        chan struct{}
+}
+
+// commitTogether records the commits of several calls, one durable write for
+// each partition among them, and gives each call its errors.
+func (g *GroupManager) commitTogether(calls []*commitCall) {
+	for len(calls) > 0 {
+		// The calls of the first one's partition, in the order they came.
+		partitionID := calls[0].partitionID
+		var same, others []*commitCall
+		total := 0
+		for _, call := range calls {
+			if call.partitionID == partitionID {
+				same = append(same, call)
+				total += len(call.commits)
+			} else {
+				others = append(others, call)
+			}
+		}
+		commits := same[0].commits
+		if len(same) > 1 {
+			commits = make([]DeliveryCommit, 0, total)
+			for _, call := range same {
+				commits = append(commits, call.commits...)
+			}
+		}
+		errs := g.commitDeliveries(partitionID, commits)
+		for _, call := range same {
+			call.errs = errs[:len(call.commits):len(call.commits)]
+			errs = errs[len(call.commits):]
+			close(call.done)
+		}
+		calls = others
+	}
+}
+
+// commitDeliveries is one durable write of CommitDeliveries.
+func (g *GroupManager) commitDeliveries(partitionID int32, commits []DeliveryCommit) []error {
 	errs := make([]error, len(commits))
 
 	// One commit at a time: each derives the new floor from the previous one.

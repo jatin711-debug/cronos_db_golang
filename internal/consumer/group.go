@@ -107,6 +107,12 @@ type GroupManager struct {
 	// commitMu serializes progress writes (acks and replicated progress): each
 	// derives a group's new cursor from the one before it.
 	commitMu sync.Mutex
+	// commitQueue holds the calls of CommitDeliveries that wait for a write,
+	// in the order they came; committing says that one of them is making a
+	// write, and will hand the next one on. Guarded by commitQueueMu.
+	commitQueueMu sync.Mutex
+	commitQueue   []*commitCall
+	committing    bool
 	// progressVersion changes whenever any group's progress or membership does.
 	progressVersion atomic.Uint64
 	// journal keeps each partition's recent completions for followers that
