@@ -1703,9 +1703,13 @@ func (h *EventServiceHandler) Ack(stream types.EventService_AckServer) error {
 
 	// Acks are read ahead of processing. Recording a completion is a durable
 	// write, so everything that queues up behind one write is committed
-	// together by the next instead of paying for an fsync each.
+	// together by the next instead of paying for an fsync each. The credits
+	// of an acknowledged delivery go back as it is read, so that more acks can
+	// queue up: a consumer whose window is small would otherwise have nothing
+	// more to acknowledge until the write had finished.
 	incoming := make(chan *types.AckRequest, maxAckBatch)
 	recvErr := make(chan error, 1)
+	subject := principal(stream.Context())
 	go func() {
 		defer close(incoming)
 		for {
@@ -1714,6 +1718,7 @@ func (h *EventServiceHandler) Ack(stream types.EventService_AckServer) error {
 				recvErr <- err
 				return
 			}
+			h.releaseAckedCredits(stream.Context(), subject, req)
 			select {
 			case incoming <- req:
 			case <-stream.Context().Done():
@@ -1753,6 +1758,46 @@ func (h *EventServiceHandler) Ack(stream types.EventService_AckServer) error {
 // maxAckBatch bounds how many acks of one stream share a durable commit.
 const maxAckBatch = 256
 
+// validateAck checks that an ack names a delivery that is on its way to the
+// caller, and that the caller may still read its topic. It returns the
+// partition, the consumer group and the records of the delivery.
+func (h *EventServiceHandler) validateAck(ctx context.Context, subject string, req *types.AckRequest) (*partition.Partition, string, []*types.Event, error) {
+	parts := strings.SplitN(req.GetDeliveryId(), ":", 3)
+	if len(parts) != 3 {
+		return nil, "", nil, fmt.Errorf("invalid delivery ID")
+	}
+	pid, err := strconv.ParseInt(parts[1], 10, 32)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	p, err := h.partitionManager.GetInternalPartition(int32(pid))
+	if err != nil {
+		return nil, "", nil, err
+	}
+	group, topic, events, err := p.Dispatcher.ValidateAck(req.DeliveryId, subject, req.NextOffset, req.Success)
+	if err == nil {
+		err = h.checkTopicAuth(ctx, topic, "subscribe")
+	}
+	if err != nil {
+		return nil, "", nil, err
+	}
+	return p, group, events, nil
+}
+
+// releaseAckedCredits gives back the credits of the delivery an ack names as
+// soon as the ack is read, if it is one that will be recorded: the consumer
+// is done with the delivery, and its next window can be on its way while the
+// completions before it are written to disk (see
+// delivery.Dispatcher.ReleaseAckedCredits).
+func (h *EventServiceHandler) releaseAckedCredits(ctx context.Context, subject string, req *types.AckRequest) {
+	if !req.GetSuccess() {
+		return
+	}
+	if p, _, _, err := h.validateAck(ctx, subject, req); err == nil {
+		p.Dispatcher.ReleaseAckedCredits(req.DeliveryId)
+	}
+}
+
 // processAcks validates a run of acks from one stream, records the successful
 // ones with one durable write per partition, and returns a response for each
 // ack in order.
@@ -1769,25 +1814,7 @@ func (h *EventServiceHandler) processAcks(ctx context.Context, acks []*types.Ack
 	subject := principal(ctx)
 	for i, req := range acks {
 		state := &states[i]
-		parts := strings.SplitN(req.GetDeliveryId(), ":", 3)
-		if len(parts) != 3 {
-			state.err = fmt.Errorf("invalid delivery ID")
-			continue
-		}
-		pid, err := strconv.ParseInt(parts[1], 10, 32)
-		if err != nil {
-			state.err = err
-			continue
-		}
-		p, err := h.partitionManager.GetInternalPartition(int32(pid))
-		if err != nil {
-			state.err = err
-			continue
-		}
-		group, topic, events, err := p.Dispatcher.ValidateAck(req.DeliveryId, subject, req.NextOffset, req.Success)
-		if err == nil {
-			err = h.checkTopicAuth(ctx, topic, "subscribe")
-		}
+		p, group, events, err := h.validateAck(ctx, subject, req)
 		if err != nil {
 			state.err = err
 			continue
