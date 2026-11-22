@@ -1,5 +1,28 @@
 # Production release requirements
 
+**v0.14.1 takes costs off a leader's publish, acknowledgement and read
+paths**: in the soak at 450 publishes per second the nodes that lead
+partitions use about a fifth of a core where v0.14.0 used a third to two
+fifths; a partition with sixteen publishers takes four times as many
+publishes per second; a consumer group with a small credit window is
+delivered three times as many events or more; and idle client connections
+hold a fortieth of the memory. It changes no API, flag, wire message or
+on-disk format, and going back to v0.14.0 needs nothing; see the
+[v0.14.1 notes](RELEASE_V0.14.1.md) for what behaves differently. The release
+gates (a 24-hour soak, a soak on separate hosts, power-loss testing on real
+disks, production-sized drills) are still open.
+
+## v0.14.1 release
+
+The [v0.14.1 notes](RELEASE_V0.14.1.md) describe the changes and the tests
+that checked them. The chart and default image tag are `0.14.1`. The release
+workflow builds, scans and tests the images and publishes them to
+`ghcr.io/jatin711-debug/cronos-db` with attested provenance, an SBOM and a
+cosign signature; the same index is copied to `johnny711dock/cronos-db`.
+Publication status, checksums and the exact deployment digest are on the
+[release page](https://github.com/jatin711-debug/cronos_db_golang/releases/tag/v0.14.1).
+This release makes no new capacity claim.
+
 **v0.14.0 makes catching up a consumer group far behind cheap**: on the
 catch-up that failed v0.13.1's compressed soak, the group was back in step in
 17 minutes instead of 50, with publishes held at 450 per second. It also copies

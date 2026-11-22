@@ -6,17 +6,16 @@
 
 ### Get the image
 
-The v0.14.0 image is published for Linux amd64 and arm64, as
+The v0.14.1 image is published for Linux amd64 and arm64, as
 `johnny711dock/cronos-db` on Docker Hub and `ghcr.io/jatin711-debug/cronos-db`
 on GitHub's registry; both names hold the same image, with the same digest.
-Check the [release page](https://github.com/jatin711-debug/cronos_db_golang/releases/tag/v0.14.0)
+Check the [release page](https://github.com/jatin711-debug/cronos_db_golang/releases/tag/v0.14.1)
 for publication status and image evidence:
 
 ```bash
-docker pull johnny711dock/cronos-db:0.14.0    # :latest selects the current stable release
-docker pull ghcr.io/jatin711-debug/cronos-db:0.14.0
-# The tested v0.14.0 image (linux/amd64 and linux/arm64), pinned for immutable deployments:
-docker pull johnny711dock/cronos-db@sha256:c913c3fa52f2d20b9069e618721f34a55dcd977c6537cfcdeaef808791604669
+docker pull johnny711dock/cronos-db:0.14.1    # :latest selects the current stable release
+docker pull ghcr.io/jatin711-debug/cronos-db:0.14.1
+# For immutable deployments, pin the digest in the release's IMAGE_DIGEST asset.
 ```
 
 From v0.14.0 the release workflow publishes each image itself. It carries
@@ -53,7 +52,7 @@ docker run -d \
   -p 9000:9000 \
   -p 8080:8080 \
   -v cronos-data:/data \
-  johnny711dock/cronos-db:0.14.0 \
+  johnny711dock/cronos-db:0.14.1 \
   --node-id=my-node \
   --data-dir=/data \
   --dev
@@ -97,7 +96,7 @@ docker run -d \
   -p 9000:9000 \
   -p 8080:8080 \
   -v /path/on/host:/data \
-  johnny711dock/cronos-db:0.14.0 \
+  johnny711dock/cronos-db:0.14.1 \
   --node-id=my-node \
   --data-dir=/data \
   --dev
@@ -227,7 +226,7 @@ docker run -d \
   -v cronos-node1-data:/data \
   -v /etc/cronos/certs:/certs:ro \
   --env-file /etc/cronos/secrets.env \
-  johnny711dock/cronos-db:0.14.0 \
+  johnny711dock/cronos-db:0.14.1 \
   --node-id=node1 \
   --data-dir=/data \
   --cluster \

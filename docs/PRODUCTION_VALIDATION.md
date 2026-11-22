@@ -29,6 +29,29 @@ not on separate hosts or Kubernetes; power loss was not tested; and the
 latencies are those of a shared desktop machine. A 24-hour run of `TestSoak` on
 one machine is the next step, before the separate-host run.
 
+## v0.14.1 — TODO(date)
+
+The nightly workflow ran the acceptance suite three times in a row, the
+container suite, the rolling upgrade from v0.14.0 with a rollback,
+`TestPowerLoss` with `every_event` and `batch`, and the soak's remote mode
+against three nodes driven by command; all passed (run 44997241289). Its run
+before that failed once in the snapshot catch-up test, which had waited for a
+copy the node did not need; the test now has its leaders keep their logs.
+
+The soak ran for 40 minutes at 450 publishes per second on one GitHub runner
+with v0.14.0 and with this release in turn (`catchup_ab` with profiles, run
+44899806945; three nodes of 2 CPUs and 384 MiB). Each of the two nodes that led
+partitions used 30 to 42 percent of a core with v0.14.0 and 19 to 24 percent
+with v0.14.1; the median publish took 2.8 and 2.5 ms, the slowest 1,445 and
+724 ms. Neither refused a publish or delivered an event early.
+
+TODO(soak): the compressed soak on RunPod (4 hours at 450 publishes per
+second, all seven disruptions).
+
+This does not close the gates below: every run was on one host; LazyFS models
+a page cache, not a disk that loses its own writes; and the remote mode ran
+against processes on one runner, not separate hosts.
+
 ## v0.14.0 — 2026-11-20
 
 The long tests moved to GitHub-hosted runners. The compressed soak's
