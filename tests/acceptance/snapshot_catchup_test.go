@@ -19,7 +19,15 @@ import (
 // must hold is what holds for the other faults: nothing acknowledged is
 // lost, nothing is delivered early, and the replicas end with the same log.
 func TestFollowerFarBehindCatchesUpFromASnapshot(t *testing.T) {
-	c := newCluster(t, "--snapshot-catchup-threshold=100")
+	// The leaders keep their logs for the length of the test. A follower
+	// copies a log when it lacks a hundred entries of what its leader holds,
+	// and with the cluster's two-second passes a leader drops each segment
+	// of 182 entries seconds after its consumers finish it. The node comes
+	// back when its leaders are some 90 entries into a segment: whether it
+	// had a hundred to lack depended on whether the segment before had been
+	// dropped yet, and when it had, replay was right and this test waited
+	// for a copy that had no reason to come.
+	c := newCluster(t, "--snapshot-catchup-threshold=100", "--compaction-interval=5m")
 	c.startAll()
 	observer := c.dial()
 	w := startWorkload(t, c, "far-behind", "far-behind-workers", 3, 20, 2)
