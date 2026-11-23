@@ -2133,9 +2133,17 @@ type ReplicationPositionResponse struct {
 	AcceptingWrites bool `protobuf:"varint,5,opt,name=accepting_writes,json=acceptingWrites,proto3" json:"accepting_writes,omitempty"`
 	// Offset of the first entry the log holds; what lay below was removed.
 	// Nodes up to v0.13.1 do not report it (0).
-	LogStart      int64 `protobuf:"varint,6,opt,name=log_start,json=logStart,proto3" json:"log_start,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	LogStart int64 `protobuf:"varint,6,opt,name=log_start,json=logStart,proto3" json:"log_start,omitempty"`
+	// True from a node that leads the partition and reports progress_followers.
+	// Nodes up to v0.14.1 do not.
+	ProgressReported bool `protobuf:"varint,7,opt,name=progress_reported,json=progressReported,proto3" json:"progress_reported,omitempty"`
+	// The followers that hold the leader's consumer progress: each has taken
+	// the full copy since it was last connected, and what changed since. A
+	// replica that is not listed would, if it came to lead, deliver again what
+	// it has not been told the groups finished.
+	ProgressFollowers []string `protobuf:"bytes,8,rep,name=progress_followers,json=progressFollowers,proto3" json:"progress_followers,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *ReplicationPositionResponse) Reset() {
@@ -2208,6 +2216,20 @@ func (x *ReplicationPositionResponse) GetLogStart() int64 {
 		return x.LogStart
 	}
 	return 0
+}
+
+func (x *ReplicationPositionResponse) GetProgressReported() bool {
+	if x != nil {
+		return x.ProgressReported
+	}
+	return false
+}
+
+func (x *ReplicationPositionResponse) GetProgressFollowers() []string {
+	if x != nil {
+		return x.ProgressFollowers
+	}
+	return nil
 }
 
 // ReplicationLeaderReportRequest asks a node about the partitions it leads.
@@ -5477,7 +5499,7 @@ const file_proto_events_proto_rawDesc = "" +
 	"\x1aReplicationPositionRequest\x12!\n" +
 	"\fpartition_id\x18\x01 \x01(\x05R\vpartitionId\x12\x1f\n" +
 	"\vfence_epoch\x18\x02 \x01(\x03R\n" +
-	"fenceEpoch\"\xcf\x01\n" +
+	"fenceEpoch\"\xab\x02\n" +
 	"\x1bReplicationPositionResponse\x12\x14\n" +
 	"\x05found\x18\x01 \x01(\bR\x05found\x12\x1f\n" +
 	"\vlast_offset\x18\x02 \x01(\x03R\n" +
@@ -5485,7 +5507,9 @@ const file_proto_events_proto_rawDesc = "" +
 	"\tlast_term\x18\x03 \x01(\x03R\blastTerm\x12\x14\n" +
 	"\x05epoch\x18\x04 \x01(\x03R\x05epoch\x12)\n" +
 	"\x10accepting_writes\x18\x05 \x01(\bR\x0facceptingWrites\x12\x1b\n" +
-	"\tlog_start\x18\x06 \x01(\x03R\blogStart\" \n" +
+	"\tlog_start\x18\x06 \x01(\x03R\blogStart\x12+\n" +
+	"\x11progress_reported\x18\a \x01(\bR\x10progressReported\x12-\n" +
+	"\x12progress_followers\x18\b \x03(\tR\x11progressFollowers\" \n" +
 	"\x1eReplicationLeaderReportRequest\"\x9c\x02\n" +
 	"\x15LeaderPartitionReport\x12!\n" +
 	"\fpartition_id\x18\x01 \x01(\x05R\vpartitionId\x12\x14\n" +

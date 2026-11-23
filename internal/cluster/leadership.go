@@ -1215,7 +1215,11 @@ func (m *Manager) handoffMayStart(partitionID int32, leader, target string, aliv
 	if m.config.ReplicationFactor <= 1 {
 		return true
 	}
-	return leaderPos.LastOffset-targetPos.LastOffset <= transferStartLag
+	// The target also has to know what the consumer groups have finished
+	// (see targetHoldsProgress). Asked here, before the leader stops taking
+	// publishes, the copy does not lengthen the handoff.
+	return leaderPos.LastOffset-targetPos.LastOffset <= transferStartLag &&
+		m.targetHoldsProgress(partitionID, leader, target, alive)
 }
 
 // advanceTransfers completes or abandons the handoffs in progress. A handoff
@@ -1283,6 +1287,11 @@ func (m *Manager) advanceTransfers() {
 			continue
 		}
 		if targetPos.LastOffset != leaderPos.LastOffset || targetPos.LastTerm != leaderPos.LastTerm {
+			continue
+		}
+		// It held the consumer progress when the handoff began; a copy sent
+		// again since has to end first.
+		if m.config.ReplicationFactor > 1 && !m.targetHoldsProgress(partitionID, leader, target, alive) {
 			continue
 		}
 

@@ -70,6 +70,9 @@ type fakePositions struct {
 	unreachable map[string]bool
 	// starts holds where each node's log starts (see ReplicaLogRange).
 	starts map[string]int64
+	// progress holds, for a leader that reports it, the followers that hold
+	// its consumer progress (see LeaderProgressFollowers).
+	progress map[string][]string
 }
 
 func (f *fakePositions) set(node string, position ReplicaPosition) {

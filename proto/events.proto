@@ -410,6 +410,16 @@ message ReplicationPositionResponse {
   // Offset of the first entry the log holds; what lay below was removed.
   // Nodes up to v0.13.1 do not report it (0).
   int64 log_start = 6;
+
+  // True from a node that leads the partition and reports progress_followers.
+  // Nodes up to v0.14.1 do not.
+  bool progress_reported = 7;
+
+  // The followers that hold the leader's consumer progress: each has taken
+  // the full copy since it was last connected, and what changed since. A
+  // replica that is not listed would, if it came to lead, deliver again what
+  // it has not been told the groups finished.
+  repeated string progress_followers = 8;
 }
 
 // ReplicationLeaderReportRequest asks a node about the partitions it leads.

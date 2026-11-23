@@ -44,6 +44,9 @@ type Manager struct {
 	// All are guarded by mu.
 	transferRetryAt map[int32]time.Time
 	snapshotAt      map[int32]time.Time
+	// progressWaitLogged is when a handoff of the partition last said that it
+	// waits for its target to hold the consumer progress. Guarded by mu.
+	progressWaitLogged map[int32]time.Time
 	// snapshotChecking is set while catchUpFromSnapshots runs.
 	snapshotChecking atomic.Bool
 	// refusedPlacement is, per partition, the nodes the ring last wanted to
