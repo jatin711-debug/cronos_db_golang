@@ -125,10 +125,13 @@ Before the release:
 - **CI** (run 44997241670): every job passed, including the race suite, the
   fault campaign and the container tests.
 - **Nightly jobs** (run 44997241289): the acceptance suite passed three times
-  in a row and the container suite once; the rolling upgrade from v0.14.0,
-  rollback and upgrade again passed; `TestPowerLoss` passed on a GitHub runner
-  with `every_event` and `batch`; and the soak's remote mode passed against
-  three nodes driven by command. The run before it (44899803697) failed in one
+  in a row and the container suite once; the rolling upgrade, rollback and
+  upgrade again passed, starting from v0.13.1, not from v0.14.0 as this page
+  first said (a run started by hand took the default release of the catch-up
+  comparison; the workflow now starts from the last release, and the upgrade
+  from v0.14.0 was tested after the release, below); `TestPowerLoss` passed on
+  a GitHub runner with `every_event` and `batch`; and the soak's remote mode
+  passed against three nodes driven by command. The run before it (44899803697) failed in one
   test, `TestFollowerFarBehindCatchesUpFromASnapshot`, on the third pass of
   the suite: the test waited for a snapshot copy, and the leaders had dropped
   a finished segment 40 ms before the node returned, which left it fewer
@@ -201,6 +204,12 @@ index was copied unchanged, signature and attestations included, to
 `johnny711dock/cronos-db:0.14.1` and `:latest`. `gh attestation verify` accepts
 its provenance and its SBOM under both names. A dry run of the workflow on the
 release commit (run 45146486432) had passed before the tag was made.
+
+After the release, the published Windows binaries of v0.14.0 and v0.14.1, each
+matching its release's `SHA256SUMS`, passed the rolling upgrade from v0.14.0
+to v0.14.1, the rollback and the upgrade again under traffic
+(`TestRollingUpgradeAndRollback`). Of the 669, 718 and 603 events published in
+the three phases, every one was acknowledged and none was delivered twice.
 
 ## Known limits
 

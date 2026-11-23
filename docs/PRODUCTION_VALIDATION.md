@@ -32,11 +32,16 @@ one machine is the next step, before the separate-host run.
 ## v0.14.1 — 2026-11-23
 
 The nightly workflow ran the acceptance suite three times in a row, the
-container suite, the rolling upgrade from v0.14.0 with a rollback,
+container suite, the rolling upgrade from v0.13.1 with a rollback,
 `TestPowerLoss` with `every_event` and `batch`, and the soak's remote mode
 against three nodes driven by command; all passed (run 44997241289). Its run
 before that failed once in the snapshot catch-up test, which had waited for a
-copy the node did not need; the test now has its leaders keep their logs.
+copy the node did not need; the test now has its leaders keep their logs. This
+entry first said the upgrade started from v0.14.0: a nightly run started by
+hand took the catch-up comparison's default release, v0.13.1, and the workflow
+now starts from the last release. After the release, the published Windows
+binaries passed the rolling upgrade from v0.14.0 to v0.14.1 with a rollback,
+with no event delivered twice.
 
 The soak ran for 40 minutes at 450 publishes per second on one GitHub runner
 with v0.14.0 and with this release in turn (`catchup_ab` with profiles, run
