@@ -58,10 +58,12 @@ GiB, within 13 MiB of its file sizes. The soak allowed 45 minutes per
 disruption instead of 15; none needed it.
 
 It also counted repeated deliveries for the first time at this size: 245,686
-for one group and 266,049 for the other, all when a leader was lost or frozen.
-A node that returns is handed its partitions back as soon as its log has
-caught up and delivers again what was delivered while it was away; v0.14.0
-does the same. The [v0.14.1 notes](RELEASE_V0.14.1.md) give the figures.
+for one group and 266,049 for the other, all when leadership moved. A node
+that returns is handed its partitions back as soon as its log has caught up,
+before it has been copied what the groups finished while it was away, and
+delivers that again; and later in the run a follower that took over repeated
+thousands of events too. v0.14.0 has the same code for both. The
+[v0.14.1 notes](RELEASE_V0.14.1.md) give the figures.
 
 This does not close the gates below: every run was on one host; LazyFS models
 a page cache, not a disk that loses its own writes; and the remote mode ran

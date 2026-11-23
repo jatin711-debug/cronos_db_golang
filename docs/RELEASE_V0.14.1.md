@@ -189,8 +189,9 @@ Before the release:
   file sizes, and was pruned to under 150 MiB by the end.
 
   Both groups were delivered some events twice: 245,686 for the main group
-  and 266,049 for the slow one, all when a leader was lost or frozen and none
-  in steady running; see Known limits.
+  and 266,049 for the slow one, all when leadership moved (a leader lost,
+  frozen or replaced, the cluster restarted) and none in steady running; see
+  Known limits.
 
 The release page records what the release workflow checked on the published
 images: the scan, the container fault tests of the amd64 image, the start of
@@ -201,18 +202,31 @@ the arm64 image, and the digest of the published index.
 Unchanged from v0.14.0, and this release makes no new capacity claim. The
 soaks ran on one host, so the separate-host soak gate stays open.
 
-Measured for the first time in this release's soak, and also in v0.14.0: a
-node that returns is handed its partitions back as soon as its log has caught
-up, and it then delivers again the events that were appended, and delivered,
-while it was away. In the soak a leader was away for 286 seconds at 450
-publishes per second; 12 seconds after it returned it led its two partitions
-again and delivered about 64,000 events to each group a second time. Nothing
-is lost or skipped, and consumers must handle repeats in any case, but the
-number grows with the length of the outage and the publish rate. The nightly
-soak, with a 30-second outage at a tenth of the rate, repeats about 880 events
-per group on v0.14.0 and 800 and 220 on this release. Why the returning node's
-record of what the groups have finished is behind its log at that moment has
-not been traced yet.
+Measured for the first time in this release's soak, and also in v0.14.0: when
+a partition's leadership moves, its new leader can deliver again events that
+its consumer groups had already finished. Nothing is lost or skipped, and
+consumers must handle repeats in any case, but the numbers are larger than a
+change of leader should cost.
+
+- **A node that returns is handed its partitions back before it knows what
+  was finished while it was away.** The handoff waits for the node's log to
+  end where the leader's does. The record of what each group has finished is
+  copied to it separately, a page of 4,096 completions every half second, and
+  the handoff does not wait for that. In the soak a leader was away for 286
+  seconds at 450 publishes per second; 12 seconds after it returned it led its
+  two partitions again and delivered about 64,000 events to each group a
+  second time, which is what was appended while it was away. The nightly soak,
+  with a 30-second outage at a tenth of the rate, repeats about 880 events per
+  group on v0.14.0, and 800 and 220 on this release.
+- **Later in a long run, a follower that takes over repeats more.** The first
+  failover of the soak, 20 minutes in, repeated nothing. One 77 minutes in, to
+  a node that had never been away, repeated 15,920 events for one group and
+  1,945 for the other, and the restart of the whole cluster after three hours
+  repeated 35,313 and 68,115. The followers' copies of the groups' progress
+  were behind by then; why is not established yet. The code that copies them
+  is the same in v0.14.0.
+
+Both are the next release's work.
 
 Found while testing this release, and also in v0.14.0: a node that already
 knows its partitions' leaders when it starts asks each for a copy of its log
