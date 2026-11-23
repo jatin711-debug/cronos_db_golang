@@ -26,7 +26,8 @@ const (
 	// maxJournalOffsets bounds the completions a partition's journal keeps.
 	// A follower further behind than this gets the full copy.
 	maxJournalOffsets = 1 << 18
-	// maxDeltaOffsets bounds the completions sent in one delta.
+	// maxDeltaOffsets is about how many completions one delta carries. What
+	// was recorded after that goes with the next one.
 	maxDeltaOffsets = 1 << 16
 )
 
@@ -118,22 +119,30 @@ func (j *progressJournals) reset(partitionID int32, version uint64) {
 	j.journals[partitionID] = &progressJournal{horizon: version}
 }
 
-// since returns, per group, the completions recorded after version, and
-// whether the journal reaches back that far. The caller holds mu.
-func (j *progressJournals) sinceLocked(partitionID int32, version uint64) (map[string][]int64, int, bool) {
+// sinceLocked returns, per group, the completions recorded after version, and
+// whether the journal reaches back that far. Once it has gathered limit
+// completions it stops at the end of the version it is in: upTo is then that
+// version, the one the completions returned bring a follower to, and what was
+// recorded later is left for the next call. upTo is 0 when nothing was left.
+// The caller holds mu.
+func (j *progressJournals) sinceLocked(partitionID int32, version uint64, limit int) (added map[string][]int64, upTo uint64, ok bool) {
 	journal := j.journals[partitionID]
 	if journal == nil || version < journal.horizon {
 		return nil, 0, false
 	}
 	entries := journal.live()
 	first := sort.Search(len(entries), func(i int) bool { return entries[i].version > version })
-	added := make(map[string][]int64)
+	added = make(map[string][]int64)
 	total := 0
-	for _, entry := range entries[first:] {
+	for i, entry := range entries[first:] {
+		// The entries of one version are next to each other, one per group.
+		if total >= limit && entry.version != entries[first+i-1].version {
+			return added, entries[first+i-1].version, true
+		}
 		added[entry.group] = append(added[entry.group], entry.offsets...)
 		total += len(entry.offsets)
 	}
-	return added, total, true
+	return added, 0, true
 }
 
 // noteCompletions bumps the progress version for completions just recorded
@@ -157,16 +166,27 @@ func (g *GroupManager) ResetProgressJournal(partitionID int32) {
 // ExportProgressDelta returns a partition's consumer progress for a follower
 // that holds it up to version since: every tracked group with its current
 // floor, and the completions above that floor recorded after since. ok is
-// false when the journal does not reach back to since, or when that is more
-// than one delta should carry; the follower then needs the full copy.
-// version is the progress version the delta brings the follower up to.
+// false when the journal does not reach back to since; the follower then
+// needs the full copy. version is the progress version the delta brings the
+// follower up to.
+//
+// A delta carries about maxDeltaOffsets completions. When more were recorded
+// after since, version is short of the current one, and the delta from it
+// carries the next ones. Such a follower used to be given no delta at all and
+// was sent the full copy instead. That copy is every completion above each
+// floor, so sending it could take longer than the leader took to record
+// another delta's worth: the follower then got one full copy after another
+// and was never nearer than a copy's length to what its leader knew.
 func (g *GroupManager) ExportProgressDelta(partitionID int32, since uint64) (groups []*types.ConsumerGroupProgress, version uint64, ok bool) {
 	g.journal.mu.Lock()
 	version = g.progressVersion.Load()
-	added, total, ok := g.journal.sinceLocked(partitionID, since)
+	added, upTo, ok := g.journal.sinceLocked(partitionID, since, maxDeltaOffsets)
 	g.journal.mu.Unlock()
-	if !ok || total > maxDeltaOffsets {
+	if !ok {
 		return nil, version, false
+	}
+	if upTo != 0 {
+		version = upTo
 	}
 
 	g.mu.RLock()

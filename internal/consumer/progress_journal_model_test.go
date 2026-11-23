@@ -1,6 +1,7 @@
 package consumer
 
 import (
+	"math"
 	"math/rand"
 	"slices"
 	"testing"
@@ -56,10 +57,14 @@ func TestProgressJournalMatchesAModel(t *testing.T) {
 	next := int64(0)
 	check := func(since uint64) {
 		t.Helper()
-		got, gotTotal, gotOK := journals.sinceLocked(0, since)
+		got, upTo, gotOK := journals.sinceLocked(0, since, math.MaxInt)
+		gotTotal := 0
+		for _, offsets := range got {
+			gotTotal += len(offsets)
+		}
 		want, wantTotal, wantOK := model.since(since)
-		if gotOK != wantOK || gotTotal != wantTotal {
-			t.Fatalf("since version %d (of %d): ok=%v total=%d, want ok=%v total=%d", since, version, gotOK, gotTotal, wantOK, wantTotal)
+		if gotOK != wantOK || gotTotal != wantTotal || upTo != 0 {
+			t.Fatalf("since version %d (of %d): ok=%v total=%d up to %d, want ok=%v total=%d and nothing left", since, version, gotOK, gotTotal, upTo, wantOK, wantTotal)
 		}
 		if !gotOK {
 			return
@@ -70,6 +75,34 @@ func TestProgressJournalMatchesAModel(t *testing.T) {
 		for group, offsets := range want {
 			if !slices.Equal(got[group], offsets) {
 				t.Fatalf("since version %d: group %s has %d offsets, want %d", since, group, len(got[group]), len(offsets))
+			}
+		}
+
+		// Asked for a bounded number at a time, it gives the same completions
+		// in pieces, each from the version the piece before it led to.
+		const piece = 3000
+		pieces := make(map[string][]int64)
+		for at := since; ; {
+			part, next, ok := journals.sinceLocked(0, at, piece)
+			if !ok {
+				t.Fatalf("since version %d: no piece from version %d", since, at)
+			}
+			size := 0
+			for group, offsets := range part {
+				pieces[group] = append(pieces[group], offsets...)
+				size += len(offsets)
+			}
+			if next == 0 {
+				break
+			}
+			if next <= at || size < piece {
+				t.Fatalf("since version %d: a piece of %d completions from version %d leads to version %d", since, size, at, next)
+			}
+			at = next
+		}
+		for group, offsets := range want {
+			if !slices.Equal(pieces[group], offsets) {
+				t.Fatalf("since version %d: in pieces, group %s has %d offsets, want %d", since, group, len(pieces[group]), len(offsets))
 			}
 		}
 	}
