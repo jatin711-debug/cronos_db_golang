@@ -135,14 +135,23 @@ type FollowerInfo struct {
 
 	// progressSent is the consumer-progress version this follower last
 	// acknowledged; progressSending marks a send in flight. Guarded by mu.
-	progressSent           uint64
-	progressSentAt         time.Time
-	progressSending        bool
-	progressCursor         types.ProgressCursor
-	progressRoundVersion   uint64
-	progressRoundActive    bool
-	progressRoundLogEnd    int64
-	progressRoundReach     int64
+	progressSent         uint64
+	progressSentAt       time.Time
+	progressSending      bool
+	progressCursor       types.ProgressCursor
+	progressRoundVersion uint64
+	progressRoundActive  bool
+	progressRoundLogEnd  int64
+	progressRoundReach   int64
+	// progressRoundCarry holds, per group, the completions of the round that
+	// lay at or beyond where the follower's log ended as their page was sent:
+	// the follower left those, and they go with the next delta
+	// (progressCarry). progressRoundShort is set when they are more than a
+	// delta should carry, or a floor lay beyond the follower's log: it is
+	// then sent the copy again once its log has grown.
+	progressRoundCarry     map[string][]int64
+	progressRoundCarried   int
+	progressRoundShort     bool
 	progressSentReach      int64
 	deadLetterCursor       types.DeadLetterCursor
 	deadLetterRoundVersion uint64
