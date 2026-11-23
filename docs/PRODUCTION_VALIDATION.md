@@ -45,8 +45,23 @@ partitions used 30 to 42 percent of a core with v0.14.0 and 19 to 24 percent
 with v0.14.1; the median publish took 2.8 and 2.5 ms, the slowest 1,445 and
 724 ms. Neither refused a publish or delivered an event early.
 
-TODO(soak): the compressed soak on RunPod (4 hours at 450 publishes per
-second, all seven disruptions).
+The compressed soak that v0.13.1 failed ran again on RunPod (three nodes as
+processes on one 4-vCPU host, 384 MiB each, `every_event`, 8 MiB segments, 4
+hours at 450 publishes per second with bursts of 1,200) and passed all seven
+disruptions: 6,690,058 events accepted, every one delivered to both consumer
+groups and exported, none refused or early. The disruptions reconciled in 304,
+23, 344, 877, 902, 47 and 67 seconds; the consumer group that fell 387,051
+events behind was back in step 44 seconds after it returned, with publishes
+held at 450 per second, where v0.13.1 fell to about 180 and did not catch up.
+Heap in use stayed under 250 MiB per node and each node's data peaked at 9.3
+GiB, within 13 MiB of its file sizes. The soak allowed 45 minutes per
+disruption instead of 15; none needed it.
+
+It also counted repeated deliveries for the first time at this size: 245,686
+for one group and 266,049 for the other, all when a leader was lost or frozen.
+A node that returns is handed its partitions back as soon as its log has
+caught up and delivers again what was delivered while it was away; v0.14.0
+does the same. The [v0.14.1 notes](RELEASE_V0.14.1.md) give the figures.
 
 This does not close the gates below: every run was on one host; LazyFS models
 a page cache, not a disk that loses its own writes; and the remote mode ran

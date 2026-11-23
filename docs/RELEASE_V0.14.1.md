@@ -151,8 +151,46 @@ Before the release:
   not compare catch-up times.
 - **Compressed soak** (RunPod, three nodes as processes on one 4-vCPU Linux
   host, 384 MiB each, encrypted WAL, `every_event`, 8 MiB segments, 4 hours at
-  450 publishes per second with bursts of 1,200): TODO(soak): result,
-  disruption times, memory and disk.
+  450 publishes per second with bursts of 1,200; the configuration v0.13.1's
+  compressed soak failed in): passed all seven disruptions. It accepted
+  6,690,058 events, and every one was delivered to both consumer groups and
+  exported; none was refused, delivered early or left with an unknown outcome.
+
+  | Disruption | Reconciled after | v0.13.1, same soak |
+  |---|---|---|
+  | Leader lost, its node down for 286 s | 304 s | 303 s |
+  | Leader frozen for 20 s | 23 s | 27 s |
+  | Leader lost while a follower catches up | 344 s | 479 s |
+  | CDC destination down for 857 s | 877 s | 940 s |
+  | Consumer group slow, then offline, for 857 s; 387,051 events behind | 902 s | not within 15 minutes; the run ended here |
+  | Node replaced by an empty one (7.5 GiB lost) | 47 s | not reached |
+  | Whole cluster lost | 67 s | not reached |
+
+  The consumer group was back in step 44 seconds after it returned, with
+  publishes held at 450 per second (median 1.1 ms; 99th percentile 60 ms in
+  the minute of the catch-up). In v0.13.1 publishes fell to about 180 per
+  second there and the group did not catch up. The soak allowed a disruption
+  45 minutes to reconcile instead of its default 15, as the nightly comparison
+  does; none needed more than the 902 seconds above, 857 of which are the
+  outage itself.
+
+  Over the steady minutes the median publish took 1.1 ms and the 99th
+  percentile 5.3 ms. Publishes fell below 450 per second only in the minutes
+  that lost a leader: 229 per second at the worst, when a leader was lost
+  during catch-up, and 254 when the whole cluster was. The 5,341 failed
+  publish attempts and every delivery more than 5 seconds late (57 seconds at
+  the worst, after the whole cluster was lost) fall in those minutes too,
+  apart from 33 failed attempts while the cluster started. The generator could
+  not send 71,373 publishes on time, 1.1 percent of its target.
+
+  Each node's heap in use stayed under 250 MiB of its 384 MiB limit (v0.13.1:
+  258 MiB) and its resident memory under 277 MiB. Each node's data grew to
+  9.3 GiB before the seeded events fell due, never more than 13 MiB above its
+  file sizes, and was pruned to under 150 MiB by the end.
+
+  Both groups were delivered some events twice: 245,686 for the main group
+  and 266,049 for the slow one, all when a leader was lost or frozen and none
+  in steady running; see Known limits.
 
 The release page records what the release workflow checked on the published
 images: the scan, the container fault tests of the amd64 image, the start of
@@ -162,6 +200,19 @@ the arm64 image, and the digest of the published index.
 
 Unchanged from v0.14.0, and this release makes no new capacity claim. The
 soaks ran on one host, so the separate-host soak gate stays open.
+
+Measured for the first time in this release's soak, and also in v0.14.0: a
+node that returns is handed its partitions back as soon as its log has caught
+up, and it then delivers again the events that were appended, and delivered,
+while it was away. In the soak a leader was away for 286 seconds at 450
+publishes per second; 12 seconds after it returned it led its two partitions
+again and delivered about 64,000 events to each group a second time. Nothing
+is lost or skipped, and consumers must handle repeats in any case, but the
+number grows with the length of the outage and the publish rate. The nightly
+soak, with a 30-second outage at a tenth of the rate, repeats about 880 events
+per group on v0.14.0 and 800 and 220 on this release. Why the returning node's
+record of what the groups have finished is behind its log at that moment has
+not been traced yet.
 
 Found while testing this release, and also in v0.14.0: a node that already
 knows its partitions' leaders when it starts asks each for a copy of its log
