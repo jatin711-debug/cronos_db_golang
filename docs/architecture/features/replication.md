@@ -146,9 +146,14 @@ dead-letter-page path described above. See
 The full install is wrapped in a 10-minute `context` by
 `PartitionManager.SyncPartitionFromLeader`
 (`internal/partition/manager.go`), which is itself invoked from
-`Manager.JoinCluster` (`internal/cluster/manager.go`) for every
-partition the joining node owns, and by the handoff target of a
-replication-factor-1 partition (`pullForHandoff`).
+`Manager.JoinCluster` (`internal/cluster/manager.go`) for each
+partition the joining node owns and holds nothing of, once it has read the
+cluster state (`copiesAtJoin`), by a follower that is far behind
+(`catchUpFromSnapshots`), and by the handoff target of a
+replication-factor-1 partition (`pullForHandoff`). A node that joins with a
+log of its own is caught up as a follower: up to v0.14.1 it copied the whole
+log at join however little it lacked, or downloaded it and refused to install
+it when it had not read the cluster state yet.
 
 `Manager.reconcileLocalLeadership` (`internal/cluster/leadership.go`) runs whenever a committed assignment
 changes, and every 5s, and idempotently wires up `PromoteToLeader` +
@@ -247,16 +252,39 @@ paused only while it notes where each file ends.
   reports that none is in flight and the target's log ends at the same entry,
   the change of leader is committed. Until then nothing changes hands. A
   handoff that takes too long is abandoned and the leader stays.
+  A handoff neither starts nor completes until the leader reports that the
+  target also holds its consumer progress (`ReplicationPositionResponse.
+  progress_followers`, from `Leader.ProgressFollowers`): the full copy since
+  it was last connected, and what changed since. A node that has just come
+  back therefore leads again only once it knows what was finished while it was
+  away. Up to v0.14.1 the handoff waited for the log alone, and such a node
+  delivered all of that a second time. A leader of an older build does not
+  report it, and hands over as before.
 - **Consumer progress.** The leader sends each consumer group's completed work
   to its followers (`ReplicationService.SyncConsumerProgress`) whenever it
   changes and at least every 30 seconds, so a promoted follower does not
   redeliver it. The same message carries the position of the partition's
   change feed, so a promoted follower continues exporting where the old
   leader stopped (see [cdc.md](cdc.md)).
-- **Sparse completion pages.** Each follower has its own cursor over pages
-  of at most 4,096 completed offsets across consumer groups. Failed pages are
-  retried; version changes and periodic refreshes cover additions behind a
-  cursor.
+- **Sparse completion pages.** The full copy of the progress goes to a
+  follower in pages of at most 4,096 completed offsets, one after another in
+  one pass, from the follower's own cursor. A failed page ends the pass and
+  the next one continues from it; what was recorded behind the cursor
+  meanwhile goes with the delta that follows the copy. A follower takes
+  progress only as far as its log reaches: a few completions beyond it are
+  kept and go with the next delta, and a follower that left more is sent the
+  copy again once its log has grown. Up to v0.14.1 a page went with each
+  half-second maintenance pass, and a copy of many pages was judged against
+  the follower's log as it had been when the copy began: under load it always
+  counted as cut short and was begun again, so a partition with many
+  completions above its floors (events scheduled hours ahead hold a floor
+  for those hours) kept its followers a copy's length behind.
+- **Deltas.** After the full copy a follower is sent what changed since the
+  version it holds, at most about 65,536 completions at a time; a follower
+  further behind gets them over several passes. The full copy is sent again
+  only when the leader's journal of recent completions no longer reaches
+  back to the follower's version, when its connection was made again, and
+  every 30 minutes.
 - **Dead-letter disposition.** Durable journal pages carry failed payloads
   and removal tombstones. A follower syncs them before acknowledging, and
   the leader withholds completion transfer until that copy is durable.
