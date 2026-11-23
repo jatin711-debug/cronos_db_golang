@@ -173,3 +173,59 @@ func TestProgressDeltasKeepAFollowerEqualToTheLeader(t *testing.T) {
 		}
 	}
 }
+
+// More completions than one delta carries reach a follower in several deltas,
+// each from the version the one before brought it to. It used to be sent the
+// full copy instead, which takes longer the more a group has finished above
+// its floor.
+func TestProgressDeltaCarriesOnWhereTheLastOneStopped(t *testing.T) {
+	leader := newStoreBackedManager(t, t.TempDir())
+	defer leader.Close()
+	follower := newStoreBackedManager(t, t.TempDir())
+	defer follower.Close()
+	if err := leader.CreateGroup("a", "orders", []int32{0}); err != nil {
+		t.Fatal(err)
+	}
+	leader.ResetProgressJournal(0)
+	held := leader.ProgressVersion()
+
+	// Offset 0 stays pending, so every completion stays on record.
+	const total = maxDeltaOffsets*5/2 + 100
+	for first := int64(1); first <= total; first += 1024 {
+		batch := make([]int64, 0, 1024)
+		for offset := first; offset < first+1024 && offset <= total; offset++ {
+			batch = append(batch, offset)
+		}
+		commitOffsets(t, leader, "a", batch...)
+	}
+
+	deltas := 0
+	for {
+		groups, version, ok := leader.ExportProgressDelta(0, held)
+		if !ok {
+			t.Fatalf("no delta from version %d: the follower would be sent the full copy", held)
+		}
+		if got := len(deltaFor(t, groups, "a").GetCompletedOffsets()); got > maxDeltaOffsets+1024 {
+			t.Fatalf("a delta of %d completions, want about %d at most", got, maxDeltaOffsets)
+		}
+		if err := follower.ApplyReplicatedProgress(0, total+1, groups); err != nil {
+			t.Fatal(err)
+		}
+		deltas++
+		if version == leader.ProgressVersion() {
+			break
+		}
+		if version <= held {
+			t.Fatalf("a delta from version %d leads to version %d", held, version)
+		}
+		held = version
+	}
+	if deltas != 3 {
+		t.Fatalf("%d completions went in %d deltas, want 3", total, deltas)
+	}
+	for offset := int64(0); offset <= total; offset++ {
+		if want, got := leader.IsCompleted("a", 0, offset), follower.IsCompleted("a", 0, offset); want != got {
+			t.Fatalf("offset %d: leader complete=%v, follower complete=%v", offset, want, got)
+		}
+	}
+}
