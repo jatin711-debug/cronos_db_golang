@@ -29,7 +29,7 @@ not on separate hosts or Kubernetes; power loss was not tested; and the
 latencies are those of a shared desktop machine. A 24-hour run of `TestSoak` on
 one machine is the next step, before the separate-host run.
 
-## v0.14.1 — TODO(date)
+## v0.14.1 — 2026-11-23
 
 The nightly workflow ran the acceptance suite three times in a row, the
 container suite, the rolling upgrade from v0.14.0 with a rollback,
