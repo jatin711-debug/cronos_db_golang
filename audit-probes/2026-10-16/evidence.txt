@@ -1,0 +1,42 @@
+=== RUN   TestAudit20261016PublicRecordMustRemainReadable
+=== RUN   TestAudit20261016PublicRecordMustRemainReadable/batch=false
+    audit_20261016_test.go:47: accepted event (11062302 protobuf bytes) is unreadable immediately: event=<nil> err=read event at offset 0 from segment 00000000000000000000.log: event not found at offset 0
+=== RUN   TestAudit20261016PublicRecordMustRemainReadable/batch=true
+    audit_20261016_test.go:47: accepted event (11062302 protobuf bytes) is unreadable immediately: event=<nil> err=read event at offset 0 from segment 00000000000000000000.log: event not found at offset 0
+--- FAIL: TestAudit20261016PublicRecordMustRemainReadable (0.36s)
+    --- FAIL: TestAudit20261016PublicRecordMustRemainReadable/batch=false (0.19s)
+    --- FAIL: TestAudit20261016PublicRecordMustRemainReadable/batch=true (0.18s)
+=== RUN   TestAudit20261016ProducerCannotChooseLogTerm
+=== RUN   TestAudit20261016ProducerCannotChooseLogTerm/batch=false
+    audit_20261016_test.go:78: public producer supplied stored term 999999, leader term is 7
+=== RUN   TestAudit20261016ProducerCannotChooseLogTerm/batch=true
+    audit_20261016_test.go:78: public producer supplied stored term 999999, leader term is 7
+--- FAIL: TestAudit20261016ProducerCannotChooseLogTerm (0.29s)
+    --- FAIL: TestAudit20261016ProducerCannotChooseLogTerm/batch=false (0.15s)
+    --- FAIL: TestAudit20261016ProducerCannotChooseLogTerm/batch=true (0.14s)
+=== RUN   TestAudit20261016ProducerTermReachesFollower
+2026/10/16 05:29:10 [SCHEDULER-WORKER] Started for partition 0
+2026/10/16 05:29:10 [PARTITION] Partition 0 promoted to leader (epoch=1)
+2026/10/16 05:29:10 [LEADER] Connected to follower term-follower at 127.0.0.1:56352 (gRPC replication)
+2026/10/16 05:29:10 [PARTITION] Follower term-follower added to partition 0
+    audit_20261016_test.go:98: follower log 0:replicated-producer-term-0@999999  contains producer term; leader epoch=1
+2026/10/16 05:29:10 [Partition 0] Snapshot created: HWM=0, offsets=0, time=2026-10-16T05:29:10-04:00
+--- FAIL: TestAudit20261016ProducerTermReachesFollower (0.30s)
+=== RUN   TestAudit20261016DeadLetterDispositionMustKeepRecoverableCopy
+    audit_20261016_test.go:138: follower marks event complete but has no dead-letter copy; loss of leader disk leaves no DLQ entry and suppresses redelivery
+2026/10/16 05:29:10 [LEADER] Consumer progress to follower term-follower failed (partition 0), retrying: rpc error: code = Unavailable desc = connection error: desc = "transport: Error while dialing: dial tcp 127.0.0.1:56352: connectex: No connection could be made because the target machine actively refused it."
+--- FAIL: TestAudit20261016DeadLetterDispositionMustKeepRecoverableCopy (0.33s)
+=== RUN   TestAudit20261016QuotaRefusalDoesNotClaimID
+    audit_20261016_test.go:157: retry after quota lifted is still refused despite no WAL append: response=error:"duplicate message_id: an earlier publish with this ID is still in progress" err=<nil> nextOffset=0
+--- FAIL: TestAudit20261016QuotaRefusalDoesNotClaimID (0.14s)
+=== RUN   TestAudit20261016RotationFailureDoesNotAppendRetryTwice
+=== RUN   TestAudit20261016RotationFailureDoesNotAppendRetryTwice/batch=false
+    audit_20261016_test.go:197: retry appended same message ID 2 times after failed rotation; want one log entry
+=== RUN   TestAudit20261016RotationFailureDoesNotAppendRetryTwice/batch=true
+    audit_20261016_test.go:197: retry appended same message ID 2 times after failed rotation; want one log entry
+--- FAIL: TestAudit20261016RotationFailureDoesNotAppendRetryTwice (0.32s)
+    --- FAIL: TestAudit20261016RotationFailureDoesNotAppendRetryTwice/batch=false (0.16s)
+    --- FAIL: TestAudit20261016RotationFailureDoesNotAppendRetryTwice/batch=true (0.16s)
+FAIL
+FAIL	github.com/jatin711-debug/cronos_db_golang/internal/api	3.923s
+FAIL

@@ -1,0 +1,68 @@
+These probes assert desired production behavior. Failures are expected at the audited commit.
+2026/09/27 17:13:53 [WAL-0] Truncated to offset 0, removed 2 events
+--- FAIL: TestAuditDelayedAppendMustNotTruncateAcknowledgedTail (0.15s)
+    production_audit_test.go:36: same-term retry erased acknowledged tail: next offset=1, want 2 (response=success:true next_offset:1 term:2)
+--- FAIL: TestAuditZeroTermCannotBypassFence (0.12s)
+    production_audit_test.go:45: term 0 append accepted despite current epoch 10
+--- FAIL: TestAuditQuorumFailureRetryMustNotReportSuccess (0.11s)
+    production_audit_test.go:61: retry reports success without quorum or scheduling: published=0 duplicates=1 timers=0
+FAIL
+FAIL	github.com/jatin711-debug/cronos_db_golang/internal/api	5.815s
+--- FAIL: TestAuditConsumerReturnsAfterStreamFailure (0.29s)
+    production_audit_test.go:57: consumer stuck after subscribe failure; reconnect cannot run until outer context cancels
+FAIL
+FAIL	github.com/jatin711-debug/cronos_db_golang/pkg/client	5.678s
+--- FAIL: TestAuditDeploymentEnvironmentIsHonored (0.00s)
+    production_audit_test.go:23: deployment env ignored: partitions=1 replicationFactor=1 fsync=batch clusterAddr=:7947
+FAIL
+FAIL	github.com/jatin711-debug/cronos_db_golang/internal/config	5.378s
+--- FAIL: TestAuditNegativeUntrackedAckMustNotCommit (0.00s)
+    production_audit_test.go:22: unsuccessful, fabricated delivery ACK advanced victim offset to 1000000
+FAIL
+FAIL	github.com/jatin711-debug/cronos_db_golang/internal/consumer	5.397s
+--- FAIL: TestAuditDLQRetainsEntryAfterRestart (0.08s)
+    production_audit_test.go:44: durable DLQ entry missing after reopen: got 0, want 1
+FAIL
+FAIL	github.com/jatin711-debug/cronos_db_golang/internal/delivery	5.461s
+2026/09/27 17:13:53 [Partition 0] Snapshot created: HWM=0, offsets=0, time=2026-09-27T17:13:53-04:00
+2026/09/27 17:13:53 [SEGMENT] Invalid record length 0 at position 129, treating as corrupt tail
+2026/09/27 17:13:53 [WAL-0] Loaded 1 segments, nextOffset=1
+2026/09/27 17:13:53 [JOB 1] WAL file <USERPROFILE>\AppData\Local\Temp\TestAuditSnapshotRestoresPendingTimer2739095011\001\partitions\0\cold_schedule\000002.log with log number 000002 stopped reading at offset: 0; replayed 0 keys in 0 batches
+2026/09/27 17:13:53 [JOB 1] WAL file <USERPROFILE>\AppData\Local\Temp\TestAuditSnapshotRestoresPendingTimer2739095011\001\partitions\0\dedup_0\000002.log with log number 000002 stopped reading at offset: 0; replayed 0 keys in 0 batches
+2026/09/27 17:13:53 [JOB 1] WAL file <USERPROFILE>\AppData\Local\Temp\TestAuditSnapshotRestoresPendingTimer2739095011\001\partitions\0\consumer_offsets\000002.log with log number 000002 stopped reading at offset: 0; replayed 0 keys in 0 batches
+2026/09/27 17:13:53 [Partition 0] Snapshot loaded: HWM=0, offsets=0, age=221.0601ms
+2026/09/27 17:13:53 [Partition 0] Fast recovery from snapshot: HWM=0, scheduled=0
+2026/09/27 17:13:53 [Partition 0] No new events since snapshot, skipping replay
+2026/09/27 17:13:53 [Partition 0] Dedup recovery: re-seeded 1 message IDs from WAL tail (offsets 0-0)
+2026/09/27 17:13:53 [SCHEDULER-WORKER] Started for partition 0
+2026/09/27 17:13:53 [Partition 0] Snapshot created: HWM=0, offsets=0, time=2026-09-27T17:13:53-04:00
+--- FAIL: TestAuditSnapshotRestoresPendingTimer (0.37s)
+    production_audit_test.go:39: pending timer lost after snapshot/restart: got 0, want 1
+2026/09/27 17:13:53 [PARTITION] Partition 0 promoted to leader (epoch=2)
+--- FAIL: TestAuditPromotionSchedulesReplicatedEvents (0.10s)
+    production_audit_test.go:60: promotion left replicated event unscheduled: got 0 timers, want 1
+FAIL
+FAIL	github.com/jatin711-debug/cronos_db_golang/internal/partition	5.886s
+--- FAIL: TestAuditReplayFiltersAuthorizedTopic (0.05s)
+    production_audit_test.go:27: replay leaked topic "secret" to request for allowed
+FAIL
+FAIL	github.com/jatin711-debug/cronos_db_golang/internal/replay	5.464s
+--- FAIL: TestAuditHydratorRecoversMissedWindow (0.05s)
+    production_audit_test.go:24: cold event inside hot window stranded: hydrated 0, want 1
+FAIL
+FAIL	github.com/jatin711-debug/cronos_db_golang/internal/scheduler	5.451s
+--- FAIL: TestAuditUnorderedTimestampsRemainQueryable (0.03s)
+    production_audit_test.go:25: time-range lookup missed out-of-order event: got 0, want 1
+2026/09/27 17:13:53 [SEGMENT] Decrypt failed at position 64: cipher: message authentication failed, truncating file
+2026/09/27 17:13:53 [WAL-0] Loaded 1 segments, nextOffset=0
+--- FAIL: TestAuditWrongEncryptionKeyFailsClosed (0.05s)
+    production_audit_test.go:49: wrong key opened populated WAL as writable: nextOffset=0
+FAIL
+FAIL	github.com/jatin711-debug/cronos_db_golang/internal/storage	5.483s
+--- FAIL: TestAuditCannotCommitAbortedTransaction (0.04s)
+    production_audit_test.go:21: Commit accepted an aborted transaction
+--- FAIL: TestAuditPrepareFailureReturnsWithoutDeadlock (0.26s)
+    production_audit_test.go:41: Prepare deadlocked after participant failure despite 50ms timeout
+FAIL
+FAIL	github.com/jatin711-debug/cronos_db_golang/internal/tx	5.854s
+FAIL

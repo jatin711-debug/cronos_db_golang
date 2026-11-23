@@ -1,0 +1,6 @@
+NAME                 READY   STATUS    RESTARTS   AGE   IP           NODE                NOMINATED NODE   READINESS GATES
+cronos-cronos-db-0   1/1     Running   0          69s   10.244.4.6   cronos-ci-worker4   <none>           <none>
+cronos-cronos-db-1   1/1     Running   0          69s   10.244.6.5   cronos-ci-worker5   <none>           <none>
+cronos-cronos-db-2   1/1     Running   0          69s   10.244.3.5   cronos-ci-worker2   <none>           <none>
+cronos-cronos-db-3   1/1     Running   0          69s   10.244.2.5   cronos-ci-worker    <none>           <none>
+cronos-cronos-db-4   1/1     Running   0          69s   10.244.1.5   cronos-ci-worker3   <none>           <none>

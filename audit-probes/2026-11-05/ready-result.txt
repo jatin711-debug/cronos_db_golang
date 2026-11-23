@@ -1,0 +1,7 @@
+2026/11/05 03:29:19 [SCHEDULER-WORKER] Started for partition 0
+2026/11/05 03:29:19 [Partition 0] Snapshot created: HWM=0, offsets=0, time=2026-11-05T03:29:19-05:00
+--- FAIL: TestAuditReadyWithoutReplicationLeader (1.26s)
+    zz_current_audit_test.go:13: readiness returned 200 while publish refused: replication leader for partition 0 is not ready
+FAIL
+FAIL	github.com/jatin711-debug/cronos_db_golang/internal/api	2.974s
+FAIL
