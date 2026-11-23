@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sort"
 	"sync/atomic"
 	"time"
 
@@ -75,40 +76,146 @@ func (l *Leader) shipPagedConsumerProgress() {
 			f.progressRoundActive = true
 			f.progressRoundLogEnd = logEnd
 			f.progressRoundReach = 0
+			f.progressRoundCarry, f.progressRoundCarried, f.progressRoundShort = nil, 0, false
 		}
 		f.progressRoundLogEnd = min(f.progressRoundLogEnd, logEnd)
 		cursor, roundVersion := f.progressCursor, f.progressRoundVersion
 		f.progressSending = true
 		f.mu.Unlock()
-		go func(f *FollowerInfo) {
-			groups, next, done, err := source(cursor)
-			if err == nil && !l.followerHasDeadLetters(f) {
-				err = fmt.Errorf("new dead letters await replication")
-			}
-			if err == nil {
-				err = l.sendProgress(client, groups, feedOffset, feedKnown)
-			}
-			f.mu.Lock()
-			f.progressSending = false
-			if err == nil && f.client == client {
-				f.progressCursor = next
-				f.progressRoundReach = max(f.progressRoundReach, progressReach(groups))
-				if done {
-					f.progressRoundActive = false
-					f.progressSent, f.progressSentAt, f.progressSentLogEnd = roundVersion, time.Now(), f.progressRoundLogEnd
-					f.progressSentReach = f.progressRoundReach
-					f.feedSent, f.feedSentKnown = feedOffset, feedKnown
-					f.progressFullAt = time.Now()
+		go l.shipProgressRound(f, client, source, feedSource, cursor, roundVersion)
+	}
+}
+
+// shipProgressRound sends a follower the full copy of the consumer progress
+// from cursor on, one page after another, until it has all of it.
+//
+// A page went with each maintenance pass, 4,096 completions every half
+// second. The copy holds every completion above each group's floor, and an
+// event scheduled hours ahead holds the floor for those hours: with half a
+// million completions per group, a follower that had been away, or whose
+// connection had been made again, waited minutes for the copy. If it came to
+// lead before the end it delivered again whatever the copy had not reached,
+// and what was finished while the copy ran reached it only with the delta
+// after.
+//
+// A failed page ends the pass; the next one continues from the page that
+// failed. So does a dead letter recorded meanwhile, which has to reach the
+// follower before the completion that goes with it.
+//
+// A follower takes progress only as far as its own log reaches. What a page
+// names beyond that is judged against where the follower's log ended as that
+// page was sent: a few completions there are kept and go with the next delta
+// (progressRoundCarry); many, or a floor, mean a follower that is behind, and
+// it is sent the copy again once its log has grown.
+//
+// This was judged for the whole copy, against where the log had ended when
+// the copy began. By the time a copy of many pages ended, consumers had
+// finished events appended since; the copy counted as cut short, and the next
+// pass began it again instead of sending what had changed. A partition with
+// enough completions above its floors was sent the full copy without end,
+// and its followers were always a copy's length behind.
+func (l *Leader) shipProgressRound(f *FollowerInfo, client types.ReplicationServiceClient,
+	source func(types.ProgressCursor) ([]*types.ConsumerGroupProgress, types.ProgressCursor, bool, error),
+	feedSource func() (int64, bool), cursor types.ProgressCursor, roundVersion uint64) {
+	for {
+		var feedOffset int64
+		var feedKnown bool
+		if feedSource != nil {
+			feedOffset, feedKnown = feedSource()
+		}
+		groups, next, done, err := source(cursor)
+		if err == nil && !l.followerHasDeadLetters(f) {
+			err = fmt.Errorf("new dead letters await replication")
+		}
+		// Where the follower's log ends as this page goes: it only grows, so
+		// the follower takes at least the completions below it.
+		f.mu.Lock()
+		logEnd := f.NextOffset
+		if f.LastAckTS == 0 {
+			logEnd = -1
+		}
+		f.mu.Unlock()
+		if err == nil {
+			err = l.sendProgress(client, groups, feedOffset, feedKnown)
+		}
+		f.mu.Lock()
+		more := err == nil && f.client == client && !done
+		if err == nil && f.client == client {
+			f.progressCursor = next
+			f.progressRoundReach = max(f.progressRoundReach, progressReach(groups))
+			f.noteLeftByRound(groups, logEnd)
+			if done {
+				f.progressRoundActive = false
+				f.progressSent, f.progressSentAt = roundVersion, time.Now()
+				if f.progressRoundShort {
+					// As sent to the log the follower had when the copy
+					// began: it goes again once that log reaches the copy.
+					f.progressSentLogEnd, f.progressSentReach = f.progressRoundLogEnd, f.progressRoundReach
 					f.progressCarry = nil
+				} else {
+					f.progressSentLogEnd, f.progressSentReach = logEnd, min(f.progressRoundReach, logEnd)
+					f.progressCarry = f.progressRoundCarry
 				}
+				f.progressRoundCarry = nil
+				f.feedSent, f.feedSentKnown = feedOffset, feedKnown
+				f.progressFullAt = time.Now()
 			}
-			firstFailure := err != nil && !f.progressFailing
-			f.progressFailing = err != nil
-			f.mu.Unlock()
-			if firstFailure {
-				log.Printf("[LEADER] Consumer progress page to %s failed: %v", f.ID, err)
+		}
+		if more {
+			select {
+			case <-l.quit:
+				more = false // this node no longer leads
+			default:
 			}
-		}(f)
+		}
+		if !more {
+			f.progressSending = false
+		}
+		firstFailure := err != nil && !f.progressFailing
+		f.progressFailing = err != nil
+		f.mu.Unlock()
+		if firstFailure {
+			log.Printf("[LEADER] Consumer progress page to %s failed: %v", f.ID, err)
+		}
+		if !more {
+			return
+		}
+		cursor = next
+	}
+}
+
+// maxRoundCarry is how many completions of a full copy may wait for the
+// follower's log to grow and go with the next delta. A follower that left
+// more than this is behind, and gets the copy again when it has caught up.
+const maxRoundCarry = 4096
+
+// noteLeftByRound records what a page of the full copy named that a follower
+// whose log ended at logEnd did not take: the completions at or beyond it, in
+// progressRoundCarry, or progressRoundShort when they are too many or a floor
+// lies beyond it. The caller holds f.mu.
+func (f *FollowerInfo) noteLeftByRound(groups []*types.ConsumerGroupProgress, logEnd int64) {
+	for _, group := range groups {
+		if group.GetCommittedOffset() > logEnd {
+			f.progressRoundShort = true
+		}
+		completed := group.GetCompletedOffsets()
+		// Ascending: everything from the first at or beyond logEnd.
+		first := sort.Search(len(completed), func(i int) bool { return completed[i] >= logEnd })
+		if first == len(completed) || f.progressRoundShort {
+			continue
+		}
+		f.progressRoundCarried += len(completed) - first
+		if f.progressRoundCarried > maxRoundCarry {
+			f.progressRoundShort = true
+			continue
+		}
+		if f.progressRoundCarry == nil {
+			f.progressRoundCarry = make(map[string][]int64)
+		}
+		f.progressRoundCarry[group.GetGroupId()] = append(f.progressRoundCarry[group.GetGroupId()], completed[first:]...)
+	}
+	if f.progressRoundShort {
+		f.progressRoundCarry = nil
 	}
 }
 
@@ -209,4 +316,41 @@ func (l *Leader) sendProgress(client types.ReplicationServiceClient, groups []*t
 		return fmt.Errorf("%s", resp.GetError())
 	}
 	return nil
+}
+
+// ProgressFollowers returns the followers that hold this leader's consumer
+// progress, by ID. Such a follower has taken the full copy since it was last
+// connected and is not being sent it again; it took all of what it was sent,
+// and nothing waits for its log to grow; and it holds the current version, or
+// acknowledged what had changed within the last few maintenance passes, which
+// is as near as a follower gets while consumers go on acknowledging.
+//
+// A replica that is not among them would, if it came to lead, deliver again
+// what it has not been told was finished. reported is false when this leader
+// does not replicate consumer progress in pages and so cannot say.
+func (l *Leader) ProgressFollowers() (followers []string, reported bool) {
+	l.mu.RLock()
+	versionSource, paged := l.progressVersion, l.progressPage != nil
+	all := make([]*FollowerInfo, 0, len(l.followers))
+	for _, f := range l.followers {
+		all = append(all, f)
+	}
+	fresh := 3*l.flushInterval + time.Second
+	l.mu.RUnlock()
+	if !paged || versionSource == nil {
+		return nil, false
+	}
+	version := versionSource()
+	for _, f := range all {
+		f.mu.Lock()
+		holds := !f.progressFullAt.IsZero() && !f.progressRoundActive && len(f.progressCarry) == 0 &&
+			f.progressSentLogEnd >= f.progressSentReach &&
+			(f.progressSent == version || time.Since(f.progressSentAt) < fresh)
+		f.mu.Unlock()
+		if holds {
+			followers = append(followers, f.ID)
+		}
+	}
+	sort.Strings(followers)
+	return followers, true
 }
