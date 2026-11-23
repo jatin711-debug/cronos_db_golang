@@ -599,6 +599,9 @@ func (m *Manager) JoinCluster(leaderAddr string) error {
 		if leader.ID == localNodeID {
 			continue // Nothing to sync from remote
 		}
+		if !m.copiesAtJoin(partitionID, leader.ID) {
+			continue
+		}
 
 		log.Printf("[CLUSTER] Syncing partition %d from leader %s", partitionID, leader.Address)
 		if err := partitionAccessor.GetOrCreatePartition(partitionID); err != nil {
@@ -614,6 +617,38 @@ func (m *Manager) JoinCluster(leaderAddr string) error {
 
 	log.Printf("[CLUSTER] Join cluster complete, synced %d/%d local partitions", synced, len(localPartitions))
 	return nil
+}
+
+// copiesAtJoin reports whether a node that joins copies a partition's whole
+// log from its leader before it serves anything.
+//
+// That is for a node that holds nothing of the partition. One that holds a
+// log is caught up as a follower, by replay or by a copy as its distance from
+// the leader calls for (see catchUpFromSnapshots); copied here it downloaded
+// the whole log however little it lacked. The copy is also installed only
+// where the cluster has committed the partition's log format, which a node
+// that has just started has not read yet: it downloaded the log, refused it
+// ("does not require the term-start format") and left the files in
+// snapshot-staging. So the copy waits for the cluster state too, and a node
+// that does not have it yet leaves the partition to the follower's catch-up.
+func (m *Manager) copiesAtJoin(partitionID int32, leaderID string) bool {
+	m.mu.RLock()
+	ranger, _ := m.positions.(replicaLogRanger)
+	m.mu.RUnlock()
+	if ranger != nil {
+		ctx, cancel := context.WithTimeout(m.ctx, positionQueryTimeout)
+		found, _, last, err := ranger.ReplicaLogRange(ctx, "", partitionID)
+		cancel()
+		if err == nil && found && last >= 0 {
+			log.Printf("[CLUSTER] Partition %d: this node holds its log to offset %d and will catch up from leader %s as a follower", partitionID, last, leaderID)
+			return false
+		}
+	}
+	if !m.metadataCurrent() {
+		log.Printf("[CLUSTER] Partition %d: the cluster state is not read yet; leader %s will catch this node up as a follower", partitionID, leaderID)
+		return false
+	}
+	return true
 }
 
 // GetMembership returns the membership manager

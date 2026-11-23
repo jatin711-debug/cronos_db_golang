@@ -400,6 +400,13 @@ func run() int {
 		// Position replies tell the cluster whether this node still takes
 		// publishes for a partition, which a leadership handoff waits on.
 		pm.SetWritableCheck(clusterMgr.IsPartitionWritable)
+		// Lifecycle and term-start records, in appends and in snapshots, are
+		// taken only for partitions the cluster has committed to require the
+		// format. This is set before the node joins: a copy made while it
+		// joins is checked against it too, and was refused when the check
+		// was put in place only afterwards.
+		pm.SetLifecycleRequirement(clusterMgr.PartitionRequiresLifecycle)
+		pm.SetTermStartRequirement(clusterMgr.PartitionRequiresTermStart)
 		if err := clusterMgr.Start(); err != nil {
 			slog.Error("Failed to start cluster manager", "error", err)
 			os.Exit(1)
@@ -582,12 +589,6 @@ func run() int {
 
 	// Register internal replication and raft metadata services on the internal listener.
 	replicationServer := api.NewReplicationServiceHandler(pm)
-	if clusterMgr != nil {
-		// Lifecycle records, in appends and in snapshots, are taken only for
-		// partitions the cluster has committed to require the format.
-		pm.SetLifecycleRequirement(clusterMgr.PartitionRequiresLifecycle)
-		pm.SetTermStartRequirement(clusterMgr.PartitionRequiresTermStart)
-	}
 	internalServer.RegisterReplicationServer(replicationServer)
 	if cfg.ExperimentalFeatures {
 		internalServer.RegisterCrossRegionServer(crossRegionServer)
