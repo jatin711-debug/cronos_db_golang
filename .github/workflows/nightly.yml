@@ -28,9 +28,9 @@ on:
         default: false
         type: boolean
       baseline:
-        description: Tag of the release to compare with (catchup_ab)
+        description: Tag of the release to start from; empty means the last release before this commit for the rolling upgrade, and v0.13.1 for catchup_ab
         required: false
-        default: v0.13.1
+        default: ""
         type: string
       catchup_legs:
         description: Legs of the catch-up comparison to run (both, branch)
