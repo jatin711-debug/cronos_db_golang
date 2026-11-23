@@ -15,7 +15,8 @@ for publication status and image evidence:
 ```bash
 docker pull johnny711dock/cronos-db:0.14.1    # :latest selects the current stable release
 docker pull ghcr.io/jatin711-debug/cronos-db:0.14.1
-# For immutable deployments, pin the digest in the release's IMAGE_DIGEST asset.
+# The tested v0.14.1 image (linux/amd64 and linux/arm64), pinned for immutable deployments:
+docker pull johnny711dock/cronos-db@sha256:73e18d84b53e9649600dd67b95b38141853e53562e4e324ab9b1451bdb8fed0d
 ```
 
 From v0.14.0 the release workflow publishes each image itself. It carries

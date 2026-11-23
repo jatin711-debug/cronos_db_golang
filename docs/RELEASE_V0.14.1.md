@@ -193,9 +193,14 @@ Before the release:
   frozen or replaced, the cluster restarted) and none in steady running; see
   Known limits.
 
-The release page records what the release workflow checked on the published
-images: the scan, the container fault tests of the amd64 image, the start of
-the arm64 image, and the digest of the published index.
+The release workflow (run 45157279687) built both images from the tag, scanned
+them, ran the network-partition and memory-limited restart tests on the amd64
+image and started the arm64 one, then published them as one index,
+`sha256:73e18d84b53e9649600dd67b95b38141853e53562e4e324ab9b1451bdb8fed0d`, with attested provenance, an SPDX SBOM and a cosign signature. The
+index was copied unchanged, signature and attestations included, to
+`johnny711dock/cronos-db:0.14.1` and `:latest`. `gh attestation verify` accepts
+its provenance and its SBOM under both names. A dry run of the workflow on the
+release commit (run 45146486432) had passed before the tag was made.
 
 ## Known limits
 

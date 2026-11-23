@@ -21,6 +21,14 @@ workflow builds, scans and tests the images and publishes them to
 cosign signature; the same index is copied to `johnny711dock/cronos-db`.
 Publication status, checksums and the exact deployment digest are on the
 [release page](https://github.com/jatin711-debug/cronos_db_golang/releases/tag/v0.14.1).
+v0.14.1 was published on 2026-11-23; its image index is `sha256:73e18d84b53e9649600dd67b95b38141853e53562e4e324ab9b1451bdb8fed0d`
+(linux/amd64 and linux/arm64), published as `ghcr.io/jatin711-debug/cronos-db:0.14.1`
+by the release workflow and copied, with its signature and attestations, to
+`johnny711dock/cronos-db:0.14.1` and `:latest`; the release is marked latest.
+The workflow scanned both images, ran the network-partition and
+memory-limited restart tests on the amd64 image, and started the arm64 image.
+`gh attestation verify` finds its SLSA provenance and SPDX SBOM under both
+names, signed by `release.yml` at `refs/tags/v0.14.1`.
 This release makes no new capacity claim.
 
 **v0.14.0 makes catching up a consumer group far behind cheap**: on the
