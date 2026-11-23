@@ -409,6 +409,9 @@ func (h *ReplicationServiceHandler) Position(ctx context.Context, req *types.Rep
 		Epoch:           position.Epoch,
 		AcceptingWrites: position.AcceptingWrites,
 		LogStart:        position.LogStart,
+
+		ProgressReported:  position.ProgressReported,
+		ProgressFollowers: position.ProgressFollowers,
 	}, nil
 }
 

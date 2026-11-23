@@ -1940,6 +1940,11 @@ type ReplicaPosition struct {
 	// LogStart is the offset of the first entry the log holds (0 from a node
 	// that does not report it).
 	LogStart int64
+	// ProgressFollowers are the followers that hold this node's consumer
+	// progress, when it leads the partition and ProgressReported is set (see
+	// replication.Leader.ProgressFollowers).
+	ProgressReported  bool
+	ProgressFollowers []string
 }
 
 // SetWritableCheck supplies the cluster's view of whether this node may accept
@@ -1984,7 +1989,7 @@ func (pm *PartitionManager) LocalReplicaPosition(partitionID int32) ReplicaPosit
 		accepting = partition.publishing.Load() > 0
 	}
 	lastOffset, lastTerm := partition.LogPosition()
-	return ReplicaPosition{
+	position := ReplicaPosition{
 		Found:           true,
 		LastOffset:      lastOffset,
 		LastTerm:        lastTerm,
@@ -1992,6 +1997,24 @@ func (pm *PartitionManager) LocalReplicaPosition(partitionID int32) ReplicaPosit
 		AcceptingWrites: accepting,
 		LogStart:        partition.Wal.GetFirstOffset(),
 	}
+	if leader := partition.replQuorum.Load(); leader != nil && partition.IsLeader() {
+		position.ProgressFollowers, position.ProgressReported = leader.ProgressFollowers()
+	}
+	return position
+}
+
+// LeaderProgressFollowers asks the node at addr ("" for this node), which
+// leads the partition, which of its followers hold its consumer progress.
+// reported is false when it does not lead the partition or is a build that
+// does not say; nothing is known then.
+func (pm *PartitionManager) LeaderProgressFollowers(ctx context.Context, addr string, partitionID int32) (reported bool, followers []string, err error) {
+	var position ReplicaPosition
+	if addr == "" {
+		position = pm.LocalReplicaPosition(partitionID)
+	} else if position, err = pm.RemoteReplicaPosition(ctx, addr, partitionID); err != nil {
+		return false, nil, err
+	}
+	return position.ProgressReported, position.ProgressFollowers, nil
 }
 
 // SetSnapshotCatchUp lets the replication handler ask for a snapshot of a
@@ -2114,6 +2137,9 @@ func (pm *PartitionManager) remoteReplicaPosition(ctx context.Context, addr stri
 		Epoch:           resp.GetEpoch(),
 		AcceptingWrites: resp.GetAcceptingWrites(),
 		LogStart:        resp.GetLogStart(),
+
+		ProgressReported:  resp.GetProgressReported(),
+		ProgressFollowers: resp.GetProgressFollowers(),
 	}, nil
 }
 
